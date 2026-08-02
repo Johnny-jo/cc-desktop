@@ -1,9 +1,4 @@
 /// <reference types="electron-vite/preload" />
 
-import type { DesktopApi } from "../electron/preload";
-
-declare global {
-  interface Window {
-    desktop: DesktopApi;
-  }
-}
+// Window.desktop is declared in src/lib/desktop-api.ts
+export {};

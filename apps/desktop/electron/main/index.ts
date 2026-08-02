@@ -1,7 +1,56 @@
-import { app, BrowserWindow } from "electron";
+import fs from "node:fs";
 import path from "node:path";
+import { app, BrowserWindow, safeStorage } from "electron";
+import { IPC } from "@claude-desktop/shared";
+import type {
+  CpaStatus,
+  FileChange,
+  PermissionRequest,
+  SdkNormalizedEvent,
+  SessionSummary,
+} from "@claude-desktop/shared";
+import { SettingsStore } from "./settings-store";
+import { DiffTracker } from "./diff-tracker";
+import { PermissionBroker } from "./permission-broker";
+import { CpaSupervisor } from "./cpa-supervisor";
+import { SessionManager, type QueryFn } from "./session-manager";
+import { registerIpcHandlers } from "./ipc-handlers";
 
 let mainWindow: BrowserWindow | null = null;
+
+function getMainWindow(): BrowserWindow | null {
+  return mainWindow;
+}
+
+function sendToRenderer(channel: string, payload: unknown): void {
+  const win = getMainWindow();
+  if (!win || win.isDestroyed()) return;
+  win.webContents.send(channel, payload);
+}
+
+/** Task 13 wires the real Agent SDK; keep IPC invokable without crashing. */
+const placeholderQueryFn: QueryFn = async function* placeholderQueryFn() {
+  // no-op stream — SessionManager will mark the turn idle when the stream ends
+};
+
+function createTokenCrypto(): {
+  encrypt: (plain: string) => string;
+  decrypt: (cipher: string) => string;
+} {
+  if (safeStorage.isEncryptionAvailable()) {
+    return {
+      encrypt: (plain: string) =>
+        safeStorage.encryptString(plain).toString("base64"),
+      decrypt: (cipher: string) =>
+        safeStorage.decryptString(Buffer.from(cipher, "base64")),
+    };
+  }
+  // Fallback keeps SettingsStore DI usable when OS encryption is unavailable.
+  return {
+    encrypt: (plain: string) => Buffer.from(plain, "utf8").toString("base64"),
+    decrypt: (cipher: string) => Buffer.from(cipher, "base64").toString("utf8"),
+  };
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -19,10 +68,80 @@ function createWindow() {
   } else {
     mainWindow.loadFile(path.join(__dirname, "../renderer/index.html"));
   }
+
+  mainWindow.on("closed", () => {
+    mainWindow = null;
+  });
 }
 
-app.whenReady().then(createWindow);
+function bootstrap() {
+  const { encrypt, decrypt } = createTokenCrypto();
+  const settings = new SettingsStore({
+    userDataDir: app.getPath("userData"),
+    encrypt,
+    decrypt,
+  });
+
+  const diffs = new DiffTracker({
+    readFile: (filePath) => fs.readFileSync(filePath, "utf8"),
+  });
+
+  const permissions = new PermissionBroker({
+    getMode: () => settings.get().permissionMode,
+    requestFromUi: (req: PermissionRequest) => {
+      sendToRenderer(IPC.permissionRequest, req);
+    },
+  });
+
+  const cpa = new CpaSupervisor({
+    getSettings: () => settings.get(),
+    getToken: () => settings.getToken(),
+    onStatusChange: (status: CpaStatus) => {
+      sendToRenderer(IPC.cpaStatusEvent, status);
+    },
+  });
+
+  const sessions = new SessionManager({
+    queryFn: placeholderQueryFn,
+    permissionBroker: permissions,
+    diffTracker: diffs,
+    cpa,
+    settings,
+    emit: (event: SdkNormalizedEvent) => {
+      sendToRenderer(IPC.sessionEvent, event);
+    },
+    emitSession: (summary: SessionSummary) => {
+      sendToRenderer(IPC.sessionUpdated, summary);
+    },
+    emitDiff: (sessionId: string, changes: FileChange[]) => {
+      sendToRenderer(IPC.diffUpdated, { sessionId, changes });
+    },
+  });
+
+  registerIpcHandlers({
+    window: getMainWindow,
+    sessions,
+    permissions,
+    settings,
+    cpa,
+    diffs,
+  });
+
+  createWindow();
+
+  app.on("before-quit", () => {
+    // stopIfManaged is a no-op unless this app spawned CPA.
+    // Always call it so managed children are not orphaned on quit.
+    cpa.stopIfManaged();
+  });
+}
+
+app.whenReady().then(bootstrap);
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
+});
+
+app.on("activate", () => {
+  if (BrowserWindow.getAllWindows().length === 0) createWindow();
 });
