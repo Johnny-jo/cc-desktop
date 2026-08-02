@@ -1340,7 +1340,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 - 创建：`src/state/store.ts`
 - 创建/完善：`ChatPanel.tsx`、`MessageList.tsx`、`ToolCard.tsx`、`Composer.tsx`、`SessionList.tsx`、`TopBar.tsx`
 
-- [ ] **步骤 1：实现轻量 store**
+- [x] **步骤 1：实现轻量 store**
 
 状态字段：
 - `projectPath`
@@ -1355,7 +1355,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 
 订阅 `desktop.on(IPC.sessionEvent, ...)` 更新 items（text_delta 追加到最后一条 streaming assistant；tool_start/end 插入/更新 ToolCard）。
 
-- [ ] **步骤 2：Composer 提交**
+- [x] **步骤 2：Composer 提交**
 
 ```ts
 async function onSend(text: string) {
@@ -1368,13 +1368,13 @@ async function onSend(text: string) {
 }
 ```
 
-- [ ] **步骤 3：SessionList 点击 → `sessionSelect` 加载 items/changes**
+- [x] **步骤 3：SessionList 点击 → `sessionSelect` 加载 items/changes**
 
-- [ ] **步骤 4：TopBar 显示项目路径、CPA StatusDot、模型 select、权限模式 select**
+- [x] **步骤 4：TopBar 显示项目路径、CPA StatusDot、模型 select、权限模式 select**
 
-- [ ] **步骤 5：手工验证 UI 在 mock 下可操作（可在 SessionManager 暂用假 queryFn 推假流）**
+- [x] **步骤 5：手工验证 UI 在 mock 下可操作（可在 SessionManager 暂用假 queryFn 推假流）**
 
-- [ ] **步骤 6：Commit**
+- [x] **步骤 6：Commit**
 
 ```bash
 git commit -am "feat(desktop): chat UI state, sessions, composer, top bar
