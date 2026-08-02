@@ -487,6 +487,10 @@ export async function startCpa(): Promise<void> {
   }
 }
 
+export function clearPermissionRequest(): void {
+  setState({ permissionRequest: null });
+}
+
 /** Test helper — reset module state. */
 export function __resetStoreForTests(): void {
   state = {

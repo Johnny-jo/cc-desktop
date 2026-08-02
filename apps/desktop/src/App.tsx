@@ -2,35 +2,9 @@ import React, { useEffect } from "react";
 import { TopBar } from "./components/TopBar";
 import { SessionList } from "./components/SessionList";
 import { ChatPanel } from "./components/ChatPanel";
-import { bootstrapStore, useAppStore } from "./state/store";
-
-function ChangesPlaceholder() {
-  const activeSessionId = useAppStore((s) => s.activeSessionId);
-  const changesBySession = useAppStore((s) => s.changesBySession);
-  const changes = activeSessionId
-    ? (changesBySession[activeSessionId] ?? [])
-    : [];
-
-  return (
-    <div className="changes-placeholder">
-      <div className="panel-title">Changes</div>
-      {changes.length === 0 ? (
-        <p className="muted">No file changes yet (task 12 adds DiffView).</p>
-      ) : (
-        <ul className="changes-list">
-          {changes.map((c) => (
-            <li key={c.path}>
-              <span className={`change-status status-${c.status}`}>
-                {c.status}
-              </span>{" "}
-              {c.path}
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
+import { ChangesPanel } from "./components/ChangesPanel";
+import { PermissionModal } from "./components/PermissionModal";
+import { bootstrapStore } from "./state/store";
 
 export function App() {
   useEffect(() => {
@@ -48,9 +22,10 @@ export function App() {
           <ChatPanel />
         </div>
         <div className="panel panel-changes">
-          <ChangesPlaceholder />
+          <ChangesPanel />
         </div>
       </div>
+      <PermissionModal />
     </div>
   );
 }

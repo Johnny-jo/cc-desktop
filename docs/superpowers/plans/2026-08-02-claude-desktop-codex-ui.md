@@ -1391,20 +1391,20 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 - 创建：`src/components/ChangesPanel.tsx`
 - 创建：`src/components/DiffView.tsx`
 
-- [ ] **步骤 1：PermissionModal**
+- [x] **步骤 1：PermissionModal**
 
 显示 toolName、summary、JSON 预览（截断）。三按钮：
 - Allow once → `{ behavior: "allow", scope: "once" }`
 - Allow for session → `scope: "session"`
 - Deny → `{ behavior: "deny", message: "User denied" }`
 
-- [ ] **步骤 2：ChangesPanel**
+- [x] **步骤 2：ChangesPanel**
 
 文件列表；选中 path 后 `DiffView` 用 `<pre>` 渲染 hunks，简单着色：行首 `+` 绿、`-` 红。
 
-- [ ] **步骤 3：订阅 `diff:updated` 刷新**
+- [x] **步骤 3：订阅 `diff:updated` 刷新**
 
-- [ ] **步骤 4：Commit**
+- [x] **步骤 4：Commit**
 
 ```bash
 git commit -am "feat(desktop): permission modal and changes/diff panel
