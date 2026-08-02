@@ -1,0 +1,28 @@
+{
+  "name": "@claude-desktop/desktop",
+  "version": "0.0.1",
+  "private": true,
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@claude-desktop/shared": "workspace:*",
+    "@anthropic-ai/claude-agent-sdk": "latest",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "electron": "^34.0.0",
+    "electron-vite": "^3.0.0",
+    "typescript": "^5.8.2",
+    "vite": "^6.0.0",
+    "vitest": "^3.0.5"
+  }
+}

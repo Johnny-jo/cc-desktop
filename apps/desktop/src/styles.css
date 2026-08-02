@@ -1,0 +1,47 @@
+:root {
+  color-scheme: dark;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  background: #0f1419;
+  color: #e7ecf3;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+.app {
+  display: grid;
+  grid-template-rows: 40px 1fr;
+  height: 100vh;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 12px;
+  border-bottom: 1px solid #243041;
+  background: #121820;
+  font-size: 12px;
+}
+
+.main {
+  display: grid;
+  grid-template-columns: 220px 1fr 360px;
+  min-height: 0;
+}
+
+.panel {
+  border-right: 1px solid #243041;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px;
+}
+
+.panel:last-child {
+  border-right: none;
+}
