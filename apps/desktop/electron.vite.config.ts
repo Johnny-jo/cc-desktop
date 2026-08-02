@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin()],
+    plugins: [externalizeDepsPlugin({ exclude: ["@claude-desktop/shared"] })],
     build: {
       outDir: "out/main",
       lib: {

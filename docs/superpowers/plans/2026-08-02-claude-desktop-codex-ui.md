@@ -1251,7 +1251,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 - 修改：`electron/preload/index.ts`
 - 创建：`src/lib/desktop-api.ts`
 
-- [ ] **步骤 1：在 main 里实例化服务并 `registerIpcHandlers`**
+- [x] **步骤 1：在 main 里实例化服务并 `registerIpcHandlers`**
 
 ```ts
 export function registerIpcHandlers(ctx: {
@@ -1302,7 +1302,7 @@ requestFromUi: (req) => {
 
 Session emit → `send(IPC.sessionEvent, event)` 等。
 
-- [ ] **步骤 2：扩展 preload 方法与 `window.desktop` 类型**
+- [x] **步骤 2：扩展 preload 方法与 `window.desktop` 类型**
 
 ```ts
 // src/lib/desktop-api.ts
@@ -1320,11 +1320,11 @@ export function getDesktop() {
 }
 ```
 
-- [ ] **步骤 3：app quit 时 `cpa.stopIfManaged()`**
+- [x] **步骤 3：app quit 时 `cpa.stopIfManaged()`**
 
-- [ ] **步骤 4：手动 smoke：`pnpm dev`，DevTools 调 `window.desktop` 看 invoke 不炸**
+- [x] **步骤 4：手动 smoke：`pnpm dev`，DevTools 调 `window.desktop` 看 invoke 不炸**
 
-- [ ] **步骤 5：Commit**
+- [x] **步骤 5：Commit**
 
 ```bash
 git commit -am "feat(desktop): wire IPC handlers and preload API
