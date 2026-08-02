@@ -1,5 +1,5 @@
 import net from "node:net";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
 import type { AppSettings, CpaStatus } from "@claude-desktop/shared";
 
 export type SpawnedProcess = {
@@ -22,8 +22,6 @@ export type CpaSupervisorDeps = {
   pollIntervalMs?: number;
   /** max wait after spawn (ms) */
   readyTimeoutMs?: number;
-  /** connect timeout for default probePort (ms) */
-  probeTimeoutMs?: number;
 };
 
 const DEFAULT_POLL_MS = 250;
@@ -145,6 +143,11 @@ export class CpaSupervisor {
       return status;
     }
 
+    // Avoid leaking a previous managed child on retry/restart.
+    if (this.managedByApp && this.child) {
+      this.stopIfManaged();
+    }
+
     this.setStatus({ state: "starting" });
 
     try {
@@ -175,6 +178,7 @@ export class CpaSupervisor {
         });
       }
     } catch (err) {
+      this.clearManagedChild();
       const message = err instanceof Error ? err.message : String(err);
       const status: CpaStatus = { state: "error", message };
       this.setStatus(status);
@@ -196,12 +200,28 @@ export class CpaSupervisor {
       await sleep(this.pollIntervalMs);
     }
 
+    // Timed out waiting for readiness — kill the managed child so retries
+    // do not leave orphaned processes behind.
+    this.clearManagedChild();
     const status: CpaStatus = {
       state: "error",
       message: `CPA did not become ready on port ${port} within ${this.readyTimeoutMs}ms`,
     };
     this.setStatus(status);
     return status;
+  }
+
+  /** Kill managed child (if any) and clear ownership flags without status change. */
+  private clearManagedChild(): void {
+    if (this.child) {
+      try {
+        this.child.kill();
+      } catch {
+        // ignore kill errors
+      }
+    }
+    this.child = null;
+    this.managedByApp = false;
   }
 
   private setStatus(status: CpaStatus): void {
