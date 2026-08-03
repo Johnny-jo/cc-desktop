@@ -406,9 +406,20 @@ textarea {
 .session-meta {
   display: flex;
   justify-content: space-between;
+  align-items: center;
+  gap: 6px;
   min-width: 0;
   font-size: 11px;
   color: var(--text-faint);
+}
+
+.session-folder {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  opacity: 0.9;
 }
 
 .session-status.status-running {

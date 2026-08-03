@@ -10,6 +10,7 @@ import type { DiffTracker } from "./diff-tracker";
 import type { CpaSupervisor } from "./cpa-supervisor";
 import type { SettingsStore } from "./settings-store";
 import type { UserPromptBroker } from "./user-prompt-broker";
+import type { SessionArchive, StoredSession } from "./session-archive";
 import { normalizeSdkEvent } from "./normalize-sdk-event";
 import { MessageStream } from "./message-stream";
 
@@ -31,6 +32,8 @@ export type SessionManagerDeps = {
   diffTracker: DiffTracker;
   cpa: CpaSupervisor;
   settings: SettingsStore;
+  /** Persist session index + transcripts across restarts */
+  archive?: SessionArchive;
   emit: (event: SdkNormalizedEvent) => void;
   emitSession: (s: SessionSummary) => void;
   emitDiff: (sessionId: string, changes: FileChange[]) => void;
@@ -126,6 +129,7 @@ export class SessionManager {
   private readonly diffTracker: DiffTracker;
   private readonly cpa: CpaSupervisor;
   private readonly settings: SettingsStore;
+  private readonly archive: SessionArchive | undefined;
   private readonly emit: SessionManagerDeps["emit"];
   private readonly emitSession: SessionManagerDeps["emitSession"];
   private readonly emitDiff: SessionManagerDeps["emitDiff"];
@@ -140,16 +144,62 @@ export class SessionManager {
     this.diffTracker = deps.diffTracker;
     this.cpa = deps.cpa;
     this.settings = deps.settings;
+    this.archive = deps.archive;
     this.emit = deps.emit;
     this.emitSession = deps.emitSession;
     this.emitDiff = deps.emitDiff;
     this.emitSlashCommands = deps.emitSlashCommands;
+
+    // Hydrate session list from disk (no live query until user continues).
+    if (this.archive) {
+      for (const stored of this.archive.loadIndex()) {
+        this.sessions.set(stored.id, {
+          summary: {
+            id: stored.id,
+            title: stored.title,
+            cwd: stored.cwd,
+            updatedAt: stored.updatedAt,
+            status: stored.status === "running" ? "idle" : stored.status,
+          },
+          abortController: null,
+          sdkSessionId: stored.sdkSessionId,
+          slashCommands: [],
+          turnActive: false,
+        });
+      }
+    }
   }
 
   list(): SessionSummary[] {
     return [...this.sessions.values()]
       .map((e) => ({ ...e.summary }))
       .sort((a, b) => b.updatedAt - a.updatedAt);
+  }
+
+  getSummary(sessionId: string): SessionSummary | undefined {
+    const e = this.sessions.get(sessionId);
+    return e ? { ...e.summary } : undefined;
+  }
+
+  /** Transcript for UI restore (from disk archive). */
+  getTranscript(sessionId: string) {
+    return this.archive?.loadItems(sessionId) ?? [];
+  }
+
+  saveTranscript(
+    sessionId: string,
+    items: import("@claude-desktop/shared").ChatItem[],
+  ): void {
+    this.archive?.saveItems(sessionId, items);
+  }
+
+  private persistSummary(entry: SessionEntry): void {
+    if (!this.archive) return;
+    const stored: StoredSession = {
+      ...entry.summary,
+      ...(entry.sdkSessionId ? { sdkSessionId: entry.sdkSessionId } : {}),
+    };
+    this.archive.upsertSummary(stored);
   }
 
   /** SDK skills / slash commands cached for a session (empty if none yet). */
@@ -206,6 +256,7 @@ export class SessionManager {
     };
     this.sessions.set(sessionId, entry);
     this.emitSession({ ...summary });
+    this.persistSummary(entry);
 
     await this.openStreamingSession(sessionId, prompt, { resume: false });
     return sessionId;
@@ -226,6 +277,7 @@ export class SessionManager {
     };
     entry.turnActive = true;
     this.emitSession({ ...entry.summary });
+    this.persistSummary(entry);
 
     // Live streaming session: just push the next user message.
     if (entry.input && !entry.input.isClosed && entry.consumer) {
@@ -235,7 +287,7 @@ export class SessionManager {
       return;
     }
 
-    // Fallback: open a new streaming query with resume.
+    // Fallback: open a new streaming query with resume (uses sdkSessionId when known).
     await this.openStreamingSession(sessionId, prompt, { resume: true });
   }
 
@@ -409,6 +461,7 @@ export class SessionManager {
             };
             entry.turnActive = false;
             this.emitSession({ ...entry.summary });
+            this.persistSummary(entry);
           }
         }
 
@@ -422,6 +475,7 @@ export class SessionManager {
               updatedAt: Date.now(),
             };
             this.emitSession({ ...entry.summary });
+            this.persistSummary(entry);
           }
         }
       }
@@ -434,6 +488,7 @@ export class SessionManager {
           updatedAt: Date.now(),
         };
         this.emitSession({ ...entry.summary });
+        this.persistSummary(entry);
       }
       entry.turnActive = false;
     } catch (err) {

@@ -66,7 +66,11 @@ export function SessionList({ onOpenSettings }: SessionListProps) {
         {sessions.length === 0 ? (
           <li className="session-empty">No sessions yet</li>
         ) : (
-          sessions.map((s) => (
+          sessions.map((s) => {
+            const folder =
+              s.cwd?.replace(/\\/g, "/").split("/").filter(Boolean).pop() ??
+              "";
+            return (
             <li key={s.id} className="session-list-item">
               <button
                 type="button"
@@ -76,18 +80,23 @@ export function SessionList({ onOpenSettings }: SessionListProps) {
                     : "session-item"
                 }
                 onClick={() => void selectSession(s.id)}
-                title={s.title}
+                title={`${s.title}${s.cwd ? `\n${s.cwd}` : ""}`}
               >
                 <span className="session-title">{s.title}</span>
                 <span className="session-meta">
+                  {folder ? (
+                    <span className="session-folder" title={s.cwd}>
+                      {folder}
+                    </span>
+                  ) : null}
                   <span className={`session-status status-${s.status}`}>
-                    {s.status === "running" ? "●" : ""}
-                    {s.status !== "running" ? formatTime(s.updatedAt) : "running"}
+                    {s.status === "running" ? "● running" : formatTime(s.updatedAt)}
                   </span>
                 </span>
               </button>
             </li>
-          ))
+            );
+          })
         )}
       </ul>
 

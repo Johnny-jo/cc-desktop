@@ -17,6 +17,7 @@ import { DiffTracker } from "./diff-tracker";
 import { PermissionBroker } from "./permission-broker";
 import { UserPromptBroker } from "./user-prompt-broker";
 import { CpaSupervisor } from "./cpa-supervisor";
+import { SessionArchive } from "./session-archive";
 import { SessionManager, type QueryFn } from "./session-manager";
 import { registerIpcHandlers } from "./ipc-handlers";
 
@@ -88,11 +89,14 @@ function createWindow() {
 
 function bootstrap() {
   const { encrypt, decrypt } = createTokenCrypto();
+  const userDataDir = app.getPath("userData");
   const settings = new SettingsStore({
-    userDataDir: app.getPath("userData"),
+    userDataDir,
     encrypt,
     decrypt,
   });
+
+  const archive = new SessionArchive(userDataDir);
 
   const diffs = new DiffTracker({
     readFile: (filePath) => fs.readFileSync(filePath, "utf8"),
@@ -126,6 +130,7 @@ function bootstrap() {
     diffTracker: diffs,
     cpa,
     settings,
+    archive,
     emit: (event: SdkNormalizedEvent) => {
       sendToRenderer(IPC.sessionEvent, event);
     },

@@ -20,6 +20,7 @@ export const IPC = {
   sessionAbort: "session:abort",
   sessionList: "session:list",
   sessionSelect: "session:select",
+  sessionSaveTranscript: "session:save-transcript",
   permissionRespond: "permission:respond",
   userPromptRespond: "user-prompt:respond",
   settingsGet: "settings:get",
@@ -60,7 +61,22 @@ export type IpcInvokeMap = {
   [IPC.sessionList]: { args: []; result: SessionSummary[] };
   [IPC.sessionSelect]: {
     args: [{ sessionId: string }];
-    result: { sessionId: string; items: unknown[]; changes: FileChange[] };
+    result: {
+      sessionId: string;
+      cwd: string;
+      items: import("./models").ChatItem[];
+      changes: FileChange[];
+    };
+  };
+  /** Persist renderer transcript for a session (debounced by UI) */
+  sessionSaveTranscript: {
+    args: [
+      {
+        sessionId: string;
+        items: import("./models").ChatItem[];
+      },
+    ];
+    result: { ok: boolean };
   };
   [IPC.permissionRespond]: {
     args: [{ requestId: string; decision: PermissionDecision }];

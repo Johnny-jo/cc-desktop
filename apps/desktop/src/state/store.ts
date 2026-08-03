@@ -75,10 +75,25 @@ function getItems(sessionId: string): ChatItem[] {
   return state.itemsBySession[sessionId] ?? [];
 }
 
+let transcriptSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleSaveTranscript(sessionId: string, items: ChatItem[]): void {
+  if (transcriptSaveTimer) clearTimeout(transcriptSaveTimer);
+  transcriptSaveTimer = setTimeout(() => {
+    try {
+      const desktop = getDesktop();
+      void desktop.saveSessionTranscript?.(sessionId, items);
+    } catch {
+      // not in electron / API missing
+    }
+  }, 400);
+}
+
 function setItems(sessionId: string, items: ChatItem[]): void {
   setState({
     itemsBySession: { ...state.itemsBySession, [sessionId]: items },
   });
+  scheduleSaveTranscript(sessionId, items);
 }
 
 function upsertSession(summary: SessionSummary): void {
@@ -462,16 +477,40 @@ export async function selectSession(sessionId: string): Promise<void> {
   try {
     const res = (await desktop.selectSession(sessionId)) as {
       sessionId: string;
-      items: unknown[];
+      cwd?: string;
+      items?: ChatItem[];
       changes: FileChange[];
     };
-    // items from main are always []; renderer owns transcript.
+
+    // Prefer disk transcript if local memory is empty (app restart / other window).
+    const localItems = state.itemsBySession[sessionId] ?? [];
+    const restoredItems =
+      localItems.length > 0 ? localItems : (res.items ?? []);
+
+    // Switch project path to this session's workspace folder.
+    const cwd = res.cwd || state.sessions.find((s) => s.id === sessionId)?.cwd;
+
     setState({
+      activeSessionId: sessionId,
+      projectPath: cwd || state.projectPath,
+      itemsBySession: {
+        ...state.itemsBySession,
+        [sessionId]: restoredItems,
+      },
       changesBySession: {
         ...state.changesBySession,
         [sessionId]: res.changes ?? [],
       },
+      lastError: null,
     });
+
+    // Keep settings.lastProjectPath in sync (main already updates; refresh public settings).
+    try {
+      const settings = (await desktop.getSettings()) as PublicSettings;
+      setState({ settings });
+    } catch {
+      // ignore
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     setState({ lastError: message });

@@ -4,6 +4,7 @@ import { dialog, ipcMain, type BrowserWindow } from "electron";
 import { IPC } from "@claude-desktop/shared";
 import type {
   AppSettings,
+  ChatItem,
   PermissionDecision,
   UserPromptDecision,
 } from "@claude-desktop/shared";
@@ -86,12 +87,32 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
   ipcMain.handle(
     IPC.sessionSelect,
     async (_e, { sessionId }: { sessionId: string }) => {
-      // Chat items are owned by the renderer store (task 11); main returns diffs only.
+      const summary = ctx.sessions.getSummary(sessionId);
+      if (!summary) {
+        throw new Error(`Unknown session: ${sessionId}`);
+      }
+      // Restore cwd as last project when user switches sessions.
+      if (summary.cwd) {
+        ctx.settings.update({ lastProjectPath: summary.cwd });
+      }
+      const items = ctx.sessions.getTranscript(sessionId);
       return {
         sessionId,
-        items: [] as unknown[],
+        cwd: summary.cwd,
+        items,
         changes: ctx.diffs.list(sessionId),
       };
+    },
+  );
+
+  ipcMain.handle(
+    IPC.sessionSaveTranscript,
+    async (
+      _e,
+      { sessionId, items }: { sessionId: string; items: ChatItem[] },
+    ) => {
+      ctx.sessions.saveTranscript(sessionId, items);
+      return { ok: true };
     },
   );
 

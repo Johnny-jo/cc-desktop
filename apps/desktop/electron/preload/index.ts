@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from "electron";
 import { IPC } from "@claude-desktop/shared";
 import type {
   AppSettings,
+  ChatItem,
   PermissionDecision,
   UserPromptDecision,
 } from "@claude-desktop/shared";
@@ -32,7 +33,18 @@ const desktop = {
   listSessions: () => ipcRenderer.invoke(IPC.sessionList),
 
   selectSession: (sessionId: string) =>
-    ipcRenderer.invoke(IPC.sessionSelect, { sessionId }),
+    ipcRenderer.invoke(IPC.sessionSelect, { sessionId }) as Promise<{
+      sessionId: string;
+      cwd: string;
+      items: ChatItem[];
+      changes: import("@claude-desktop/shared").FileChange[];
+    }>,
+
+  saveSessionTranscript: (sessionId: string, items: ChatItem[]) =>
+    ipcRenderer.invoke(IPC.sessionSaveTranscript, {
+      sessionId,
+      items,
+    }) as Promise<{ ok: boolean }>,
 
   getSessionSlashCommands: (sessionId: string) =>
     ipcRenderer.invoke(IPC.sessionSlashCommands, { sessionId }) as Promise<{
