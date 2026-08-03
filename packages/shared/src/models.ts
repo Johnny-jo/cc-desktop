@@ -115,6 +115,8 @@ export type SessionSummary = {
   cwd: string;
   updatedAt: number;
   status: "idle" | "running" | "error";
+  /** Accumulated billing/cost usage for the session */
+  usage?: SessionUsage;
   /** Latest context-window occupancy (not billing totals) */
   contextUsage?: ContextUsage;
 };
