@@ -229,6 +229,22 @@ export class DiffTracker {
     return changesToArray(map);
   }
 
+  /** Restore a full change set from disk (overwrites in-memory map for session). */
+  hydrate(sessionId: string, changes: FileChange[]): void {
+    const map = new Map<string, FileChange>();
+    for (const c of changes) {
+      if (!c?.path) continue;
+      map.set(c.path, {
+        path: c.path,
+        status: c.status === "A" || c.status === "M" ? c.status : "M",
+        hunks: c.hunks ?? "",
+        updatedAt: c.updatedAt ?? Date.now(),
+        events: Array.isArray(c.events) ? [...c.events] : [],
+      });
+    }
+    this.sessions.set(sessionId, map);
+  }
+
   clearSession(sessionId: string): void {
     this.sessions.delete(sessionId);
   }

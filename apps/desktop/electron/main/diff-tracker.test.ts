@@ -31,6 +31,21 @@ describe("DiffTracker", () => {
     expect(changes[0].hunks).toMatch(/Bash|new file|\+/);
   });
 
+  it("hydrate restores a full change set", () => {
+    const tracker = new DiffTracker();
+    tracker.hydrate("s1", [
+      {
+        path: "a.ts",
+        status: "M",
+        hunks: "+x",
+        updatedAt: 1,
+        events: [{ tool: "Edit", at: 1, hunk: "+x" }],
+      },
+    ]);
+    expect(tracker.list("s1")).toHaveLength(1);
+    expect(tracker.list("s1")[0].path).toBe("a.ts");
+  });
+
   it("records Write without previous content as added (status A)", () => {
     const tracker = new DiffTracker();
     tracker.onToolUse("s1", "Write", {

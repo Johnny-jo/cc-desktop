@@ -150,7 +150,7 @@ export class SessionManager {
     this.emitDiff = deps.emitDiff;
     this.emitSlashCommands = deps.emitSlashCommands;
 
-    // Hydrate session list from disk (no live query until user continues).
+    // Hydrate session list + file changes from disk (no live query until continue).
     if (this.archive) {
       for (const stored of this.archive.loadIndex()) {
         this.sessions.set(stored.id, {
@@ -166,6 +166,10 @@ export class SessionManager {
           slashCommands: [],
           turnActive: false,
         });
+        const changes = this.archive.loadChanges(stored.id);
+        if (changes.length) {
+          this.diffTracker.hydrate(stored.id, changes);
+        }
       }
     }
   }
@@ -200,6 +204,17 @@ export class SessionManager {
       ...(entry.sdkSessionId ? { sdkSessionId: entry.sdkSessionId } : {}),
     };
     this.archive.upsertSummary(stored);
+  }
+
+  private persistChanges(sessionId: string): void {
+    if (!this.archive) return;
+    this.archive.saveChanges(sessionId, this.diffTracker.list(sessionId));
+  }
+
+  private emitDiffAndPersist(sessionId: string): void {
+    const list = this.diffTracker.list(sessionId);
+    this.emitDiff(sessionId, list);
+    this.persistChanges(sessionId);
   }
 
   /** SDK skills / slash commands cached for a session (empty if none yet). */
@@ -587,7 +602,7 @@ export class SessionManager {
       if (refreshed) {
         this.diffTracker.refreshBashWritesFromDisk(sessionId);
         const list = this.diffTracker.list(sessionId);
-        if (list.length) this.emitDiff(sessionId, list);
+        if (list.length) this.emitDiffAndPersist(sessionId);
       }
       return;
     }
@@ -611,7 +626,7 @@ export class SessionManager {
           ? (block.input as Record<string, unknown>)
           : {};
       this.diffTracker.onToolUse(sessionId, block.name, input);
-      this.emitDiff(sessionId, this.diffTracker.list(sessionId));
+      this.emitDiffAndPersist(sessionId);
     }
   }
 }

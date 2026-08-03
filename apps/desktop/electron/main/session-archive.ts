@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { ChatItem, SessionSummary } from "@claude-desktop/shared";
+import type { ChatItem, FileChange, SessionSummary } from "@claude-desktop/shared";
 
 export type StoredSession = SessionSummary & {
   sdkSessionId?: string;
@@ -15,6 +15,12 @@ type TranscriptFile = {
   version: 1;
   sessionId: string;
   items: ChatItem[];
+};
+
+type ChangesFile = {
+  version: 1;
+  sessionId: string;
+  changes: FileChange[];
 };
 
 /**
@@ -122,9 +128,56 @@ export class SessionArchive {
     fs.writeFileSync(file, JSON.stringify(payload, null, 2), "utf8");
   }
 
+  loadChanges(sessionId: string): FileChange[] {
+    const file = this.changesPath(sessionId);
+    try {
+      if (!fs.existsSync(file)) return [];
+      const raw = fs.readFileSync(file, "utf8");
+      const data = JSON.parse(raw) as ChangesFile;
+      if (!Array.isArray(data.changes)) return [];
+      return data.changes
+        .filter((c) => c && typeof c.path === "string")
+        .map((c) => ({
+          path: String(c.path),
+          status: c.status === "A" || c.status === "M" ? c.status : "M",
+          hunks: String(c.hunks ?? ""),
+          updatedAt: Number(c.updatedAt) || Date.now(),
+          events: Array.isArray(c.events)
+            ? c.events.map((e) => ({
+                tool:
+                  e.tool === "Edit" || e.tool === "Write" || e.tool === "Bash"
+                    ? e.tool
+                    : "Write",
+                at: Number(e.at) || Date.now(),
+                hunk: String(e.hunk ?? ""),
+              }))
+            : [],
+        }));
+    } catch {
+      return [];
+    }
+  }
+
+  saveChanges(sessionId: string, changes: FileChange[]): void {
+    const file = this.changesPath(sessionId);
+    const payload: ChangesFile = {
+      version: 1,
+      sessionId,
+      changes,
+    };
+    fs.mkdirSync(this.root, { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(payload, null, 2), "utf8");
+  }
+
+  private safeId(sessionId: string): string {
+    return sessionId.replace(/[^a-zA-Z0-9_-]/g, "_");
+  }
+
   private transcriptPath(sessionId: string): string {
-    // sanitize id for filesystem
-    const safe = sessionId.replace(/[^a-zA-Z0-9_-]/g, "_");
-    return path.join(this.root, `${safe}.json`);
+    return path.join(this.root, `${this.safeId(sessionId)}.json`);
+  }
+
+  private changesPath(sessionId: string): string {
+    return path.join(this.root, `${this.safeId(sessionId)}.changes.json`);
   }
 }

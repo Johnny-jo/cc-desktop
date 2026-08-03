@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { SessionArchive } from "./session-archive";
-import type { ChatItem } from "@claude-desktop/shared";
+import type { ChatItem, FileChange } from "@claude-desktop/shared";
 
 describe("SessionArchive", () => {
   const dirs: string[] = [];
@@ -71,5 +71,34 @@ describe("SessionArchive", () => {
   it("returns empty for missing transcript", () => {
     const arch = new SessionArchive(tmpDir());
     expect(arch.loadItems("missing")).toEqual([]);
+  });
+
+  it("persists and reloads file changes", () => {
+    const arch = new SessionArchive(tmpDir());
+    const changes: FileChange[] = [
+      {
+        path: "src/a.ts",
+        status: "M",
+        hunks: "--- a/src/a.ts\n+++ b/src/a.ts\n+hello",
+        updatedAt: 123,
+        events: [{ tool: "Edit", at: 123, hunk: "+hello" }],
+      },
+      {
+        path: "UIManager.cs",
+        status: "A",
+        hunks: "@@ new file\n+using UnityEngine;",
+        updatedAt: 124,
+        events: [{ tool: "Bash", at: 124, hunk: "+using UnityEngine;" }],
+      },
+    ];
+    arch.saveChanges("s1", changes);
+    const loaded = arch.loadChanges("s1");
+    expect(loaded).toHaveLength(2);
+    expect(loaded[0]).toMatchObject({ path: "src/a.ts", status: "M" });
+    expect(loaded[1]).toMatchObject({
+      path: "UIManager.cs",
+      status: "A",
+    });
+    expect(loaded[1].events[0]?.tool).toBe("Bash");
   });
 });
