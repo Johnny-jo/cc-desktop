@@ -124,4 +124,37 @@ describe("CpaSupervisor", () => {
     expect(models).toEqual(["deepseek-v4-flash", "deepseek-v4-pro", "k3"]);
     vi.unstubAllGlobals();
   });
+
+  it("listModelCatalog parses context fields and caches", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: [
+          { id: "provider/deepseek-v4-flash", context_length: 65536 },
+          { id: "deepseek-v4-flash", max_model_len: 128000 },
+          { id: "no-limit-model" },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const cpa = new CpaSupervisor({
+      getSettings: () => ({ ...baseSettings }),
+      getToken: () => "tok",
+      probePort: async () => true,
+      spawnProcess: vi.fn(),
+    });
+
+    const catalog = await cpa.listModelCatalog();
+    expect(catalog.some((m) => m.id === "deepseek-v4-flash")).toBe(true);
+    const flash = catalog.find((m) => m.id === "deepseek-v4-flash");
+    expect(flash?.contextLimit).toBe(128000);
+    expect(cpa.getModelCatalog().length).toBeGreaterThan(0);
+
+    // listModels still returns string ids
+    const ids = await cpa.listModels();
+    expect(ids).toContain("deepseek-v4-flash");
+
+    vi.unstubAllGlobals();
+  });
 });
