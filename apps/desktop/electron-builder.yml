@@ -1,0 +1,30 @@
+appId: com.claude-desktop.app
+productName: Claude Desktop
+copyright: Copyright © Claude Desktop contributors
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - out/**/*
+  - package.json
+
+# Workspace package is bundled into out/ by electron-vite; no asarUnpack of node_modules required for shared.
+asar: true
+
+# Windows: directory package only for MVP (NSIS installer can be added later).
+# Disable signing/rcedit so packaging works offline without winCodeSign binaries.
+win:
+  target:
+    - target: dir
+      arch:
+        - x64
+  signAndEditExecutable: false
+  verifyUpdateCodeSignature: false
+
+forceCodeSigning: false
+
+# electron-vite outputs
+extraMetadata:
+  main: out/main/index.js
