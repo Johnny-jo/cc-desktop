@@ -369,9 +369,24 @@ function subscribeDesktopEvents(): void {
     desktop.on(IPC.sessionUpdated, (payload) => {
       const summary = payload as SessionSummary;
       upsertSession(summary);
-      // Do NOT append pendingStartPrompt here — startSession().then owns the
-      // single optimistic user bubble for the first turn. Double-append here
-      // caused the first user message to reappear after the assistant reply.
+
+      // First turn: append the user bubble as soon as the session becomes
+      // running (early), not when startSession() resolves after the full turn
+      // (that put the question under the assistant reply).
+      if (
+        pendingStartPrompt &&
+        summary.status === "running" &&
+        !getItems(summary.id).some(
+          (i) =>
+            i.kind === "text" &&
+            i.role === "user" &&
+            i.text === pendingStartPrompt,
+        )
+      ) {
+        const text = pendingStartPrompt;
+        pendingStartPrompt = null;
+        appendUserMessage(summary.id, text, { optimistic: true });
+      }
     }),
   );
 
@@ -627,8 +642,9 @@ export function sendMessage(text: string): void {
     return;
   }
 
-  // New session: only append the user bubble once when start resolves.
-  // (Do not also append from session:updated — that caused a post-reply duplicate.)
+  // New session: show the user bubble on first session:updated (running).
+  // startSession awaits the full turn, so appending only in .then() puts the
+  // question after the assistant reply.
   pendingStartPrompt = prompt;
   void desktop
     .startSession(prompt, state.projectPath ?? undefined)
@@ -637,9 +653,19 @@ export function sendMessage(text: string): void {
       if (!state.activeSessionId || state.activeSessionId !== sessionId) {
         setState({ activeSessionId: sessionId });
       }
-      const textToAdd = pendingStartPrompt ?? prompt;
-      pendingStartPrompt = null;
-      appendUserMessage(sessionId, textToAdd, { optimistic: true });
+      // Fallback if session:updated never carried the prompt (should be rare).
+      if (pendingStartPrompt) {
+        const textToAdd = pendingStartPrompt;
+        pendingStartPrompt = null;
+        if (
+          !getItems(sessionId).some(
+            (i) =>
+              i.kind === "text" && i.role === "user" && i.text === textToAdd,
+          )
+        ) {
+          appendUserMessage(sessionId, textToAdd, { optimistic: true });
+        }
+      }
     })
     .catch((err: unknown) => {
       pendingStartPrompt = null;
