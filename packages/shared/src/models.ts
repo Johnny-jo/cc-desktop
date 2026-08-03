@@ -1,5 +1,21 @@
 export type PermissionMode = "default" | "acceptEdits" | "plan";
 
+export type ContextLimitSource = "cpa" | "builtin" | "override" | "default";
+
+export type ContextUsage = {
+  usedTokens: number;
+  limitTokens: number;
+  ratio: number;
+  source: ContextLimitSource;
+  modelId: string;
+  updatedAt: number;
+};
+
+export type ModelInfo = {
+  id: string;
+  contextLimit?: number;
+};
+
 export type CpaStatus =
   | { state: "unknown" }
   | { state: "stopped" }
@@ -99,8 +115,8 @@ export type SessionSummary = {
   cwd: string;
   updatedAt: number;
   status: "idle" | "running" | "error";
-  /** Running totals for this session (tokens / cost / wall time) */
-  usage?: SessionUsage;
+  /** Latest context-window occupancy (not billing totals) */
+  contextUsage?: ContextUsage;
 };
 
 export type PermissionRequest = {
@@ -125,6 +141,10 @@ export type AppSettings = {
   permissionMode: PermissionMode;
   shutdownCpaOnQuit: boolean;
   lastProjectPath?: string;
+  /** Fallback window when model unknown (tokens) */
+  defaultContextLimit: number;
+  /** Per-model id overrides */
+  modelContextLimits: Record<string, number>;
 };
 
 export type PublicSettings = Omit<AppSettings, never> & {
