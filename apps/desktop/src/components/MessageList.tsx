@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import type { ChatItem } from "@claude-desktop/shared";
 import { ToolCard } from "./ToolCard";
+import { MarkdownBody } from "./MarkdownBody";
 
 /** Long skill / system dumps that slipped through as plain text. */
 function looksLikeSkillDump(text: string): boolean {
@@ -105,8 +106,7 @@ export function MessageList({ items }: { items: ChatItem[] }) {
               <div className="bubble bubble-system">{item.text}</div>
             ) : (
               <div className="bubble bubble-assistant">
-                {item.text}
-                {item.streaming ? <span className="cursor">▍</span> : null}
+                <MarkdownBody text={item.text} streaming={item.streaming} />
               </div>
             )}
           </div>
