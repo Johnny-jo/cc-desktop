@@ -14,7 +14,13 @@ const DEFAULTS: AppSettings = {
   cpaConfigPath: "D:\\gitrep\\CC\\CPA\\config.yaml",
   cpaPort: 8317,
   defaultModel: "kimi-for-coding",
-  models: ["kimi-for-coding", "k3", "grok-4.5"],
+  models: [
+    "kimi-for-coding",
+    "k3",
+    "grok-4.5",
+    "deepseek-v4-flash",
+    "deepseek-v4-pro",
+  ],
   permissionMode: "default",
   shutdownCpaOnQuit: false,
 };

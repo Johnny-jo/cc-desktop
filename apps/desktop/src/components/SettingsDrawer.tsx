@@ -1,6 +1,11 @@
 import React, { useEffect, useState } from "react";
 import type { AppSettings, PublicSettings } from "@claude-desktop/shared";
-import { saveSettings, useAppStore } from "../state/store";
+import {
+  getState,
+  saveSettings,
+  syncCpaModels,
+  useAppStore,
+} from "../state/store";
 
 export type SettingsDrawerProps = {
   open: boolean;
@@ -33,6 +38,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   const settings = useAppStore((s) => s.settings);
   const [form, setForm] = useState<FormState>(() => fromSettings(settings));
   const [saving, setSaving] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const [savedNote, setSavedNote] = useState<string | null>(null);
 
@@ -163,6 +169,40 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
               spellCheck={false}
             />
           </label>
+
+          <div className="settings-inline-actions">
+            <button
+              type="button"
+              className="btn btn-sm"
+              disabled={syncing}
+              onClick={() => {
+                void (async () => {
+                  setLocalError(null);
+                  setSavedNote(null);
+                  setSyncing(true);
+                  try {
+                    await syncCpaModels();
+                    const latest = getState().settings;
+                    setForm(fromSettings(latest));
+                    setSavedNote(
+                      `Synced ${latest?.models?.length ?? 0} models from CPA`,
+                    );
+                  } catch (err) {
+                    setLocalError(
+                      err instanceof Error ? err.message : String(err),
+                    );
+                  } finally {
+                    setSyncing(false);
+                  }
+                })();
+              }}
+            >
+              {syncing ? "Syncing…" : "Sync models from CPA"}
+            </button>
+            <span className="settings-hint">
+              Pulls /v1/models (e.g. deepseek-v4-flash)
+            </span>
+          </div>
 
           <label className="settings-field">
             Default model

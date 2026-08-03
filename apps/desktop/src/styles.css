@@ -1068,6 +1068,18 @@ textarea {
   color: var(--text-muted);
 }
 
+.settings-inline-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.settings-hint {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
 .settings-error {
   margin: 0;
   color: var(--danger);

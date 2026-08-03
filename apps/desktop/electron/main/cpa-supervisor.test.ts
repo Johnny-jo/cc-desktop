@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { CpaSupervisor } from "./cpa-supervisor";
+import { CpaSupervisor, preferUnprefixedModels } from "./cpa-supervisor";
 
 const baseSettings = {
   cpaExePath: "x",
@@ -77,5 +77,49 @@ describe("CpaSupervisor", () => {
     // First child was already cleaned on timeout; second retry should not
     // re-kill it as a "previous managed child" beyond that cleanup.
     expect(kill1).toHaveBeenCalledTimes(1);
+  });
+
+  it("preferUnprefixedModels drops provider/path duplicates", () => {
+    expect(
+      preferUnprefixedModels([
+        "deepseek-v4-flash",
+        "deepseek-v4-pro",
+        "k3",
+        "kimi/k3",
+        "g2a/grok-4.5",
+        "grok-4.5",
+      ]),
+    ).toEqual(["deepseek-v4-flash", "deepseek-v4-pro", "k3", "grok-4.5"]);
+  });
+
+  it("listModels fetches /v1/models with bearer token", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: [
+          { id: "deepseek-v4-flash" },
+          { id: "deepseek-v4-pro" },
+          { id: "kimi/k3" },
+          { id: "k3" },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const cpa = new CpaSupervisor({
+      getSettings: () => ({ ...baseSettings }),
+      getToken: () => "tok",
+      probePort: async () => true,
+      spawnProcess: vi.fn(),
+    });
+    const models = await cpa.listModels();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8317/v1/models",
+      expect.objectContaining({
+        headers: { Authorization: "Bearer tok" },
+      }),
+    );
+    expect(models).toEqual(["deepseek-v4-flash", "deepseek-v4-pro", "k3"]);
+    vi.unstubAllGlobals();
   });
 });

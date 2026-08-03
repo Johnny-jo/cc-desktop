@@ -526,6 +526,20 @@ export async function startCpa(): Promise<void> {
   }
 }
 
+/** Pull model list from CPA /v1/models into settings (includes deepseek proxies). */
+export async function syncCpaModels(): Promise<void> {
+  const desktop = getDesktop();
+  try {
+    await desktop.syncCpaModels();
+    const settings = (await desktop.getSettings()) as PublicSettings;
+    setState({ settings, lastError: null });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    setState({ lastError: message });
+    throw err;
+  }
+}
+
 export function clearPermissionRequest(): void {
   setState({ permissionRequest: null });
 }

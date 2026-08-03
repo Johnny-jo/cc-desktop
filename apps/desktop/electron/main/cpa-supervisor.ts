@@ -104,6 +104,39 @@ export class CpaSupervisor {
     } as Record<string, string>;
   }
 
+  /**
+   * List client-visible model ids from CPA OpenAI-compatible /v1/models.
+   * Prefers unprefixed aliases (deepseek-v4-flash) over provider/path forms
+   * (kimi/k3) when both exist.
+   */
+  async listModels(): Promise<string[]> {
+    const settings = this.getSettings();
+    const token = this.getToken();
+    if (!token) {
+      throw new Error("CPA token is not set");
+    }
+    const port = settings.cpaPort;
+    const url = `http://127.0.0.1:${port}/v1/models`;
+    const res = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(
+        `CPA /v1/models failed: ${res.status}${body ? ` ${body.slice(0, 200)}` : ""}`,
+      );
+    }
+    const json = (await res.json()) as {
+      data?: Array<{ id?: string }>;
+    };
+    const raw = (json.data ?? [])
+      .map((m) => m.id)
+      .filter((id): id is string => typeof id === "string" && id.length > 0);
+    return preferUnprefixedModels(raw);
+  }
+
   async ensureReady(): Promise<CpaStatus> {
     if (this.ensurePromise) {
       return this.ensurePromise;
@@ -232,4 +265,21 @@ export class CpaSupervisor {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Keep unprefixed ids; drop `provider/model` duplicates of the same leaf name. */
+export function preferUnprefixedModels(ids: string[]): string[] {
+  const unprefixed = new Set(ids.filter((id) => !id.includes("/")));
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const id of ids) {
+    if (id.includes("/")) {
+      const leaf = id.split("/").pop() ?? id;
+      if (unprefixed.has(leaf)) continue;
+    }
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
 }

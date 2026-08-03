@@ -48,6 +48,12 @@ const desktop = {
 
   getCpaStatus: () => ipcRenderer.invoke(IPC.cpaStatus),
 
+  syncCpaModels: () =>
+    ipcRenderer.invoke(IPC.cpaSyncModels) as Promise<{
+      models: string[];
+      defaultModel: string;
+    }>,
+
   setModel: (model: string) =>
     ipcRenderer.invoke(IPC.modelSet, { model }) as Promise<{ model: string }>,
 

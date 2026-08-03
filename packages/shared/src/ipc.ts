@@ -22,6 +22,8 @@ export const IPC = {
   settingsSet: "settings:set",
   cpaStart: "cpa:start",
   cpaStatus: "cpa:status",
+  /** Fetch model ids from CPA /v1/models and merge into settings */
+  cpaSyncModels: "cpa:sync-models",
   modelSet: "model:set",
   // main → renderer (webContents.send)
   sessionEvent: "session:event",
@@ -63,6 +65,10 @@ export type IpcInvokeMap = {
   };
   [IPC.cpaStart]: { args: []; result: CpaStatus };
   [IPC.cpaStatus]: { args: []; result: CpaStatus };
+  [IPC.cpaSyncModels]: {
+    args: [];
+    result: { models: string[]; defaultModel: string };
+  };
   [IPC.modelSet]: { args: [{ model: string }]; result: { model: string } };
 };
 

@@ -117,6 +117,20 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
 
   ipcMain.handle(IPC.cpaStatus, async () => ctx.cpa.getStatus());
 
+  ipcMain.handle(IPC.cpaSyncModels, async () => {
+    await ctx.cpa.ensureReady();
+    const models = await ctx.cpa.listModels();
+    if (models.length === 0) {
+      throw new Error("CPA returned an empty model list");
+    }
+    const current = ctx.settings.get();
+    const defaultModel = models.includes(current.defaultModel)
+      ? current.defaultModel
+      : models[0];
+    ctx.settings.update({ models, defaultModel });
+    return { models, defaultModel };
+  });
+
   ipcMain.handle(IPC.modelSet, async (_e, { model }: { model: string }) => {
     ctx.settings.update({ defaultModel: model });
     return { model };
