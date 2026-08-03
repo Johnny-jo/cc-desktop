@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import type { ChatItem } from "@claude-desktop/shared";
 import { ToolCard } from "./ToolCard";
 import { MarkdownBody } from "./MarkdownBody";
+import { formatTurnUsageLine } from "../lib/format-usage";
 
 /** Long skill / system dumps that slipped through as plain text. */
 function looksLikeSkillDump(text: string): boolean {
@@ -73,6 +74,16 @@ export function MessageList({ items }: { items: ChatItem[] }) {
           return (
             <div key={item.id} className="message-row tool-row">
               <ToolCard tool={item.tool} />
+            </div>
+          );
+        }
+
+        if (item.kind === "usage") {
+          return (
+            <div key={item.id} className="message-row usage-row">
+              <div className="usage-chip" title="This turn">
+                {formatTurnUsageLine(item.usage)}
+              </div>
             </div>
           );
         }

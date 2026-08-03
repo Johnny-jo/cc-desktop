@@ -3,6 +3,7 @@ import type { PermissionMode } from "@claude-desktop/shared";
 import { MessageList } from "./MessageList";
 import { Composer } from "./Composer";
 import { setPermissionMode, useAppStore } from "../state/store";
+import { formatSessionUsageLine } from "../lib/format-usage";
 
 const PERMISSION_MODES: PermissionMode[] = ["default", "acceptEdits", "plan"];
 
@@ -25,6 +26,7 @@ export function ChatPanel({
 
   const items = activeSessionId ? (itemsBySession[activeSessionId] ?? []) : [];
   const active = sessions.find((s) => s.id === activeSessionId);
+  const sessionUsageLine = formatSessionUsageLine(active?.usage);
 
   return (
     <div className="chat-panel">
@@ -34,6 +36,11 @@ export function ChatPanel({
             {active ? active.title : "New chat"}
           </span>
           {running ? <span className="badge running">running</span> : null}
+          {sessionUsageLine ? (
+            <span className="session-usage" title="Session totals">
+              {sessionUsageLine}
+            </span>
+          ) : null}
         </div>
         <div className="chat-header-right">
           <label className="chat-header-field">

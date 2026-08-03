@@ -35,9 +35,33 @@ export type ToolCardState = {
   elapsedSeconds?: number;
 };
 
+/** Per-turn token / cost / timing from SDK result message */
+export type TurnUsage = {
+  durationMs?: number;
+  durationApiMs?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
+  costUsd?: number;
+  numTurns?: number;
+};
+
+/** Accumulated usage for a whole desktop session */
+export type SessionUsage = {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  costUsd: number;
+  durationMs: number;
+  turns: number;
+};
+
 export type ChatItem =
   | { kind: "text"; id: string; role: ChatRole; text: string; streaming?: boolean }
-  | { kind: "tool"; id: string; tool: ToolCardState };
+  | { kind: "tool"; id: string; tool: ToolCardState }
+  | { kind: "usage"; id: string; usage: TurnUsage };
 
 /** App-local slash command (composer `/` menu) */
 export type SlashCommandItem = {
@@ -75,6 +99,8 @@ export type SessionSummary = {
   cwd: string;
   updatedAt: number;
   status: "idle" | "running" | "error";
+  /** Running totals for this session (tokens / cost / wall time) */
+  usage?: SessionUsage;
 };
 
 export type PermissionRequest = {
@@ -118,5 +144,12 @@ export type SdkNormalizedEvent =
       elapsedSeconds: number;
     }
   | { type: "user_message"; sessionId: string; text: string }
-  | { type: "result"; sessionId: string; ok: boolean; costUsd?: number; error?: string }
+  | {
+      type: "result";
+      sessionId: string;
+      ok: boolean;
+      costUsd?: number;
+      error?: string;
+      usage?: TurnUsage;
+    }
   | { type: "raw"; sessionId: string; payload: unknown };

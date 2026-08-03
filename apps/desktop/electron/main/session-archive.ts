@@ -56,6 +56,19 @@ export class SessionArchive {
             : "idle",
         sdkSessionId:
           typeof s.sdkSessionId === "string" ? s.sdkSessionId : undefined,
+        ...(s.usage && typeof s.usage === "object"
+          ? {
+              usage: {
+                inputTokens: Number(s.usage.inputTokens) || 0,
+                outputTokens: Number(s.usage.outputTokens) || 0,
+                cacheReadTokens: Number(s.usage.cacheReadTokens) || 0,
+                cacheCreationTokens: Number(s.usage.cacheCreationTokens) || 0,
+                costUsd: Number(s.usage.costUsd) || 0,
+                durationMs: Number(s.usage.durationMs) || 0,
+                turns: Number(s.usage.turns) || 0,
+              },
+            }
+          : {}),
       }));
     } catch {
       return [];
@@ -73,6 +86,7 @@ export class SessionArchive {
           updatedAt: s.updatedAt,
           status: s.status === "running" ? "idle" : s.status,
           ...(s.sdkSessionId ? { sdkSessionId: s.sdkSessionId } : {}),
+          ...(s.usage ? { usage: s.usage } : {}),
         }))
         .sort((a, b) => b.updatedAt - a.updatedAt),
     };

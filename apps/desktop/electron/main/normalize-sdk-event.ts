@@ -246,6 +246,83 @@ function normalizeUser(
   return out;
 }
 
+function num(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+}
+
+/** Pull token/cost/timing fields from an SDK result message (success or error). */
+export function extractTurnUsage(msg: UnknownRecord): {
+  costUsd?: number;
+  usage?: import("@claude-desktop/shared").TurnUsage;
+} {
+  const costUsd =
+    num(msg.total_cost_usd) ?? num(msg.totalCostUsd) ?? undefined;
+
+  const usageObj = isRecord(msg.usage) ? msg.usage : null;
+  // Anthropic-style snake_case on NonNullableUsage / BetaUsage
+  const inputTokens =
+    num(usageObj?.input_tokens) ??
+    num(usageObj?.inputTokens) ??
+    undefined;
+  const outputTokens =
+    num(usageObj?.output_tokens) ??
+    num(usageObj?.outputTokens) ??
+    undefined;
+  const cacheReadTokens =
+    num(usageObj?.cache_read_input_tokens) ??
+    num(usageObj?.cacheReadInputTokens) ??
+    undefined;
+  const cacheCreationTokens =
+    num(usageObj?.cache_creation_input_tokens) ??
+    num(usageObj?.cacheCreationInputTokens) ??
+    undefined;
+
+  // Also sum modelUsage map if present (camelCase ModelUsage entries)
+  let modelIn = 0;
+  let modelOut = 0;
+  let modelCost = 0;
+  const modelUsage = isRecord(msg.modelUsage)
+    ? msg.modelUsage
+    : isRecord(msg.model_usage)
+      ? msg.model_usage
+      : null;
+  if (modelUsage) {
+    for (const v of Object.values(modelUsage)) {
+      if (!isRecord(v)) continue;
+      modelIn += num(v.inputTokens) ?? num(v.input_tokens) ?? 0;
+      modelOut += num(v.outputTokens) ?? num(v.output_tokens) ?? 0;
+      modelCost += num(v.costUSD) ?? num(v.cost_usd) ?? 0;
+    }
+  }
+
+  const durationMs = num(msg.duration_ms) ?? num(msg.durationMs);
+  const durationApiMs = num(msg.duration_api_ms) ?? num(msg.durationApiMs);
+  const numTurns = num(msg.num_turns) ?? num(msg.numTurns);
+
+  const rawUsage = {
+    durationMs,
+    durationApiMs,
+    inputTokens: inputTokens ?? (modelIn || undefined),
+    outputTokens: outputTokens ?? (modelOut || undefined),
+    cacheReadTokens,
+    cacheCreationTokens,
+    costUsd: costUsd ?? (modelCost || undefined),
+    numTurns,
+  };
+
+  // Drop undefined keys so snapshots / equality checks stay clean.
+  const usage: import("@claude-desktop/shared").TurnUsage = {};
+  for (const [k, v] of Object.entries(rawUsage)) {
+    if (v != null) (usage as Record<string, number>)[k] = v;
+  }
+
+  const hasAny = Object.keys(usage).length > 0;
+  return {
+    costUsd: usage.costUsd,
+    usage: hasAny ? usage : undefined,
+  };
+}
+
 function normalizeResult(
   msg: UnknownRecord,
   sessionId: string,
@@ -255,8 +332,7 @@ function normalizeResult(
     msg.subtype === "error" ||
     (typeof msg.subtype === "string" && msg.subtype.startsWith("error"));
 
-  const costUsd =
-    typeof msg.total_cost_usd === "number" ? msg.total_cost_usd : undefined;
+  const { costUsd, usage } = extractTurnUsage(msg);
 
   if (isError) {
     let error: string | undefined;
@@ -269,8 +345,8 @@ function normalizeResult(
     } else {
       error = "SDK result error";
     }
-    return [{ type: "result", sessionId, ok: false, costUsd, error }];
+    return [{ type: "result", sessionId, ok: false, costUsd, error, usage }];
   }
 
-  return [{ type: "result", sessionId, ok: true, costUsd }];
+  return [{ type: "result", sessionId, ok: true, costUsd, usage }];
 }

@@ -332,6 +332,14 @@ function applySessionEvent(event: SdkNormalizedEvent): void {
           text: event.error,
         });
       }
+      // Per-turn usage footer (tokens / duration / cost)
+      if (event.usage) {
+        items.push({
+          kind: "usage",
+          id: nextId("usage"),
+          usage: event.usage,
+        });
+      }
       setItems(sessionId, items);
       // Turn finished — flush transcript immediately so quit cannot lose it.
       saveTranscriptNow(sessionId, items);

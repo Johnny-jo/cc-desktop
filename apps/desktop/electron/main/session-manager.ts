@@ -3,7 +3,9 @@ import type {
   FileChange,
   SdkNormalizedEvent,
   SessionSummary,
+  SessionUsage,
   SlashCommandItem,
+  TurnUsage,
 } from "@claude-desktop/shared";
 import type { PermissionBroker } from "./permission-broker";
 import type { DiffTracker } from "./diff-tracker";
@@ -160,6 +162,7 @@ export class SessionManager {
             cwd: stored.cwd,
             updatedAt: stored.updatedAt,
             status: stored.status === "running" ? "idle" : stored.status,
+            ...(stored.usage ? { usage: stored.usage } : {}),
           },
           abortController: null,
           sdkSessionId: stored.sdkSessionId,
@@ -473,6 +476,7 @@ export class SessionManager {
               ...entry.summary,
               status: event.ok ? "idle" : "error",
               updatedAt: Date.now(),
+              usage: accumulateUsage(entry.summary.usage, event.usage),
             };
             entry.turnActive = false;
             this.emitSession({ ...entry.summary });
@@ -647,4 +651,31 @@ export function humanizeAgentError(raw: string, model: string): string {
     );
   }
   return raw;
+}
+
+/** Merge one turn's usage into session totals. */
+export function accumulateUsage(
+  prev: SessionUsage | undefined,
+  turn: TurnUsage | undefined,
+): SessionUsage | undefined {
+  if (!turn) return prev;
+  const base: SessionUsage = prev ?? {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+    costUsd: 0,
+    durationMs: 0,
+    turns: 0,
+  };
+  return {
+    inputTokens: base.inputTokens + (turn.inputTokens ?? 0),
+    outputTokens: base.outputTokens + (turn.outputTokens ?? 0),
+    cacheReadTokens: base.cacheReadTokens + (turn.cacheReadTokens ?? 0),
+    cacheCreationTokens:
+      base.cacheCreationTokens + (turn.cacheCreationTokens ?? 0),
+    costUsd: base.costUsd + (turn.costUsd ?? 0),
+    durationMs: base.durationMs + (turn.durationMs ?? 0),
+    turns: base.turns + 1,
+  };
 }

@@ -35,6 +35,40 @@ describe("normalizeSdkEvent", () => {
     ]);
   });
 
+  it("extracts tokens and duration from result messages", () => {
+    const msg = {
+      type: "result",
+      subtype: "success",
+      duration_ms: 4200,
+      duration_api_ms: 3100,
+      total_cost_usd: 0.0123,
+      num_turns: 2,
+      usage: {
+        input_tokens: 1200,
+        output_tokens: 340,
+        cache_read_input_tokens: 100,
+        cache_creation_input_tokens: 50,
+      },
+    };
+    const events = normalizeSdkEvent(msg, sessionId);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      type: "result",
+      ok: true,
+      costUsd: 0.0123,
+      usage: {
+        durationMs: 4200,
+        durationApiMs: 3100,
+        inputTokens: 1200,
+        outputTokens: 340,
+        cacheReadTokens: 100,
+        cacheCreationTokens: 50,
+        costUsd: 0.0123,
+        numTurns: 2,
+      },
+    });
+  });
+
   it("folds long skill dump assistant text into collapsible Skill tool cards", () => {
     const skillBody = [
       "Base directory for this skill: C:\\Users\\x\\.claude\\skills\\using-superpowers",
@@ -150,7 +184,13 @@ describe("normalizeSdkEvent", () => {
       result: "done",
     };
     expect(normalizeSdkEvent(msg, sessionId)).toEqual([
-      { type: "result", sessionId, ok: true, costUsd: 0.012 },
+      {
+        type: "result",
+        sessionId,
+        ok: true,
+        costUsd: 0.012,
+        usage: { costUsd: 0.012 },
+      },
     ]);
   });
 

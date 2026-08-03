@@ -560,6 +560,26 @@ textarea {
   color: var(--warn);
 }
 
+.session-usage {
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 280px;
+}
+
+.usage-row {
+  justify-content: flex-start;
+}
+
+.usage-chip {
+  font-size: 11px;
+  color: var(--text-faint);
+  padding: 2px 0 8px;
+  letter-spacing: 0.01em;
+}
+
 .chat-body {
   overflow: auto;
   min-height: 0;
