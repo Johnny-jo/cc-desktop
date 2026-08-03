@@ -17,7 +17,7 @@ export type FileChange = {
   updatedAt: number;
   /** event-level entries newest last */
   events: Array<{
-    tool: "Edit" | "Write";
+    tool: "Edit" | "Write" | "Bash";
     at: number;
     hunk: string;
   }>;

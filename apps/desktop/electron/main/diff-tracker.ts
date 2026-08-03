@@ -12,6 +12,36 @@ export type DiffTrackerDeps = {
   now?: () => number;
 };
 
+/**
+ * Detect shell redirects that create/overwrite a file, e.g.:
+ *   cat > foo.ts <<'EOF' ...
+ *   cat > path/file.md <<EOF
+ *   tee path/file.ts <<'EOF'
+ * Returns absolute-ish path string as given in the command.
+ */
+export function parseBashWriteTarget(command: string): string | null {
+  const cmd = command.trim();
+  // cat/tee > file << ...
+  const heredoc = cmd.match(
+    /(?:^|[;&|\n])\s*(?:cat|tee)\s+>\s*['"]?([^\s'"]+)['"]?\s*<</,
+  );
+  if (heredoc?.[1]) return heredoc[1];
+
+  // echo ... > file  (single redirect, not >>)
+  const echoRedir = cmd.match(
+    /(?:^|[;&|\n])\s*echo\s+[\s\S]*?[^>]>\s*['"]?([^\s'"]+)['"]?\s*$/,
+  );
+  if (echoRedir?.[1]) return echoRedir[1];
+
+  // printf ... > file
+  const printfRedir = cmd.match(
+    /(?:^|[;&|\n])\s*printf\s+[\s\S]*?[^>]>\s*['"]?([^\s'"]+)['"]?\s*$/,
+  );
+  if (printfRedir?.[1]) return printfRedir[1];
+
+  return null;
+}
+
 export class DiffTracker {
   private readonly sessions = new Map<string, Map<string, FileChange>>();
   private readonly readFile?: DiffTrackerDeps["readFile"];
@@ -27,8 +57,20 @@ export class DiffTracker {
     toolName: string,
     input: Record<string, unknown>,
   ): void {
-    if (toolName !== "Edit" && toolName !== "Write") return;
+    if (toolName === "Edit" || toolName === "Write") {
+      this.onEditOrWrite(sessionId, toolName, input);
+      return;
+    }
+    if (toolName === "Bash") {
+      this.onBashWrite(sessionId, input);
+    }
+  }
 
+  private onEditOrWrite(
+    sessionId: string,
+    toolName: "Edit" | "Write",
+    input: Record<string, unknown>,
+  ): void {
     const path = String(input.file_path ?? input.path ?? "");
     if (!path) return;
 
@@ -78,6 +120,107 @@ export class DiffTracker {
         status,
       }),
     );
+  }
+
+  /**
+   * When the model writes via Bash (cat/tee heredoc, echo > file), still
+   * surface a change entry. Prefer reading disk content after the tool runs;
+   * at tool_use time we only know the path — use empty previous if unread.
+   */
+  private onBashWrite(
+    sessionId: string,
+    input: Record<string, unknown>,
+  ): void {
+    const command = String(input.command ?? "");
+    const path = parseBashWriteTarget(command);
+    if (!path) return;
+
+    const at = this.now();
+    let map = this.sessions.get(sessionId);
+    if (!map) {
+      map = new Map();
+      this.sessions.set(sessionId, map);
+    }
+
+    let previousContent: string | null = null;
+    let nextContent = "";
+    if (this.readFile) {
+      try {
+        // At tool_use time file may still be old; best-effort snapshot.
+        previousContent = this.readFile(path);
+      } catch {
+        previousContent = null;
+      }
+    }
+
+    // Extract heredoc body if present for a better hunk before disk updates.
+    const heredocBody = command.match(/<<['"]?(\w+)['"]?\n([\s\S]*?)\n\1/);
+    if (heredocBody?.[2] != null) {
+      nextContent = heredocBody[2];
+    } else if (previousContent != null) {
+      // Will refresh from disk on list if needed; mark as touch.
+      nextContent = previousContent;
+    }
+
+    const status = previousContent == null ? "A" : "M";
+    const hunk = buildWriteHunk({
+      path,
+      previousContent: status === "A" ? null : previousContent,
+      nextContent:
+        nextContent ||
+        (status === "A"
+          ? "# written via Bash (content not captured)\n"
+          : previousContent ?? ""),
+    });
+    // Annotate that this came from Bash so UI can show source.
+    const annotated = `${hunk}\n# via Bash`;
+    this.sessions.set(
+      sessionId,
+      upsertFileChange(map, {
+        path,
+        tool: "Bash",
+        hunk: annotated,
+        at,
+        status,
+      }),
+    );
+  }
+
+  /**
+   * After Bash completes, re-read disk for paths already tracked via Bash
+   * so hunks reflect real content.
+   */
+  refreshBashWritesFromDisk(sessionId: string): void {
+    if (!this.readFile) return;
+    const map = this.sessions.get(sessionId);
+    if (!map) return;
+    let next = map;
+    for (const [path, change] of map) {
+      const fromBash = change.events.some((e) => e.tool === "Bash");
+      if (!fromBash) continue;
+      let content: string;
+      try {
+        content = this.readFile(path);
+      } catch {
+        continue;
+      }
+      const status = change.status;
+      const prevForHunk =
+        status === "A" ? null : change.events.length > 1 ? null : null;
+      const hunk = buildWriteHunk({
+        path,
+        previousContent: prevForHunk,
+        nextContent: content,
+      });
+      next = upsertFileChange(next, {
+        path,
+        tool: "Bash",
+        hunk: `${hunk}\n# via Bash (disk)`,
+        at: this.now(),
+        status,
+      });
+    }
+    this.sessions.set(sessionId, next);
   }
 
   list(sessionId: string): FileChange[] {

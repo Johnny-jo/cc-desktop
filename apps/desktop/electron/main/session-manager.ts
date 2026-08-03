@@ -570,13 +570,41 @@ export class SessionManager {
   private handleToolUseForDiff(sessionId: string, msg: unknown): void {
     if (typeof msg !== "object" || msg === null) return;
     const rec = msg as Record<string, unknown>;
+
+    // tool_result for Bash: refresh disk content for bash-written paths
+    if (rec.type === "user") {
+      const message = rec.message as Record<string, unknown> | undefined;
+      const content = message && Array.isArray(message.content) ? message.content : [];
+      let refreshed = false;
+      for (const block of content) {
+        if (typeof block !== "object" || block === null) continue;
+        const b = block as Record<string, unknown>;
+        if (b.type !== "tool_result") continue;
+        // After any tool result, try to refresh bash-tracked files from disk
+        // (cheap no-op if none tracked as Bash).
+        refreshed = true;
+      }
+      if (refreshed) {
+        this.diffTracker.refreshBashWritesFromDisk(sessionId);
+        const list = this.diffTracker.list(sessionId);
+        if (list.length) this.emitDiff(sessionId, list);
+      }
+      return;
+    }
+
     if (rec.type !== "assistant") return;
     const message = rec.message as Record<string, unknown> | undefined;
     if (!message || !Array.isArray(message.content)) return;
 
     for (const block of message.content) {
       if (!isToolUseBlock(block)) continue;
-      if (block.name !== "Edit" && block.name !== "Write") continue;
+      if (
+        block.name !== "Edit" &&
+        block.name !== "Write" &&
+        block.name !== "Bash"
+      ) {
+        continue;
+      }
 
       const input =
         typeof block.input === "object" && block.input !== null

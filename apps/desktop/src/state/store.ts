@@ -369,11 +369,9 @@ function subscribeDesktopEvents(): void {
     desktop.on(IPC.sessionUpdated, (payload) => {
       const summary = payload as SessionSummary;
       upsertSession(summary);
-
-      if (pendingStartPrompt && summary.status === "running") {
-        appendUserMessage(summary.id, pendingStartPrompt);
-        pendingStartPrompt = null;
-      }
+      // Do NOT append pendingStartPrompt here — startSession().then owns the
+      // single optimistic user bubble for the first turn. Double-append here
+      // caused the first user message to reappear after the assistant reply.
     }),
   );
 
@@ -629,22 +627,19 @@ export function sendMessage(text: string): void {
     return;
   }
 
-  // New session: stash prompt until session:updated / invoke resolves.
+  // New session: only append the user bubble once when start resolves.
+  // (Do not also append from session:updated — that caused a post-reply duplicate.)
   pendingStartPrompt = prompt;
   void desktop
     .startSession(prompt, state.projectPath ?? undefined)
     .then((res) => {
       const { sessionId } = res as { sessionId: string };
-      if (!state.activeSessionId) {
+      if (!state.activeSessionId || state.activeSessionId !== sessionId) {
         setState({ activeSessionId: sessionId });
       }
-      if (pendingStartPrompt) {
-        appendUserMessage(sessionId, pendingStartPrompt, { optimistic: true });
-        pendingStartPrompt = null;
-      } else {
-        // session:updated may have already applied it; ensure present
-        appendUserMessage(sessionId, prompt, { optimistic: true });
-      }
+      const textToAdd = pendingStartPrompt ?? prompt;
+      pendingStartPrompt = null;
+      appendUserMessage(sessionId, textToAdd, { optimistic: true });
     })
     .catch((err: unknown) => {
       pendingStartPrompt = null;

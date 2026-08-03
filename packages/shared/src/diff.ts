@@ -58,7 +58,7 @@ export function upsertFileChange(
   map: Map<string, FileChange>,
   event: {
     path: string;
-    tool: "Edit" | "Write";
+    tool: "Edit" | "Write" | "Bash";
     hunk: string;
     at: number;
     status: FileChangeStatus;

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { DiffTracker } from "./diff-tracker";
+import { DiffTracker, parseBashWriteTarget } from "./diff-tracker";
 
 describe("DiffTracker", () => {
   it("records Edit as modified file change", () => {
@@ -13,6 +13,22 @@ describe("DiffTracker", () => {
     expect(changes).toHaveLength(1);
     expect(changes[0].status).toBe("M");
     expect(changes[0].hunks).toContain("+b");
+  });
+
+  it("records Bash cat>heredoc as added file change", () => {
+    expect(
+      parseBashWriteTarget("cat > UIManager.cs <<'EOF'\nhello\nEOF"),
+    ).toBe("UIManager.cs");
+
+    const tracker = new DiffTracker();
+    tracker.onToolUse("s1", "Bash", {
+      command: "cat > UIManager.cs <<'EOF'\nusing UnityEngine;\nEOF",
+    });
+    const changes = tracker.list("s1");
+    expect(changes).toHaveLength(1);
+    expect(changes[0].path).toBe("UIManager.cs");
+    expect(changes[0].status).toBe("A");
+    expect(changes[0].hunks).toMatch(/Bash|new file|\+/);
   });
 
   it("records Write without previous content as added (status A)", () => {
