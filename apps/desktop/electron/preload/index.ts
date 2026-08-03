@@ -6,8 +6,12 @@ import type {
 } from "@claude-desktop/shared";
 
 const desktop = {
-  openProject: (path: string) =>
-    ipcRenderer.invoke(IPC.projectOpen, { path }) as Promise<{ path: string }>,
+  /** Omit path to open the native directory picker. */
+  openProject: (path?: string) =>
+    ipcRenderer.invoke(
+      IPC.projectOpen,
+      path !== undefined ? { path } : {},
+    ) as Promise<{ path: string }>,
 
   startSession: (prompt: string, cwd?: string) =>
     ipcRenderer.invoke(IPC.sessionStart, { prompt, cwd }) as Promise<{

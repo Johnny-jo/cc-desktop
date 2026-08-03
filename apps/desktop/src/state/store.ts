@@ -352,12 +352,47 @@ export function useAppStore<T>(selector: (s: AppState) => T): T {
 
 // --- actions ---
 
-export async function openProject(path: string): Promise<void> {
+/** Open project by path, or show native folder dialog when path omitted. */
+export async function openProject(path?: string): Promise<void> {
   const desktop = getDesktop();
-  const res = (await desktop.openProject(path)) as { path: string };
-  setState({ projectPath: res.path, lastError: null });
-  const settings = (await desktop.getSettings()) as PublicSettings;
-  setState({ settings });
+  try {
+    const res = (await desktop.openProject(path)) as { path: string };
+    setState({ projectPath: res.path, lastError: null });
+    const settings = (await desktop.getSettings()) as PublicSettings;
+    setState({ settings });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message === "canceled" || /cancel/i.test(message)) {
+      // User dismissed the dialog — not an app error.
+      return;
+    }
+    setState({ lastError: message });
+    throw err;
+  }
+}
+
+export async function saveSettings(
+  patch: Partial<PublicSettings> & { token?: string },
+): Promise<void> {
+  const desktop = getDesktop();
+  try {
+    const { token, hasToken: _hasToken, ...rest } = patch as Partial<PublicSettings> & {
+      token?: string;
+      hasToken?: boolean;
+    };
+    const body: Partial<PublicSettings> & { token?: string } = { ...rest };
+    if (token !== undefined) body.token = token;
+    const settings = (await desktop.setSettings(body)) as PublicSettings;
+    setState({ settings, lastError: null });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    setState({ lastError: message });
+    throw err;
+  }
+}
+
+export function clearLastError(): void {
+  setState({ lastError: null });
 }
 
 export function newChat(): void {

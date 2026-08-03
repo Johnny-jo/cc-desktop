@@ -11,12 +11,14 @@ import {
 
 const PERMISSION_MODES: PermissionMode[] = ["default", "acceptEdits", "plan"];
 
-export function TopBar() {
+export type TopBarProps = {
+  onOpenSettings: () => void;
+};
+
+export function TopBar({ onOpenSettings }: TopBarProps) {
   const projectPath = useAppStore((s) => s.projectPath);
   const cpaStatus = useAppStore((s) => s.cpaStatus);
   const settings = useAppStore((s) => s.settings);
-  const lastError = useAppStore((s) => s.lastError);
-  const [pathDraft, setPathDraft] = useState("");
 
   const models = settings?.models?.length
     ? settings.models
@@ -24,15 +26,11 @@ export function TopBar() {
       ? [settings.defaultModel]
       : [];
 
-  const onOpen = async () => {
-    const path = (pathDraft || projectPath || "").trim();
-    if (!path) return;
+  const onBrowse = async () => {
     try {
-      await openProject(path);
-      setPathDraft("");
-    } catch (err) {
-      // lastError set in store if openProject propagates; local catch for throw
-      console.error(err);
+      await openProject();
+    } catch {
+      // lastError set in store
     }
   };
 
@@ -41,18 +39,13 @@ export function TopBar() {
       <span className="brand">Claude Desktop</span>
 
       <div className="topbar-project">
-        <input
-          className="topbar-input"
-          placeholder={projectPath ?? "Project path…"}
-          value={pathDraft}
-          onChange={(e) => setPathDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") void onOpen();
-          }}
-          title={projectPath ?? "Open project path"}
-        />
-        <button type="button" className="btn" onClick={() => void onOpen()}>
-          Open
+        <button
+          type="button"
+          className="btn"
+          onClick={() => void onBrowse()}
+          title="Open project folder"
+        >
+          Open folder
         </button>
       </div>
 
@@ -101,11 +94,14 @@ export function TopBar() {
         </select>
       </label>
 
-      {lastError ? (
-        <span className="topbar-error" title={lastError}>
-          {lastError}
-        </span>
-      ) : null}
+      <button
+        type="button"
+        className="btn topbar-settings"
+        onClick={onOpenSettings}
+        title="Settings"
+      >
+        Settings
+      </button>
     </div>
   );
 }

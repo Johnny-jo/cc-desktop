@@ -33,7 +33,11 @@ export const IPC = {
 } as const;
 
 export type IpcInvokeMap = {
-  [IPC.projectOpen]: { args: [{ path: string }]; result: { path: string } };
+  /** path optional: omit to show native openDirectory dialog */
+  [IPC.projectOpen]: {
+    args: [{ path?: string }?];
+    result: { path: string };
+  };
   [IPC.sessionStart]: {
     args: [{ prompt: string; cwd?: string }];
     result: { sessionId: string };

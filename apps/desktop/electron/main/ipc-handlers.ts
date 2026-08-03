@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import { access } from "node:fs/promises";
-import { ipcMain, type BrowserWindow } from "electron";
+import { dialog, ipcMain, type BrowserWindow } from "electron";
 import { IPC } from "@claude-desktop/shared";
 import type { AppSettings, PermissionDecision } from "@claude-desktop/shared";
 import type { SessionManager } from "./session-manager";
@@ -19,11 +19,33 @@ export type IpcHandlerContext = {
 };
 
 export function registerIpcHandlers(ctx: IpcHandlerContext): void {
-  ipcMain.handle(IPC.projectOpen, async (_e, { path }: { path: string }) => {
-    await access(path, fs.constants.R_OK);
-    ctx.settings.update({ lastProjectPath: path });
-    return { path };
-  });
+  ipcMain.handle(
+    IPC.projectOpen,
+    async (_e, payload?: { path?: string }) => {
+      let path = payload?.path?.trim() ?? "";
+
+      if (!path) {
+        const win = ctx.window();
+        const res = win
+          ? await dialog.showOpenDialog(win, {
+              properties: ["openDirectory"],
+              title: "Open project folder",
+            })
+          : await dialog.showOpenDialog({
+              properties: ["openDirectory"],
+              title: "Open project folder",
+            });
+        if (res.canceled || !res.filePaths[0]) {
+          throw new Error("canceled");
+        }
+        path = res.filePaths[0];
+      }
+
+      await access(path, fs.constants.R_OK);
+      ctx.settings.update({ lastProjectPath: path });
+      return { path };
+    },
+  );
 
   ipcMain.handle(
     IPC.sessionStart,
