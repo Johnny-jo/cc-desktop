@@ -3,6 +3,7 @@ import { SessionList } from "./components/SessionList";
 import { ChatPanel } from "./components/ChatPanel";
 import { ChangesPanel } from "./components/ChangesPanel";
 import { PermissionModal } from "./components/PermissionModal";
+import { UserPromptModal } from "./components/UserPromptModal";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { ErrorBanner } from "./components/ErrorBanner";
 import { bootstrapStore } from "./state/store";
@@ -36,6 +37,7 @@ export function App() {
         ) : null}
       </div>
       <PermissionModal />
+      <UserPromptModal />
       <SettingsDrawer
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}

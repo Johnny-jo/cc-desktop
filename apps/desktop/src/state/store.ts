@@ -10,6 +10,7 @@ import {
   type SdkNormalizedEvent,
   type SessionSummary,
   type ToolCardState,
+  type UserPromptRequest,
 } from "@claude-desktop/shared";
 import { getDesktop } from "../lib/desktop-api";
 
@@ -20,6 +21,7 @@ export type AppState = {
   itemsBySession: Record<string, ChatItem[]>;
   changesBySession: Record<string, FileChange[]>;
   permissionRequest: PermissionRequest | null;
+  userPromptRequest: UserPromptRequest | null;
   cpaStatus: CpaStatus;
   settings: PublicSettings | null;
   running: boolean;
@@ -35,6 +37,7 @@ let state: AppState = {
   itemsBySession: {},
   changesBySession: {},
   permissionRequest: null,
+  userPromptRequest: null,
   cpaStatus: { state: "unknown" },
   settings: null,
   running: false,
@@ -207,6 +210,31 @@ function applySessionEvent(event: SdkNormalizedEvent): void {
       setItems(sessionId, items);
       return;
     }
+    case "tool_progress": {
+      const existing = items.findIndex(
+        (i) => i.kind === "tool" && i.tool.id === event.toolUseId,
+      );
+      if (existing >= 0) {
+        const cur = items[existing];
+        if (cur.kind === "tool") {
+          items[existing] = {
+            kind: "tool",
+            id: cur.id,
+            tool: {
+              ...cur.tool,
+              status: "running",
+              elapsedSeconds: event.elapsedSeconds,
+              name:
+                event.toolName && event.toolName !== "tool"
+                  ? event.toolName
+                  : cur.tool.name,
+            },
+          };
+          setItems(sessionId, items);
+        }
+      }
+      return;
+    }
     case "result": {
       // Finalize any streaming assistant bubble.
       const last = items[items.length - 1];
@@ -282,6 +310,12 @@ function subscribeDesktopEvents(): void {
   unsubs.push(
     desktop.on(IPC.permissionRequest, (payload) => {
       setState({ permissionRequest: payload as PermissionRequest });
+    }),
+  );
+
+  unsubs.push(
+    desktop.on(IPC.userPromptRequest, (payload) => {
+      setState({ userPromptRequest: payload as UserPromptRequest });
     }),
   );
 
@@ -544,6 +578,10 @@ export function clearPermissionRequest(): void {
   setState({ permissionRequest: null });
 }
 
+export function clearUserPromptRequest(): void {
+  setState({ userPromptRequest: null });
+}
+
 /** Test helper — reset module state. */
 export function __resetStoreForTests(): void {
   state = {
@@ -553,6 +591,7 @@ export function __resetStoreForTests(): void {
     itemsBySession: {},
     changesBySession: {},
     permissionRequest: null,
+    userPromptRequest: null,
     cpaStatus: { state: "unknown" },
     settings: null,
     running: false,

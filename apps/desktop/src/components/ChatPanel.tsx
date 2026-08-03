@@ -81,7 +81,10 @@ export function ChatPanel({
 
       <div className="chat-composer">
         <div className="chat-inner">
-          <Composer />
+          <Composer
+            onToggleChanges={onToggleChanges}
+            onOpenSettings={onOpenSettings}
+          />
         </div>
       </div>
     </div>

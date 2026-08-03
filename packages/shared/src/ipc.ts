@@ -8,6 +8,8 @@ import type {
   PublicSettings,
   SdkNormalizedEvent,
   SessionSummary,
+  UserPromptDecision,
+  UserPromptRequest,
 } from "./models";
 
 export const IPC = {
@@ -18,6 +20,7 @@ export const IPC = {
   sessionList: "session:list",
   sessionSelect: "session:select",
   permissionRespond: "permission:respond",
+  userPromptRespond: "user-prompt:respond",
   settingsGet: "settings:get",
   settingsSet: "settings:set",
   cpaStart: "cpa:start",
@@ -28,6 +31,7 @@ export const IPC = {
   // main → renderer (webContents.send)
   sessionEvent: "session:event",
   permissionRequest: "permission:request",
+  userPromptRequest: "user-prompt:request",
   diffUpdated: "diff:updated",
   cpaStatusEvent: "cpa:status-event",
   sessionUpdated: "session:updated",
@@ -58,6 +62,10 @@ export type IpcInvokeMap = {
     args: [{ requestId: string; decision: PermissionDecision }];
     result: { ok: boolean };
   };
+  [IPC.userPromptRespond]: {
+    args: [{ requestId: string; decision: UserPromptDecision }];
+    result: { ok: boolean };
+  };
   [IPC.settingsGet]: { args: []; result: PublicSettings };
   [IPC.settingsSet]: {
     args: [Partial<AppSettings> & { token?: string }];
@@ -75,6 +83,7 @@ export type IpcInvokeMap = {
 export type IpcEventMap = {
   [IPC.sessionEvent]: SdkNormalizedEvent;
   [IPC.permissionRequest]: PermissionRequest;
+  [IPC.userPromptRequest]: UserPromptRequest;
   [IPC.diffUpdated]: { sessionId: string; changes: FileChange[] };
   [IPC.cpaStatusEvent]: CpaStatus;
   [IPC.sessionUpdated]: SessionSummary;

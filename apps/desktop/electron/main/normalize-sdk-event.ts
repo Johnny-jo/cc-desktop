@@ -63,9 +63,32 @@ export function normalizeSdkEvent(
       return normalizeUser(msg, sessionId);
     case "result":
       return normalizeResult(msg, sessionId);
+    case "tool_progress":
+      return normalizeToolProgress(msg, sessionId);
     default:
       return [];
   }
+}
+
+function normalizeToolProgress(
+  msg: UnknownRecord,
+  sessionId: string,
+): SdkNormalizedEvent[] {
+  const toolUseId = String(msg.tool_use_id ?? "");
+  if (!toolUseId) return [];
+  const elapsed =
+    typeof msg.elapsed_time_seconds === "number"
+      ? msg.elapsed_time_seconds
+      : 0;
+  return [
+    {
+      type: "tool_progress",
+      sessionId,
+      toolUseId,
+      toolName: String(msg.tool_name ?? "tool"),
+      elapsedSeconds: elapsed,
+    },
+  ];
 }
 
 function normalizeStreamEvent(

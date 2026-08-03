@@ -17,6 +17,24 @@ describe("normalizeSdkEvent", () => {
     ]);
   });
 
+  it("maps tool_progress to tool_progress event", () => {
+    const msg = {
+      type: "tool_progress",
+      tool_use_id: "tu-1",
+      tool_name: "Bash",
+      elapsed_time_seconds: 3.2,
+    };
+    expect(normalizeSdkEvent(msg, sessionId)).toEqual([
+      {
+        type: "tool_progress",
+        sessionId,
+        toolUseId: "tu-1",
+        toolName: "Bash",
+        elapsedSeconds: 3.2,
+      },
+    ]);
+  });
+
   it("maps assistant tool_use content to tool_start", () => {
     const msg = {
       type: "assistant",

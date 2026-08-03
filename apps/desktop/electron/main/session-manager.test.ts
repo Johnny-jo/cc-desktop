@@ -153,11 +153,19 @@ describe("SessionManager", () => {
     expect(opts.cwd).toBe("D:/work");
     expect(opts.includePartialMessages).toBe(true);
     expect(opts.permissionMode).toBe("default");
-    expect(opts.allowedTools).toEqual([
+    // tools = availability; allowedTools = auto-allow (read-only) so canUseTool still gates writes
+    expect(opts.tools).toEqual([
       "Read",
       "Edit",
       "Write",
       "Bash",
+      "Glob",
+      "Grep",
+      "WebFetch",
+      "WebSearch",
+    ]);
+    expect(opts.allowedTools).toEqual([
+      "Read",
       "Glob",
       "Grep",
       "WebFetch",

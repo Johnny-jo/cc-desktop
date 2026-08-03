@@ -2,9 +2,14 @@ import fs from "node:fs";
 import { access } from "node:fs/promises";
 import { dialog, ipcMain, type BrowserWindow } from "electron";
 import { IPC } from "@claude-desktop/shared";
-import type { AppSettings, PermissionDecision } from "@claude-desktop/shared";
+import type {
+  AppSettings,
+  PermissionDecision,
+  UserPromptDecision,
+} from "@claude-desktop/shared";
 import type { SessionManager } from "./session-manager";
 import type { PermissionBroker } from "./permission-broker";
+import type { UserPromptBroker } from "./user-prompt-broker";
 import type { SettingsStore } from "./settings-store";
 import type { CpaSupervisor } from "./cpa-supervisor";
 import type { DiffTracker } from "./diff-tracker";
@@ -13,6 +18,7 @@ export type IpcHandlerContext = {
   window: () => BrowserWindow | null;
   sessions: SessionManager;
   permissions: PermissionBroker;
+  userPrompts: UserPromptBroker;
   settings: SettingsStore;
   cpa: CpaSupervisor;
   diffs: DiffTracker;
@@ -99,6 +105,20 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
       }: { requestId: string; decision: PermissionDecision },
     ) => {
       const ok = ctx.permissions.respond(requestId, decision);
+      return { ok };
+    },
+  );
+
+  ipcMain.handle(
+    IPC.userPromptRespond,
+    async (
+      _e,
+      {
+        requestId,
+        decision,
+      }: { requestId: string; decision: UserPromptDecision },
+    ) => {
+      const ok = ctx.userPrompts.respond(requestId, decision);
       return { ok };
     },
   );

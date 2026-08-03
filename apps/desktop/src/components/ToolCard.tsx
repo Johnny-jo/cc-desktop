@@ -1,10 +1,20 @@
 import React, { useState } from "react";
 import type { ToolCardState } from "@claude-desktop/shared";
 
+function formatElapsed(sec?: number): string {
+  if (sec == null || !Number.isFinite(sec)) return "";
+  if (sec < 10) return `${sec.toFixed(1)}s`;
+  return `${Math.round(sec)}s`;
+}
+
 export function ToolCard({ tool }: { tool: ToolCardState }) {
   // Collapsed by default — user expands to inspect details.
   const [open, setOpen] = useState(false);
   const hasBody = Boolean(tool.summary || tool.resultPreview);
+  const elapsed =
+    tool.status === "running" && tool.elapsedSeconds != null
+      ? formatElapsed(tool.elapsedSeconds)
+      : "";
 
   return (
     <div className={`tool-card tool-${tool.status}${open ? " open" : ""}`}>
@@ -24,7 +34,10 @@ export function ToolCard({ tool }: { tool: ToolCardState }) {
             {tool.summary}
           </span>
         ) : null}
-        <span className={`tool-status status-${tool.status}`}>{tool.status}</span>
+        <span className={`tool-status status-${tool.status}`}>
+          {tool.status}
+          {elapsed ? ` · ${elapsed}` : ""}
+        </span>
       </button>
 
       {open && hasBody ? (

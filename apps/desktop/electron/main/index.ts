@@ -9,10 +9,12 @@ import type {
   PermissionRequest,
   SdkNormalizedEvent,
   SessionSummary,
+  UserPromptRequest,
 } from "@claude-desktop/shared";
 import { SettingsStore } from "./settings-store";
 import { DiffTracker } from "./diff-tracker";
 import { PermissionBroker } from "./permission-broker";
+import { UserPromptBroker } from "./user-prompt-broker";
 import { CpaSupervisor } from "./cpa-supervisor";
 import { SessionManager, type QueryFn } from "./session-manager";
 import { registerIpcHandlers } from "./ipc-handlers";
@@ -102,6 +104,12 @@ function bootstrap() {
     },
   });
 
+  const userPrompts = new UserPromptBroker({
+    requestFromUi: (req: UserPromptRequest) => {
+      sendToRenderer(IPC.userPromptRequest, req);
+    },
+  });
+
   const cpa = new CpaSupervisor({
     getSettings: () => settings.get(),
     getToken: () => settings.getToken(),
@@ -113,6 +121,7 @@ function bootstrap() {
   const sessions = new SessionManager({
     queryFn: realQueryFn,
     permissionBroker: permissions,
+    userPromptBroker: userPrompts,
     diffTracker: diffs,
     cpa,
     settings,
@@ -131,6 +140,7 @@ function bootstrap() {
     window: getMainWindow,
     sessions,
     permissions,
+    userPrompts,
     settings,
     cpa,
     diffs,

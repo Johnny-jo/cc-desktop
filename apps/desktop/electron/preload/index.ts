@@ -3,6 +3,7 @@ import { IPC } from "@claude-desktop/shared";
 import type {
   AppSettings,
   PermissionDecision,
+  UserPromptDecision,
 } from "@claude-desktop/shared";
 
 const desktop = {
@@ -35,6 +36,12 @@ const desktop = {
 
   respondPermission: (requestId: string, decision: PermissionDecision) =>
     ipcRenderer.invoke(IPC.permissionRespond, {
+      requestId,
+      decision,
+    }) as Promise<{ ok: boolean }>,
+
+  respondUserPrompt: (requestId: string, decision: UserPromptDecision) =>
+    ipcRenderer.invoke(IPC.userPromptRespond, {
       requestId,
       decision,
     }) as Promise<{ ok: boolean }>,

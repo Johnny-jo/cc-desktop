@@ -8,6 +8,7 @@ import type { PermissionBroker } from "./permission-broker";
 import type { DiffTracker } from "./diff-tracker";
 import type { CpaSupervisor } from "./cpa-supervisor";
 import type { SettingsStore } from "./settings-store";
+import type { UserPromptBroker } from "./user-prompt-broker";
 import { normalizeSdkEvent } from "./normalize-sdk-event";
 
 /** Injected so unit tests can mock the Agent SDK stream. Production uses real `query`. */
@@ -19,6 +20,7 @@ export type QueryFn = (args: {
 export type SessionManagerDeps = {
   queryFn: QueryFn;
   permissionBroker: PermissionBroker;
+  userPromptBroker?: UserPromptBroker;
   diffTracker: DiffTracker;
   cpa: CpaSupervisor;
   settings: SettingsStore;
@@ -34,7 +36,12 @@ type SessionEntry = {
   sdkSessionId?: string;
 };
 
-const ALLOWED_TOOLS = [
+/**
+ * Base tool set for the agent. Prefer `tools` (availability) over bare
+ * `allowedTools` (auto-approve). Using bare allowedTools shadows canUseTool
+ * and skips the permission modal — see CLAUDE_SDK_CAN_USE_TOOL_SHADOWED.
+ */
+const SESSION_TOOLS = [
   "Read",
   "Edit",
   "Write",
@@ -75,6 +82,7 @@ function isToolUseBlock(
 export class SessionManager {
   private readonly queryFn: QueryFn;
   private readonly permissionBroker: PermissionBroker;
+  private readonly userPromptBroker: UserPromptBroker | undefined;
   private readonly diffTracker: DiffTracker;
   private readonly cpa: CpaSupervisor;
   private readonly settings: SettingsStore;
@@ -87,6 +95,7 @@ export class SessionManager {
   constructor(deps: SessionManagerDeps) {
     this.queryFn = deps.queryFn;
     this.permissionBroker = deps.permissionBroker;
+    this.userPromptBroker = deps.userPromptBroker;
     this.diffTracker = deps.diffTracker;
     this.cpa = deps.cpa;
     this.settings = deps.settings;
@@ -182,13 +191,17 @@ export class SessionManager {
     const env = this.cpa.buildProcessEnv(settings.defaultModel);
 
     // Shape matches @anthropic-ai/claude-agent-sdk Options + PermissionResult.
+    // Use `tools` (which tools exist) NOT bare `allowedTools` (auto-allow).
+    // Safe read tools can be pre-allowed; Edit/Write/Bash go through canUseTool.
     const options: Record<string, unknown> = {
       cwd: entry.summary.cwd,
       includePartialMessages: true,
       permissionMode: settings.permissionMode,
       model: settings.defaultModel,
       env,
-      allowedTools: [...ALLOWED_TOOLS],
+      tools: [...SESSION_TOOLS],
+      // Only auto-allow read-ish tools so canUseTool still gates mutations.
+      allowedTools: ["Read", "Glob", "Grep", "WebFetch", "WebSearch"],
       abortController,
       canUseTool: async (
         name: string,
@@ -212,6 +225,14 @@ export class SessionManager {
           message: result.message ?? "Denied by permission broker",
         };
       },
+      // MCP elicitation / host dialogs → UI (when broker is wired)
+      ...(this.userPromptBroker
+        ? {
+            onElicitation:
+              this.userPromptBroker.makeOnElicitation(sessionId),
+            onUserDialog: this.userPromptBroker.makeOnUserDialog(sessionId),
+          }
+        : {}),
     };
 
     if (opts.resume) {
