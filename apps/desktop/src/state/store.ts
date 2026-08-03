@@ -318,13 +318,17 @@ export async function bootstrapStore(): Promise<void> {
       desktop.listSessions() as Promise<SessionSummary[]>,
     ]);
 
-    setState({
+    // Do not clobber projectPath if openProject (or user) already set it while
+    // these awaits were in flight — live e2e hit a race where stale
+    // lastProjectPath overwrote a freshly opened directory.
+    setState((prev) => ({
+      ...prev,
       settings,
       cpaStatus,
       sessions: sessions ?? [],
-      projectPath: settings.lastProjectPath ?? null,
+      projectPath: prev.projectPath ?? settings.lastProjectPath ?? null,
       running: (sessions ?? []).some((s) => s.status === "running"),
-    });
+    }));
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     setState({ lastError: message });
