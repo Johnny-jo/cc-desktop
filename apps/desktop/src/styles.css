@@ -1,24 +1,52 @@
 :root {
   color-scheme: dark;
   font-family: ui-sans-serif, system-ui, sans-serif;
-  background: #0f1419;
-  color: #e7ecf3;
-  --border: #243041;
-  --bg-elevated: #121820;
-  --bg-hover: #1a2330;
+  background: #0a0e14;
+  color: #d8dee6;
+
+  --bg-app: #0a0e14;
+  --bg-elevated: #11161d;
+  --bg-panel: #0d1218;
+  --bg-hover: #161c24;
+  --border: #1d2733;
+  --border-strong: #2a3542;
+  --text: #d8dee6;
+  --text-muted: #7d8ba0;
+  --muted: #7d8ba0;
   --accent: #3b82f6;
-  --danger: #ef4444;
-  --muted: #8b9bb4;
+  --accent-soft: rgba(59, 130, 246, 0.12);
   --ok: #22c55e;
   --warn: #eab308;
+  --danger: #ef4444;
+
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --shadow-1: 0 1px 0 rgba(0, 0, 0, 0.2), 0 4px 12px rgba(0, 0, 0, 0.18);
+  --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.28);
+  --focus-ring: 0 0 0 2px var(--accent-soft);
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
 }
 
 * {
   box-sizing: border-box;
 }
 
+html,
+body {
+  height: 100%;
+}
+
 body {
   margin: 0;
+  background: var(--bg-app);
+  color: var(--text);
 }
 
 button,
@@ -27,6 +55,23 @@ select,
 textarea {
   font: inherit;
   color: inherit;
+}
+
+/* Scrollbars */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #232c38;
+  border-radius: 5px;
+  border: 2px solid var(--bg-app);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #2f3947;
 }
 
 .app {
@@ -249,13 +294,22 @@ textarea {
 .btn {
   background: #1c2634;
   border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  padding: 5px 12px;
   cursor: pointer;
+  font-size: 12px;
+  line-height: 1.4;
+  transition: background 120ms ease, border-color 120ms ease;
 }
 
 .btn:hover:not(:disabled) {
   background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.btn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 
 .btn:disabled {
@@ -264,7 +318,7 @@ textarea {
 }
 
 .btn-sm {
-  padding: 2px 8px;
+  padding: 3px 9px;
   font-size: 11px;
 }
 
@@ -280,6 +334,31 @@ textarea {
 .btn-danger {
   background: #7f1d1d;
   border-color: #991b1b;
+}
+
+.btn-ghost {
+  background: transparent;
+  border-color: transparent;
+}
+
+.btn-ghost:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.input,
+.select {
+  background: #0b1016;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 5px 8px;
+  font-size: 12px;
+}
+
+.input:focus-visible,
+.select:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-color: var(--accent);
 }
 
 .muted {
