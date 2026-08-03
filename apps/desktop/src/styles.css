@@ -74,10 +74,30 @@ textarea {
   background: #2f3947;
 }
 
+/*
+ * App shell uses flex (not a fixed 3-row grid) because ErrorBanner returns
+ * null when idle. With grid-template-rows: 48px auto 1fr and only 2 children,
+ * .main landed in the auto track (content-sized) and left a blank 1fr row
+ * below the composer — the bug shown in problem/2026-08-03 112810.png.
+ */
 .app {
-  display: grid;
-  grid-template-rows: 48px auto 1fr;
+  display: flex;
+  flex-direction: column;
   height: 100vh;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.app > .topbar {
+  flex: 0 0 48px;
+}
+
+.app > .error-banner {
+  flex: 0 0 auto;
+}
+
+.app > .main {
+  flex: 1 1 auto;
   min-height: 0;
 }
 
@@ -252,6 +272,8 @@ textarea {
   display: grid;
   grid-template-columns: 240px minmax(0, 1fr) 320px;
   min-height: 0;
+  /* height comes from flex:1 on .app > .main — do not set fixed height */
+  overflow: hidden;
 }
 
 .main-no-changes {
@@ -266,6 +288,8 @@ textarea {
   display: flex;
   flex-direction: column;
   background: var(--bg-panel);
+  /* Grid cells stretch; keep full height so children can pin to bottom */
+  height: 100%;
 }
 
 .panel:last-child {
@@ -274,6 +298,13 @@ textarea {
 
 .panel-chat {
   background: var(--bg-app);
+}
+
+/* Direct panel children fill the column (chat-panel, session-list, changes-panel) */
+.panel > * {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
 }
 
 .btn {
@@ -448,12 +479,13 @@ textarea {
   white-space: nowrap;
 }
 
-/* Chat */
+/* Chat — 3-row grid: header | scrollable messages | pinned composer */
 .chat-panel {
   display: grid;
   grid-template-rows: 44px minmax(0, 1fr) auto;
   min-height: 0;
   height: 100%;
+  width: 100%;
 }
 
 .chat-inner {
@@ -469,6 +501,7 @@ textarea {
   align-items: stretch;
   border-bottom: 1px solid var(--border);
   background: var(--bg-elevated);
+  min-height: 44px;
 }
 
 .chat-header-inner {
@@ -477,6 +510,7 @@ textarea {
   gap: var(--space-2);
   font-size: 13px;
   font-weight: 600;
+  height: 100%;
 }
 
 .chat-title {
@@ -488,11 +522,14 @@ textarea {
 .chat-body {
   overflow: auto;
   min-height: 0;
+  height: 100%;
 }
 
 .chat-composer {
   border-top: 1px solid var(--border);
   background: var(--bg-elevated);
+  /* never shrink away from the bottom */
+  flex-shrink: 0;
 }
 
 .badge {
