@@ -12,7 +12,7 @@ export default defineConfig({
     },
   },
   preload: {
-    plugins: [externalizeDepsPlugin()],
+    plugins: [externalizeDepsPlugin({ exclude: ["@claude-desktop/shared"] })],
     build: {
       outDir: "out/preload",
       lib: {

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { app, BrowserWindow, safeStorage } from "electron";
+import { query } from "@anthropic-ai/claude-agent-sdk";
 import { IPC } from "@claude-desktop/shared";
 import type {
   CpaStatus,
@@ -28,10 +29,18 @@ function sendToRenderer(channel: string, payload: unknown): void {
   win.webContents.send(channel, payload);
 }
 
-/** Task 13 wires the real Agent SDK; keep IPC invokable without crashing. */
-const placeholderQueryFn: QueryFn = async function* placeholderQueryFn() {
-  // no-op stream — SessionManager will mark the turn idle when the stream ends
-};
+/**
+ * Production queryFn: real Agent SDK.
+ * SessionManager keeps queryFn injectable so unit tests can mock the stream.
+ * Options are built by SessionManager (cwd/env/canUseTool/resume/…).
+ */
+const realQueryFn: QueryFn = ({ prompt, options }) =>
+  query({
+    prompt,
+    // SessionManager builds a Record matching SDK Options; cast at the boundary.
+    options: options as Parameters<typeof query>[0]["options"],
+  });
+
 
 function createTokenCrypto(): {
   encrypt: (plain: string) => string;
@@ -102,7 +111,7 @@ function bootstrap() {
   });
 
   const sessions = new SessionManager({
-    queryFn: placeholderQueryFn,
+    queryFn: realQueryFn,
     permissionBroker: permissions,
     diffTracker: diffs,
     cpa,

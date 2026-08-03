@@ -10,6 +10,7 @@ import type { CpaSupervisor } from "./cpa-supervisor";
 import type { SettingsStore } from "./settings-store";
 import { normalizeSdkEvent } from "./normalize-sdk-event";
 
+/** Injected so unit tests can mock the Agent SDK stream. Production uses real `query`. */
 export type QueryFn = (args: {
   prompt: string;
   options: Record<string, unknown>;
@@ -180,18 +181,41 @@ export class SessionManager {
     const settings = this.settings.get();
     const env = this.cpa.buildProcessEnv(settings.defaultModel);
 
+    // Shape matches @anthropic-ai/claude-agent-sdk Options + PermissionResult.
     const options: Record<string, unknown> = {
       cwd: entry.summary.cwd,
       includePartialMessages: true,
       permissionMode: settings.permissionMode,
+      model: settings.defaultModel,
       env,
       allowedTools: [...ALLOWED_TOOLS],
       abortController,
-      canUseTool: (name: string, input: Record<string, unknown>) =>
-        this.permissionBroker.canUseTool(name, input, sessionId),
+      canUseTool: async (
+        name: string,
+        input: Record<string, unknown>,
+        _sdkOpts: { signal: AbortSignal },
+      ) => {
+        const result = await this.permissionBroker.canUseTool(
+          name,
+          input,
+          sessionId,
+        );
+        if (result.behavior === "allow") {
+          return {
+            behavior: "allow" as const,
+            updatedInput: result.updatedInput,
+          };
+        }
+        // SDK PermissionResult.deny requires a non-optional message.
+        return {
+          behavior: "deny" as const,
+          message: result.message ?? "Denied by permission broker",
+        };
+      },
     };
 
     if (opts.resume) {
+      // Prefer SDK session id from prior result; fall back to local id.
       options.resume = entry.sdkSessionId ?? sessionId;
     }
 
