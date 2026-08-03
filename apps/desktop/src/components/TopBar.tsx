@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React from "react";
 import type { PermissionMode } from "@claude-desktop/shared";
 import { StatusDot } from "./StatusDot";
 import {
@@ -13,9 +13,15 @@ const PERMISSION_MODES: PermissionMode[] = ["default", "acceptEdits", "plan"];
 
 export type TopBarProps = {
   onOpenSettings: () => void;
+  changesOpen: boolean;
+  onToggleChanges: () => void;
 };
 
-export function TopBar({ onOpenSettings }: TopBarProps) {
+export function TopBar({
+  onOpenSettings,
+  changesOpen,
+  onToggleChanges,
+}: TopBarProps) {
   const projectPath = useAppStore((s) => s.projectPath);
   const cpaStatus = useAppStore((s) => s.cpaStatus);
   const settings = useAppStore((s) => s.settings);
@@ -38,16 +44,14 @@ export function TopBar({ onOpenSettings }: TopBarProps) {
     <div className="topbar">
       <span className="brand">Claude Desktop</span>
 
-      <div className="topbar-project">
-        <button
-          type="button"
-          className="btn"
-          onClick={() => void onBrowse()}
-          title="Open project folder"
-        >
-          Open folder
-        </button>
-      </div>
+      <button
+        type="button"
+        className="btn btn-ghost"
+        onClick={() => void onBrowse()}
+        title="Open project folder"
+      >
+        Open folder
+      </button>
 
       <span className="topbar-path" title={projectPath ?? ""}>
         {projectPath ?? "No project"}
@@ -55,7 +59,7 @@ export function TopBar({ onOpenSettings }: TopBarProps) {
 
       <button
         type="button"
-        className="btn"
+        className="btn btn-ghost"
         onClick={() => void startCpa()}
         title="Start / ensure CPA"
       >
@@ -65,6 +69,7 @@ export function TopBar({ onOpenSettings }: TopBarProps) {
       <label className="topbar-field">
         Model
         <select
+          className="select"
           value={settings?.defaultModel ?? ""}
           disabled={!settings}
           onChange={(e) => void setModel(e.target.value)}
@@ -80,6 +85,7 @@ export function TopBar({ onOpenSettings }: TopBarProps) {
       <label className="topbar-field">
         Permission
         <select
+          className="select"
           value={settings?.permissionMode ?? "default"}
           disabled={!settings}
           onChange={(e) =>
@@ -94,14 +100,25 @@ export function TopBar({ onOpenSettings }: TopBarProps) {
         </select>
       </label>
 
-      <button
-        type="button"
-        className="btn topbar-settings"
-        onClick={onOpenSettings}
-        title="Settings"
-      >
-        Settings
-      </button>
+      <div className="topbar-actions">
+        <button
+          type="button"
+          className="btn btn-ghost"
+          onClick={onToggleChanges}
+          title={changesOpen ? "Hide changes panel" : "Show changes panel"}
+          aria-pressed={changesOpen}
+        >
+          {changesOpen ? "Changes ⟩" : "Changes ⟨"}
+        </button>
+        <button
+          type="button"
+          className="btn btn-ghost"
+          onClick={onOpenSettings}
+          title="Settings"
+        >
+          Settings
+        </button>
+      </div>
     </div>
   );
 }
