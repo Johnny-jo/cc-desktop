@@ -9,7 +9,13 @@ const COLOR: Record<CpaStatus["state"], string> = {
   error: "#ef4444",
 };
 
-export function StatusDot({ status }: { status: CpaStatus }) {
+export function StatusDot({
+  status,
+  compact = false,
+}: {
+  status: CpaStatus;
+  compact?: boolean;
+}) {
   const color = COLOR[status.state] ?? COLOR.unknown;
   const title =
     status.state === "ready"
@@ -21,7 +27,11 @@ export function StatusDot({ status }: { status: CpaStatus }) {
   return (
     <span className="status-dot-wrap" title={title}>
       <span className="status-dot" style={{ background: color }} />
-      <span className="status-dot-label">CPA {status.state}</span>
+      {compact ? (
+        <span className="status-dot-label">CPA {status.state}</span>
+      ) : (
+        <span className="status-dot-label">CPA {status.state}</span>
+      )}
     </span>
   );
 }

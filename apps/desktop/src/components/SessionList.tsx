@@ -1,5 +1,12 @@
 import React from "react";
-import { newChat, selectSession, useAppStore } from "../state/store";
+import {
+  newChat,
+  openProject,
+  selectSession,
+  startCpa,
+  useAppStore,
+} from "../state/store";
+import { StatusDot } from "./StatusDot";
 
 function formatTime(ts: number): string {
   try {
@@ -14,18 +21,47 @@ function formatTime(ts: number): string {
   }
 }
 
-export function SessionList() {
+export type SessionListProps = {
+  onOpenSettings: () => void;
+};
+
+export function SessionList({ onOpenSettings }: SessionListProps) {
   const sessions = useAppStore((s) => s.sessions);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
+  const projectPath = useAppStore((s) => s.projectPath);
+  const cpaStatus = useAppStore((s) => s.cpaStatus);
+
+  const onBrowse = async () => {
+    try {
+      await openProject();
+    } catch {
+      // lastError in store
+    }
+  };
+
+  const projectLabel = projectPath
+    ? projectPath.replace(/\\/g, "/").split("/").filter(Boolean).pop() ??
+      projectPath
+    : "No project";
 
   return (
     <div className="session-list">
-      <div className="session-list-header">
-        <span>Sessions</span>
-        <button type="button" className="btn btn-sm" onClick={() => newChat()}>
-          New
-        </button>
+      <div className="sidebar-brand">
+        <span className="brand-mark">Claude</span>
+        <span className="brand-sub">Desktop</span>
       </div>
+
+      <button
+        type="button"
+        className="sidebar-new"
+        onClick={() => newChat()}
+      >
+        <span className="sidebar-new-icon">+</span>
+        New chat
+      </button>
+
+      <div className="sidebar-section-label">Recent</div>
+
       <ul className="session-list-ul">
         {sessions.length === 0 ? (
           <li className="session-empty">No sessions yet</li>
@@ -45,15 +81,43 @@ export function SessionList() {
                 <span className="session-title">{s.title}</span>
                 <span className="session-meta">
                   <span className={`session-status status-${s.status}`}>
-                    {s.status}
+                    {s.status === "running" ? "●" : ""}
+                    {s.status !== "running" ? formatTime(s.updatedAt) : "running"}
                   </span>
-                  <span className="session-time">{formatTime(s.updatedAt)}</span>
                 </span>
               </button>
             </li>
           ))
         )}
       </ul>
+
+      <div className="sidebar-footer">
+        <button
+          type="button"
+          className="sidebar-footer-row"
+          onClick={() => void onBrowse()}
+          title={projectPath ?? "Open project folder"}
+        >
+          <span className="sidebar-footer-icon">📁</span>
+          <span className="sidebar-footer-text">{projectLabel}</span>
+        </button>
+        <button
+          type="button"
+          className="sidebar-footer-row"
+          onClick={() => void startCpa()}
+          title="Start / ensure CPA"
+        >
+          <StatusDot status={cpaStatus} compact />
+        </button>
+        <button
+          type="button"
+          className="sidebar-footer-row"
+          onClick={onOpenSettings}
+        >
+          <span className="sidebar-footer-icon">⚙</span>
+          <span className="sidebar-footer-text">Settings</span>
+        </button>
+      </div>
     </div>
   );
 }

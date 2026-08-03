@@ -1,5 +1,4 @@
 import React, { useEffect, useState } from "react";
-import { TopBar } from "./components/TopBar";
 import { SessionList } from "./components/SessionList";
 import { ChatPanel } from "./components/ChatPanel";
 import { ChangesPanel } from "./components/ChangesPanel";
@@ -18,23 +17,22 @@ export function App() {
 
   return (
     <div className="app">
-      <TopBar
-        onOpenSettings={() => setSettingsOpen(true)}
-        changesOpen={changesOpen}
-        onToggleChanges={() => setChangesOpen((v) => !v)}
-      />
       <ErrorBanner />
       <div className={changesOpen ? "main" : "main main-no-changes"}>
-        <div className="panel panel-sessions">
-          <SessionList />
-        </div>
-        <div className="panel panel-chat">
-          <ChatPanel />
-        </div>
+        <aside className="panel panel-sessions">
+          <SessionList onOpenSettings={() => setSettingsOpen(true)} />
+        </aside>
+        <main className="panel panel-chat">
+          <ChatPanel
+            changesOpen={changesOpen}
+            onToggleChanges={() => setChangesOpen((v) => !v)}
+            onOpenSettings={() => setSettingsOpen(true)}
+          />
+        </main>
         {changesOpen ? (
-          <div className="panel panel-changes">
+          <aside className="panel panel-changes">
             <ChangesPanel />
-          </div>
+          </aside>
         ) : null}
       </div>
       <PermissionModal />

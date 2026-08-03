@@ -12,7 +12,12 @@ export function MessageList({ items }: { items: ChatItem[] }) {
   if (items.length === 0) {
     return (
       <div className="message-list empty">
-        <p className="muted">Send a message to start a session.</p>
+        <div className="empty-hero">
+          <div className="empty-hero-title">How can I help you today?</div>
+          <p className="empty-hero-sub">
+            Open a project, then send a message to start a session.
+          </p>
+        </div>
       </div>
     );
   }
@@ -28,16 +33,25 @@ export function MessageList({ items }: { items: ChatItem[] }) {
           );
         }
 
+        const role = item.role;
         return (
           <div
             key={item.id}
-            className={`message-row role-${item.role}${item.streaming ? " streaming" : ""}`}
+            className={`message-row role-${role}${item.streaming ? " streaming" : ""}`}
           >
-            <div className="message-role">{item.role}</div>
-            <div className="message-body">
-              {item.text}
-              {item.streaming ? <span className="cursor">▍</span> : null}
-            </div>
+            {role === "user" ? (
+              <div className="bubble bubble-user">
+                {item.text}
+                {item.streaming ? <span className="cursor">▍</span> : null}
+              </div>
+            ) : role === "system" ? (
+              <div className="bubble bubble-system">{item.text}</div>
+            ) : (
+              <div className="bubble bubble-assistant">
+                {item.text}
+                {item.streaming ? <span className="cursor">▍</span> : null}
+              </div>
+            )}
           </div>
         );
       })}
