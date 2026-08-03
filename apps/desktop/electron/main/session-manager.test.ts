@@ -15,6 +15,8 @@ const baseSettings: AppSettings = {
   models: ["kimi-for-coding"],
   permissionMode: "default",
   shutdownCpaOnQuit: false,
+  defaultContextLimit: 200_000,
+  modelContextLimits: {},
 };
 
 /** Drain one user message from streaming prompt (MessageStream). */

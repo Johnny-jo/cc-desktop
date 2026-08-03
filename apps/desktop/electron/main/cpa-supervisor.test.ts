@@ -9,6 +9,8 @@ const baseSettings = {
   models: [] as [],
   permissionMode: "default" as const,
   shutdownCpaOnQuit: false,
+  defaultContextLimit: 200_000,
+  modelContextLimits: {},
 };
 
 describe("CpaSupervisor", () => {
