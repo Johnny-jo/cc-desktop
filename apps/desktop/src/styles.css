@@ -344,9 +344,11 @@ textarea {
   list-style: none;
   margin: 0;
   padding: 0;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   flex: 1;
   min-height: 0;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -354,6 +356,8 @@ textarea {
 
 .session-list-item {
   min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
 }
 
 .session-empty {
@@ -364,6 +368,7 @@ textarea {
 
 .session-item {
   width: 100%;
+  max-width: 100%;
   min-width: 0;
   text-align: left;
   background: transparent;
@@ -374,6 +379,8 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  overflow: hidden;
+  box-sizing: border-box;
 }
 
 .session-item:hover {
@@ -385,6 +392,9 @@ textarea {
 }
 
 .session-title {
+  display: block;
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
   font-size: 13px;
   font-weight: 500;
@@ -512,6 +522,8 @@ textarea {
 .chat-title {
   font-size: 14px;
   font-weight: 600;
+  min-width: 0;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -602,7 +614,8 @@ textarea {
 
 .message-row.role-assistant,
 .message-row.role-system,
-.message-row.tool-row {
+.message-row.tool-row,
+.message-row.skill-row {
   justify-content: flex-start;
 }
 
@@ -610,11 +623,14 @@ textarea {
   max-width: min(720px, 100%);
   font-size: 14.5px;
   line-height: 1.55;
+  overflow-wrap: anywhere;
   word-break: break-word;
   white-space: pre-wrap;
 }
 
 .bubble-user {
+  /* Long prompts wrap inside the bubble; never spill past ~72% of chat width */
+  max-width: min(560px, 72%);
   background: var(--bg-bubble-user);
   border-radius: 18px 18px 6px 18px;
   padding: 10px 14px;
@@ -626,6 +642,61 @@ textarea {
   padding: 2px 0;
   color: var(--text);
   max-width: 100%;
+}
+
+/* Collapsed skill / long injected content (default closed) */
+.skill-dump-card {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  overflow: hidden;
+}
+
+.skill-dump-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+  background: transparent;
+  border: none;
+  padding: 9px 12px;
+  cursor: pointer;
+  color: inherit;
+  min-width: 0;
+}
+
+.skill-dump-toggle:hover {
+  background: var(--bg-hover);
+}
+
+.skill-dump-title {
+  font-weight: 600;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.skill-dump-summary {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.skill-dump-body {
+  margin: 0;
+  padding: 0 12px 12px 32px;
+  max-height: 280px;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .bubble-system {

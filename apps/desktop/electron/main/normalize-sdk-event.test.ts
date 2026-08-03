@@ -35,6 +35,38 @@ describe("normalizeSdkEvent", () => {
     ]);
   });
 
+  it("folds long skill dump assistant text into collapsible Skill tool cards", () => {
+    const skillBody = [
+      "Base directory for this skill: C:\\Users\\x\\.claude\\skills\\using-superpowers",
+      "",
+      "<SUBAGENT-STOP>",
+      "If you are a subagent, stop.",
+      "</SUBAGENT-STOP>",
+      "",
+      "<EXTREMELY-IMPORTANT>",
+      "You must use this skill.",
+      "</EXTREMELY-IMPORTANT>",
+      "## Rules",
+      "More content here to exceed length threshold. ".repeat(10),
+    ].join("\n");
+    const msg = {
+      type: "assistant",
+      message: {
+        content: [{ type: "text", text: skillBody }],
+      },
+    };
+    const events = normalizeSdkEvent(msg, sessionId);
+    expect(events.some((e) => e.type === "text_done")).toBe(false);
+    expect(events.some((e) => e.type === "tool_start")).toBe(true);
+    expect(events.some((e) => e.type === "tool_end")).toBe(true);
+    const start = events.find((e) => e.type === "tool_start");
+    expect(start).toMatchObject({
+      type: "tool_start",
+      tool: { name: "Skill", status: "done" },
+    });
+  });
+
+
   it("maps assistant tool_use content to tool_start", () => {
     const msg = {
       type: "assistant",

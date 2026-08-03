@@ -17,7 +17,25 @@ function summarizeTool(name: string, input: UnknownRecord): string {
   if (name === "Edit" || name === "Write" || name === "Read") {
     return String(input.file_path ?? input.path ?? "");
   }
+  if (name === "Skill" || name === "skill") {
+    // Skill tool dumps full SKILL.md — keep card summary short (path/name only).
+    return String(
+      input.skill ?? input.name ?? input.path ?? input.skill_name ?? "skill",
+    ).slice(0, 120);
+  }
   return name;
+}
+
+/** Skill / long system-injected bodies should not dump open in the chat. */
+export function isCollapsibleSkillText(text: string): boolean {
+  if (text.length < 200) return false;
+  return (
+    /Base directory for this skill/i.test(text) ||
+    /<SUBAGENT-STOP>/i.test(text) ||
+    /<EXTREMELY-IMPORTANT>/i.test(text) ||
+    (/Launching skill:/i.test(text) && text.length > 300) ||
+    (/SKILL\.md|skill body|using-superpowers/i.test(text) && text.length > 400)
+  );
 }
 
 function toolPreview(content: unknown): string | undefined {
@@ -119,7 +137,21 @@ function normalizeAssistant(
     if (!isRecord(block) || typeof block.type !== "string") continue;
 
     if (block.type === "text" && typeof block.text === "string") {
-      out.push({ type: "text_done", sessionId, text: block.text });
+      // Skill dumps often arrive as assistant text — fold into a collapsible tool card.
+      if (isCollapsibleSkillText(block.text)) {
+        const id = `skill-text-${String(block.id ?? block.text.slice(0, 24))}`;
+        const tool: ToolCardState = {
+          id,
+          name: "Skill",
+          summary: skillSummaryFromText(block.text),
+          status: "done",
+          resultPreview: block.text.slice(0, 4000),
+        };
+        out.push({ type: "tool_start", sessionId, tool });
+        out.push({ type: "tool_end", sessionId, tool });
+      } else {
+        out.push({ type: "text_done", sessionId, text: block.text });
+      }
       continue;
     }
 
@@ -138,6 +170,16 @@ function normalizeAssistant(
   }
 
   return out;
+}
+
+function skillSummaryFromText(text: string): string {
+  const dir = text.match(/Base directory for this skill:\s*(.+)/i);
+  if (dir?.[1]) {
+    const p = dir[1].trim().split(/[/\\]/).filter(Boolean);
+    return p[p.length - 1] ?? dir[1].trim().slice(0, 80);
+  }
+  const first = text.split("\n").find((l) => l.trim().length > 0);
+  return (first ?? "skill content").trim().slice(0, 80);
 }
 
 function normalizeUser(
@@ -164,12 +206,28 @@ function normalizeUser(
     if (block.type === "tool_result") {
       const id = String(block.tool_use_id ?? block.toolUseId ?? "");
       const isError = Boolean(block.is_error ?? block.isError);
+      const name = String(block.name ?? "tool");
+      // Keep skill bodies in the collapsed card; don't also emit as chat text.
+      const preview =
+        name === "Skill" || name === "skill"
+          ? toolPreview(block.content)?.slice(0, 4000) ??
+            (typeof block.content === "string"
+              ? block.content.slice(0, 4000)
+              : undefined)
+          : toolPreview(block.content);
       const tool: ToolCardState = {
         id,
-        name: String(block.name ?? "tool"),
-        summary: "",
+        name,
+        summary:
+          name === "Skill" || name === "skill"
+            ? skillSummaryFromText(
+                typeof block.content === "string"
+                  ? block.content
+                  : preview ?? "",
+              )
+            : "",
         status: isError ? "error" : "done",
-        resultPreview: toolPreview(block.content),
+        resultPreview: preview,
       };
       out.push({ type: "tool_end", sessionId, tool });
     }
