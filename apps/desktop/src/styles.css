@@ -76,15 +76,16 @@ textarea {
 
 .app {
   display: grid;
-  grid-template-rows: 44px auto 1fr;
+  grid-template-rows: 48px auto 1fr;
   height: 100vh;
+  min-height: 0;
 }
 
 .topbar {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 0 12px;
+  gap: var(--space-2);
+  padding: 0 var(--space-3);
   border-bottom: 1px solid var(--border);
   background: var(--bg-elevated);
   font-size: 12px;
@@ -97,25 +98,10 @@ textarea {
   white-space: nowrap;
 }
 
-.topbar-project {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-  min-width: 0;
-}
-
-.topbar-input {
-  width: 180px;
-  max-width: 28vw;
-  background: #0b1016;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 4px 8px;
-}
-
 .topbar-path {
-  color: var(--muted);
-  max-width: 180px;
+  color: var(--text-muted);
+  min-width: 0;
+  max-width: 220px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -125,20 +111,18 @@ textarea {
   display: flex;
   align-items: center;
   gap: 6px;
-  color: var(--muted);
+  color: var(--text-muted);
   white-space: nowrap;
 }
 
-.topbar-field select {
-  background: #0b1016;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 3px 6px;
+.topbar-field .select {
   max-width: 160px;
 }
 
-.topbar-settings {
+.topbar-actions {
   margin-left: auto;
+  display: flex;
+  gap: var(--space-1);
 }
 
 .error-banner {
@@ -270,25 +254,30 @@ textarea {
 
 .main {
   display: grid;
-  grid-template-columns: 220px 1fr 300px;
+  grid-template-columns: 240px minmax(0, 1fr) 320px;
   min-height: 0;
+}
+
+.main-no-changes {
+  grid-template-columns: 240px minmax(0, 1fr);
 }
 
 .panel {
   border-right: 1px solid var(--border);
+  min-width: 0;
   min-height: 0;
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  background: var(--bg-panel);
 }
 
 .panel:last-child {
   border-right: none;
 }
 
-.panel-sessions,
-.panel-changes {
-  background: #0c1117;
+.panel-chat {
+  background: var(--bg-app);
 }
 
 .btn {

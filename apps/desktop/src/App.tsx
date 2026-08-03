@@ -10,6 +10,7 @@ import { bootstrapStore } from "./state/store";
 
 export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [changesOpen, setChangesOpen] = useState(true);
 
   useEffect(() => {
     void bootstrapStore();
@@ -17,18 +18,24 @@ export function App() {
 
   return (
     <div className="app">
-      <TopBar onOpenSettings={() => setSettingsOpen(true)} />
+      <TopBar
+        onOpenSettings={() => setSettingsOpen(true)}
+        changesOpen={changesOpen}
+        onToggleChanges={() => setChangesOpen((v) => !v)}
+      />
       <ErrorBanner />
-      <div className="main">
+      <div className={changesOpen ? "main" : "main main-no-changes"}>
         <div className="panel panel-sessions">
           <SessionList />
         </div>
         <div className="panel panel-chat">
           <ChatPanel />
         </div>
-        <div className="panel panel-changes">
-          <ChangesPanel />
-        </div>
+        {changesOpen ? (
+          <div className="panel panel-changes">
+            <ChangesPanel />
+          </div>
+        ) : null}
       </div>
       <PermissionModal />
       <SettingsDrawer
