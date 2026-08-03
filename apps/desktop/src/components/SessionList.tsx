@@ -31,7 +31,7 @@ export function SessionList() {
           <li className="session-empty">No sessions yet</li>
         ) : (
           sessions.map((s) => (
-            <li key={s.id}>
+            <li key={s.id} className="session-list-item">
               <button
                 type="button"
                 className={
@@ -40,13 +40,14 @@ export function SessionList() {
                     : "session-item"
                 }
                 onClick={() => void selectSession(s.id)}
+                title={s.title}
               >
                 <span className="session-title">{s.title}</span>
                 <span className="session-meta">
                   <span className={`session-status status-${s.status}`}>
                     {s.status}
                   </span>
-                  <span>{formatTime(s.updatedAt)}</span>
+                  <span className="session-time">{formatTime(s.updatedAt)}</span>
                 </span>
               </button>
             </li>

@@ -128,8 +128,8 @@ textarea {
 .error-banner {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 6px 12px;
+  gap: var(--space-2);
+  padding: 6px var(--space-3);
   background: #3f1212;
   border-bottom: 1px solid #7f1d1d;
   color: #fecaca;
@@ -160,20 +160,20 @@ textarea {
 }
 
 .settings-drawer {
-  width: min(420px, 100vw);
+  width: min(440px, 100vw);
   height: 100%;
   background: var(--bg-elevated);
   border-left: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--shadow-2);
 }
 
 .settings-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 14px;
+  padding: var(--space-3) var(--space-4);
   border-bottom: 1px solid var(--border);
 }
 
@@ -186,10 +186,10 @@ textarea {
 .settings-body {
   flex: 1;
   overflow: auto;
-  padding: 12px 14px;
+  padding: var(--space-3) var(--space-4);
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .settings-field {
@@ -197,23 +197,19 @@ textarea {
   flex-direction: column;
   gap: 4px;
   font-size: 12px;
-  color: var(--muted);
+  color: var(--text-muted);
 }
 
-.settings-field input {
-  background: #0b1016;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 6px 8px;
-  color: #e7ecf3;
+.settings-field .input {
+  width: 100%;
 }
 
 .settings-check {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   font-size: 12px;
-  color: var(--muted);
+  color: var(--text-muted);
 }
 
 .settings-error {
@@ -229,7 +225,7 @@ textarea {
 }
 
 .settings-footer {
-  padding: 12px 14px;
+  padding: var(--space-3) var(--space-4);
   border-top: 1px solid var(--border);
   display: flex;
   justify-content: flex-end;
@@ -367,7 +363,7 @@ textarea {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 10px 6px;
+  padding: var(--space-3) var(--space-3) var(--space-2);
   font-size: 12px;
   font-weight: 600;
 }
@@ -375,28 +371,36 @@ textarea {
 .session-list-ul {
   list-style: none;
   margin: 0;
-  padding: 4px;
+  padding: 0 var(--space-2) var(--space-2);
   overflow: auto;
   flex: 1;
+  min-height: 0;
+}
+
+.session-list-item {
+  min-width: 0;
 }
 
 .session-empty {
-  color: var(--muted);
+  color: var(--text-muted);
   font-size: 12px;
-  padding: 8px;
+  padding: var(--space-3);
+  text-align: center;
 }
 
 .session-item {
   width: 100%;
+  min-width: 0;
   text-align: left;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 6px;
-  padding: 8px;
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
   cursor: pointer;
   display: flex;
   flex-direction: column;
   gap: 4px;
+  transition: background 120ms ease, border-color 120ms ease;
 }
 
 .session-item:hover {
@@ -404,12 +408,14 @@ textarea {
 }
 
 .session-item.active {
-  background: #172033;
-  border-color: var(--border);
+  background: #141b25;
+  border-color: var(--border-strong);
 }
 
 .session-title {
+  min-width: 0;
   font-size: 12px;
+  font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -418,9 +424,10 @@ textarea {
 .session-meta {
   display: flex;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--space-2);
+  min-width: 0;
   font-size: 10px;
-  color: var(--muted);
+  color: var(--text-muted);
 }
 
 .session-status.status-running {
@@ -435,31 +442,66 @@ textarea {
   color: var(--ok);
 }
 
+.session-time {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Chat */
 .chat-panel {
   display: grid;
-  grid-template-rows: 36px 1fr auto;
+  grid-template-rows: 44px minmax(0, 1fr) auto;
   min-height: 0;
   height: 100%;
 }
 
+.chat-inner {
+  width: 100%;
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 0 var(--space-4);
+  min-width: 0;
+}
+
 .chat-header {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 0 12px;
+  align-items: stretch;
   border-bottom: 1px solid var(--border);
-  font-size: 12px;
+  background: var(--bg-elevated);
+}
+
+.chat-header-inner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 13px;
   font-weight: 600;
+}
+
+.chat-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-body {
+  overflow: auto;
+  min-height: 0;
+}
+
+.chat-composer {
+  border-top: 1px solid var(--border);
+  background: var(--bg-elevated);
 }
 
 .badge {
   font-size: 10px;
   font-weight: 500;
-  padding: 1px 6px;
+  padding: 2px 7px;
   border-radius: 999px;
   border: 1px solid var(--border);
-  color: var(--muted);
+  color: var(--text-muted);
 }
 
 .badge.running {
@@ -468,29 +510,30 @@ textarea {
 }
 
 .message-list {
-  overflow: auto;
-  padding: 12px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-3);
+  padding: var(--space-4) 0;
   min-height: 0;
 }
 
 .message-list.empty {
   align-items: center;
   justify-content: center;
+  min-height: 200px;
+  color: var(--text-muted);
 }
 
 .message-row {
   display: grid;
-  grid-template-columns: 72px 1fr;
-  gap: 8px;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: var(--space-2);
   font-size: 13px;
-  line-height: 1.45;
+  line-height: 1.5;
 }
 
 .message-role {
-  color: var(--muted);
+  color: var(--text-muted);
   font-size: 11px;
   text-transform: uppercase;
   padding-top: 2px;
@@ -499,6 +542,7 @@ textarea {
 .message-body {
   white-space: pre-wrap;
   word-break: break-word;
+  min-width: 0;
 }
 
 .role-user .message-body {
@@ -507,10 +551,6 @@ textarea {
 
 .role-system .message-body {
   color: var(--danger);
-}
-
-.role-assistant.streaming .message-body {
-  opacity: 0.95;
 }
 
 .cursor {
@@ -527,21 +567,22 @@ textarea {
 }
 
 .tool-row {
-  grid-template-columns: 1fr;
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .tool-card {
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 8px 10px;
-  background: #101821;
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+  background: #10161e;
   font-size: 12px;
+  box-shadow: var(--shadow-1);
 }
 
 .tool-card-header {
   display: flex;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--space-2);
   margin-bottom: 4px;
 }
 
@@ -562,7 +603,7 @@ textarea {
 }
 
 .tool-summary {
-  color: var(--muted);
+  color: var(--text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -572,30 +613,34 @@ textarea {
   margin: 6px 0 0;
   padding: 6px 8px;
   background: #0b1016;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   font-size: 11px;
   overflow: auto;
-  max-height: 120px;
+  max-height: 140px;
   white-space: pre-wrap;
 }
 
 .composer {
-  border-top: 1px solid var(--border);
-  padding: 10px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  background: var(--bg-elevated);
+  gap: var(--space-2);
+  padding: var(--space-3) 0;
 }
 
 .composer-input {
   width: 100%;
   resize: vertical;
-  min-height: 64px;
+  min-height: 68px;
   background: #0b1016;
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+}
+
+.composer-input:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-color: var(--accent);
 }
 
 .composer-input:disabled {
@@ -605,30 +650,63 @@ textarea {
 .composer-actions {
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
-/* Changes placeholder */
-.changes-placeholder {
-  padding: 10px;
-  overflow: auto;
+/* Changes panel */
+.changes-panel {
+  display: flex;
+  flex-direction: column;
   height: 100%;
+  min-height: 0;
+  overflow: hidden;
 }
 
-.panel-title {
+.changes-panel .panel-title {
+  padding: var(--space-3) var(--space-3) var(--space-2);
   font-size: 12px;
   font-weight: 600;
-  margin-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.changes-panel .muted {
+  padding: var(--space-3);
+  color: var(--text-muted);
 }
 
 .changes-list {
   list-style: none;
   margin: 0;
-  padding: 0;
+  padding: var(--space-2);
   font-size: 12px;
   display: flex;
   flex-direction: column;
   gap: 6px;
+  overflow: auto;
+  max-height: 40%;
+}
+
+.change-item {
+  width: 100%;
+  min-width: 0;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  padding: 6px 8px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.change-item:hover {
+  background: var(--bg-hover);
+}
+
+.change-item.active {
+  background: #141b25;
+  border-color: var(--border-strong);
 }
 
 .change-status {
@@ -644,49 +722,8 @@ textarea {
   color: var(--warn);
 }
 
-/* Changes panel */
-.changes-panel {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  min-height: 0;
-  overflow: hidden;
-}
-
-.changes-panel .panel-title {
-  padding: 10px 10px 6px;
-  margin-bottom: 0;
-  border-bottom: 1px solid var(--border);
-}
-
-.changes-panel .muted {
-  padding: 10px;
-}
-
-.change-item {
-  width: 100%;
-  text-align: left;
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  padding: 6px 8px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-}
-
-.change-item:hover {
-  background: var(--bg-hover);
-}
-
-.change-item.active {
-  background: #172033;
-  border-color: var(--border);
-}
-
 .change-path {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -705,8 +742,8 @@ textarea {
 .diff-header {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
   font-size: 12px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-elevated);
@@ -714,6 +751,7 @@ textarea {
 
 .diff-path {
   font-family: ui-monospace, monospace;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -721,7 +759,7 @@ textarea {
 }
 
 .diff-meta {
-  color: var(--muted);
+  color: var(--text-muted);
   font-size: 11px;
 }
 
@@ -730,15 +768,15 @@ textarea {
   min-height: 0;
   overflow: auto;
   margin: 0;
-  padding: 8px 0;
+  padding: var(--space-2) 0;
   font-family: ui-monospace, monospace;
   font-size: 11px;
-  line-height: 1.4;
+  line-height: 1.45;
   background: #0b1016;
 }
 
 .diff-line {
-  padding: 0 10px;
+  padding: 0 var(--space-3);
   white-space: pre-wrap;
   word-break: break-all;
 }
@@ -754,17 +792,12 @@ textarea {
 }
 
 .diff-ctx {
-  color: var(--muted);
+  color: var(--text-muted);
 }
 
 .diff-hunk {
   color: var(--accent);
   background: rgba(59, 130, 246, 0.08);
-}
-
-.diff-meta {
-  color: var(--warn);
-  font-style: italic;
 }
 
 /* Permission modal */
@@ -780,22 +813,22 @@ textarea {
 
 .modal {
   background: var(--bg-elevated);
-  border: 1px solid var(--border);
-  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
   min-width: 420px;
   max-width: 560px;
   max-height: 80vh;
   display: flex;
   flex-direction: column;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  box-shadow: var(--shadow-2);
 }
 
 .modal-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  padding: 12px 16px;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
   border-bottom: 1px solid var(--border);
 }
 
@@ -805,7 +838,7 @@ textarea {
 }
 
 .modal-body {
-  padding: 12px 16px;
+  padding: var(--space-3) var(--space-4);
   overflow: auto;
   min-height: 0;
 }
@@ -818,7 +851,7 @@ textarea {
 
 .permission-details summary {
   cursor: pointer;
-  color: var(--muted);
+  color: var(--text-muted);
   font-size: 12px;
   margin-bottom: 6px;
 }
@@ -828,7 +861,7 @@ textarea {
   padding: 10px;
   background: #0b1016;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   font-size: 11px;
   overflow: auto;
   max-height: 240px;
@@ -839,7 +872,7 @@ textarea {
 .modal-actions {
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
-  padding: 12px 16px;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
   border-top: 1px solid var(--border);
 }
