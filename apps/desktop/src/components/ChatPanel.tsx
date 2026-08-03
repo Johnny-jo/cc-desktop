@@ -2,7 +2,7 @@ import React from "react";
 import type { PermissionMode } from "@claude-desktop/shared";
 import { MessageList } from "./MessageList";
 import { Composer } from "./Composer";
-import { setModel, setPermissionMode, useAppStore } from "../state/store";
+import { setPermissionMode, useAppStore } from "../state/store";
 
 const PERMISSION_MODES: PermissionMode[] = ["default", "acceptEdits", "plan"];
 
@@ -26,12 +26,6 @@ export function ChatPanel({
   const items = activeSessionId ? (itemsBySession[activeSessionId] ?? []) : [];
   const active = sessions.find((s) => s.id === activeSessionId);
 
-  const models = settings?.models?.length
-    ? settings.models
-    : settings?.defaultModel
-      ? [settings.defaultModel]
-      : [];
-
   return (
     <div className="chat-panel">
       <header className="chat-header">
@@ -42,21 +36,6 @@ export function ChatPanel({
           {running ? <span className="badge running">running</span> : null}
         </div>
         <div className="chat-header-right">
-          <label className="chat-header-field">
-            <select
-              className="select select-ghost"
-              value={settings?.defaultModel ?? ""}
-              disabled={!settings}
-              onChange={(e) => void setModel(e.target.value)}
-              title="Model"
-            >
-              {models.map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-            </select>
-          </label>
           <label className="chat-header-field">
             <select
               className="select select-ghost"

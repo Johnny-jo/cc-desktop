@@ -2,6 +2,7 @@ import React, { useCallback, useState } from "react";
 import {
   abortActiveSession,
   sendMessage,
+  setModel,
   useAppStore,
 } from "../state/store";
 
@@ -14,14 +15,18 @@ export function Composer() {
 
   const canSend = Boolean(text.trim()) && Boolean(projectPath || activeSessionId);
 
+  const models = settings?.models?.length
+    ? settings.models
+    : settings?.defaultModel
+      ? [settings.defaultModel]
+      : [];
+
   const onSend = useCallback(() => {
     if (!text.trim()) return;
     const prompt = text;
     setText("");
     sendMessage(prompt);
   }, [text]);
-
-  const modelLabel = settings?.defaultModel ?? "model";
 
   return (
     <div className="composer-shell">
@@ -47,9 +52,21 @@ export function Composer() {
           disabled={!projectPath && !activeSessionId}
         />
         <div className="composer-bar">
-          <span className="composer-model" title={modelLabel}>
-            ✦ {modelLabel}
-          </span>
+          <label className="composer-model-field" title="Model">
+            <span className="composer-model-prefix">✦</span>
+            <select
+              className="select select-ghost composer-model-select"
+              value={settings?.defaultModel ?? ""}
+              disabled={!settings || models.length === 0}
+              onChange={(e) => void setModel(e.target.value)}
+            >
+              {models.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
+          </label>
           <div className="composer-actions">
             {running ? (
               <button

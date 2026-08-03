@@ -649,7 +649,7 @@ textarea {
   }
 }
 
-/* Tool cards */
+/* Tool cards — collapsed by default */
 .tool-row {
   width: 100%;
 }
@@ -658,21 +658,56 @@ textarea {
   width: 100%;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  padding: 10px 12px;
   background: var(--bg-elevated);
   font-size: 12.5px;
+  overflow: hidden;
 }
 
-.tool-card-header {
+.tool-card-toggle {
+  width: 100%;
   display: flex;
-  justify-content: space-between;
-  gap: var(--space-2);
-  margin-bottom: 4px;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+  background: transparent;
+  border: none;
+  padding: 9px 12px;
+  cursor: pointer;
+  color: inherit;
+  min-width: 0;
+}
+
+.tool-card-toggle:hover {
+  background: var(--bg-hover);
+}
+
+.tool-chevron {
+  flex-shrink: 0;
+  width: 12px;
+  color: var(--text-faint);
+  font-size: 11px;
 }
 
 .tool-name {
   font-weight: 600;
   font-size: 13px;
+  flex-shrink: 0;
+}
+
+.tool-summary-inline {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.tool-status {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 11px;
 }
 
 .tool-status.status-running {
@@ -687,11 +722,15 @@ textarea {
   color: var(--danger);
 }
 
+.tool-card-body {
+  padding: 0 12px 10px 32px;
+  border-top: 1px solid var(--border-soft);
+}
+
 .tool-summary {
   color: var(--text-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  padding-top: 8px;
+  word-break: break-word;
 }
 
 .tool-preview {
@@ -701,7 +740,7 @@ textarea {
   border-radius: var(--radius-sm);
   font-size: 11.5px;
   overflow: auto;
-  max-height: 140px;
+  max-height: 160px;
   white-space: pre-wrap;
   color: var(--text-muted);
 }
@@ -754,18 +793,38 @@ textarea {
   gap: var(--space-3);
 }
 
-.composer-model {
+.composer-model-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 55%;
+  color: var(--text-muted);
+}
+
+.composer-model-prefix {
+  flex-shrink: 0;
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+.composer-model-select {
+  max-width: 100%;
+  min-width: 0;
+  padding: 2px 4px;
   font-size: 12px;
   color: var(--text-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+}
+
+.composer-model-select:hover:not(:disabled) {
+  color: var(--text);
 }
 
 .composer-actions {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  flex-shrink: 0;
 }
 
 /* Changes panel */
