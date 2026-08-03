@@ -15,11 +15,21 @@ export function ChatPanel() {
   return (
     <div className="chat-panel">
       <div className="chat-header">
-        <span>{active ? active.title : "New chat"}</span>
-        {running ? <span className="badge running">running</span> : null}
+        <div className="chat-inner chat-header-inner">
+          <span className="chat-title">{active ? active.title : "New chat"}</span>
+          {running ? <span className="badge running">running</span> : null}
+        </div>
       </div>
-      <MessageList items={items} />
-      <Composer />
+      <div className="chat-body">
+        <div className="chat-inner">
+          <MessageList items={items} />
+        </div>
+      </div>
+      <div className="chat-composer">
+        <div className="chat-inner">
+          <Composer />
+        </div>
+      </div>
     </div>
   );
 }
