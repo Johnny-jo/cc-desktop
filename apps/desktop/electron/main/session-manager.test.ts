@@ -1,7 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import type { AppSettings, FileChange, SdkNormalizedEvent, SessionSummary } from "@claude-desktop/shared";
 import type { QueryFn } from "./session-manager";
-import { SessionManager } from "./session-manager";
+import { SessionManager, humanizeAgentError } from "./session-manager";
 import type { PermissionBroker } from "./permission-broker";
 import type { DiffTracker } from "./diff-tracker";
 import type { CpaSupervisor } from "./cpa-supervisor";
@@ -325,6 +325,15 @@ describe("SessionManager", () => {
       status: "idle",
     });
     expect(list[0].title.length).toBeGreaterThan(0);
+  });
+
+  it("humanizeAgentError explains image_url rejection", () => {
+    const raw =
+      "Failed to deserialize the JSON body into the target type: messages[14]: unknown variant `image_url`, expected `text`";
+    const msg = humanizeAgentError(raw, "deepseek-v4-flash");
+    expect(msg).toContain("deepseek-v4-flash");
+    expect(msg).toMatch(/does not accept image content/i);
+    expect(msg).toMatch(/new chat|vision-capable/i);
   });
 });
 

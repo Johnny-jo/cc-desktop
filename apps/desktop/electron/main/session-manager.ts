@@ -255,7 +255,8 @@ export class SessionManager {
         this.emitSession({ ...entry.summary });
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const raw = err instanceof Error ? err.message : String(err);
+      const message = humanizeAgentError(raw, settings.defaultModel);
       this.emit({
         type: "result",
         sessionId,
@@ -268,6 +269,7 @@ export class SessionManager {
         updatedAt: Date.now(),
       };
       this.emitSession({ ...entry.summary });
+      // Re-throw original for logging/callers; UI already got humanized event.
       throw err;
     } finally {
       if (entry.abortController === abortController) {
@@ -295,4 +297,19 @@ export class SessionManager {
       this.emitDiff(sessionId, this.diffTracker.list(sessionId));
     }
   }
+}
+
+/**
+ * Map common upstream/CPA errors to actionable UI copy.
+ * DeepSeek (and some OpenAI-compat proxies) reject Anthropic image blocks.
+ */
+export function humanizeAgentError(raw: string, model: string): string {
+  if (/unknown variant\s*`?image_url`?/i.test(raw) || /image_url.*expected\s*`?text`?/i.test(raw)) {
+    return (
+      `Model "${model}" does not accept image content (image_url). ` +
+      `Start a new chat without screenshots, or switch to a vision-capable model ` +
+      `(e.g. kimi / grok), then retry. Original: ${raw}`
+    );
+  }
+  return raw;
 }
