@@ -161,6 +161,14 @@ function bootstrap() {
     // stopIfManaged is a no-op unless this app spawned CPA.
     // Always call it so managed children are not orphaned on quit.
     cpa.stopIfManaged();
+    // Close streaming sessions so consumers finish cleanly.
+    for (const s of sessions.list()) {
+      try {
+        sessions.closeSession(s.id);
+      } catch {
+        // ignore
+      }
+    }
   });
 }
 

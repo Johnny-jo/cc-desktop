@@ -54,6 +54,11 @@ const unsubs: Array<() => void> = [];
 
 /** Pending user prompt for startSession before sessionId is known. */
 let pendingStartPrompt: string | null = null;
+/**
+ * Queue of optimistically-appended user texts per session.
+ * SDK often re-emits the same user turn after the agent finishes; we drop that echo.
+ */
+const optimisticUserTexts = new Map<string, string[]>();
 let idCounter = 0;
 
 function nextId(prefix: string): string {
@@ -75,18 +80,39 @@ function getItems(sessionId: string): ChatItem[] {
   return state.itemsBySession[sessionId] ?? [];
 }
 
-let transcriptSaveTimer: ReturnType<typeof setTimeout> | null = null;
+const transcriptSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function saveTranscriptNow(sessionId: string, items?: ChatItem[]): void {
+  try {
+    const desktop = getDesktop();
+    const payload = items ?? state.itemsBySession[sessionId] ?? [];
+    void desktop.saveSessionTranscript?.(sessionId, payload);
+  } catch {
+    // not in electron / API missing
+  }
+}
 
 function scheduleSaveTranscript(sessionId: string, items: ChatItem[]): void {
-  if (transcriptSaveTimer) clearTimeout(transcriptSaveTimer);
-  transcriptSaveTimer = setTimeout(() => {
-    try {
-      const desktop = getDesktop();
-      void desktop.saveSessionTranscript?.(sessionId, items);
-    } catch {
-      // not in electron / API missing
-    }
-  }, 400);
+  const prev = transcriptSaveTimers.get(sessionId);
+  if (prev) clearTimeout(prev);
+  const t = setTimeout(() => {
+    transcriptSaveTimers.delete(sessionId);
+    saveTranscriptNow(sessionId, items);
+  }, 200);
+  transcriptSaveTimers.set(sessionId, t);
+}
+
+/** Flush all debounced transcript writes (call on quit). */
+export function flushAllTranscripts(): void {
+  for (const [sessionId, timer] of transcriptSaveTimers) {
+    clearTimeout(timer);
+    transcriptSaveTimers.delete(sessionId);
+    saveTranscriptNow(sessionId);
+  }
+  // Also persist every known session once more
+  for (const sessionId of Object.keys(state.itemsBySession)) {
+    saveTranscriptNow(sessionId);
+  }
 }
 
 function setItems(sessionId: string, items: ChatItem[]): void {
@@ -94,6 +120,23 @@ function setItems(sessionId: string, items: ChatItem[]): void {
     itemsBySession: { ...state.itemsBySession, [sessionId]: items },
   });
   scheduleSaveTranscript(sessionId, items);
+}
+
+function pushOptimisticUser(sessionId: string, text: string): void {
+  const q = optimisticUserTexts.get(sessionId) ?? [];
+  q.push(text);
+  optimisticUserTexts.set(sessionId, q);
+}
+
+function consumeOptimisticUser(sessionId: string, text: string): boolean {
+  const q = optimisticUserTexts.get(sessionId);
+  if (!q?.length) return false;
+  const idx = q.indexOf(text);
+  if (idx < 0) return false;
+  q.splice(idx, 1);
+  if (!q.length) optimisticUserTexts.delete(sessionId);
+  else optimisticUserTexts.set(sessionId, q);
+  return true;
 }
 
 function upsertSession(summary: SessionSummary): void {
@@ -116,16 +159,22 @@ function upsertSession(summary: SessionSummary): void {
   setState({ sessions, running, activeSessionId });
 }
 
-function appendUserMessage(sessionId: string, text: string): void {
+function appendUserMessage(
+  sessionId: string,
+  text: string,
+  opts?: { optimistic?: boolean },
+): void {
   const items = getItems(sessionId);
   const last = items[items.length - 1];
   if (last?.kind === "text" && last.role === "user" && last.text === text) {
+    if (opts?.optimistic) pushOptimisticUser(sessionId, text);
     return;
   }
   setItems(sessionId, [
     ...items,
     { kind: "text", id: nextId("user"), role: "user", text },
   ]);
+  if (opts?.optimistic) pushOptimisticUser(sessionId, text);
 }
 
 function applySessionEvent(event: SdkNormalizedEvent): void {
@@ -134,6 +183,21 @@ function applySessionEvent(event: SdkNormalizedEvent): void {
 
   switch (event.type) {
     case "user_message": {
+      // Drop SDK echo of a message we already showed optimistically.
+      if (consumeOptimisticUser(sessionId, event.text)) {
+        return;
+      }
+      // SDK often re-emits the user prompt after the agent finishes (appears
+      // as a duplicate bubble under the assistant reply). If we already have
+      // this exact user text in the transcript, ignore the echo.
+      if (
+        items.some(
+          (i) =>
+            i.kind === "text" && i.role === "user" && i.text === event.text,
+        )
+      ) {
+        return;
+      }
       appendUserMessage(sessionId, event.text);
       return;
     }
@@ -269,6 +333,8 @@ function applySessionEvent(event: SdkNormalizedEvent): void {
         });
       }
       setItems(sessionId, items);
+      // Turn finished — flush transcript immediately so quit cannot lose it.
+      saveTranscriptNow(sessionId, items);
       setState({
         running: state.sessions.some(
           (s) => s.id !== sessionId && s.status === "running",
@@ -389,14 +455,23 @@ export async function bootstrapStore(): Promise<void> {
     // Do not clobber projectPath if openProject (or user) already set it while
     // these awaits were in flight — live e2e hit a race where stale
     // lastProjectPath overwrote a freshly opened directory.
+    const list = sessions ?? [];
     setState((prev) => ({
       ...prev,
       settings,
       cpaStatus,
-      sessions: sessions ?? [],
+      sessions: list,
       projectPath: prev.projectPath ?? settings.lastProjectPath ?? null,
-      running: (sessions ?? []).some((s) => s.status === "running"),
+      running: list.some((s) => s.status === "running"),
     }));
+
+    // After restart, auto-open the most recent session (restores chat + cwd).
+    if (list.length > 0 && !getState().activeSessionId) {
+      const latest = [...list].sort((a, b) => b.updatedAt - a.updatedAt)[0];
+      if (latest) {
+        void selectSession(latest.id);
+      }
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     setState({ lastError: message });
@@ -538,7 +613,7 @@ export function sendMessage(text: string): void {
   setState({ running: true, lastError: null });
 
   if (activeSessionId) {
-    appendUserMessage(activeSessionId, prompt);
+    appendUserMessage(activeSessionId, prompt, { optimistic: true });
     // Optimistic running status for the active session.
     const sessions = state.sessions.map((s) =>
       s.id === activeSessionId
@@ -564,11 +639,11 @@ export function sendMessage(text: string): void {
         setState({ activeSessionId: sessionId });
       }
       if (pendingStartPrompt) {
-        appendUserMessage(sessionId, pendingStartPrompt);
+        appendUserMessage(sessionId, pendingStartPrompt, { optimistic: true });
         pendingStartPrompt = null;
       } else {
         // session:updated may have already applied it; ensure present
-        appendUserMessage(sessionId, prompt);
+        appendUserMessage(sessionId, prompt, { optimistic: true });
       }
     })
     .catch((err: unknown) => {

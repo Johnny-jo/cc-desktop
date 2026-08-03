@@ -6,7 +6,7 @@ import { PermissionModal } from "./components/PermissionModal";
 import { UserPromptModal } from "./components/UserPromptModal";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { ErrorBanner } from "./components/ErrorBanner";
-import { bootstrapStore } from "./state/store";
+import { bootstrapStore, flushAllTranscripts } from "./state/store";
 
 export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -14,6 +14,24 @@ export function App() {
 
   useEffect(() => {
     void bootstrapStore();
+  }, []);
+
+  // Flush chat transcripts before the window dies (dev reload / quit).
+  useEffect(() => {
+    const flush = () => {
+      try {
+        flushAllTranscripts();
+      } catch {
+        // ignore
+      }
+    };
+    window.addEventListener("pagehide", flush);
+    window.addEventListener("beforeunload", flush);
+    return () => {
+      flush();
+      window.removeEventListener("pagehide", flush);
+      window.removeEventListener("beforeunload", flush);
+    };
   }, []);
 
   return (

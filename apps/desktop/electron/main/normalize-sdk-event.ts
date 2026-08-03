@@ -190,8 +190,16 @@ function normalizeUser(
   const content = message ? asArray(message.content) : [];
   const out: SdkNormalizedEvent[] = [];
 
+  // Synthetic / meta user frames (tool echoes, etc.) — never show as chat bubbles.
+  if (msg.isSynthetic === true || msg.is_synthetic === true) {
+    // still process tool_result below; skip bare text
+  }
+
   // string content form
   if (typeof message?.content === "string") {
+    if (msg.isSynthetic === true || msg.is_synthetic === true) {
+      return out;
+    }
     return [{ type: "user_message", sessionId, text: message.content }];
   }
 
@@ -199,7 +207,9 @@ function normalizeUser(
     if (!isRecord(block) || typeof block.type !== "string") continue;
 
     if (block.type === "text" && typeof block.text === "string") {
-      out.push({ type: "user_message", sessionId, text: block.text });
+      if (msg.isSynthetic !== true && msg.is_synthetic !== true) {
+        out.push({ type: "user_message", sessionId, text: block.text });
+      }
       continue;
     }
 
