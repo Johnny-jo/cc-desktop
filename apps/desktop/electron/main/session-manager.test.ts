@@ -17,6 +17,53 @@ const baseSettings: AppSettings = {
   shutdownCpaOnQuit: false,
 };
 
+/** Drain one user message from streaming prompt (MessageStream). */
+async function takeFirstUserText(
+  prompt: string | AsyncIterable<unknown>,
+): Promise<string> {
+  if (typeof prompt === "string") return prompt;
+  for await (const msg of prompt) {
+    if (
+      typeof msg === "object" &&
+      msg !== null &&
+      (msg as { type?: string }).type === "user"
+    ) {
+      const m = msg as {
+        message?: { content?: string | unknown[] };
+      };
+      if (typeof m.message?.content === "string") return m.message.content;
+    }
+    break;
+  }
+  return "";
+}
+
+/**
+ * Default mock: consume first streaming user message, emit Hi + tool + result.
+ */
+function defaultQueryFn(): QueryFn {
+  return async function* (args) {
+    await takeFirstUserText(args.prompt);
+    yield {
+      type: "stream_event",
+      event: {
+        type: "content_block_delta",
+        delta: { type: "text_delta", text: "Hi" },
+      },
+    };
+    yield {
+      type: "assistant",
+      message: {
+        content: [
+          { type: "tool_use", id: "1", name: "Read", input: { file_path: "a" } },
+        ],
+      },
+      session_id: "sdk-session-1",
+    };
+    yield { type: "result", subtype: "success", total_cost_usd: 0 };
+  };
+}
+
 function makeDeps(overrides: {
   queryFn?: QueryFn;
   ensureReady?: () => Promise<{ state: string; message?: string; port?: number; managedByApp?: boolean }>;
@@ -28,26 +75,7 @@ function makeDeps(overrides: {
   const sessions: SessionSummary[] = [];
   const diffs: Array<{ sessionId: string; changes: FileChange[] }> = [];
 
-  const queryFn: QueryFn =
-    overrides.queryFn ??
-    (async function* () {
-      yield {
-        type: "stream_event",
-        event: {
-          type: "content_block_delta",
-          delta: { type: "text_delta", text: "Hi" },
-        },
-      };
-      yield {
-        type: "assistant",
-        message: {
-          content: [
-            { type: "tool_use", id: "1", name: "Read", input: { file_path: "a" } },
-          ],
-        },
-        session_id: "sdk-session-1",
-      };
-    });
+  const queryFn: QueryFn = overrides.queryFn ?? defaultQueryFn();
 
   const permissionBroker = {
     canUseTool:
@@ -139,16 +167,23 @@ describe("SessionManager", () => {
   });
 
   it("passes expected options to queryFn", async () => {
-    const captured: Array<{ prompt: string; options: Record<string, unknown> }> = [];
+    const captured: Array<{
+      prompt: string | AsyncIterable<unknown>;
+      options: Record<string, unknown>;
+    }> = [];
     const queryFn: QueryFn = async function* (args) {
       captured.push(args);
+      const text = await takeFirstUserText(args.prompt);
+      expect(text).toBe("prompt-1");
+      yield { type: "result", subtype: "success", total_cost_usd: 0 };
     };
 
     const ctx = makeDeps({ queryFn });
     const sessionId = await ctx.manager.start("prompt-1", "D:/work");
 
     expect(captured).toHaveLength(1);
-    expect(captured[0].prompt).toBe("prompt-1");
+    // Streaming mode: prompt is AsyncIterable, not a raw string
+    expect(typeof captured[0].prompt !== "string").toBe(true);
     const opts = captured[0].options;
     expect(opts.cwd).toBe("D:/work");
     expect(opts.includePartialMessages).toBe(true);
@@ -190,6 +225,8 @@ describe("SessionManager", () => {
 
     const queryFn: QueryFn = async function* (args) {
       passedCanUseTool = args.options.canUseTool as typeof passedCanUseTool;
+      await takeFirstUserText(args.prompt);
+      yield { type: "result", subtype: "success", total_cost_usd: 0 };
     };
 
     const ctx = makeDeps({ queryFn, canUseTool });
@@ -213,7 +250,8 @@ describe("SessionManager", () => {
     const onToolUse = vi.fn();
     const listDiffs = vi.fn().mockReturnValue(changes);
 
-    const queryFn: QueryFn = async function* () {
+    const queryFn: QueryFn = async function* (args) {
+      await takeFirstUserText(args.prompt);
       yield {
         type: "assistant",
         message: {
@@ -231,6 +269,7 @@ describe("SessionManager", () => {
           ],
         },
       };
+      yield { type: "result", subtype: "success", total_cost_usd: 0 };
     };
 
     const ctx = makeDeps({ queryFn, onToolUse, listDiffs });
@@ -244,28 +283,46 @@ describe("SessionManager", () => {
     expect(ctx.emitDiff).toHaveBeenCalledWith(sessionId, changes);
   });
 
-  it("continue resumes with existing session id", async () => {
-    const captured: Array<{ prompt: string; options: Record<string, unknown> }> = [];
+  it("continue reuses streaming session (single queryFn open)", async () => {
+    const openCount = { n: 0 };
+    const texts: string[] = [];
     const queryFn: QueryFn = async function* (args) {
-      captured.push(args);
-      yield {
-        type: "stream_event",
-        event: {
-          type: "content_block_delta",
-          delta: { type: "text_delta", text: "ok" },
-        },
-      };
+      openCount.n += 1;
+      // Keep consuming user messages from the stream for each turn
+      if (typeof args.prompt === "string") {
+        texts.push(args.prompt);
+        yield { type: "result", subtype: "success", total_cost_usd: 0 };
+        return;
+      }
+      for await (const msg of args.prompt) {
+        if (
+          typeof msg === "object" &&
+          msg !== null &&
+          (msg as { type?: string }).type === "user"
+        ) {
+          const content = (msg as { message?: { content?: string } }).message
+            ?.content;
+          if (typeof content === "string") texts.push(content);
+          yield {
+            type: "stream_event",
+            event: {
+              type: "content_block_delta",
+              delta: { type: "text_delta", text: "ok" },
+            },
+          };
+          yield { type: "result", subtype: "success", total_cost_usd: 0 };
+          // Stay open for next push — don't return until stream ends
+        }
+      }
     };
 
     const ctx = makeDeps({ queryFn });
     const sessionId = await ctx.manager.start("first", "D:/p");
-    captured.length = 0;
-
     await ctx.manager.continue(sessionId, "second");
-    expect(captured).toHaveLength(1);
-    expect(captured[0].prompt).toBe("second");
-    expect(captured[0].options.resume).toBe(sessionId);
-    expect(captured[0].options.cwd).toBe("D:/p");
+
+    expect(openCount.n).toBe(1);
+    expect(texts).toEqual(["first", "second"]);
+    expect(ctx.manager.list()[0]?.status).toBe("idle");
   });
 
   it("abort aborts the active AbortController", async () => {
@@ -277,7 +334,10 @@ describe("SessionManager", () => {
 
     const queryFn: QueryFn = async function* (args) {
       controller = args.options.abortController as AbortController;
+      await takeFirstUserText(args.prompt);
       await gate;
+      // After abort/release, end the turn so waitForTurnIdle unblocks
+      yield { type: "result", subtype: "success", total_cost_usd: 0 };
     };
 
     const ctx = makeDeps({ queryFn });
@@ -288,8 +348,6 @@ describe("SessionManager", () => {
       expect(controller).toBeDefined();
     });
 
-    ctx.manager.abort(controller ? (await getSessionId(ctx.manager)) : "");
-    // abort by listed session
     const id = ctx.manager.list()[0]?.id;
     expect(id).toBeTruthy();
     ctx.manager.abort(id!);

@@ -36,6 +36,17 @@ export const APP_SLASH_COMMANDS: SlashCommandItem[] = [
   },
 ];
 
+/** Merge app commands with SDK skills (app names win on conflict). */
+export function mergeSlashCommands(
+  sdkCommands: SlashCommandItem[] = [],
+): SlashCommandItem[] {
+  const appNames = new Set(APP_SLASH_COMMANDS.map((c) => c.name.toLowerCase()));
+  const sdkOnly = sdkCommands.filter(
+    (c) => !appNames.has(c.name.toLowerCase()),
+  );
+  return [...APP_SLASH_COMMANDS, ...sdkOnly];
+}
+
 export function filterSlashCommands(
   query: string,
   commands: SlashCommandItem[] = APP_SLASH_COMMANDS,

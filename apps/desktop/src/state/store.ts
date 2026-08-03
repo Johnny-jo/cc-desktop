@@ -9,6 +9,7 @@ import {
   type PublicSettings,
   type SdkNormalizedEvent,
   type SessionSummary,
+  type SlashCommandItem,
   type ToolCardState,
   type UserPromptRequest,
 } from "@claude-desktop/shared";
@@ -20,6 +21,8 @@ export type AppState = {
   activeSessionId: string | null;
   itemsBySession: Record<string, ChatItem[]>;
   changesBySession: Record<string, FileChange[]>;
+  /** SDK skills / slash commands keyed by session */
+  slashBySession: Record<string, SlashCommandItem[]>;
   permissionRequest: PermissionRequest | null;
   userPromptRequest: UserPromptRequest | null;
   cpaStatus: CpaStatus;
@@ -36,6 +39,7 @@ let state: AppState = {
   activeSessionId: null,
   itemsBySession: {},
   changesBySession: {},
+  slashBySession: {},
   permissionRequest: null,
   userPromptRequest: null,
   cpaStatus: { state: "unknown" },
@@ -320,6 +324,21 @@ function subscribeDesktopEvents(): void {
   );
 
   unsubs.push(
+    desktop.on(IPC.sessionSlashCommandsEvent, (payload) => {
+      const { sessionId, commands } = payload as {
+        sessionId: string;
+        commands: SlashCommandItem[];
+      };
+      setState({
+        slashBySession: {
+          ...state.slashBySession,
+          [sessionId]: commands,
+        },
+      });
+    }),
+  );
+
+  unsubs.push(
     desktop.on(IPC.cpaStatusEvent, (payload) => {
       setState({ cpaStatus: payload as CpaStatus });
     }),
@@ -590,6 +609,7 @@ export function __resetStoreForTests(): void {
     activeSessionId: null,
     itemsBySession: {},
     changesBySession: {},
+    slashBySession: {},
     permissionRequest: null,
     userPromptRequest: null,
     cpaStatus: { state: "unknown" },

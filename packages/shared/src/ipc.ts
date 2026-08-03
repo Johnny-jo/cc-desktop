@@ -8,6 +8,7 @@ import type {
   PublicSettings,
   SdkNormalizedEvent,
   SessionSummary,
+  SlashCommandItem,
   UserPromptDecision,
   UserPromptRequest,
 } from "./models";
@@ -28,6 +29,8 @@ export const IPC = {
   /** Fetch model ids from CPA /v1/models and merge into settings */
   cpaSyncModels: "cpa:sync-models",
   modelSet: "model:set",
+  /** SDK skills / slash commands for a live session */
+  sessionSlashCommands: "session:slash-commands",
   // main → renderer (webContents.send)
   sessionEvent: "session:event",
   permissionRequest: "permission:request",
@@ -35,6 +38,7 @@ export const IPC = {
   diffUpdated: "diff:updated",
   cpaStatusEvent: "cpa:status-event",
   sessionUpdated: "session:updated",
+  sessionSlashCommandsEvent: "session:slash-commands-event",
   appError: "app:error",
 } as const;
 
@@ -78,6 +82,10 @@ export type IpcInvokeMap = {
     result: { models: string[]; defaultModel: string };
   };
   [IPC.modelSet]: { args: [{ model: string }]; result: { model: string } };
+  [IPC.sessionSlashCommands]: {
+    args: [{ sessionId: string }];
+    result: { commands: SlashCommandItem[] };
+  };
 };
 
 export type IpcEventMap = {
@@ -87,6 +95,10 @@ export type IpcEventMap = {
   [IPC.diffUpdated]: { sessionId: string; changes: FileChange[] };
   [IPC.cpaStatusEvent]: CpaStatus;
   [IPC.sessionUpdated]: SessionSummary;
+  [IPC.sessionSlashCommandsEvent]: {
+    sessionId: string;
+    commands: SlashCommandItem[];
+  };
   [IPC.appError]: { message: string; detail?: string };
   // also permission mode can piggyback via settings
   permissionMode?: PermissionMode;

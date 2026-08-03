@@ -13,6 +13,7 @@ import {
 import {
   APP_SLASH_COMMANDS,
   filterSlashCommands,
+  mergeSlashCommands,
   parseLeadingSlash,
 } from "../lib/slash-commands";
 
@@ -37,6 +38,7 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
   const projectPath = useAppStore((s) => s.projectPath);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
   const settings = useAppStore((s) => s.settings);
+  const slashBySession = useAppStore((s) => s.slashBySession);
 
   const canSend =
     Boolean(text.trim()) && Boolean(projectPath || activeSessionId);
@@ -47,11 +49,20 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
       ? [settings.defaultModel]
       : [];
 
+  const allSlashCommands = useMemo(() => {
+    const sdk =
+      (activeSessionId && slashBySession[activeSessionId]) || [];
+    return mergeSlashCommands(sdk);
+  }, [activeSessionId, slashBySession]);
+
   const slash = parseLeadingSlash(text);
   const slashOpen = Boolean(slash && text.startsWith("/"));
   const slashMatches = useMemo(
-    () => (slashOpen ? filterSlashCommands(slash?.name ?? "") : []),
-    [slashOpen, slash?.name],
+    () =>
+      slashOpen
+        ? filterSlashCommands(slash?.name ?? "", allSlashCommands)
+        : [],
+    [slashOpen, slash?.name, allSlashCommands],
   );
 
   const runSlash = useCallback(
@@ -98,26 +109,39 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
           return;
         case "help":
           setHelpNote(
-            APP_SLASH_COMMANDS.map((c) => `/${c.name} — ${c.description}`).join(
-              "\n",
-            ),
+            allSlashCommands
+              .map((c) => `/${c.name} — ${c.description}`)
+              .join("\n"),
           );
           setText("");
           return;
-        default:
-          // Unknown slash: send as normal prompt so agent can handle skills later
+        default: {
+          // SDK skill / unknown: send as prompt (agent expands slash commands)
+          const skill = allSlashCommands.find((c) => c.name === name);
+          if (skill?.sendAsPrompt || !APP_SLASH_COMMANDS.some((c) => c.name === name)) {
+            sendMessage(text.startsWith("/") ? text : `/${name}`);
+            setText("");
+            return;
+          }
           sendMessage(text);
           setText("");
+        }
       }
     },
-    [onOpenSettings, onToggleChanges, settings?.permissionMode, text],
+    [
+      allSlashCommands,
+      onOpenSettings,
+      onToggleChanges,
+      settings?.permissionMode,
+      text,
+    ],
   );
 
   const onSend = useCallback(() => {
     if (!text.trim()) return;
     const parsed = parseLeadingSlash(text.trim());
     if (parsed && parsed.name) {
-      const known = APP_SLASH_COMMANDS.some((c) => c.name === parsed.name);
+      const known = allSlashCommands.some((c) => c.name === parsed.name);
       if (known) {
         void runSlash(parsed.name);
         return;
@@ -127,7 +151,7 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
     setText("");
     setHelpNote(null);
     sendMessage(prompt);
-  }, [runSlash, text]);
+  }, [allSlashCommands, runSlash, text]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (slashOpen && slashMatches.length > 0) {

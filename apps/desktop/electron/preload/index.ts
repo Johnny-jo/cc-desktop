@@ -34,6 +34,11 @@ const desktop = {
   selectSession: (sessionId: string) =>
     ipcRenderer.invoke(IPC.sessionSelect, { sessionId }),
 
+  getSessionSlashCommands: (sessionId: string) =>
+    ipcRenderer.invoke(IPC.sessionSlashCommands, { sessionId }) as Promise<{
+      commands: import("@claude-desktop/shared").SlashCommandItem[];
+    }>,
+
   respondPermission: (requestId: string, decision: PermissionDecision) =>
     ipcRenderer.invoke(IPC.permissionRespond, {
       requestId,

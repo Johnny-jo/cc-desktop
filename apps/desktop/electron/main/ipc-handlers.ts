@@ -96,6 +96,13 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
   );
 
   ipcMain.handle(
+    IPC.sessionSlashCommands,
+    async (_e, { sessionId }: { sessionId: string }) => {
+      return { commands: ctx.sessions.getSlashCommands(sessionId) };
+    },
+  );
+
+  ipcMain.handle(
     IPC.permissionRespond,
     async (
       _e,

@@ -9,6 +9,7 @@ import type {
   PermissionRequest,
   SdkNormalizedEvent,
   SessionSummary,
+  SlashCommandItem,
   UserPromptRequest,
 } from "@claude-desktop/shared";
 import { SettingsStore } from "./settings-store";
@@ -38,8 +39,8 @@ function sendToRenderer(channel: string, payload: unknown): void {
  */
 const realQueryFn: QueryFn = ({ prompt, options }) =>
   query({
-    prompt,
-    // SessionManager builds a Record matching SDK Options; cast at the boundary.
+    // Streaming MessageStream is structurally compatible with SDKUserMessage.
+    prompt: prompt as Parameters<typeof query>[0]["prompt"],
     options: options as Parameters<typeof query>[0]["options"],
   });
 
@@ -133,6 +134,9 @@ function bootstrap() {
     },
     emitDiff: (sessionId: string, changes: FileChange[]) => {
       sendToRenderer(IPC.diffUpdated, { sessionId, changes });
+    },
+    emitSlashCommands: (sessionId: string, commands: SlashCommandItem[]) => {
+      sendToRenderer(IPC.sessionSlashCommandsEvent, { sessionId, commands });
     },
   });
 

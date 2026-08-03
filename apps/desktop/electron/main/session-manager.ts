@@ -3,6 +3,7 @@ import type {
   FileChange,
   SdkNormalizedEvent,
   SessionSummary,
+  SlashCommandItem,
 } from "@claude-desktop/shared";
 import type { PermissionBroker } from "./permission-broker";
 import type { DiffTracker } from "./diff-tracker";
@@ -10,12 +11,18 @@ import type { CpaSupervisor } from "./cpa-supervisor";
 import type { SettingsStore } from "./settings-store";
 import type { UserPromptBroker } from "./user-prompt-broker";
 import { normalizeSdkEvent } from "./normalize-sdk-event";
+import { MessageStream } from "./message-stream";
 
-/** Injected so unit tests can mock the Agent SDK stream. Production uses real `query`. */
+/**
+ * Production query may receive a string (legacy/tests) or AsyncIterable (streaming).
+ * When the result is a Query-like object it may expose supportedCommands / interrupt / close.
+ */
+export type QueryHandle = AsyncGenerator<unknown> | AsyncIterable<unknown>;
+
 export type QueryFn = (args: {
-  prompt: string;
+  prompt: string | AsyncIterable<unknown>;
   options: Record<string, unknown>;
-}) => AsyncGenerator<unknown> | AsyncIterable<unknown>;
+}) => QueryHandle;
 
 export type SessionManagerDeps = {
   queryFn: QueryFn;
@@ -27,13 +34,37 @@ export type SessionManagerDeps = {
   emit: (event: SdkNormalizedEvent) => void;
   emitSession: (s: SessionSummary) => void;
   emitDiff: (sessionId: string, changes: FileChange[]) => void;
+  /** Optional: notify UI when SDK slash/skills list is refreshed */
+  emitSlashCommands?: (sessionId: string, commands: SlashCommandItem[]) => void;
+};
+
+type QueryControl = {
+  supportedCommands?: () => Promise<
+    Array<{
+      name: string;
+      description: string;
+      argumentHint?: string;
+      aliases?: string[];
+    }>
+  >;
+  interrupt?: () => Promise<unknown>;
+  close?: () => void;
 };
 
 type SessionEntry = {
   summary: SessionSummary;
   abortController: AbortController | null;
-  /** SDK session id when known (from result/session_id on messages) */
   sdkSessionId?: string;
+  /** Streaming input queue (kept open across turns) */
+  input?: MessageStream;
+  /** Live query handle for control requests */
+  query?: QueryHandle & QueryControl;
+  /** Background consumer promise */
+  consumer?: Promise<void>;
+  /** SDK + skill slash commands for this session */
+  slashCommands: SlashCommandItem[];
+  /** True while waiting for a result after push */
+  turnActive: boolean;
 };
 
 /**
@@ -75,7 +106,16 @@ function isToolUseBlock(
   return (
     b.type === "tool_use" &&
     typeof b.name === "string" &&
-    (typeof b.input === "object" && b.input !== null)
+    typeof b.input === "object" &&
+    b.input !== null
+  );
+}
+
+function isResultMessage(msg: unknown): boolean {
+  return (
+    typeof msg === "object" &&
+    msg !== null &&
+    (msg as { type?: string }).type === "result"
   );
 }
 
@@ -89,6 +129,7 @@ export class SessionManager {
   private readonly emit: SessionManagerDeps["emit"];
   private readonly emitSession: SessionManagerDeps["emitSession"];
   private readonly emitDiff: SessionManagerDeps["emitDiff"];
+  private readonly emitSlashCommands: SessionManagerDeps["emitSlashCommands"];
 
   private readonly sessions = new Map<string, SessionEntry>();
 
@@ -102,6 +143,7 @@ export class SessionManager {
     this.emit = deps.emit;
     this.emitSession = deps.emitSession;
     this.emitDiff = deps.emitDiff;
+    this.emitSlashCommands = deps.emitSlashCommands;
   }
 
   list(): SessionSummary[] {
@@ -110,11 +152,35 @@ export class SessionManager {
       .sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
+  /** SDK skills / slash commands cached for a session (empty if none yet). */
+  getSlashCommands(sessionId: string): SlashCommandItem[] {
+    return [...(this.sessions.get(sessionId)?.slashCommands ?? [])];
+  }
+
   abort(sessionId: string): void {
     const entry = this.sessions.get(sessionId);
-    if (!entry?.abortController) return;
+    if (!entry) return;
     try {
-      entry.abortController.abort();
+      void entry.query?.interrupt?.();
+    } catch {
+      // ignore
+    }
+    if (entry.abortController) {
+      try {
+        entry.abortController.abort();
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  /** Close streaming input for a session (e.g. window quit). */
+  closeSession(sessionId: string): void {
+    const entry = this.sessions.get(sessionId);
+    if (!entry) return;
+    try {
+      entry.input?.end();
+      entry.query?.close?.();
     } catch {
       // ignore
     }
@@ -132,10 +198,16 @@ export class SessionManager {
       updatedAt: now,
       status: "running",
     };
-    this.sessions.set(sessionId, { summary, abortController: null });
+    const entry: SessionEntry = {
+      summary,
+      abortController: null,
+      slashCommands: [],
+      turnActive: true,
+    };
+    this.sessions.set(sessionId, entry);
     this.emitSession({ ...summary });
 
-    await this.runTurn(sessionId, prompt, { resume: false });
+    await this.openStreamingSession(sessionId, prompt, { resume: false });
     return sessionId;
   }
 
@@ -152,9 +224,19 @@ export class SessionManager {
       status: "running",
       updatedAt: Date.now(),
     };
+    entry.turnActive = true;
     this.emitSession({ ...entry.summary });
 
-    await this.runTurn(sessionId, prompt, { resume: true });
+    // Live streaming session: just push the next user message.
+    if (entry.input && !entry.input.isClosed && entry.consumer) {
+      entry.input.push(prompt, entry.sdkSessionId);
+      // Wait until this turn's result (or error) so IPC still "awaits the turn".
+      await this.waitForTurnIdle(sessionId);
+      return;
+    }
+
+    // Fallback: open a new streaming query with resume.
+    await this.openStreamingSession(sessionId, prompt, { resume: true });
   }
 
   private async ensureCpaOrThrow(sessionId?: string): Promise<void> {
@@ -176,31 +258,21 @@ export class SessionManager {
     throw new Error(`CPA: ${message}`);
   }
 
-  private async runTurn(
+  private buildOptions(
     sessionId: string,
-    prompt: string,
-    opts: { resume: boolean },
-  ): Promise<void> {
-    const entry = this.sessions.get(sessionId);
-    if (!entry) return;
-
-    const abortController = new AbortController();
-    entry.abortController = abortController;
-
+    entry: SessionEntry,
+    abortController: AbortController,
+  ): Record<string, unknown> {
     const settings = this.settings.get();
     const env = this.cpa.buildProcessEnv(settings.defaultModel);
 
-    // Shape matches @anthropic-ai/claude-agent-sdk Options + PermissionResult.
-    // Use `tools` (which tools exist) NOT bare `allowedTools` (auto-allow).
-    // Safe read tools can be pre-allowed; Edit/Write/Bash go through canUseTool.
-    const options: Record<string, unknown> = {
+    return {
       cwd: entry.summary.cwd,
       includePartialMessages: true,
       permissionMode: settings.permissionMode,
       model: settings.defaultModel,
       env,
       tools: [...SESSION_TOOLS],
-      // Only auto-allow read-ish tools so canUseTool still gates mutations.
       allowedTools: ["Read", "Glob", "Grep", "WebFetch", "WebSearch"],
       abortController,
       canUseTool: async (
@@ -219,31 +291,105 @@ export class SessionManager {
             updatedInput: result.updatedInput,
           };
         }
-        // SDK PermissionResult.deny requires a non-optional message.
         return {
           behavior: "deny" as const,
           message: result.message ?? "Denied by permission broker",
         };
       },
-      // MCP elicitation / host dialogs → UI (when broker is wired)
       ...(this.userPromptBroker
         ? {
-            onElicitation:
-              this.userPromptBroker.makeOnElicitation(sessionId),
+            onElicitation: this.userPromptBroker.makeOnElicitation(sessionId),
             onUserDialog: this.userPromptBroker.makeOnUserDialog(sessionId),
           }
         : {}),
     };
+  }
 
+  /**
+   * Start a streaming-input query, push the first prompt, and run a background
+   * consumer until the stream ends. Resolves after the first turn's result.
+   */
+  private async openStreamingSession(
+    sessionId: string,
+    prompt: string,
+    opts: { resume: boolean },
+  ): Promise<void> {
+    const entry = this.sessions.get(sessionId);
+    if (!entry) return;
+
+    // Tear down any previous stream
+    try {
+      entry.input?.end();
+      entry.query?.close?.();
+    } catch {
+      // ignore
+    }
+
+    const abortController = new AbortController();
+    entry.abortController = abortController;
+    entry.turnActive = true;
+
+    const input = new MessageStream();
+    entry.input = input;
+
+    const options = this.buildOptions(sessionId, entry, abortController);
     if (opts.resume) {
-      // Prefer SDK session id from prior result; fall back to local id.
       options.resume = entry.sdkSessionId ?? sessionId;
     }
 
+    const settings = this.settings.get();
+
     try {
-      const stream = this.queryFn({ prompt, options });
+      const q = this.queryFn({
+        prompt: input as AsyncIterable<unknown>,
+        options,
+      });
+      entry.query = q as QueryHandle & QueryControl;
+
+      // Kick off consumer before first push so we don't miss early messages.
+      entry.consumer = this.consumeQuery(sessionId, q, settings.defaultModel);
+
+      // Refresh slash/skills list (control request; streaming mode only).
+      void this.refreshSlashCommands(sessionId);
+
+      input.push(prompt, entry.sdkSessionId);
+      await this.waitForTurnIdle(sessionId);
+    } catch (err) {
+      const raw = err instanceof Error ? err.message : String(err);
+      const message = humanizeAgentError(raw, settings.defaultModel);
+      this.emit({
+        type: "result",
+        sessionId,
+        ok: false,
+        error: message,
+      });
+      entry.summary = {
+        ...entry.summary,
+        status: "error",
+        updatedAt: Date.now(),
+      };
+      entry.turnActive = false;
+      this.emitSession({ ...entry.summary });
+      try {
+        input.end();
+      } catch {
+        // ignore
+      }
+      throw err;
+    }
+  }
+
+  private async consumeQuery(
+    sessionId: string,
+    stream: QueryHandle,
+    model: string,
+  ): Promise<void> {
+    const entry = this.sessions.get(sessionId);
+    if (!entry) return;
+
+    try {
       for await (const msg of stream) {
-        if (abortController.signal.aborted) break;
+        if (entry.abortController?.signal.aborted) break;
 
         const sdkId = extractSdkSessionId(msg);
         if (sdkId) {
@@ -261,12 +407,26 @@ export class SessionManager {
               status: event.ok ? "idle" : "error",
               updatedAt: Date.now(),
             };
+            entry.turnActive = false;
+            this.emitSession({ ...entry.summary });
+          }
+        }
+
+        // Also mark idle on bare result messages if normalize missed fields
+        if (isResultMessage(msg) && entry.turnActive) {
+          entry.turnActive = false;
+          if (entry.summary.status === "running") {
+            entry.summary = {
+              ...entry.summary,
+              status: "idle",
+              updatedAt: Date.now(),
+            };
             this.emitSession({ ...entry.summary });
           }
         }
       }
 
-      // If stream ended without result, mark idle
+      // Stream ended (input closed or process exit)
       if (entry.summary.status === "running") {
         entry.summary = {
           ...entry.summary,
@@ -275,9 +435,20 @@ export class SessionManager {
         };
         this.emitSession({ ...entry.summary });
       }
+      entry.turnActive = false;
     } catch (err) {
+      if (entry.abortController?.signal.aborted) {
+        entry.turnActive = false;
+        entry.summary = {
+          ...entry.summary,
+          status: "idle",
+          updatedAt: Date.now(),
+        };
+        this.emitSession({ ...entry.summary });
+        return;
+      }
       const raw = err instanceof Error ? err.message : String(err);
-      const message = humanizeAgentError(raw, settings.defaultModel);
+      const message = humanizeAgentError(raw, model);
       this.emit({
         type: "result",
         sessionId,
@@ -289,13 +460,55 @@ export class SessionManager {
         status: "error",
         updatedAt: Date.now(),
       };
+      entry.turnActive = false;
       this.emitSession({ ...entry.summary });
-      // Re-throw original for logging/callers; UI already got humanized event.
-      throw err;
     } finally {
-      if (entry.abortController === abortController) {
+      if (entry.abortController) {
         entry.abortController = null;
       }
+    }
+  }
+
+  private waitForTurnIdle(sessionId: string): Promise<void> {
+    const entry = this.sessions.get(sessionId);
+    if (!entry) return Promise.resolve();
+    if (!entry.turnActive) return Promise.resolve();
+
+    return new Promise((resolve) => {
+      const start = Date.now();
+      const tick = () => {
+        const e = this.sessions.get(sessionId);
+        if (!e || !e.turnActive) {
+          resolve();
+          return;
+        }
+        // Safety: don't hang forever (30 min)
+        if (Date.now() - start > 30 * 60 * 1000) {
+          e.turnActive = false;
+          resolve();
+          return;
+        }
+        setTimeout(tick, 50);
+      };
+      tick();
+    });
+  }
+
+  private async refreshSlashCommands(sessionId: string): Promise<void> {
+    const entry = this.sessions.get(sessionId);
+    if (!entry?.query?.supportedCommands) return;
+    try {
+      // Give initialize a brief moment on cold start
+      await new Promise((r) => setTimeout(r, 100));
+      const cmds = await entry.query.supportedCommands();
+      entry.slashCommands = (cmds ?? []).map((c) => ({
+        name: c.name,
+        description: c.description || c.argumentHint || c.name,
+        sendAsPrompt: true,
+      }));
+      this.emitSlashCommands?.(sessionId, entry.slashCommands);
+    } catch {
+      // Control request may fail if CLI not ready; non-fatal.
     }
   }
 
@@ -325,7 +538,10 @@ export class SessionManager {
  * DeepSeek (and some OpenAI-compat proxies) reject Anthropic image blocks.
  */
 export function humanizeAgentError(raw: string, model: string): string {
-  if (/unknown variant\s*`?image_url`?/i.test(raw) || /image_url.*expected\s*`?text`?/i.test(raw)) {
+  if (
+    /unknown variant\s*`?image_url`?/i.test(raw) ||
+    /image_url.*expected\s*`?text`?/i.test(raw)
+  ) {
     return (
       `Model "${model}" does not accept image content (image_url). ` +
       `Start a new chat without screenshots, or switch to a vision-capable model ` +
