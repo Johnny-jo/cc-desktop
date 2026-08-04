@@ -655,6 +655,7 @@ textarea {
   line-height: 1.4;
 }
 
+.chat-body {
   overflow: auto;
   min-height: 0;
   height: 100%;

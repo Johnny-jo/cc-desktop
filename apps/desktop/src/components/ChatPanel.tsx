@@ -115,31 +115,33 @@ export function ChatPanel({
         </div>
       </header>
 
-      {showBanner && ctx ? (
-        <div className={`context-banner context-banner-${level}`} role="status">
-          <div className="context-banner-text">
-            上下文已用 <strong>{formatContextPercent(ctx.ratio)}</strong>
-            （{formatTokens(ctx.usedTokens)} / {formatTokens(ctx.limitTokens)}）。
-            接近窗口上限，建议新开对话或压缩历史。
-          </div>
-          <button
-            type="button"
-            className="btn btn-ghost btn-sm"
-            onClick={() => {
-              if (!activeSessionId) return;
-              setBannerDismissed((prev) => ({
-                ...prev,
-                [activeSessionId]: true,
-              }));
-            }}
-          >
-            知道了
-          </button>
-        </div>
-      ) : null}
-
       <div className="chat-body">
         <div className="chat-inner">
+          {showBanner && ctx ? (
+            <div
+              className={`context-banner context-banner-${level}`}
+              role="status"
+            >
+              <div className="context-banner-text">
+                上下文已用 <strong>{formatContextPercent(ctx.ratio)}</strong>
+                （{formatTokens(ctx.usedTokens)} / {formatTokens(ctx.limitTokens)}）。
+                接近窗口上限，建议新开对话或压缩历史。
+              </div>
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={() => {
+                  if (!activeSessionId) return;
+                  setBannerDismissed((prev) => ({
+                    ...prev,
+                    [activeSessionId]: true,
+                  }));
+                }}
+              >
+                知道了
+              </button>
+            </div>
+          ) : null}
           <MessageList items={items} />
         </div>
       </div>
