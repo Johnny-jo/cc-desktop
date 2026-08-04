@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 import {
   IPC,
+  type Attachment,
   type ChatItem,
   type CpaStatus,
   type FileChange,
@@ -11,6 +12,7 @@ import {
   type SessionSummary,
   type SlashCommandItem,
   type ToolCardState,
+  type UserPrompt,
   type UserPromptRequest,
 } from "@claude-desktop/shared";
 import { getDesktop } from "../lib/desktop-api";
@@ -617,9 +619,15 @@ export async function selectSession(sessionId: string): Promise<void> {
  * Fire-and-forget send. sessionStart/continue await the full turn in main,
  * so UI must drive from session:event / session:updated.
  */
-export function sendMessage(text: string): void {
-  const prompt = text.trim();
-  if (!prompt) return;
+export function sendMessage(text: string, attachments: Attachment[] = []): void {
+  const promptText = text.trim();
+  const displayText =
+    attachments.length > 0
+      ? `${promptText}\n\n[Attached: ${attachments.map((a) => a.name).join(", ")}]`
+      : promptText;
+
+  const prompt: UserPrompt = { text: promptText, attachments };
+  if (!promptText && attachments.length === 0) return;
 
   let desktop;
   try {
@@ -634,7 +642,7 @@ export function sendMessage(text: string): void {
   setState({ running: true, lastError: null });
 
   if (activeSessionId) {
-    appendUserMessage(activeSessionId, prompt, { optimistic: true });
+    appendUserMessage(activeSessionId, displayText, { optimistic: true });
     // Optimistic running status for the active session.
     const sessions = state.sessions.map((s) =>
       s.id === activeSessionId
@@ -653,7 +661,7 @@ export function sendMessage(text: string): void {
   // New session: show the user bubble on first session:updated (running).
   // startSession awaits the full turn, so appending only in .then() puts the
   // question after the assistant reply.
-  pendingStartPrompt = prompt;
+  pendingStartPrompt = displayText;
   void desktop
     .startSession(prompt, state.projectPath ?? undefined)
     .then((res) => {

@@ -1,5 +1,7 @@
 import React, { useCallback, useMemo, useRef, useState } from "react";
-import type { PermissionMode } from "@claude-desktop/shared";
+import type { Attachment, PermissionMode } from "@claude-desktop/shared";
+import { formatFileSize, IMAGE_MIME_TYPES } from "@claude-desktop/shared";
+import { getDesktop } from "../lib/desktop-api";
 import {
   abortActiveSession,
   newChat,
@@ -22,17 +24,46 @@ export type ComposerProps = {
   onOpenSettings?: () => void;
 };
 
+const MAX_ATTACHMENTS = 5;
+const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
+const MAX_TEXT_SIZE = 512 * 1024;
+
 const PERMISSION_CYCLE: PermissionMode[] = [
   "default",
   "acceptEdits",
   "plan",
 ];
 
+function getDesktopOrNull() {
+  try {
+    return getDesktop();
+  } catch {
+    return null;
+  }
+}
+
+function validateAttachment(a: Attachment): string | null {
+  if (a.kind === "image" && a.size > MAX_IMAGE_SIZE) {
+    return `${a.name} exceeds ${formatFileSize(MAX_IMAGE_SIZE)}`;
+  }
+  if (a.kind === "text" && a.size > MAX_TEXT_SIZE) {
+    return `${a.name} exceeds ${formatFileSize(MAX_TEXT_SIZE)}`;
+  }
+  if (a.kind === "binary") {
+    return `${a.name} is not a supported text/image file`;
+  }
+  return null;
+}
+
 export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
   const [text, setText] = useState("");
   const [slashIndex, setSlashIndex] = useState(0);
   const [helpNote, setHelpNote] = useState<string | null>(null);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
   const modelSelectRef = useRef<HTMLSelectElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const running = useAppStore((s) => s.running);
   const projectPath = useAppStore((s) => s.projectPath);
@@ -41,7 +72,8 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
   const slashBySession = useAppStore((s) => s.slashBySession);
 
   const canSend =
-    Boolean(text.trim()) && Boolean(projectPath || activeSessionId);
+    (Boolean(text.trim()) || attachments.length > 0) &&
+    Boolean(projectPath || activeSessionId);
 
   const models = settings?.models?.length
     ? settings.models
@@ -65,6 +97,86 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
     [slashOpen, slash?.name, allSlashCommands],
   );
 
+  const validateAndSetAttachments = useCallback((next: Attachment[]) => {
+    setAttachmentError(null);
+    if (next.length > MAX_ATTACHMENTS) {
+      setAttachmentError(`At most ${MAX_ATTACHMENTS} files allowed`);
+      next = next.slice(0, MAX_ATTACHMENTS);
+    }
+    for (const a of next) {
+      const err = validateAttachment(a);
+      if (err) {
+        setAttachmentError(err);
+        break;
+      }
+    }
+    setAttachments(next);
+  }, []);
+
+  const addAttachments = useCallback(
+    async (files: File[]) => {
+      const desktop = getDesktopOrNull();
+      if (!desktop) return;
+      const added: Attachment[] = [];
+      for (const file of files) {
+        try {
+          const path = desktop.getPathForFile(file);
+          const attachment = await desktop.readAttachment(path);
+          added.push(attachment);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          setAttachmentError(message);
+        }
+      }
+      validateAndSetAttachments([...attachments, ...added]);
+    },
+    [attachments, validateAndSetAttachments],
+  );
+
+  const handleFileSelect = useCallback(async () => {
+    const desktop = getDesktopOrNull();
+    if (!desktop) return;
+    try {
+      const { paths } = await desktop.selectFiles();
+      const added: Attachment[] = [];
+      for (const path of paths) {
+        try {
+          const attachment = await desktop.readAttachment(path);
+          added.push(attachment);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          setAttachmentError(message);
+        }
+      }
+      validateAndSetAttachments([...attachments, ...added]);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setAttachmentError(message);
+    }
+  }, [attachments, validateAndSetAttachments]);
+
+  const removeAttachment = useCallback(
+    (path: string) => {
+      validateAndSetAttachments(attachments.filter((a) => a.path !== path));
+    },
+    [attachments, validateAndSetAttachments],
+  );
+
+  const onDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+  };
+  const onDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+  };
+  const onDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length) await addAttachments(files);
+  };
+
   const runSlash = useCallback(
     async (name: string) => {
       setHelpNote(null);
@@ -73,6 +185,7 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
         case "clear":
           newChat();
           setText("");
+          setAttachments([]);
           return;
         case "model":
           setText("");
@@ -118,18 +231,24 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
         default: {
           // SDK skill / unknown: send as prompt (agent expands slash commands)
           const skill = allSlashCommands.find((c) => c.name === name);
-          if (skill?.sendAsPrompt || !APP_SLASH_COMMANDS.some((c) => c.name === name)) {
-            sendMessage(text.startsWith("/") ? text : `/${name}`);
+          if (
+            skill?.sendAsPrompt ||
+            !APP_SLASH_COMMANDS.some((c) => c.name === name)
+          ) {
+            sendMessage(text.startsWith("/") ? text : `/${name}`, attachments);
             setText("");
+            setAttachments([]);
             return;
           }
-          sendMessage(text);
+          sendMessage(text, attachments);
           setText("");
+          setAttachments([]);
         }
       }
     },
     [
       allSlashCommands,
+      attachments,
       onOpenSettings,
       onToggleChanges,
       settings?.permissionMode,
@@ -138,7 +257,7 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
   );
 
   const onSend = useCallback(() => {
-    if (!text.trim()) return;
+    if (!text.trim() && attachments.length === 0) return;
     const parsed = parseLeadingSlash(text.trim());
     if (parsed && parsed.name) {
       const known = allSlashCommands.some((c) => c.name === parsed.name);
@@ -150,8 +269,10 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
     const prompt = text;
     setText("");
     setHelpNote(null);
-    sendMessage(prompt);
-  }, [allSlashCommands, runSlash, text]);
+    setAttachmentError(null);
+    sendMessage(prompt, attachments);
+    setAttachments([]);
+  }, [allSlashCommands, attachments, runSlash, text]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (slashOpen && slashMatches.length > 0) {
@@ -211,15 +332,48 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
         <pre className="slash-help-note">{helpNote}</pre>
       ) : null}
 
-      <div className="composer">
+      {attachmentError ? (
+        <div className="composer-attachment-error">{attachmentError}</div>
+      ) : null}
+
+      {attachments.length > 0 ? (
+        <div className="composer-attachments">
+          {attachments.map((a) => (
+            <div key={a.path} className="composer-attachment">
+              <span className="composer-attachment-name" title={a.path}>
+                {a.name}
+              </span>
+              <span className="composer-attachment-meta">
+                {formatFileSize(a.size)} · {a.kind}
+              </span>
+              <button
+                type="button"
+                className="composer-attachment-remove"
+                onClick={() => removeAttachment(a.path)}
+                title="Remove file"
+                aria-label={`Remove ${a.name}`}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      <div
+        className={isDragging ? "composer dragging" : "composer"}
+        onDragOver={onDragOver}
+        onDragLeave={onDragLeave}
+        onDrop={onDrop}
+      >
         <textarea
           className="composer-input"
           rows={2}
           placeholder={
             projectPath
               ? activeSessionId
-                ? "Reply…  (type / for commands)"
-                : "Message Claude…  (type / for commands)"
+                ? "Reply…  (type / for commands, drop files)"
+                : "Message Claude…  (type / for commands, drop files)"
               : "Open a project first, then type a message…"
           }
           value={text}
@@ -231,22 +385,45 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
           disabled={!projectPath && !activeSessionId}
         />
         <div className="composer-bar">
-          <label className="composer-model-field" title="Model">
-            <span className="composer-model-prefix">✦</span>
-            <select
-              ref={modelSelectRef}
-              className="select select-ghost composer-model-select"
-              value={settings?.defaultModel ?? ""}
-              disabled={!settings || models.length === 0}
-              onChange={(e) => void setModel(e.target.value)}
+          <div className="composer-left">
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept={IMAGE_MIME_TYPES.join(",") + ",.txt,.md,.json,.js,.ts,.py,.pdf"}
+              className="composer-file-input"
+              onChange={async (e) => {
+                const files = Array.from(e.target.files ?? []);
+                e.target.value = "";
+                if (files.length) await addAttachments(files);
+              }}
+            />
+            <button
+              type="button"
+              className="btn btn-ghost btn-icon"
+              title="Attach files"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={!projectPath && !activeSessionId}
             >
-              {models.map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-            </select>
-          </label>
+              📎
+            </button>
+            <label className="composer-model-field" title="Model">
+              <span className="composer-model-prefix">✦</span>
+              <select
+                ref={modelSelectRef}
+                className="select select-ghost composer-model-select"
+                value={settings?.defaultModel ?? ""}
+                disabled={!settings || models.length === 0}
+                onChange={(e) => void setModel(e.target.value)}
+              >
+                {models.map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
           <div className="composer-actions">
             {running ? (
               <button

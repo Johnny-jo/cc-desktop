@@ -1096,6 +1096,12 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  transition: border-color 140ms ease, background 140ms ease;
+}
+
+.composer.dragging {
+  border-color: var(--accent);
+  background: var(--accent-soft);
 }
 
 .composer-input {
@@ -1128,6 +1134,87 @@ textarea {
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
+}
+
+.composer-left {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.composer-file-input {
+  position: absolute;
+  width: 0;
+  height: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.composer-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 2px;
+}
+
+.composer-attachment {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: var(--bg-active);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  color: var(--text-muted);
+  max-width: 100%;
+}
+
+.composer-attachment-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 180px;
+  color: var(--text);
+}
+
+.composer-attachment-meta {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+.composer-attachment-remove {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.composer-attachment-remove:hover {
+  background: var(--danger);
+  color: #fff;
+}
+
+.composer-attachment-error {
+  padding: 6px 10px;
+  background: rgba(248, 113, 113, 0.1);
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  border-radius: var(--radius-sm);
+  color: var(--danger);
+  font-size: 12px;
 }
 
 .composer-model-field {
