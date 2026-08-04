@@ -1,7 +1,7 @@
 import net from "node:net";
 import { spawn } from "node:child_process";
-import type { AppSettings, CpaStatus } from "@claude-desktop/shared";
-
+import type { AppSettings, CpaStatus, ModelInfo } from "@claude-desktop/shared";
+import { parseModelContextLimit } from "@claude-desktop/shared";
 export type SpawnedProcess = {
   pid?: number;
   kill: (signal?: NodeJS.Signals | number) => boolean;
@@ -76,6 +76,7 @@ export class CpaSupervisor {
   private child: SpawnedProcess | null = null;
   private managedByApp = false;
   private ensurePromise: Promise<CpaStatus> | null = null;
+  private modelCatalog: ModelInfo[] = [];
 
   constructor(deps: CpaSupervisorDeps) {
     this.getSettings = deps.getSettings;
@@ -105,11 +106,11 @@ export class CpaSupervisor {
   }
 
   /**
-   * List client-visible model ids from CPA OpenAI-compatible /v1/models.
-   * Prefers unprefixed aliases (deepseek-v4-flash) over provider/path forms
-   * (kimi/k3) when both exist.
+   * Fetch OpenAI-compatible /v1/models and cache ModelInfo with context limits.
+   * Prefers unprefixed aliases for the returned ids, but keeps the best available
+   * context limit (preferring direct rows, then any prefixed sibling).
    */
-  async listModels(): Promise<string[]> {
+  async listModelCatalog(): Promise<ModelInfo[]> {
     const settings = this.getSettings();
     const token = this.getToken();
     if (!token) {
@@ -128,13 +129,62 @@ export class CpaSupervisor {
         `CPA /v1/models failed: ${res.status}${body ? ` ${body.slice(0, 200)}` : ""}`,
       );
     }
-    const json = (await res.json()) as {
-      data?: Array<{ id?: string }>;
-    };
-    const raw = (json.data ?? [])
-      .map((m) => m.id)
-      .filter((id): id is string => typeof id === "string" && id.length > 0);
-    return preferUnprefixedModels(raw);
+    const json = (await res.json()) as { data?: unknown[] };
+    const rawItems = Array.isArray(json.data) ? json.data : [];
+
+    // Map id -> best ModelInfo (prefer entry that has contextLimit)
+    const byId = new Map<string, ModelInfo>();
+    for (const item of rawItems) {
+      if (!item || typeof item !== "object") continue;
+      const id = (item as { id?: unknown }).id;
+      if (typeof id !== "string" || !id) continue;
+      const contextLimit = parseModelContextLimit(item);
+      const next: ModelInfo = {
+        id,
+        ...(contextLimit != null ? { contextLimit } : {}),
+      };
+      const prev = byId.get(id);
+      if (!prev) {
+        byId.set(id, next);
+      } else if (next.contextLimit != null && prev.contextLimit == null) {
+        byId.set(id, next);
+      } else if (
+        next.contextLimit != null &&
+        prev.contextLimit != null &&
+        next.contextLimit > prev.contextLimit
+      ) {
+        byId.set(id, next);
+      }
+    }
+
+    const ids = preferUnprefixedModels([...byId.keys()]);
+    const catalog: ModelInfo[] = ids.map((id) => {
+      // Prefer unprefixed row; fall back to any prefixed sibling's limit
+      const direct = byId.get(id);
+      if (direct?.contextLimit != null) {
+        return { id, contextLimit: direct.contextLimit };
+      }
+      for (const [k, v] of byId) {
+        if (k === id || k.endsWith(`/${id}`)) {
+          if (v.contextLimit != null) {
+            return { id, contextLimit: v.contextLimit };
+          }
+        }
+      }
+      return { id };
+    });
+
+    this.modelCatalog = catalog;
+    return this.getModelCatalog();
+  }
+
+  getModelCatalog(): ModelInfo[] {
+    return this.modelCatalog.map((m) => ({ ...m }));
+  }
+
+  async listModels(): Promise<string[]> {
+    const catalog = await this.listModelCatalog();
+    return catalog.map((m) => m.id);
   }
 
   async ensureReady(): Promise<CpaStatus> {

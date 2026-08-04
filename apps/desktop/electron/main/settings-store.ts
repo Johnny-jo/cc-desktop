@@ -23,6 +23,8 @@ const DEFAULTS: AppSettings = {
   ],
   permissionMode: "default",
   shutdownCpaOnQuit: false,
+  defaultContextLimit: 200_000,
+  modelContextLimits: {},
 };
 
 type StoredFile = Partial<AppSettings> & {
@@ -52,7 +54,11 @@ export class SettingsStore {
   }
 
   get(): AppSettings {
-    return { ...this.settings, models: [...this.settings.models] };
+    return {
+      ...this.settings,
+      models: [...this.settings.models],
+      modelContextLimits: { ...this.settings.modelContextLimits },
+    };
   }
 
   getPublic(): PublicSettings {
@@ -71,6 +77,9 @@ export class SettingsStore {
 
     if (publicPatch.models) {
       publicPatch.models = [...publicPatch.models];
+    }
+    if (publicPatch.modelContextLimits) {
+      publicPatch.modelContextLimits = { ...publicPatch.modelContextLimits };
     }
     if (publicPatch.permissionMode !== undefined) {
       publicPatch.permissionMode = publicPatch.permissionMode as PermissionMode;
@@ -110,10 +119,28 @@ export class SettingsStore {
       const raw = fs.readFileSync(this.filePath, "utf8");
       const data = JSON.parse(raw) as StoredFile;
       const { tokenEnc, ...rest } = data;
+
+      const limits =
+        rest.modelContextLimits && typeof rest.modelContextLimits === "object"
+          ? Object.fromEntries(
+              Object.entries(rest.modelContextLimits as Record<string, unknown>)
+                .map(([k, v]) => [k, Number(v)] as const)
+                .filter(([, v]) => Number.isFinite(v) && v > 0),
+            )
+          : { ...DEFAULTS.modelContextLimits };
+      const defaultContextLimit =
+        typeof rest.defaultContextLimit === "number" &&
+        Number.isFinite(rest.defaultContextLimit) &&
+        rest.defaultContextLimit > 0
+          ? Math.floor(rest.defaultContextLimit)
+          : DEFAULTS.defaultContextLimit;
+
       this.settings = {
         ...DEFAULTS,
         ...rest,
         models: rest.models ? [...rest.models] : [...DEFAULTS.models],
+        defaultContextLimit,
+        modelContextLimits: limits,
       };
       this.tokenEnc = tokenEnc;
       if (tokenEnc) {

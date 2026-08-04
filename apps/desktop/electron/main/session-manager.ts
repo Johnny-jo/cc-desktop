@@ -13,6 +13,7 @@ import type { CpaSupervisor } from "./cpa-supervisor";
 import type { SettingsStore } from "./settings-store";
 import type { UserPromptBroker } from "./user-prompt-broker";
 import type { SessionArchive, StoredSession } from "./session-archive";
+import { computeContextUsage } from "@claude-desktop/shared";
 import { normalizeSdkEvent } from "./normalize-sdk-event";
 import { MessageStream } from "./message-stream";
 
@@ -163,6 +164,9 @@ export class SessionManager {
             updatedAt: stored.updatedAt,
             status: stored.status === "running" ? "idle" : stored.status,
             ...(stored.usage ? { usage: stored.usage } : {}),
+            ...(stored.contextUsage
+              ? { contextUsage: stored.contextUsage }
+              : {}),
           },
           abortController: null,
           sdkSessionId: stored.sdkSessionId,
@@ -472,11 +476,25 @@ export class SessionManager {
         for (const event of events) {
           this.emit(event);
           if (event.type === "result") {
+            const settings = this.settings.get();
+            const catalog = this.cpa.getModelCatalog();
+            const contextUsage =
+              computeContextUsage({
+                turn: event.usage,
+                modelId: model || settings.defaultModel,
+                settings: {
+                  defaultContextLimit: settings.defaultContextLimit,
+                  modelContextLimits: settings.modelContextLimits,
+                },
+                catalog,
+              }) ?? entry.summary.contextUsage;
+
             entry.summary = {
               ...entry.summary,
               status: event.ok ? "idle" : "error",
               updatedAt: Date.now(),
               usage: accumulateUsage(entry.summary.usage, event.usage),
+              ...(contextUsage ? { contextUsage } : {}),
             };
             entry.turnActive = false;
             this.emitSession({ ...entry.summary });

@@ -69,6 +69,27 @@ export class SessionArchive {
               },
             }
           : {}),
+        ...(s.contextUsage &&
+        typeof s.contextUsage === "object" &&
+        Number(s.contextUsage.usedTokens) >= 0 &&
+        Number(s.contextUsage.limitTokens) > 0
+          ? {
+              contextUsage: {
+                usedTokens: Number(s.contextUsage.usedTokens) || 0,
+                limitTokens: Number(s.contextUsage.limitTokens) || 0,
+                ratio: Number(s.contextUsage.ratio) || 0,
+                source:
+                  s.contextUsage.source === "cpa" ||
+                  s.contextUsage.source === "builtin" ||
+                  s.contextUsage.source === "override" ||
+                  s.contextUsage.source === "default"
+                    ? s.contextUsage.source
+                    : "default",
+                modelId: String(s.contextUsage.modelId ?? ""),
+                updatedAt: Number(s.contextUsage.updatedAt) || Date.now(),
+              },
+            }
+          : {}),
       }));
     } catch {
       return [];
@@ -87,6 +108,7 @@ export class SessionArchive {
           status: s.status === "running" ? "idle" : s.status,
           ...(s.sdkSessionId ? { sdkSessionId: s.sdkSessionId } : {}),
           ...(s.usage ? { usage: s.usage } : {}),
+          ...(s.contextUsage ? { contextUsage: s.contextUsage } : {}),
         }))
         .sort((a, b) => b.updatedAt - a.updatedAt),
     };

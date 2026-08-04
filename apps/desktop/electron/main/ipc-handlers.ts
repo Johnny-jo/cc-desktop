@@ -167,7 +167,8 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
 
   ipcMain.handle(IPC.cpaSyncModels, async () => {
     await ctx.cpa.ensureReady();
-    const models = await ctx.cpa.listModels();
+    const catalog = await ctx.cpa.listModelCatalog();
+    const models = catalog.map((m) => m.id);
     if (models.length === 0) {
       throw new Error("CPA returned an empty model list");
     }

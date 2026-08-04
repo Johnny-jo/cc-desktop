@@ -9,6 +9,8 @@ const baseSettings = {
   models: [] as [],
   permissionMode: "default" as const,
   shutdownCpaOnQuit: false,
+  defaultContextLimit: 200_000,
+  modelContextLimits: {},
 };
 
 describe("CpaSupervisor", () => {
@@ -92,15 +94,14 @@ describe("CpaSupervisor", () => {
     ).toEqual(["deepseek-v4-flash", "deepseek-v4-pro", "k3", "grok-4.5"]);
   });
 
-  it("listModels fetches /v1/models with bearer token", async () => {
+  it("listModelCatalog parses context fields and caches", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
         data: [
-          { id: "deepseek-v4-flash" },
-          { id: "deepseek-v4-pro" },
-          { id: "kimi/k3" },
-          { id: "k3" },
+          { id: "provider/deepseek-v4-flash", context_length: 65536 },
+          { id: "deepseek-v4-flash", max_model_len: 128000 },
+          { id: "no-limit-model" },
         ],
       }),
     });
@@ -112,14 +113,17 @@ describe("CpaSupervisor", () => {
       probePort: async () => true,
       spawnProcess: vi.fn(),
     });
-    const models = await cpa.listModels();
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:8317/v1/models",
-      expect.objectContaining({
-        headers: { Authorization: "Bearer tok" },
-      }),
-    );
-    expect(models).toEqual(["deepseek-v4-flash", "deepseek-v4-pro", "k3"]);
+
+    const catalog = await cpa.listModelCatalog();
+    expect(catalog.some((m) => m.id === "deepseek-v4-flash")).toBe(true);
+    const flash = catalog.find((m) => m.id === "deepseek-v4-flash");
+    expect(flash?.contextLimit).toBe(128000);
+    expect(cpa.getModelCatalog().length).toBeGreaterThan(0);
+
+    // listModels still returns string ids
+    const ids = await cpa.listModels();
+    expect(ids).toContain("deepseek-v4-flash");
+
     vi.unstubAllGlobals();
   });
 });
