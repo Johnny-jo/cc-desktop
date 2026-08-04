@@ -580,7 +580,81 @@ textarea {
   letter-spacing: 0.01em;
 }
 
-.chat-body {
+.context-meter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-faint);
+  max-width: 220px;
+}
+
+.context-meter-bar {
+  display: inline-block;
+  width: 48px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--bg-active);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.context-meter-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--text-muted);
+}
+
+.context-meter-warn {
+  color: var(--warn);
+}
+.context-meter-warn .context-meter-fill {
+  background: var(--warn);
+}
+
+.context-meter-danger {
+  color: var(--danger);
+}
+.context-meter-danger .context-meter-fill {
+  background: var(--danger);
+}
+
+.context-meter-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.context-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 var(--space-4);
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elevated);
+  font-size: 12px;
+  color: var(--text);
+}
+
+.context-banner-warn {
+  border-color: rgba(251, 191, 36, 0.35);
+  background: rgba(251, 191, 36, 0.08);
+}
+
+.context-banner-danger {
+  border-color: rgba(248, 113, 113, 0.4);
+  background: rgba(248, 113, 113, 0.1);
+}
+
+.context-banner-text {
+  min-width: 0;
+  line-height: 1.4;
+}
+
   overflow: auto;
   min-height: 0;
   height: 100%;

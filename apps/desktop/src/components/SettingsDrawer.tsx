@@ -20,6 +20,7 @@ type FormState = {
   modelsCsv: string;
   defaultModel: string;
   shutdownCpaOnQuit: boolean;
+  defaultContextLimit: string;
 };
 
 function fromSettings(s: PublicSettings | null): FormState {
@@ -31,6 +32,7 @@ function fromSettings(s: PublicSettings | null): FormState {
     modelsCsv: (s?.models ?? []).join(", "),
     defaultModel: s?.defaultModel ?? "",
     shutdownCpaOnQuit: s?.shutdownCpaOnQuit ?? false,
+    defaultContextLimit: String(s?.defaultContextLimit ?? 200_000),
   };
 }
 
@@ -76,6 +78,15 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
     if (!models.includes(defaultModel)) {
       models.unshift(defaultModel);
     }
+    const defaultContextLimit = Number(form.defaultContextLimit);
+    if (
+      !Number.isFinite(defaultContextLimit) ||
+      defaultContextLimit < 1024 ||
+      defaultContextLimit > 10_000_000
+    ) {
+      setLocalError("Default context limit must be between 1024 and 10000000");
+      return;
+    }
 
     const patch: Partial<AppSettings> & { token?: string } = {
       cpaExePath: form.cpaExePath.trim(),
@@ -84,6 +95,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
       models,
       defaultModel,
       shutdownCpaOnQuit: form.shutdownCpaOnQuit,
+      defaultContextLimit: Math.floor(defaultContextLimit),
     };
     if (form.token.trim()) {
       patch.token = form.token.trim();
@@ -212,6 +224,20 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
               spellCheck={false}
             />
           </label>
+
+          <label className="settings-field">
+            Default context limit (tokens)
+            <input
+              type="number"
+              min={1024}
+              step={1024}
+              value={form.defaultContextLimit}
+              onChange={(e) => setField("defaultContextLimit", e.target.value)}
+            />
+          </label>
+          <p className="settings-hint">
+            Used when CPA/builtin has no window for the model. Default 200000.
+          </p>
 
           <label className="settings-check">
             <input

@@ -1,4 +1,32 @@
-import type { SessionUsage, TurnUsage } from "@claude-desktop/shared";
+import type { ContextUsage, SessionUsage, TurnUsage } from "@claude-desktop/shared";
+
+export type ContextLevel = "ok" | "warn" | "danger";
+
+export function contextLevel(ratio: number): ContextLevel {
+  if (ratio >= 0.95) return "danger";
+  if (ratio >= 0.8) return "warn";
+  return "ok";
+}
+
+export function formatContextPercent(ratio: number): string {
+  if (!Number.isFinite(ratio) || ratio < 0) return "—";
+  const pct = ratio * 100;
+  if (pct < 10) return `${pct.toFixed(1)}%`;
+  return `${Math.round(pct)}%`;
+}
+
+export function formatContextUsageLine(u: ContextUsage): string {
+  return `${formatContextPercent(u.ratio)} · ${formatTokens(u.usedTokens)}/${formatTokens(u.limitTokens)}`;
+}
+
+export function contextMeterTitle(u: ContextUsage): string {
+  return [
+    u.modelId,
+    `source=${u.source}`,
+    `${u.usedTokens} / ${u.limitTokens}`,
+    `ratio=${u.ratio.toFixed(3)}`,
+  ].join(" · ");
+}
 
 export function formatDuration(ms?: number): string {
   if (ms == null || !Number.isFinite(ms) || ms < 0) return "—";

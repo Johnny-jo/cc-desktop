@@ -1,9 +1,16 @@
-import React from "react";
+import React, { useState } from "react";
 import type { PermissionMode } from "@claude-desktop/shared";
 import { MessageList } from "./MessageList";
 import { Composer } from "./Composer";
 import { setPermissionMode, useAppStore } from "../state/store";
-import { formatSessionUsageLine } from "../lib/format-usage";
+import {
+  contextLevel,
+  contextMeterTitle,
+  formatContextPercent,
+  formatContextUsageLine,
+  formatSessionUsageLine,
+  formatTokens,
+} from "../lib/format-usage";
 
 const PERMISSION_MODES: PermissionMode[] = ["default", "acceptEdits", "plan"];
 
@@ -24,9 +31,21 @@ export function ChatPanel({
   const running = useAppStore((s) => s.running);
   const settings = useAppStore((s) => s.settings);
 
+  // sessionId -> dismissed for this app lifetime
+  const [bannerDismissed, setBannerDismissed] = useState<Record<string, true>>({});
+
   const items = activeSessionId ? (itemsBySession[activeSessionId] ?? []) : [];
   const active = sessions.find((s) => s.id === activeSessionId);
   const sessionUsageLine = formatSessionUsageLine(active?.usage);
+  const ctx = active?.contextUsage;
+  const level = ctx ? contextLevel(ctx.ratio) : "ok";
+  const showBanner =
+    Boolean(activeSessionId) &&
+    Boolean(ctx) &&
+    ctx!.ratio >= 0.8 &&
+    !bannerDismissed[activeSessionId!];
+
+  const fillPct = ctx ? Math.max(0, Math.min(100, ctx.ratio * 100)) : 0;
 
   return (
     <div className="chat-panel">
@@ -39,6 +58,22 @@ export function ChatPanel({
           {sessionUsageLine ? (
             <span className="session-usage" title="Session totals">
               {sessionUsageLine}
+            </span>
+          ) : null}
+          {ctx ? (
+            <span
+              className={`context-meter context-meter-${level}`}
+              title={contextMeterTitle(ctx)}
+            >
+              <span className="context-meter-bar" aria-hidden>
+                <span
+                  className="context-meter-fill"
+                  style={{ width: `${fillPct}%` }}
+                />
+              </span>
+              <span className="context-meter-label">
+                {formatContextUsageLine(ctx)}
+              </span>
             </span>
           ) : null}
         </div>
@@ -79,6 +114,29 @@ export function ChatPanel({
           </button>
         </div>
       </header>
+
+      {showBanner && ctx ? (
+        <div className={`context-banner context-banner-${level}`} role="status">
+          <div className="context-banner-text">
+            上下文已用 <strong>{formatContextPercent(ctx.ratio)}</strong>
+            （{formatTokens(ctx.usedTokens)} / {formatTokens(ctx.limitTokens)}）。
+            接近窗口上限，建议新开对话或压缩历史。
+          </div>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={() => {
+              if (!activeSessionId) return;
+              setBannerDismissed((prev) => ({
+                ...prev,
+                [activeSessionId]: true,
+              }));
+            }}
+          >
+            知道了
+          </button>
+        </div>
+      ) : null}
 
       <div className="chat-body">
         <div className="chat-inner">
