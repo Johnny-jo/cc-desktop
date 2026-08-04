@@ -1,5 +1,6 @@
 import type {
   AppSettings,
+  Attachment,
   CpaStatus,
   FileChange,
   PermissionDecision,
@@ -11,10 +12,15 @@ import type {
   SlashCommandItem,
   UserPromptDecision,
   UserPromptRequest,
+  UserPrompt,
 } from "./models";
 
 export const IPC = {
   projectOpen: "project:open",
+  /** Renderer → Main: read file metadata for an attachment (does not return content) */
+  fileReadAttachment: "file:read-attachment",
+  /** Renderer → Main: show native file picker and return selected paths */
+  fileSelect: "file:select",
   sessionStart: "session:start",
   sessionContinue: "session:continue",
   sessionAbort: "session:abort",
@@ -49,12 +55,20 @@ export type IpcInvokeMap = {
     args: [{ path?: string }?];
     result: { path: string };
   };
+  [IPC.fileReadAttachment]: {
+    args: [{ path: string }];
+    result: Attachment;
+  };
+  [IPC.fileSelect]: {
+    args: [];
+    result: { paths: string[] };
+  };
   [IPC.sessionStart]: {
-    args: [{ prompt: string; cwd?: string }];
+    args: [{ prompt: UserPrompt; cwd?: string }];
     result: { sessionId: string };
   };
   [IPC.sessionContinue]: {
-    args: [{ sessionId: string; prompt: string }];
+    args: [{ sessionId: string; prompt: UserPrompt }];
     result: { sessionId: string };
   };
   [IPC.sessionAbort]: { args: [{ sessionId: string }]; result: { ok: boolean } };

@@ -76,6 +76,44 @@ export type ModelInfo = {
   contextLimit?: number;
 };
 
+export type AttachmentKind = "text" | "image" | "binary";
+
+export type Attachment = {
+  /** Original filename */
+  name: string;
+  /** Absolute file path (main process reads it) */
+  path: string;
+  /** File size in bytes */
+  size: number;
+  /** MIME type guess */
+  mimeType: string;
+  kind: AttachmentKind;
+};
+
+/** Supported media types for image content blocks. */
+export const IMAGE_MIME_TYPES = [
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+] as const;
+
+export type ImageMimeType = (typeof IMAGE_MIME_TYPES)[number];
+
+export type UserContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; source: { type: "base64"; media_type: ImageMimeType; data: string } }
+  | { type: "document"; source: { type: "base64"; media_type: "application/pdf"; data: string } };
+
+export type UserPrompt = {
+  text: string;
+  attachments: Attachment[];
+};
+
+export type ReadAttachmentResult =
+  | { ok: true; block: UserContentBlock }
+  | { ok: false; error: string };
+
 export type ChatItem =
   | { kind: "text"; id: string; role: ChatRole; text: string; streaming?: boolean }
   | { kind: "tool"; id: string; tool: ToolCardState }
