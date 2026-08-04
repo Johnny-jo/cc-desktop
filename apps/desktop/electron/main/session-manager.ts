@@ -21,6 +21,11 @@ import {
 import { normalizeSdkEvent } from "./normalize-sdk-event";
 import { MessageStream } from "./message-stream";
 import { buildUserContent } from "./attachment-reader";
+import {
+  createContextCompressor,
+  KEEP_RECENT_ITEMS,
+  type ContextCompressor,
+} from "./context-compressor";
 
 /**
  * Production query may receive a string (legacy/tests) or AsyncIterable (streaming).
@@ -47,6 +52,10 @@ export type SessionManagerDeps = {
   emitDiff: (sessionId: string, changes: FileChange[]) => void;
   /** Optional: notify UI when SDK slash/skills list is refreshed */
   emitSlashCommands?: (sessionId: string, commands: SlashCommandItem[]) => void;
+  /** Optional: context compressor for automatic transcript compression */
+  compressor?: ContextCompressor;
+  /** Ratio at which automatic compression is triggered (default 0.75) */
+  compressionThreshold?: number;
 };
 
 type QueryControl = {
@@ -76,6 +85,8 @@ type SessionEntry = {
   slashCommands: SlashCommandItem[];
   /** True while waiting for a result after push */
   turnActive: boolean;
+  /** True if context has already been auto-compressed this session */
+  compressed: boolean;
 };
 
 /**
@@ -147,6 +158,8 @@ export class SessionManager {
   private readonly emitSlashCommands: SessionManagerDeps["emitSlashCommands"];
 
   private readonly sessions = new Map<string, SessionEntry>();
+  private readonly compressor: ContextCompressor | undefined;
+  private readonly compressionThreshold: number;
 
   constructor(deps: SessionManagerDeps) {
     this.queryFn = deps.queryFn;
@@ -160,6 +173,11 @@ export class SessionManager {
     this.emitSession = deps.emitSession;
     this.emitDiff = deps.emitDiff;
     this.emitSlashCommands = deps.emitSlashCommands;
+    this.compressor = deps.compressor;
+    this.compressionThreshold =
+      deps.compressionThreshold && deps.compressionThreshold > 0 && deps.compressionThreshold < 1
+        ? deps.compressionThreshold
+        : 0.75;
 
     // Hydrate session list + file changes from disk (no live query until continue).
     if (this.archive) {
@@ -180,6 +198,7 @@ export class SessionManager {
           sdkSessionId: stored.sdkSessionId,
           slashCommands: [],
           turnActive: false,
+          compressed: false,
         });
         const changes = this.archive.loadChanges(stored.id);
         if (changes.length) {
@@ -293,6 +312,7 @@ export class SessionManager {
       abortController: null,
       slashCommands: [],
       turnActive: true,
+      compressed: false,
     };
     this.sessions.set(sessionId, entry);
     this.emitSession({ ...summary });
@@ -527,6 +547,9 @@ export class SessionManager {
             entry.turnActive = false;
             this.emitSession({ ...entry.summary });
             this.persistSummary(entry);
+
+            // Trigger automatic context compression when the window is filling up.
+            await this.maybeCompressContext(sessionId);
           }
         }
 
@@ -629,6 +652,37 @@ export class SessionManager {
       this.emitSlashCommands?.(sessionId, entry.slashCommands);
     } catch {
       // Control request may fail if CLI not ready; non-fatal.
+    }
+  }
+
+  private async maybeCompressContext(sessionId: string): Promise<void> {
+    if (!this.compressor || !this.archive) return;
+    const entry = this.sessions.get(sessionId);
+    if (!entry || entry.compressed) return;
+    const ratio = entry.summary.contextUsage?.ratio;
+    if (ratio == null || ratio < this.compressionThreshold) return;
+
+    const current = this.archive.loadItems(sessionId);
+    if (current.length <= KEEP_RECENT_ITEMS) return;
+
+    try {
+      const result = await this.compressor.compress(current);
+      if (result.compressedCount === 0) return;
+      this.archive.saveItems(sessionId, result.items);
+      entry.compressed = true;
+      this.emit({
+        type: "items_replaced",
+        sessionId,
+        items: result.items,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.emit({
+        type: "result",
+        sessionId,
+        ok: false,
+        error: `Context compression failed: ${message}`,
+      });
     }
   }
 

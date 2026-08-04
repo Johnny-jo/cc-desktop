@@ -353,8 +353,11 @@ function applySessionEvent(event: SdkNormalizedEvent): void {
       });
       return;
     }
-    case "raw":
+    case "items_replaced": {
+      setItems(sessionId, event.items);
       return;
+    }
+
     default:
       return;
   }

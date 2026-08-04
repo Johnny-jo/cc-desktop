@@ -214,4 +214,5 @@ export type SdkNormalizedEvent =
       error?: string;
       usage?: TurnUsage;
     }
+  | { type: "items_replaced"; sessionId: string; items: ChatItem[] }
   | { type: "raw"; sessionId: string; payload: unknown };

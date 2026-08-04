@@ -19,6 +19,7 @@ import { UserPromptBroker } from "./user-prompt-broker";
 import { CpaSupervisor } from "./cpa-supervisor";
 import { SessionArchive } from "./session-archive";
 import { SessionManager, type QueryFn } from "./session-manager";
+import { createContextCompressor } from "./context-compressor";
 import { registerIpcHandlers } from "./ipc-handlers";
 
 let mainWindow: BrowserWindow | null = null;
@@ -131,6 +132,10 @@ function bootstrap() {
     cpa,
     settings,
     archive,
+    compressor: createContextCompressor(
+      () => settings.get(),
+      () => settings.getToken(),
+    ),
     emit: (event: SdkNormalizedEvent) => {
       sendToRenderer(IPC.sessionEvent, event);
     },
