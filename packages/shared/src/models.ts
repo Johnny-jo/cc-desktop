@@ -58,6 +58,24 @@ export type SessionUsage = {
   turns: number;
 };
 
+export type ContextLimitSource = "cpa" | "builtin" | "override" | "default";
+
+/** Latest context-window occupancy (not billing totals) */
+export type ContextUsage = {
+  usedTokens: number;
+  limitTokens: number;
+  ratio: number;
+  source: ContextLimitSource;
+  modelId: string;
+  updatedAt: number;
+};
+
+export type ModelInfo = {
+  id: string;
+  /** Parsed context window from CPA /v1/models; undefined if unknown */
+  contextLimit?: number;
+};
+
 export type ChatItem =
   | { kind: "text"; id: string; role: ChatRole; text: string; streaming?: boolean }
   | { kind: "tool"; id: string; tool: ToolCardState }
@@ -101,6 +119,8 @@ export type SessionSummary = {
   status: "idle" | "running" | "error";
   /** Running totals for this session (tokens / cost / wall time) */
   usage?: SessionUsage;
+  /** Latest context-window occupancy (not billing totals) */
+  contextUsage?: ContextUsage;
 };
 
 export type PermissionRequest = {
@@ -125,6 +145,10 @@ export type AppSettings = {
   permissionMode: PermissionMode;
   shutdownCpaOnQuit: boolean;
   lastProjectPath?: string;
+  /** Fallback window when model unknown (tokens) */
+  defaultContextLimit: number;
+  /** Per-model id overrides for context window */
+  modelContextLimits: Record<string, number>;
 };
 
 export type PublicSettings = Omit<AppSettings, never> & {
