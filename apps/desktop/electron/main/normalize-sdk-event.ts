@@ -263,10 +263,14 @@ export function extractTurnUsage(msg: UnknownRecord): {
   const inputTokens =
     num(usageObj?.input_tokens) ??
     num(usageObj?.inputTokens) ??
+    num(usageObj?.prompt_tokens) ??
+    num(usageObj?.promptTokens) ??
     undefined;
   const outputTokens =
     num(usageObj?.output_tokens) ??
     num(usageObj?.outputTokens) ??
+    num(usageObj?.completion_tokens) ??
+    num(usageObj?.completionTokens) ??
     undefined;
   const cacheReadTokens =
     num(usageObj?.cache_read_input_tokens) ??
@@ -289,8 +293,18 @@ export function extractTurnUsage(msg: UnknownRecord): {
   if (modelUsage) {
     for (const v of Object.values(modelUsage)) {
       if (!isRecord(v)) continue;
-      modelIn += num(v.inputTokens) ?? num(v.input_tokens) ?? 0;
-      modelOut += num(v.outputTokens) ?? num(v.output_tokens) ?? 0;
+      modelIn +=
+        num(v.inputTokens) ??
+        num(v.input_tokens) ??
+        num(v.promptTokens) ??
+        num(v.prompt_tokens) ??
+        0;
+      modelOut +=
+        num(v.outputTokens) ??
+        num(v.output_tokens) ??
+        num(v.completionTokens) ??
+        num(v.completion_tokens) ??
+        0;
       modelCost += num(v.costUSD) ?? num(v.cost_usd) ?? 0;
     }
   }

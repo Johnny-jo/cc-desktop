@@ -35,6 +35,26 @@ describe("normalizeSdkEvent", () => {
     ]);
   });
 
+  it("extracts OpenAI-style prompt/completion tokens as input/output", () => {
+    const msg = {
+      type: "result",
+      subtype: "success",
+      usage: {
+        prompt_tokens: 5600,
+        completion_tokens: 230,
+      },
+    };
+    const events = normalizeSdkEvent(msg, "s2");
+    expect(events[0]).toMatchObject({
+      type: "result",
+      ok: true,
+      usage: {
+        inputTokens: 5600,
+        outputTokens: 230,
+      },
+    });
+  });
+
   it("extracts tokens and duration from result messages", () => {
     const msg = {
       type: "result",
