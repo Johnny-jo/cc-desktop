@@ -26,7 +26,7 @@ export type ComposerProps = {
 
 const MAX_ATTACHMENTS = 5;
 const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
-const MAX_TEXT_SIZE = 512 * 1024;
+const MAX_TEXT_SIZE = 5 * 1024 * 1024;
 
 const PERMISSION_CYCLE: PermissionMode[] = [
   "default",

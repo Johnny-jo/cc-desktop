@@ -10,7 +10,7 @@ import type {
 export type { Attachment, UserPrompt, UserContentBlock };
 
 /** Maximum size for text attachments (bytes). */
-export const MAX_TEXT_ATTACHMENT_SIZE = 512 * 1024;
+export const MAX_TEXT_ATTACHMENT_SIZE = 5 * 1024 * 1024;
 
 /** Maximum size for image attachments (bytes). */
 export const MAX_IMAGE_ATTACHMENT_SIZE = 5 * 1024 * 1024;
