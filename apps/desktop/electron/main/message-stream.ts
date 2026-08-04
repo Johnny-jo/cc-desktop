@@ -1,10 +1,12 @@
+import type { UserContentBlock } from "@claude-desktop/shared";
+
 /**
  * Pushable async iterable for Agent SDK streaming input mode.
  * `query({ prompt: stream })` enables control requests (supportedCommands, interrupt, …).
  */
 export type StreamUserMessage = {
   type: "user";
-  message: { role: "user"; content: string };
+  message: { role: "user"; content: string | UserContentBlock[] };
   parent_tool_use_id: null;
   session_id?: string;
 };
@@ -17,13 +19,13 @@ export class MessageStream implements AsyncIterable<StreamUserMessage> {
   }> = [];
   private closed = false;
 
-  push(text: string, sessionId?: string): void {
+  push(content: string | UserContentBlock[], sessionId?: string): void {
     if (this.closed) {
       throw new Error("MessageStream is closed");
     }
     const msg: StreamUserMessage = {
       type: "user",
-      message: { role: "user", content: text },
+      message: { role: "user", content },
       parent_tool_use_id: null,
       ...(sessionId ? { session_id: sessionId } : {}),
     };

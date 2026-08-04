@@ -157,7 +157,7 @@ describe("SessionManager", () => {
 
   it("start emits normalized events from mock query generator", async () => {
     const ctx = makeDeps();
-    const sessionId = await ctx.manager.start("hello", "D:/proj");
+    const sessionId = await ctx.manager.start({ text: "hello", attachments: [] }, "D:/proj");
 
     expect(sessionId).toBeTruthy();
     expect(ctx.ensureReady).toHaveBeenCalled();
@@ -182,7 +182,7 @@ describe("SessionManager", () => {
     };
 
     const ctx = makeDeps({ queryFn });
-    const sessionId = await ctx.manager.start("prompt-1", "D:/work");
+    const sessionId = await ctx.manager.start({ text: "prompt-1", attachments: [] }, "D:/work");
 
     expect(captured).toHaveLength(1);
     // Streaming mode: prompt is AsyncIterable, not a raw string
@@ -233,7 +233,7 @@ describe("SessionManager", () => {
     };
 
     const ctx = makeDeps({ queryFn, canUseTool });
-    const sessionId = await ctx.manager.start("hi", "D:/p");
+    const sessionId = await ctx.manager.start({ text: "hi", attachments: [] }, "D:/p");
 
     expect(passedCanUseTool).toBeTypeOf("function");
     await passedCanUseTool!("Read", { file_path: "a" });
@@ -276,7 +276,7 @@ describe("SessionManager", () => {
     };
 
     const ctx = makeDeps({ queryFn, onToolUse, listDiffs });
-    const sessionId = await ctx.manager.start("edit please", "D:/p");
+    const sessionId = await ctx.manager.start({ text: "edit please", attachments: [] }, "D:/p");
 
     expect(onToolUse).toHaveBeenCalledWith(
       sessionId,
@@ -320,8 +320,8 @@ describe("SessionManager", () => {
     };
 
     const ctx = makeDeps({ queryFn });
-    const sessionId = await ctx.manager.start("first", "D:/p");
-    await ctx.manager.continue(sessionId, "second");
+    const sessionId = await ctx.manager.start({ text: "first", attachments: [] }, "D:/p");
+    await ctx.manager.continue(sessionId, { text: "second", attachments: [] });
 
     expect(openCount.n).toBe(1);
     expect(texts).toEqual(["first", "second"]);
@@ -344,7 +344,7 @@ describe("SessionManager", () => {
     };
 
     const ctx = makeDeps({ queryFn });
-    const startPromise = ctx.manager.start("slow", "D:/p");
+    const startPromise = ctx.manager.start({ text: "slow", attachments: [] }, "D:/p");
 
     // allow start to reach queryFn
     await vi.waitFor(() => {
@@ -370,7 +370,7 @@ describe("SessionManager", () => {
 
     const ctx = makeDeps({ ensureReady, queryFn: queryFn as unknown as QueryFn });
 
-    await expect(ctx.manager.start("hi", "D:/p")).rejects.toThrow(/CPA/i);
+    await expect(ctx.manager.start({ text: "hi", attachments: [] }, "D:/p")).rejects.toThrow(/CPA/i);
     expect(queryFn).not.toHaveBeenCalled();
     expect(
       ctx.emitted.some(
@@ -385,7 +385,7 @@ describe("SessionManager", () => {
         /* empty */
       },
     });
-    const id = await ctx.manager.start("title prompt", "D:/proj");
+    const id = await ctx.manager.start({ text: "title prompt", attachments: [] }, "D:/proj");
     const list = ctx.manager.list();
     expect(list).toHaveLength(1);
     expect(list[0]).toMatchObject({

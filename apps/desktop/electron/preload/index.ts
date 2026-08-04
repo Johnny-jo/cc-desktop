@@ -1,9 +1,11 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 import { IPC } from "@claude-desktop/shared";
 import type {
   AppSettings,
+  Attachment,
   ChatItem,
   PermissionDecision,
+  UserPrompt,
   UserPromptDecision,
 } from "@claude-desktop/shared";
 
@@ -15,12 +17,12 @@ const desktop = {
       path !== undefined ? { path } : {},
     ) as Promise<{ path: string }>,
 
-  startSession: (prompt: string, cwd?: string) =>
+  startSession: (prompt: UserPrompt, cwd?: string) =>
     ipcRenderer.invoke(IPC.sessionStart, { prompt, cwd }) as Promise<{
       sessionId: string;
     }>,
 
-  continueSession: (sessionId: string, prompt: string) =>
+  continueSession: (sessionId: string, prompt: UserPrompt) =>
     ipcRenderer.invoke(IPC.sessionContinue, { sessionId, prompt }) as Promise<{
       sessionId: string;
     }>,
@@ -56,6 +58,14 @@ const desktop = {
       requestId,
       decision,
     }) as Promise<{ ok: boolean }>,
+
+  getPathForFile: (file: File) => webUtils.getPathForFile(file),
+
+  readAttachment: (path: string) =>
+    ipcRenderer.invoke(IPC.fileReadAttachment, { path }) as Promise<Attachment>,
+
+  selectFiles: () =>
+    ipcRenderer.invoke(IPC.fileSelect) as Promise<{ paths: string[] }>,
 
   respondUserPrompt: (requestId: string, decision: UserPromptDecision) =>
     ipcRenderer.invoke(IPC.userPromptRespond, {

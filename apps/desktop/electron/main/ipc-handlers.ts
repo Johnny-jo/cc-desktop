@@ -4,10 +4,13 @@ import { dialog, ipcMain, type BrowserWindow } from "electron";
 import { IPC } from "@claude-desktop/shared";
 import type {
   AppSettings,
+  Attachment,
   ChatItem,
   PermissionDecision,
   UserPromptDecision,
+  UserPrompt,
 } from "@claude-desktop/shared";
+import { attachmentFromFile, guessMimeType } from "@claude-desktop/shared";
 import type { SessionManager } from "./session-manager";
 import type { PermissionBroker } from "./permission-broker";
 import type { UserPromptBroker } from "./user-prompt-broker";
@@ -55,8 +58,41 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
   );
 
   ipcMain.handle(
+    IPC.fileReadAttachment,
+    async (_e, { path }: { path: string }): Promise<Attachment> => {
+      const stats = await fs.promises.stat(path);
+      if (!stats.isFile()) {
+        throw new Error(`Not a file: ${path}`);
+      }
+      return attachmentFromFile({
+        name: path.split(/[/\\]/).pop() || path,
+        path,
+        size: stats.size,
+        type: guessMimeType(path),
+      });
+    },
+  );
+
+  ipcMain.handle(IPC.fileSelect, async () => {
+    const win = ctx.window();
+    const res = win
+      ? await dialog.showOpenDialog(win, {
+          properties: ["openFile", "multiSelections"],
+          title: "Attach files",
+        })
+      : await dialog.showOpenDialog({
+          properties: ["openFile", "multiSelections"],
+          title: "Attach files",
+        });
+    if (res.canceled || !res.filePaths.length) {
+      return { paths: [] };
+    }
+    return { paths: res.filePaths };
+  });
+
+  ipcMain.handle(
     IPC.sessionStart,
-    async (_e, { prompt, cwd }: { prompt: string; cwd?: string }) => {
+    async (_e, { prompt, cwd }: { prompt: UserPrompt; cwd?: string }) => {
       const project = cwd ?? ctx.settings.get().lastProjectPath;
       if (!project) throw new Error("No project open");
       // Note: SessionManager.start awaits the full turn before resolving.
@@ -67,7 +103,7 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
 
   ipcMain.handle(
     IPC.sessionContinue,
-    async (_e, { sessionId, prompt }: { sessionId: string; prompt: string }) => {
+    async (_e, { sessionId, prompt }: { sessionId: string; prompt: UserPrompt }) => {
       // Note: SessionManager.continue awaits the full turn before resolving.
       await ctx.sessions.continue(sessionId, prompt);
       return { sessionId };

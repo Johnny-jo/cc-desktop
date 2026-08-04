@@ -13,9 +13,14 @@ import type { CpaSupervisor } from "./cpa-supervisor";
 import type { SettingsStore } from "./settings-store";
 import type { UserPromptBroker } from "./user-prompt-broker";
 import type { SessionArchive, StoredSession } from "./session-archive";
-import { computeContextUsage } from "@claude-desktop/shared";
+import {
+  computeContextUsage,
+  type UserPrompt,
+  type UserContentBlock,
+} from "@claude-desktop/shared";
 import { normalizeSdkEvent } from "./normalize-sdk-event";
 import { MessageStream } from "./message-stream";
+import { buildUserContent } from "./attachment-reader";
 
 /**
  * Production query may receive a string (legacy/tests) or AsyncIterable (streaming).
@@ -89,9 +94,12 @@ const SESSION_TOOLS = [
   "WebSearch",
 ] as const;
 
-function titleFromPrompt(prompt: string): string {
-  const t = prompt.trim().replace(/\s+/g, " ");
-  if (!t) return "New session";
+function titleFromPrompt(prompt: UserPrompt): string {
+  const t = prompt.text.trim().replace(/\s+/g, " ");
+  if (!t) {
+    const names = prompt.attachments.map((a) => a.name).join(", ");
+    return names ? `Files: ${names.slice(0, 40)}` : "New session";
+  }
   return t.length > 48 ? `${t.slice(0, 48)}…` : t;
 }
 
@@ -258,8 +266,18 @@ export class SessionManager {
     }
   }
 
-  async start(prompt: string, cwd: string): Promise<string> {
+  async start(prompt: UserPrompt, cwd: string): Promise<string> {
     await this.ensureCpaOrThrow();
+
+    const { content, errors } = buildUserContent(prompt);
+    if (errors.length) {
+      this.emit({
+        type: "result",
+        sessionId: "unknown",
+        ok: false,
+        error: errors.join("; "),
+      });
+    }
 
     const sessionId = randomUUID();
     const now = Date.now();
@@ -280,17 +298,27 @@ export class SessionManager {
     this.emitSession({ ...summary });
     this.persistSummary(entry);
 
-    await this.openStreamingSession(sessionId, prompt, { resume: false });
+    await this.openStreamingSession(sessionId, content, { resume: false });
     return sessionId;
   }
 
-  async continue(sessionId: string, prompt: string): Promise<void> {
+  async continue(sessionId: string, prompt: UserPrompt): Promise<void> {
     const entry = this.sessions.get(sessionId);
     if (!entry) {
       throw new Error(`Unknown session: ${sessionId}`);
     }
 
     await this.ensureCpaOrThrow(sessionId);
+
+    const { content, errors } = buildUserContent(prompt);
+    if (errors.length) {
+      this.emit({
+        type: "result",
+        sessionId,
+        ok: false,
+        error: errors.join("; "),
+      });
+    }
 
     entry.summary = {
       ...entry.summary,
@@ -303,14 +331,14 @@ export class SessionManager {
 
     // Live streaming session: just push the next user message.
     if (entry.input && !entry.input.isClosed && entry.consumer) {
-      entry.input.push(prompt, entry.sdkSessionId);
+      entry.input.push(content, entry.sdkSessionId);
       // Wait until this turn's result (or error) so IPC still "awaits the turn".
       await this.waitForTurnIdle(sessionId);
       return;
     }
 
     // Fallback: open a new streaming query with resume (uses sdkSessionId when known).
-    await this.openStreamingSession(sessionId, prompt, { resume: true });
+    await this.openStreamingSession(sessionId, content, { resume: true });
   }
 
   private async ensureCpaOrThrow(sessionId?: string): Promise<void> {
@@ -385,7 +413,7 @@ export class SessionManager {
    */
   private async openStreamingSession(
     sessionId: string,
-    prompt: string,
+    content: string | UserContentBlock[],
     opts: { resume: boolean },
   ): Promise<void> {
     const entry = this.sessions.get(sessionId);
@@ -426,7 +454,7 @@ export class SessionManager {
       // Refresh slash/skills list (control request; streaming mode only).
       void this.refreshSlashCommands(sessionId);
 
-      input.push(prompt, entry.sdkSessionId);
+      input.push(content, entry.sdkSessionId);
       await this.waitForTurnIdle(sessionId);
     } catch (err) {
       const raw = err instanceof Error ? err.message : String(err);
