@@ -189,6 +189,16 @@ function applySessionEvent(event: SdkNormalizedEvent): void {
       if (consumeOptimisticUser(sessionId, event.text)) {
         return;
       }
+      // Internal post-compact resume prompt — already represented by the system
+      // "Context compacted — continuing…" note; don't dump the full summary again.
+      if (
+        event.text.startsWith(
+          "This session is being continued from a previous conversation",
+        ) ||
+        event.text.startsWith("Earlier conversation summary:")
+      ) {
+        return;
+      }
       // SDK often re-emits the user prompt after the agent finishes (appears
       // as a duplicate bubble under the assistant reply). If we already have
       // this exact user text in the transcript, ignore the echo.
@@ -351,10 +361,13 @@ function applySessionEvent(event: SdkNormalizedEvent): void {
         ),
         lastError: event.ok ? state.lastError : (event.error ?? "Turn failed"),
       });
+      // Auto-compress is scheduled from session:updated (has fresh contextUsage).
       return;
     }
     case "items_replaced": {
+      // Main finished compression — replace UI transcript with summary + recent.
       setItems(sessionId, event.items);
+      saveTranscriptNow(sessionId, event.items);
       return;
     }
 
@@ -399,6 +412,16 @@ function subscribeDesktopEvents(): void {
         const text = pendingStartPrompt;
         pendingStartPrompt = null;
         appendUserMessage(summary.id, text, { optimistic: true });
+      }
+
+      // After a turn finishes, main attaches fresh contextUsage here.
+      // Trigger auto-compress only then — and only with live renderer items.
+      if (
+        (summary.status === "idle" || summary.status === "error") &&
+        summary.contextUsage &&
+        summary.contextUsage.ratio >= AUTO_COMPRESS_RATIO
+      ) {
+        maybeAutoCompressAfterResult(summary.id);
       }
     }),
   );
@@ -704,6 +727,112 @@ export function abortActiveSession(): void {
   }
 }
 
+/** Ratio at which renderer auto-compresses after a turn finishes. */
+const AUTO_COMPRESS_RATIO = 0.75;
+/** Cooldown so we don't thrash compress while usage stays high. */
+const autoCompressedAt = new Map<string, number>();
+const AUTO_COMPRESS_COOLDOWN_MS = 5 * 60 * 1000;
+
+/**
+ * Compress the active session using the live renderer transcript (not disk).
+ * Disk archive can lag; main must receive current items to avoid wiping history.
+ * Manual /compact does NOT auto-continue — user sends the next message.
+ */
+export async function compressActiveSession(): Promise<{ ok: boolean; message?: string }> {
+  const id = state.activeSessionId;
+  if (!id) return { ok: false, message: "No active session" };
+  if (state.running) {
+    return { ok: false, message: "Wait for the current turn to finish before /compact" };
+  }
+  const desktop = getDesktop();
+  // Flush any pending debounced save first, then pass live items.
+  const prev = transcriptSaveTimers.get(id);
+  if (prev) {
+    clearTimeout(prev);
+    transcriptSaveTimers.delete(id);
+  }
+  const items = getItems(id);
+  saveTranscriptNow(id, items);
+  const res = await desktop.compressSession(id, items, { autoContinue: false });
+  if (res.ok) autoCompressedAt.set(id, Date.now());
+  return res;
+}
+
+/**
+ * Auto-compact after a finished turn when context is high.
+ * Uses Claude Code semantics: compact, then immediately continue the last task
+ * so work is not abandoned mid-session.
+ */
+function maybeAutoCompressAfterResult(sessionId: string): void {
+  const summary = state.sessions.find((s) => s.id === sessionId);
+  const ratio = summary?.contextUsage?.ratio;
+  if (ratio == null || ratio < AUTO_COMPRESS_RATIO) return;
+  // Only auto-compact when the session is idle (turn already finished).
+  if (summary?.status === "running") return;
+  const last = autoCompressedAt.get(sessionId);
+  if (last != null && Date.now() - last < AUTO_COMPRESS_COOLDOWN_MS) return;
+  // Reserve cooldown immediately so concurrent session:updated won't double-fire.
+  autoCompressedAt.set(sessionId, Date.now());
+
+  // Fire-and-forget; items_replaced will update UI when main finishes.
+  // Delay one macrotask so any in-flight session:event (result/usage footer)
+  // is applied before we snapshot the transcript.
+  void (async () => {
+    await new Promise((r) => setTimeout(r, 0));
+    try {
+      // Re-check idle after the tick — a new user send may have started.
+      const latest = state.sessions.find((s) => s.id === sessionId);
+      if (latest?.status === "running" || state.running) {
+        autoCompressedAt.delete(sessionId);
+        return;
+      }
+      // Drop any pending debounced save so a stale full transcript cannot
+      // overwrite the compressed snapshot after main finishes.
+      const pending = transcriptSaveTimers.get(sessionId);
+      if (pending) {
+        clearTimeout(pending);
+        transcriptSaveTimers.delete(sessionId);
+      }
+      const items = getItems(sessionId);
+      // Need more than KEEP_RECENT_ITEMS (6) bubbles or compression is a no-op.
+      if (items.length <= 6) {
+        autoCompressedAt.delete(sessionId);
+        return;
+      }
+      const desktop = getDesktop();
+      // Ensure disk has the same snapshot we're about to compress.
+      saveTranscriptNow(sessionId, items);
+      setState({ running: true });
+      const res = await desktop.compressSession(sessionId, items, {
+        autoContinue: true,
+      });
+      if (!res.ok) {
+        // Allow retry if compress declined (cooldown / not enough history).
+        autoCompressedAt.delete(sessionId);
+        setState({
+          running: state.sessions.some((s) => s.status === "running"),
+        });
+        if (
+          res.message &&
+          !/cooldown|Not enough|Nothing to compress|still running/i.test(
+            res.message,
+          )
+        ) {
+          setState({ lastError: res.message });
+        }
+      }
+      // On success, main already set status=running and started the continue turn.
+    } catch (err) {
+      autoCompressedAt.delete(sessionId);
+      const message = err instanceof Error ? err.message : String(err);
+      setState({
+        lastError: `Context compression failed: ${message}`,
+        running: state.sessions.some((s) => s.status === "running"),
+      });
+    }
+  })();
+}
+
 export async function setModel(model: string): Promise<void> {
   const desktop = getDesktop();
   await desktop.setModel(model);
@@ -772,6 +901,9 @@ export function __resetStoreForTests(): void {
     lastError: null,
   };
   pendingStartPrompt = null;
+  autoCompressedAt.clear();
+  for (const timer of transcriptSaveTimers.values()) clearTimeout(timer);
+  transcriptSaveTimers.clear();
   bootstrapped = false;
   for (const u of unsubs) u();
   unsubs.length = 0;

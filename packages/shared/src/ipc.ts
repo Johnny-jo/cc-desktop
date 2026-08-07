@@ -28,6 +28,7 @@ export const IPC = {
   sessionList: "session:list",
   sessionSelect: "session:select",
   sessionSaveTranscript: "session:save-transcript",
+  sessionCompress: "session:compress",
   permissionRespond: "permission:respond",
   userPromptRespond: "user-prompt:respond",
   settingsGet: "settings:get",
@@ -94,6 +95,20 @@ export type IpcInvokeMap = {
       },
     ];
     result: { ok: boolean };
+  };
+  [IPC.sessionCompress]: {
+    /**
+     * Prefer passing renderer items — disk archive can lag the live transcript.
+     * autoContinue: after compact, immediately resume the last task (Claude Code style).
+     */
+    args: [
+      {
+        sessionId: string;
+        items?: import("./models").ChatItem[];
+        autoContinue?: boolean;
+      },
+    ];
+    result: { ok: boolean; message?: string };
   };
   [IPC.permissionRespond]: {
     args: [{ requestId: string; decision: PermissionDecision }];

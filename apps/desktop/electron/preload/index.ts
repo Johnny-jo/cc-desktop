@@ -53,6 +53,20 @@ const desktop = {
       commands: import("@claude-desktop/shared").SlashCommandItem[];
     }>,
 
+  compressSession: (
+    sessionId: string,
+    items?: ChatItem[],
+    opts?: { autoContinue?: boolean },
+  ) =>
+    ipcRenderer.invoke(IPC.sessionCompress, {
+      sessionId,
+      ...(items ? { items } : {}),
+      ...(opts?.autoContinue ? { autoContinue: true } : {}),
+    }) as Promise<{
+      ok: boolean;
+      message?: string;
+    }>,
+
   respondPermission: (requestId: string, decision: PermissionDecision) =>
     ipcRenderer.invoke(IPC.permissionRespond, {
       requestId,

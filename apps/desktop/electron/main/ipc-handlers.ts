@@ -160,6 +160,22 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
   );
 
   ipcMain.handle(
+    IPC.sessionCompress,
+    async (
+      _e,
+      {
+        sessionId,
+        items,
+        autoContinue,
+      }: { sessionId: string; items?: ChatItem[]; autoContinue?: boolean },
+    ) => {
+      return await ctx.sessions.compressSession(sessionId, items, {
+        autoContinue: Boolean(autoContinue),
+      });
+    },
+  );
+
+  ipcMain.handle(
     IPC.permissionRespond,
     async (
       _e,

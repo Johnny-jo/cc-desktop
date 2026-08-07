@@ -34,6 +34,10 @@ export const APP_SLASH_COMMANDS: SlashCommandItem[] = [
     name: "help",
     description: "List available slash commands",
   },
+  {
+    name: "compact",
+    description: "Compress conversation history to reduce context usage",
+  },
 ];
 
 /** Merge app commands with SDK skills (app names win on conflict). */

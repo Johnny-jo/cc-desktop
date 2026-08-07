@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  buildContinuationPrompt,
   compressContext,
   KEEP_RECENT_ITEMS,
   splitItemsForCompression,
@@ -21,9 +22,23 @@ describe("transcriptToText", () => {
     const items: ChatItem[] = [
       { kind: "text", id: "1", role: "user", text: "Hello" },
       { kind: "text", id: "2", role: "assistant", text: "Hi there" },
-      { kind: "tool", id: "3", tool: { id: "t1", name: "Read", summary: "a.txt", status: "done" } },
+      {
+        kind: "tool",
+        id: "3",
+        tool: {
+          id: "t1",
+          name: "Read",
+          summary: "a.txt",
+          status: "done",
+          resultPreview: "file body",
+        },
+      },
     ];
-    expect(transcriptToText(items)).toBe("User: Hello\n\nAssistant: Hi there");
+    const text = transcriptToText(items);
+    expect(text).toContain("User: Hello");
+    expect(text).toContain("Assistant: Hi there");
+    expect(text).toContain("Tool: Read — a.txt [done]");
+    expect(text).toContain("result: file body");
   });
 });
 
@@ -65,5 +80,24 @@ describe("compressContext", () => {
     expect(summarize).not.toHaveBeenCalled();
     expect(result.compressedCount).toBe(0);
     expect(result.items.length).toBe(KEEP_RECENT_ITEMS - 1);
+  });
+});
+
+describe("buildContinuationPrompt", () => {
+  it("includes auto-continue instruction when requested", () => {
+    const text = buildContinuationPrompt("goals and files…", {
+      autoContinue: true,
+    });
+    expect(text).toContain("This session is being continued");
+    expect(text).toContain("goals and files…");
+    expect(text).toContain("Continue with the last task");
+  });
+
+  it("omits auto-continue for manual compact handoff", () => {
+    const text = buildContinuationPrompt("goals and files…", {
+      autoContinue: false,
+    });
+    expect(text).toContain("This session is being continued");
+    expect(text).not.toContain("Continue with the last task");
   });
 });

@@ -22,7 +22,7 @@ import { normalizeSdkEvent } from "./normalize-sdk-event";
 import { MessageStream } from "./message-stream";
 import { buildUserContent } from "./attachment-reader";
 import {
-  createContextCompressor,
+  buildContinuationPrompt,
   KEEP_RECENT_ITEMS,
   type ContextCompressor,
 } from "./context-compressor";
@@ -52,10 +52,8 @@ export type SessionManagerDeps = {
   emitDiff: (sessionId: string, changes: FileChange[]) => void;
   /** Optional: notify UI when SDK slash/skills list is refreshed */
   emitSlashCommands?: (sessionId: string, commands: SlashCommandItem[]) => void;
-  /** Optional: context compressor for automatic transcript compression */
+  /** Optional: context compressor for /compact and renderer-driven auto-compress */
   compressor?: ContextCompressor;
-  /** Ratio at which automatic compression is triggered (default 0.75) */
-  compressionThreshold?: number;
 };
 
 type QueryControl = {
@@ -87,6 +85,14 @@ type SessionEntry = {
   turnActive: boolean;
   /** True if context has already been auto-compressed this session */
   compressed: boolean;
+  /** Timestamp of last auto-compression (for cooldown) */
+  lastCompressedAt?: number;
+  /**
+   * Pending context to prepend on the next fresh query after compression.
+   * When set, the next continue() starts a NEW SDK session (no resume) and
+   * prepends this summary so the model retains continuity without full history.
+   */
+  pendingSummaryPrefix?: string;
 };
 
 /**
@@ -159,7 +165,6 @@ export class SessionManager {
 
   private readonly sessions = new Map<string, SessionEntry>();
   private readonly compressor: ContextCompressor | undefined;
-  private readonly compressionThreshold: number;
 
   constructor(deps: SessionManagerDeps) {
     this.queryFn = deps.queryFn;
@@ -174,10 +179,6 @@ export class SessionManager {
     this.emitDiff = deps.emitDiff;
     this.emitSlashCommands = deps.emitSlashCommands;
     this.compressor = deps.compressor;
-    this.compressionThreshold =
-      deps.compressionThreshold && deps.compressionThreshold > 0 && deps.compressionThreshold < 1
-        ? deps.compressionThreshold
-        : 0.75;
 
     // Hydrate session list + file changes from disk (no live query until continue).
     if (this.archive) {
@@ -285,6 +286,135 @@ export class SessionManager {
     }
   }
 
+  /**
+   * Compress a session's transcript (user /compact or renderer auto-compress).
+   * Prefer `items` from the renderer — the disk archive can lag the live UI
+   * transcript, and compressing stale disk data would wipe newer messages.
+   *
+   * When `autoContinue` is true (auto-compact path), immediately starts a fresh
+   * SDK turn with the summary + "continue last task" instruction — matching
+   * Claude Code so work is not abandoned after compaction.
+   */
+  async compressSession(
+    sessionId: string,
+    items?: import("@claude-desktop/shared").ChatItem[],
+    opts?: { autoContinue?: boolean },
+  ): Promise<{ ok: boolean; message?: string }> {
+    const entry = this.sessions.get(sessionId);
+    if (!entry) return { ok: false, message: "Session not found" };
+    if (!this.compressor || !this.archive) {
+      return { ok: false, message: "Compression not available" };
+    }
+
+    // Don't interrupt an active turn — wait until the agent is idle.
+    if (entry.turnActive || entry.summary.status === "running") {
+      return { ok: false, message: "Session is still running; compress after the turn finishes" };
+    }
+
+    // Cooldown shared with auto-compress path.
+    const now = Date.now();
+    if (
+      entry.lastCompressedAt != null &&
+      now - entry.lastCompressedAt < 5 * 60 * 1000
+    ) {
+      return { ok: false, message: "Compression cooldown — try again shortly" };
+    }
+
+    const fromRenderer = Array.isArray(items) ? items : null;
+    const fromDisk = this.archive.loadItems(sessionId);
+    // Prefer the longer transcript so we never compress a stale short snapshot
+    // over a fuller one (disk lag vs. concurrent save).
+    const current =
+      fromRenderer && fromRenderer.length >= fromDisk.length
+        ? fromRenderer
+        : fromDisk.length > 0
+          ? fromDisk
+          : (fromRenderer ?? []);
+
+    if (current.length <= KEEP_RECENT_ITEMS) {
+      return { ok: false, message: "Not enough history to compress" };
+    }
+
+    try {
+      const result = await this.compressor.compress(current);
+      if (result.compressedCount === 0) {
+        return { ok: false, message: "Nothing to compress" };
+      }
+      this.archive.saveItems(sessionId, result.items);
+      entry.compressed = true;
+      entry.lastCompressedAt = now;
+      // Close the live stream so the next turn starts a fresh SDK session
+      // without the old (now compressed) history.
+      this.closeSession(sessionId);
+      entry.sdkSessionId = undefined;
+
+      this.emit({
+        type: "items_replaced",
+        sessionId,
+        items: result.items,
+      });
+
+      if (opts?.autoContinue) {
+        // Claude Code style: after auto-compact, immediately resume the last task
+        // with the structured summary as context — don't leave the agent idle.
+        entry.pendingSummaryPrefix = undefined;
+        const continueText = buildContinuationPrompt(result.summaryText, {
+          autoContinue: true,
+        });
+        // Show a system note so the user sees why work is continuing.
+        const continueNote: import("@claude-desktop/shared").ChatItem = {
+          kind: "text",
+          id: `ctx-continue-${Date.now()}`,
+          role: "system",
+          text: "Context compacted — continuing previous task…",
+        };
+        const withNote = [...result.items, continueNote];
+        this.archive.saveItems(sessionId, withNote);
+        this.emit({
+          type: "items_replaced",
+          sessionId,
+          items: withNote,
+        });
+
+        entry.summary = {
+          ...entry.summary,
+          status: "running",
+          updatedAt: Date.now(),
+        };
+        entry.turnActive = true;
+        this.emitSession({ ...entry.summary });
+        this.persistSummary(entry);
+
+        // Fire-and-forget the continuation turn so IPC can return promptly.
+        void this.openStreamingSession(
+          sessionId,
+          [{ type: "text", text: continueText }],
+          { resume: false },
+        ).catch((err) => {
+          const message = err instanceof Error ? err.message : String(err);
+          this.emit({
+            type: "result",
+            sessionId,
+            ok: false,
+            error: `Post-compact continue failed: ${message}`,
+          });
+        });
+
+        return {
+          ok: true,
+          message: `Compressed ${result.compressedCount} items; continuing task`,
+        };
+      }
+
+      // Manual /compact: stash summary for the *next* user message only.
+      entry.pendingSummaryPrefix = result.summaryText;
+      return { ok: true, message: `Compressed ${result.compressedCount} items` };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { ok: false, message: `Compression failed: ${message}` };
+    }
+  }
+
   async start(prompt: UserPrompt, cwd: string): Promise<string> {
     await this.ensureCpaOrThrow();
 
@@ -354,6 +484,27 @@ export class SessionManager {
       entry.input.push(content, entry.sdkSessionId);
       // Wait until this turn's result (or error) so IPC still "awaits the turn".
       await this.waitForTurnIdle(sessionId);
+      return;
+    }
+
+    // After manual /compact, start a fresh SDK session (no resume) and prepend
+    // the structured summary so continuity is preserved without full history.
+    if (entry.pendingSummaryPrefix) {
+      const prefix = entry.pendingSummaryPrefix;
+      entry.pendingSummaryPrefix = undefined;
+      const summaryBlock = buildContinuationPrompt(prefix, {
+        autoContinue: false,
+      });
+      const userPart = Array.isArray(content)
+        ? content
+        : [{ type: "text" as const, text: String(content) }];
+      const freshContent: UserContentBlock[] = [
+        { type: "text", text: `${summaryBlock}\n\nCurrent user message:` },
+        ...userPart,
+      ];
+      await this.openStreamingSession(sessionId, freshContent, {
+        resume: false,
+      });
       return;
     }
 
@@ -526,6 +677,10 @@ export class SessionManager {
           if (event.type === "result") {
             const settings = this.settings.get();
             const catalog = this.cpa.getModelCatalog();
+            const usage = accumulateUsage(
+              entry.summary.usage,
+              event.usage,
+            );
             const contextUsage =
               computeContextUsage({
                 turn: event.usage,
@@ -541,15 +696,14 @@ export class SessionManager {
               ...entry.summary,
               status: event.ok ? "idle" : "error",
               updatedAt: Date.now(),
-              usage: accumulateUsage(entry.summary.usage, event.usage),
+              usage,
               ...(contextUsage ? { contextUsage } : {}),
             };
             entry.turnActive = false;
             this.emitSession({ ...entry.summary });
             this.persistSummary(entry);
-
-            // Trigger automatic context compression when the window is filling up.
-            await this.maybeCompressContext(sessionId);
+            // Auto-compress is triggered by the renderer after it has the full
+            // transcript in memory (main-side disk archive can lag and wipe history).
           }
         }
 
@@ -652,37 +806,6 @@ export class SessionManager {
       this.emitSlashCommands?.(sessionId, entry.slashCommands);
     } catch {
       // Control request may fail if CLI not ready; non-fatal.
-    }
-  }
-
-  private async maybeCompressContext(sessionId: string): Promise<void> {
-    if (!this.compressor || !this.archive) return;
-    const entry = this.sessions.get(sessionId);
-    if (!entry || entry.compressed) return;
-    const ratio = entry.summary.contextUsage?.ratio;
-    if (ratio == null || ratio < this.compressionThreshold) return;
-
-    const current = this.archive.loadItems(sessionId);
-    if (current.length <= KEEP_RECENT_ITEMS) return;
-
-    try {
-      const result = await this.compressor.compress(current);
-      if (result.compressedCount === 0) return;
-      this.archive.saveItems(sessionId, result.items);
-      entry.compressed = true;
-      this.emit({
-        type: "items_replaced",
-        sessionId,
-        items: result.items,
-      });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      this.emit({
-        type: "result",
-        sessionId,
-        ok: false,
-        error: `Context compression failed: ${message}`,
-      });
     }
   }
 
