@@ -1,5 +1,11 @@
 import React, { useEffect, useState } from "react";
-import type { AppSettings, PublicSettings } from "@claude-desktop/shared";
+import type { AppSettings, ModelInfo, PublicSettings } from "@claude-desktop/shared";
+import {
+  CONTEXT_LIMIT_MAX,
+  CONTEXT_LIMIT_MIN,
+  buildModelContextLimitsPatch,
+} from "@claude-desktop/shared";
+import { getDesktop } from "../lib/desktop-api";
 import {
   getState,
   saveSettings,
@@ -21,9 +27,15 @@ type FormState = {
   defaultModel: string;
   shutdownCpaOnQuit: boolean;
   defaultContextLimit: string;
+  /** modelId → override 字符串；缺省或 "" = auto */
+  modelContextLimitDraft: Record<string, string>;
 };
 
 function fromSettings(s: PublicSettings | null): FormState {
+  const draft: Record<string, string> = {};
+  for (const [k, v] of Object.entries(s?.modelContextLimits ?? {})) {
+    draft[k] = String(v);
+  }
   return {
     cpaExePath: s?.cpaExePath ?? "",
     cpaConfigPath: s?.cpaConfigPath ?? "",
@@ -33,23 +45,44 @@ function fromSettings(s: PublicSettings | null): FormState {
     defaultModel: s?.defaultModel ?? "",
     shutdownCpaOnQuit: s?.shutdownCpaOnQuit ?? false,
     defaultContextLimit: String(s?.defaultContextLimit ?? 200_000),
+    modelContextLimitDraft: draft,
   };
 }
 
 export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   const settings = useAppStore((s) => s.settings);
   const [form, setForm] = useState<FormState>(() => fromSettings(settings));
+  const [catalog, setCatalog] = useState<ModelInfo[]>([]);
   const [saving, setSaving] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const [savedNote, setSavedNote] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (open) {
-      setForm(fromSettings(settings));
-      setLocalError(null);
-      setSavedNote(null);
+  async function refreshCatalog() {
+    try {
+      const desktop = getDesktop();
+      const list = await desktop.getModelCatalog();
+      setCatalog(Array.isArray(list) ? list : []);
+    } catch {
+      setCatalog([]);
     }
+  }
+
+  function visibleModelIds(modelsCsv: string, cat: ModelInfo[]): string[] {
+    const fromCsv = modelsCsv
+      .split(",")
+      .map((m) => m.trim())
+      .filter(Boolean);
+    const set = new Set<string>([...fromCsv, ...cat.map((m) => m.id)]);
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }
+
+  useEffect(() => {
+    if (!open) return;
+    setForm(fromSettings(settings));
+    setLocalError(null);
+    setSavedNote(null);
+    void refreshCatalog();
   }, [open, settings]);
 
   if (!open) return null;
@@ -81,10 +114,23 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
     const defaultContextLimit = Number(form.defaultContextLimit);
     if (
       !Number.isFinite(defaultContextLimit) ||
-      defaultContextLimit < 1024 ||
-      defaultContextLimit > 10_000_000
+      defaultContextLimit < CONTEXT_LIMIT_MIN ||
+      defaultContextLimit > CONTEXT_LIMIT_MAX
     ) {
-      setLocalError("Default context limit must be between 1024 and 10000000");
+      setLocalError(
+        `Default context limit must be between ${CONTEXT_LIMIT_MIN} and ${CONTEXT_LIMIT_MAX}`,
+      );
+      return;
+    }
+
+    const visibleIds = visibleModelIds(form.modelsCsv, catalog);
+    const patchLimits = buildModelContextLimitsPatch({
+      existing: settings?.modelContextLimits ?? {},
+      visibleIds,
+      draft: form.modelContextLimitDraft,
+    });
+    if (!patchLimits.ok) {
+      setLocalError(patchLimits.error);
       return;
     }
 
@@ -96,6 +142,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
       defaultModel,
       shutdownCpaOnQuit: form.shutdownCpaOnQuit,
       defaultContextLimit: Math.floor(defaultContextLimit),
+      modelContextLimits: patchLimits.modelContextLimits,
     };
     if (form.token.trim()) {
       patch.token = form.token.trim();
@@ -199,6 +246,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
                     setSavedNote(
                       `Synced ${latest?.models?.length ?? 0} models from CPA`,
                     );
+                    void refreshCatalog();
                   } catch (err) {
                     setLocalError(
                       err instanceof Error ? err.message : String(err),
