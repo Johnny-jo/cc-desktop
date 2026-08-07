@@ -1593,6 +1593,93 @@ textarea {
   justify-content: flex-end;
 }
 
+.settings-context-limits {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0 4px;
+}
+
+.settings-context-limits-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted, #8a8a8a);
+}
+
+.settings-context-limits-table-wrap {
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid var(--border, #262626);
+  border-radius: var(--radius-sm, 8px);
+}
+
+.settings-context-limits-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.settings-context-limits-table th,
+.settings-context-limits-table td {
+  padding: 6px 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--border, #262626);
+  vertical-align: middle;
+}
+
+.settings-context-limits-table th {
+  position: sticky;
+  top: 0;
+  background: var(--bg-elevated, #1a1a1a);
+  color: var(--text-muted, #8a8a8a);
+  font-weight: 500;
+}
+
+.settings-context-limits-model {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  max-width: 12rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-context-limits-table input {
+  width: 100%;
+  min-width: 5rem;
+  box-sizing: border-box;
+  background: var(--bg-input, #242424);
+  border: 1px solid var(--border, #262626);
+  border-radius: 6px;
+  color: inherit;
+  padding: 4px 6px;
+}
+
+.settings-context-limits-source {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  opacity: 0.85;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.settings-context-limits-source.source-override {
+  color: #7dd3fc;
+}
+
+.settings-context-limits-source.source-cpa {
+  color: #86efac;
+}
+
+.settings-context-limits-source.source-builtin {
+  color: #fcd34d;
+}
+
+.settings-context-limits-source.source-default {
+  color: #a8a0bd;
+}
+
 /* Permission modal */
 .modal-overlay {
   position: fixed;

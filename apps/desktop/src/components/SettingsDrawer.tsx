@@ -4,6 +4,7 @@ import {
   CONTEXT_LIMIT_MAX,
   CONTEXT_LIMIT_MIN,
   buildModelContextLimitsPatch,
+  resolveContextLimit,
 } from "@claude-desktop/shared";
 import { getDesktop } from "../lib/desktop-api";
 import {
@@ -90,6 +91,104 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   const setField = <K extends keyof FormState>(key: K, value: FormState[K]) => {
     setForm((prev) => ({ ...prev, [key]: value }));
   };
+
+  function renderContextLimitsTable() {
+    const ids = visibleModelIds(form.modelsCsv, catalog);
+    const defaultLimit = Number(form.defaultContextLimit);
+    const draftAsNumbers: Record<string, number> = {};
+    for (const [k, v] of Object.entries(form.modelContextLimitDraft)) {
+      const p = v.trim();
+      if (!p) continue;
+      const n = Number(p);
+      if (Number.isFinite(n) && n >= CONTEXT_LIMIT_MIN && n <= CONTEXT_LIMIT_MAX) {
+        draftAsNumbers[k] = Math.floor(n);
+      }
+    }
+    const limitSettings = {
+      defaultContextLimit:
+        Number.isFinite(defaultLimit) && defaultLimit > 0
+          ? Math.floor(defaultLimit)
+          : 200_000,
+      modelContextLimits: {
+        ...(settings?.modelContextLimits ?? {}),
+        ...draftAsNumbers,
+      },
+    };
+    for (const id of ids) {
+      const raw = (form.modelContextLimitDraft[id] ?? "").trim();
+      if (!raw) delete limitSettings.modelContextLimits[id];
+    }
+
+    return (
+      <div className="settings-context-limits">
+        <div className="settings-context-limits-title">Per-model context limits</div>
+        <p className="settings-hint">
+          Empty override = CPA / builtin / default. Changes apply on the next turn.
+        </p>
+        <div className="settings-context-limits-table-wrap">
+          <table className="settings-context-limits-table">
+            <thead>
+              <tr>
+                <th>Model</th>
+                <th>Effective</th>
+                <th>Override</th>
+              </tr>
+            </thead>
+            <tbody>
+              {ids.length === 0 ? (
+                <tr>
+                  <td colSpan={3} className="settings-hint">
+                    No models — edit Models list or Sync from CPA
+                  </td>
+                </tr>
+              ) : (
+                ids.map((id) => {
+                  const { limitTokens, source } = resolveContextLimit(
+                    id,
+                    limitSettings,
+                    catalog,
+                  );
+                  return (
+                    <tr key={id}>
+                      <td className="settings-context-limits-model">{id}</td>
+                      <td>
+                        <span className="settings-context-limits-effective">
+                          {limitTokens}
+                        </span>{" "}
+                        <span
+                          className={`settings-context-limits-source source-${source}`}
+                        >
+                          {source}
+                        </span>
+                      </td>
+                      <td>
+                        <input
+                          type="number"
+                          min={CONTEXT_LIMIT_MIN}
+                          step={1024}
+                          placeholder="auto"
+                          value={form.modelContextLimitDraft[id] ?? ""}
+                          onChange={(e) =>
+                            setForm((prev) => ({
+                              ...prev,
+                              modelContextLimitDraft: {
+                                ...prev.modelContextLimitDraft,
+                                [id]: e.target.value,
+                              },
+                            }))
+                          }
+                        />
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  }
 
   const onSave = async () => {
     setLocalError(null);
@@ -286,6 +385,8 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
           <p className="settings-hint">
             Used when CPA/builtin has no window for the model. Default 200000.
           </p>
+
+          {renderContextLimitsTable()}
 
           <label className="settings-check">
             <input
