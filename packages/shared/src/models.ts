@@ -1,4 +1,4 @@
-export type PermissionMode = "default" | "acceptEdits" | "plan";
+export type PermissionMode = "default" | "acceptEdits" | "plan" | "auto";
 
 export type CpaStatus =
   | { state: "unknown" }

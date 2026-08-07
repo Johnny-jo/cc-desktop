@@ -4,6 +4,7 @@ import { formatFileSize, IMAGE_MIME_TYPES } from "@claude-desktop/shared";
 import { getDesktop } from "../lib/desktop-api";
 import {
   abortActiveSession,
+  compressActiveSession,
   newChat,
   sendMessage,
   setModel,
@@ -32,6 +33,7 @@ const PERMISSION_CYCLE: PermissionMode[] = [
   "default",
   "acceptEdits",
   "plan",
+  "auto",
 ];
 
 function getDesktopOrNull() {
@@ -220,6 +222,28 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
           }
           setText("");
           return;
+        case "compact": {
+          if (!activeSessionId) {
+            setHelpNote("No active session to compress");
+            setText("");
+            return;
+          }
+          setText("");
+          setHelpNote("Compressing…");
+          try {
+            const res = await compressActiveSession();
+            setHelpNote(
+              res.ok
+                ? (res.message ?? "Context compressed")
+                : `Compression failed: ${res.message ?? "unknown error"}`,
+            );
+          } catch (err) {
+            setHelpNote(
+              err instanceof Error ? err.message : String(err),
+            );
+          }
+          return;
+        }
         case "help":
           setHelpNote(
             allSlashCommands

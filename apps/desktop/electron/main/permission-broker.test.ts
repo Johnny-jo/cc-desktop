@@ -13,6 +13,46 @@ describe("PermissionBroker", () => {
     expect(res.behavior).toBe("allow");
   });
 
+  it("auto mode allows non-destructive tools without UI", async () => {
+    const requestFromUi = vi.fn();
+    const broker = new PermissionBroker({
+      getMode: () => "auto",
+      requestFromUi,
+      timeoutMs: 1000,
+    });
+
+    const edit = await broker.canUseTool("Edit", { file_path: "src/a.ts" }, "sess1");
+    expect(edit.behavior).toBe("allow");
+
+    const bash = await broker.canUseTool(
+      "Bash",
+      { command: "git status" },
+      "sess1",
+    );
+    expect(bash.behavior).toBe("allow");
+    expect(requestFromUi).not.toHaveBeenCalled();
+  });
+
+  it("still asks for destructive Bash even in auto mode", async () => {
+    const requestFromUi = vi.fn();
+    const broker = new PermissionBroker({
+      getMode: () => "auto",
+      requestFromUi,
+      timeoutMs: 1000,
+    });
+
+    const pending = broker.canUseTool(
+      "Bash",
+      { command: "rm -rf /tmp/foo" },
+      "sess1",
+    );
+    expect(requestFromUi).toHaveBeenCalledTimes(1);
+    const req = requestFromUi.mock.calls[0][0] as PermissionRequest;
+    broker.respond(req.requestId, { behavior: "allow", scope: "once" });
+    const res = await pending;
+    expect(res.behavior).toBe("allow");
+  });
+
   it("still asks for destructive Bash even in acceptEdits mode", async () => {
     const requestFromUi = vi.fn();
     const broker = new PermissionBroker({

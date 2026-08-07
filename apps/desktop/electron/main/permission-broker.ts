@@ -84,12 +84,20 @@ export class PermissionBroker {
       return { behavior: "deny", message: "Plan mode: writes disabled" };
     }
 
-    // Destructive Bash always requires confirmation (even under acceptEdits).
+    // Destructive Bash always requires confirmation (even under auto/acceptEdits).
     if (toolName === "Bash" && isDestructiveBash(String(input.command ?? ""))) {
       return this.askUi(toolName, input, sessionId);
     }
 
-    if (mode === "acceptEdits" && (toolName === "Edit" || toolName === "Write")) {
+    if (
+      (mode === "acceptEdits" || mode === "auto") &&
+      (toolName === "Edit" || toolName === "Write")
+    ) {
+      return { behavior: "allow", updatedInput: input };
+    }
+
+    if (mode === "auto") {
+      // Auto-approve everything except destructive Bash.
       return { behavior: "allow", updatedInput: input };
     }
 

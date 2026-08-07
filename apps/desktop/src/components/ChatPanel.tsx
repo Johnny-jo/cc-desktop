@@ -8,11 +8,10 @@ import {
   contextMeterTitle,
   formatContextPercent,
   formatContextUsageLine,
-  formatSessionUsageLine,
   formatTokens,
 } from "../lib/format-usage";
 
-const PERMISSION_MODES: PermissionMode[] = ["default", "acceptEdits", "plan"];
+const PERMISSION_MODES: PermissionMode[] = ["default", "acceptEdits", "plan", "auto"];
 
 export type ChatPanelProps = {
   changesOpen: boolean;
@@ -36,7 +35,6 @@ export function ChatPanel({
 
   const items = activeSessionId ? (itemsBySession[activeSessionId] ?? []) : [];
   const active = sessions.find((s) => s.id === activeSessionId);
-  const sessionUsageLine = formatSessionUsageLine(active?.usage);
   const ctx = active?.contextUsage;
   const level = ctx ? contextLevel(ctx.ratio) : "ok";
   const showBanner =
@@ -55,11 +53,6 @@ export function ChatPanel({
             {active ? active.title : "New chat"}
           </span>
           {running ? <span className="badge running">running</span> : null}
-          {sessionUsageLine ? (
-            <span className="session-usage" title="Session totals">
-              {sessionUsageLine}
-            </span>
-          ) : null}
           {ctx ? (
             <span
               className={`context-meter context-meter-${level}`}
