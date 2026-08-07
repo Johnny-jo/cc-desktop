@@ -28,7 +28,7 @@ describe("extractUsedTokens", () => {
   });
 
   it("returns undefined when no usable fields", () => {
-    expect(extractUsedTokens({ durationMs: 12 })).toBeUndefined();
+    expect(extractUsedTokens({})).toBeUndefined();
     expect(extractUsedTokens(undefined)).toBeUndefined();
   });
 });
@@ -94,12 +94,12 @@ describe("computeContextUsage", () => {
     });
     expect(u).toMatchObject({
       usedTokens: 160_000,
-      limitTokens: 128_000, // builtin kimi
-      source: "builtin",
+      limitTokens: 200_000, // kimi-for-coding no longer matched by builtin; falls to default
+      source: "default",
       modelId: "kimi-for-coding",
       updatedAt: 1_700_000_000_000,
     });
-    expect(u!.ratio).toBeCloseTo(160_000 / 128_000);
+    expect(u!.ratio).toBeCloseTo(160_000 / 200_000);
 
     expect(
       computeContextUsage({

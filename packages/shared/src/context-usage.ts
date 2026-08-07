@@ -10,18 +10,24 @@ export type ContextLimitSettings = {
   modelContextLimits: Record<string, number>;
 };
 
+type TokenFields = {
+  inputTokens?: number | null;
+  cacheReadTokens?: number | null;
+  cacheCreationTokens?: number | null;
+};
+
 /** Prefer input_tokens; else sum of cache fields. */
-export function extractUsedTokens(turn?: TurnUsage): number | undefined {
-  if (!turn) return undefined;
+export function extractUsedTokens(source?: TokenFields): number | undefined {
+  if (!source) return undefined;
   if (
-    turn.inputTokens != null &&
-    Number.isFinite(turn.inputTokens) &&
-    turn.inputTokens >= 0
+    source.inputTokens != null &&
+    Number.isFinite(source.inputTokens) &&
+    source.inputTokens >= 0
   ) {
-    return turn.inputTokens;
+    return source.inputTokens;
   }
-  const cacheRead = turn.cacheReadTokens;
-  const cacheCreation = turn.cacheCreationTokens;
+  const cacheRead = source.cacheReadTokens;
+  const cacheCreation = source.cacheCreationTokens;
   const hasCache =
     (cacheRead != null && Number.isFinite(cacheRead)) ||
     (cacheCreation != null && Number.isFinite(cacheCreation));
@@ -66,7 +72,8 @@ const BUILTIN_RULES: Array<{ match: RegExp; limit: number }> = [
   { match: /claude|opus|sonnet|haiku|fable/i, limit: 200_000 },
   { match: /gemini/i, limit: 1_000_000 },
   { match: /gpt-4|gpt-5|\bo1\b|\bo3\b|codex/i, limit: 128_000 },
-  { match: /kimi|k3|moonshot/i, limit: 128_000 },
+  { match: /k3|moonshot/i, limit: 256_000 },
+  { match: /kimi-k\d/i, limit: 256_000 },
   { match: /deepseek/i, limit: 128_000 },
   { match: /grok/i, limit: 128_000 },
 ];
@@ -112,6 +119,9 @@ export function computeContextUsage(args: {
   catalog: ModelInfo[];
   now?: number;
 }): ContextUsage | undefined {
+  // Context occupancy = tokens of the LATEST turn only. The SDK's per-turn
+  // input_tokens already includes the full conversation history that was sent
+  // to the model, so summing across turns would double-count history.
   const used = extractUsedTokens(args.turn);
   if (used == null) return undefined;
   const { limitTokens, source } = resolveContextLimit(
