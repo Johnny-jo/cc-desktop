@@ -519,6 +519,7 @@ textarea {
   gap: var(--space-3);
   padding: 0 var(--space-4);
   min-height: 52px;
+  min-width: 0;
   border-bottom: 1px solid transparent;
   background: transparent;
 }
@@ -528,6 +529,7 @@ textarea {
   align-items: center;
   gap: var(--space-2);
   min-width: 0;
+  flex: 1 1 auto;
 }
 
 .chat-title {
@@ -545,6 +547,7 @@ textarea {
   align-items: center;
   gap: 4px;
   flex-shrink: 0;
+  min-width: fit-content;
 }
 
 .chat-header-field {
@@ -566,7 +569,8 @@ textarea {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 280px;
+  min-width: 0;
+  max-width: min(280px, 40vw);
 }
 
 .usage-row {
@@ -586,7 +590,9 @@ textarea {
   gap: 6px;
   font-size: 11px;
   color: var(--text-faint);
-  max-width: 220px;
+  min-width: 0;
+  max-width: min(220px, 30vw);
+  flex-shrink: 1;
 }
 
 .context-meter-bar {
