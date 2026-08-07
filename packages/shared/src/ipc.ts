@@ -3,6 +3,7 @@ import type {
   Attachment,
   CpaStatus,
   FileChange,
+  ModelInfo,
   PermissionDecision,
   PermissionMode,
   PermissionRequest,
@@ -35,6 +36,8 @@ export const IPC = {
   cpaStatus: "cpa:status",
   /** Fetch model ids from CPA /v1/models and merge into settings */
   cpaSyncModels: "cpa:sync-models",
+  /** Read-only cached CPA model catalog (ids + contextLimit) */
+  cpaModelCatalog: "cpa:model-catalog",
   modelSet: "model:set",
   /** SDK skills / slash commands for a live session */
   sessionSlashCommands: "session:slash-commands",
@@ -110,6 +113,10 @@ export type IpcInvokeMap = {
   [IPC.cpaSyncModels]: {
     args: [];
     result: { models: string[]; defaultModel: string };
+  };
+  [IPC.cpaModelCatalog]: {
+    args: [];
+    result: ModelInfo[];
   };
   [IPC.modelSet]: { args: [{ model: string }]; result: { model: string } };
   [IPC.sessionSlashCommands]: {

@@ -88,6 +88,11 @@ const desktop = {
       defaultModel: string;
     }>,
 
+  getModelCatalog: () =>
+    ipcRenderer.invoke(IPC.cpaModelCatalog) as Promise<
+      import("@claude-desktop/shared").ModelInfo[]
+    >,
+
   setModel: (model: string) =>
     ipcRenderer.invoke(IPC.modelSet, { model }) as Promise<{ model: string }>,
 

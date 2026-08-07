@@ -216,6 +216,10 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
     return { models, defaultModel };
   });
 
+  ipcMain.handle(IPC.cpaModelCatalog, async () => {
+    return ctx.cpa.getModelCatalog();
+  });
+
   ipcMain.handle(IPC.modelSet, async (_e, { model }: { model: string }) => {
     ctx.settings.update({ defaultModel: model });
     return { model };
