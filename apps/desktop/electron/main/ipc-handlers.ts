@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import { access } from "node:fs/promises";
-import { dialog, ipcMain, type BrowserWindow } from "electron";
+import { execFile } from "node:child_process";
+import { dialog, ipcMain, shell, type BrowserWindow } from "electron";
 import { IPC, validateMcpServers } from "@claude-desktop/shared";
 import type {
   AppSettings,
@@ -289,6 +290,62 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
         dryRun: Boolean(dryRun),
       });
     },
+  );
+
+  ipcMain.handle(
+    IPC.fileOpenInEditor,
+    async (_e, { path: filePath }: { path: string }) => {
+      if (!filePath || typeof filePath !== "string") {
+        return { ok: false, error: "path is required" };
+      }
+      const err = await shell.openPath(filePath);
+      return err ? { ok: false, error: err } : { ok: true };
+    },
+  );
+
+  ipcMain.handle(
+    IPC.fileReveal,
+    async (_e, { path: filePath }: { path: string }) => {
+      if (filePath && typeof filePath === "string") {
+        shell.showItemInFolder(filePath);
+      }
+      return { ok: true };
+    },
+  );
+
+  ipcMain.handle(
+    IPC.projectGitStatus,
+    (_e, { cwd }: { cwd: string }) =>
+      new Promise((resolve) => {
+        if (!cwd) {
+          resolve({ isRepo: false });
+          return;
+        }
+        execFile(
+          "git",
+          ["-C", cwd, "status", "--porcelain=v1", "--branch"],
+          { timeout: 5000, maxBuffer: 1024 * 1024 },
+          (err, stdout) => {
+            if (err) {
+              resolve({ isRepo: false });
+              return;
+            }
+            const lines = String(stdout).split("\n").filter(Boolean);
+            let branch: string | undefined;
+            const changed: string[] = [];
+            for (const line of lines) {
+              if (line.startsWith("## ")) {
+                branch = line.slice(3).split("...")[0]?.trim() || undefined;
+                continue;
+              }
+              // porcelain: "XY path" (renames show "orig -> new"; keep new)
+              const p = line.slice(3).split(" -> ").pop()?.trim();
+              if (p) changed.push(p);
+            }
+            resolve({ isRepo: true, branch, changed });
+          },
+        );
+      }),
   );
 
   ipcMain.handle(

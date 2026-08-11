@@ -60,6 +60,12 @@ export const IPC = {
   diffRestoreAll: "diff:restore-all",
   /** Rewind files + conversation to a user message (SDK checkpointing) */
   sessionRewind: "session:rewind",
+  /** Open a file in the OS default editor */
+  fileOpenInEditor: "file:open-in-editor",
+  /** Reveal a file in the OS file manager */
+  fileReveal: "file:reveal",
+  /** Git status for the current project (branch + changed paths) */
+  projectGitStatus: "project:git-status",
   // main → renderer (webContents.send)
   sessionEvent: "session:event",
   permissionRequest: "permission:request",
@@ -220,6 +226,23 @@ export type IpcInvokeMap = {
       insertions?: number;
       deletions?: number;
       error?: string;
+    };
+  };
+  [IPC.fileOpenInEditor]: {
+    args: [{ path: string }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.fileReveal]: {
+    args: [{ path: string }];
+    result: { ok: boolean };
+  };
+  [IPC.projectGitStatus]: {
+    args: [{ cwd: string }];
+    result: {
+      isRepo: boolean;
+      branch?: string;
+      /** porcelain v1 paths, relative to repo root */
+      changed?: string[];
     };
   };
 };

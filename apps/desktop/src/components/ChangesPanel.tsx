@@ -1,8 +1,20 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import type { FileChangeEvent } from "@claude-desktop/shared";
 import { getDesktop } from "../lib/desktop-api";
 import { useAppStore } from "../state/store";
 import { DiffView } from "./DiffView";
+
+/** Join possibly-relative change path against the project root. */
+function resolvePath(projectPath: string | null, p: string): string {
+  if (!projectPath) return p;
+  if (/^[a-zA-Z]:[\\/]/.test(p) || p.startsWith("/")) return p;
+  return `${projectPath.replace(/[\\/]+$/, "")}/${p}`;
+}
+
+/** basename for git-status matching (git reports repo-relative / paths) */
+function normPath(p: string): string {
+  return p.replace(/\\/g, "/").replace(/^\.\//, "");
+}
 
 /** One row in the panel: a single write operation on a file. */
 type OpRow = {
@@ -23,6 +35,7 @@ function formatTime(at: number): string {
 export function ChangesPanel() {
   const activeSessionId = useAppStore((s) => s.activeSessionId);
   const changesBySession = useAppStore((s) => s.changesBySession);
+  const projectPath = useAppStore((s) => s.projectPath);
   const changes = activeSessionId
     ? (changesBySession[activeSessionId] ?? [])
     : [];
@@ -30,6 +43,36 @@ export function ChangesPanel() {
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  const [git, setGit] = useState<{
+    isRepo: boolean;
+    branch?: string;
+    changed?: string[];
+  } | null>(null);
+
+  // Git overlay: branch + whether each changed file is also dirty in git.
+  useEffect(() => {
+    if (!projectPath) {
+      setGit(null);
+      return;
+    }
+    let cancelled = false;
+    getDesktop()
+      .gitStatus(projectPath)
+      .then((res) => {
+        if (!cancelled) setGit(res);
+      })
+      .catch(() => {
+        if (!cancelled) setGit(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectPath, changes]);
+
+  const gitDirty = useMemo(
+    () => new Set((git?.changed ?? []).map(normPath)),
+    [git],
+  );
 
   // Flatten per-file changes into per-operation rows, newest first.
   const rows = useMemo<OpRow[]>(() => {
@@ -90,7 +133,15 @@ export function ChangesPanel() {
   return (
     <div className="changes-panel">
       <div className="panel-title changes-panel-title">
-        <span>Changes</span>
+        <span>
+          Changes
+          {git?.isRepo && git.branch ? (
+            <span className="changes-git-branch" title="git branch">
+              {" "}
+              ⎇ {git.branch}
+            </span>
+          ) : null}
+        </span>
         {restorable.length > 0 ? (
           <button
             type="button"
@@ -126,9 +177,27 @@ export function ChangesPanel() {
                   <span className="change-path" title={r.path}>
                     {r.path}
                   </span>
+                  {gitDirty.has(normPath(r.path)) ? (
+                    <span className="change-git-dot" title="Dirty in git working tree" />
+                  ) : null}
                   <span className="change-op-meta">
                     {r.event.tool} · {formatTime(r.event.at)}
                   </span>
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm change-open"
+                  title="Open in editor"
+                  onClick={() =>
+                    void getDesktop()
+                      .openInEditor(resolvePath(projectPath, r.path))
+                      .then((res) => {
+                        if (!res.ok) setNote(res.error ?? "Open failed");
+                      })
+                      .catch(() => undefined)
+                  }
+                >
+                  ↗
                 </button>
                 {r.event.canRestore ? (
                   <button

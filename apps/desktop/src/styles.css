@@ -1563,6 +1563,31 @@ textarea {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
+.changes-git-branch {
+  color: var(--text-faint);
+  font-weight: 400;
+  font-size: 11.5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.change-git-dot {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warn);
+}
+
+.change-open {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  padding: 4px 8px;
+}
+
+.change-open:hover {
+  color: var(--accent);
+}
+
 .change-item {
   width: 100%;
   min-width: 0;

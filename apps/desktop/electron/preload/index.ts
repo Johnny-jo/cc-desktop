@@ -126,6 +126,25 @@ const desktop = {
       error?: string;
     }>,
 
+  /** Open a file with the OS default editor. */
+  openInEditor: (path: string) =>
+    ipcRenderer.invoke(IPC.fileOpenInEditor, { path }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+
+  /** Reveal a file in the OS file manager. */
+  revealFile: (path: string) =>
+    ipcRenderer.invoke(IPC.fileReveal, { path }) as Promise<{ ok: boolean }>,
+
+  /** Git status of a project directory (branch + changed paths). */
+  gitStatus: (cwd: string) =>
+    ipcRenderer.invoke(IPC.projectGitStatus, { cwd }) as Promise<{
+      isRepo: boolean;
+      branch?: string;
+      changed?: string[];
+    }>,
+
   compressSession: (
     sessionId: string,
     items?: ChatItem[],
