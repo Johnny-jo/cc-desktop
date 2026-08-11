@@ -26,9 +26,9 @@ export function App() {
     toggleSidebar,
     toggleChanges,
     toggleTerminal,
-    adjustSidebarWidth,
-    adjustChangesWidth,
-    adjustTerminalHeight,
+    setSidebarWidth,
+    setChangesWidth,
+    setTerminalHeight,
   } = usePanelLayout();
 
   useEffect(() => {
@@ -103,11 +103,18 @@ export function App() {
             <>
               <aside
                 className="panel panel-sessions"
-                style={{ width: layout.sidebarWidth }}
+                style={{
+                  width: layout.sidebarWidth,
+                  flex: `0 0 ${layout.sidebarWidth}px`,
+                }}
               >
                 <SessionList onOpenSettings={() => setSettingsOpen(true)} />
               </aside>
-              <ResizeHandle axis="sidebar" onDrag={adjustSidebarWidth} />
+              <ResizeHandle
+                axis="sidebar"
+                size={layout.sidebarWidth}
+                onResize={setSidebarWidth}
+              />
             </>
           ) : null}
 
@@ -117,10 +124,14 @@ export function App() {
 
           {layout.changesOpen ? (
             <>
-              <ResizeHandle axis="changes" onDrag={adjustChangesWidth} />
+              <ResizeHandle
+                axis="changes"
+                size={layout.changesWidth}
+                onResize={setChangesWidth}
+              />
               <aside
                 className="panel panel-changes"
-                style={{ width: layout.changesWidth }}
+                style={{ width: layout.changesWidth, flex: `0 0 ${layout.changesWidth}px` }}
               >
                 <ChangesPanel />
               </aside>
@@ -130,7 +141,11 @@ export function App() {
 
         {layout.terminalOpen ? (
           <>
-            <ResizeHandle axis="terminal" onDrag={adjustTerminalHeight} />
+            <ResizeHandle
+              axis="terminal"
+              size={layout.terminalHeight}
+              onResize={setTerminalHeight}
+            />
             <TerminalPanel open height={layout.terminalHeight} />
           </>
         ) : (

@@ -9,19 +9,17 @@ type Props = {
 };
 
 /**
- * Bottom command panel. Line input is always editable while open;
- * shell I/O is line-oriented (not a full PTY).
+ * Bottom command panel. Always typeable; each Enter runs a command in the
+ * project directory (Windows: one-shot cmd /c — reliable without a PTY).
  */
 export function TerminalPanel({ open }: Props) {
   const projectPath = useAppStore((s) => s.projectPath);
   const [termId, setTermId] = useState<string | null>(null);
-  const [shellLabel, setShellLabel] = useState("shell");
+  const [shellLabel, setShellLabel] = useState("cmd");
   const [cwdLabel, setCwdLabel] = useState("");
   const [output, setOutput] = useState("");
   const [line, setLine] = useState("");
-  const [status, setStatus] = useState<"idle" | "running" | "exited" | "error">(
-    "idle",
-  );
+  const [ready, setReady] = useState(false);
   const scrollerRef = useRef<HTMLPreElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const activeIdRef = useRef<string | null>(null);
@@ -44,7 +42,7 @@ export function TerminalPanel({ open }: Props) {
         }
         activeIdRef.current = null;
         setTermId(null);
-        setStatus("idle");
+        setReady(false);
       }
       return;
     }
@@ -56,15 +54,14 @@ export function TerminalPanel({ open }: Props) {
       const p = payload as { id: string; stream: string; data: string };
       if (!p?.data) return;
       if (activeIdRef.current && p.id !== activeIdRef.current) return;
-      // Accept output even before React state catches up (use ref).
       if (!activeIdRef.current) activeIdRef.current = p.id;
       append(p.data);
     });
     const unsubExit = desktop.on(IPC.terminalExit, (payload) => {
       const p = payload as { id: string; code: number | null };
       if (activeIdRef.current && p.id !== activeIdRef.current) return;
-      setStatus("exited");
-      append(`\r\n[process exited: ${p.code ?? "?"}]\r\n`);
+      append(`\r\n[session ended: ${p.code ?? "?"}]\r\n`);
+      setReady(false);
     });
 
     void (async () => {
@@ -78,14 +75,14 @@ export function TerminalPanel({ open }: Props) {
         setTermId(res.id);
         setShellLabel(res.shell);
         setCwdLabel(res.cwd);
-        setStatus("running");
-        // Focus the command line so the user can type immediately.
+        setReady(true);
+        setOutput("");
         requestAnimationFrame(() => inputRef.current?.focus());
       } catch (err) {
         if (cancelled) return;
-        setStatus("error");
+        setReady(false);
         append(
-          `[failed to start shell] ${err instanceof Error ? err.message : String(err)}\r\n`,
+          `[无法启动终端] ${err instanceof Error ? err.message : String(err)}\r\n`,
         );
       }
     })();
@@ -108,38 +105,37 @@ export function TerminalPanel({ open }: Props) {
 
   useEffect(() => {
     const el = scrollerRef.current;
-    if (!el) return;
-    el.scrollTop = el.scrollHeight;
+    if (el) el.scrollTop = el.scrollHeight;
   }, [output]);
 
   useEffect(() => {
-    if (open) {
-      const t = window.setTimeout(() => inputRef.current?.focus(), 50);
-      return () => window.clearTimeout(t);
-    }
-  }, [open]);
+    if (!open) return;
+    const t = window.setTimeout(() => inputRef.current?.focus(), 80);
+    return () => window.clearTimeout(t);
+  }, [open, ready]);
 
   const sendLine = async () => {
     const text = line;
-    const id = termId ?? activeIdRef.current;
-    if (!text.trim() && !id) return;
     setLine("");
-    append(`$ ${text}\r\n`);
-    if (!id || status === "exited" || status === "error") {
-      append("[shell not running — click Restart]\r\n");
+    const id = termId ?? activeIdRef.current;
+    if (!id) {
+      append("[终端未就绪，点 Restart]\r\n");
       return;
+    }
+    if (text.trim()) {
+      append(`$ ${text}\r\n`);
     }
     try {
       const res = await getDesktop().writeTerminal(id, `${text}\n`);
       if (!res.ok) {
-        append("[write failed — shell may have exited]\r\n");
-        setStatus("exited");
+        append("[执行失败 — 可点 Restart 重试]\r\n");
       }
     } catch (err) {
       append(
         `[write failed] ${err instanceof Error ? err.message : String(err)}\r\n`,
       );
     }
+    inputRef.current?.focus();
   };
 
   const restart = async () => {
@@ -153,27 +149,24 @@ export function TerminalPanel({ open }: Props) {
     }
     activeIdRef.current = null;
     setTermId(null);
+    setReady(false);
     setOutput("");
-    setStatus("idle");
     try {
       const res = await getDesktop().createTerminal(projectPath ?? undefined);
       activeIdRef.current = res.id;
       setTermId(res.id);
       setShellLabel(res.shell);
       setCwdLabel(res.cwd);
-      setStatus("running");
+      setReady(true);
       inputRef.current?.focus();
     } catch (err) {
-      setStatus("error");
       append(
-        `[failed to restart] ${err instanceof Error ? err.message : String(err)}\r\n`,
+        `[restart failed] ${err instanceof Error ? err.message : String(err)}\r\n`,
       );
     }
   };
 
   if (!open) return null;
-
-  const canSend = Boolean(termId ?? activeIdRef.current) && status === "running";
 
   return (
     <div className="terminal-panel">
@@ -182,9 +175,7 @@ export function TerminalPanel({ open }: Props) {
         <span className="terminal-meta" title={cwdLabel}>
           {shellLabel}
           {cwdLabel ? ` · ${cwdLabel}` : ""}
-          {status === "exited" ? " · exited" : ""}
-          {status === "error" ? " · error" : ""}
-          {status === "idle" ? " · starting…" : ""}
+          {!ready ? " · …" : ""}
         </span>
         <button
           type="button"
@@ -202,12 +193,15 @@ export function TerminalPanel({ open }: Props) {
         </button>
       </div>
       <pre className="terminal-output" ref={scrollerRef}>
-        {output ||
-          (status === "running" || status === "idle"
-            ? "Starting shell…\n"
-            : "")}
+        {output || (ready ? "" : "Starting…\n")}
       </pre>
-      <div className="terminal-input-row">
+      <form
+        className="terminal-input-row"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void sendLine();
+        }}
+      >
         <span className="terminal-prompt">$</span>
         <input
           ref={inputRef}
@@ -217,23 +211,13 @@ export function TerminalPanel({ open }: Props) {
           autoComplete="off"
           autoCorrect="off"
           autoCapitalize="off"
-          placeholder={
-            canSend
-              ? "输入命令后回车…"
-              : status === "idle"
-                ? "正在启动 shell…"
-                : "Shell 未运行 — 点 Restart"
-          }
+          placeholder="输入命令，回车执行…"
           onChange={(e) => setLine(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              e.stopPropagation();
-              void sendLine();
-            }
-          }}
         />
-      </div>
+        <button type="submit" className="btn btn-sm terminal-run">
+          运行
+        </button>
+      </form>
     </div>
   );
 }

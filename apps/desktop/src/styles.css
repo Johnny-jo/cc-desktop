@@ -419,6 +419,11 @@ body.is-resizing-row * {
   border-top: 1px solid var(--border-soft);
   flex-shrink: 0;
   background: #121212;
+  margin: 0;
+}
+
+.terminal-run {
+  flex-shrink: 0;
 }
 
 .terminal-prompt {

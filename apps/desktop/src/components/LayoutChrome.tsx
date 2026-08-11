@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useRef } from "react";
 
 export type LayoutChromeProps = {
   sidebarOpen: boolean;
@@ -9,7 +9,6 @@ export type LayoutChromeProps = {
   onToggleTerminal: () => void;
 };
 
-/** 会话：圆角框 + 左侧竖条（侧栏） */
 function IconSidebar({ active }: { active: boolean }) {
   return (
     <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden>
@@ -22,7 +21,7 @@ function IconSidebar({ active }: { active: boolean }) {
         stroke="currentColor"
         strokeWidth="1.5"
         fill={active ? "currentColor" : "none"}
-        fillOpacity={active ? 0.12 : 0}
+        fillOpacity={active ? 0.14 : 0}
       />
       <path
         d="M8 3.75v12.5"
@@ -34,7 +33,6 @@ function IconSidebar({ active }: { active: boolean }) {
   );
 }
 
-/** 变更：空心圆角方框 */
 function IconChanges({ active }: { active: boolean }) {
   return (
     <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden>
@@ -47,13 +45,12 @@ function IconChanges({ active }: { active: boolean }) {
         stroke="currentColor"
         strokeWidth="1.5"
         fill={active ? "currentColor" : "none"}
-        fillOpacity={active ? 0.12 : 0}
+        fillOpacity={active ? 0.14 : 0}
       />
     </svg>
   );
 }
 
-/** 终端：横向圆角条 */
 function IconTerminal({ active }: { active: boolean }) {
   return (
     <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden>
@@ -66,15 +63,12 @@ function IconTerminal({ active }: { active: boolean }) {
         stroke="currentColor"
         strokeWidth="1.5"
         fill={active ? "currentColor" : "none"}
-        fillOpacity={active ? 0.12 : 0}
+        fillOpacity={active ? 0.14 : 0}
       />
     </svg>
   );
 }
 
-/**
- * Panel toggles in the frameless title bar (icon-only, reference style).
- */
 export function TitlebarToggles({
   sidebarOpen,
   changesOpen,
@@ -122,42 +116,45 @@ export function TitlebarToggles({
 type ResizeAxis = "sidebar" | "changes" | "terminal";
 
 /**
- * Drag handle. onDrag receives delta since last move; parent must use
- * functional state updates (prev + delta).
+ * Resize grip. Uses start-position + start-size so every move sets an absolute
+ * size (no stale React state / dropped deltas).
  */
 export function ResizeHandle({
   axis,
-  onDrag,
+  /** Current size in px (width for sidebar/changes, height for terminal). */
+  size,
+  onResize,
 }: {
   axis: ResizeAxis;
-  onDrag: (delta: number) => void;
+  size: number;
+  onResize: (nextSize: number) => void;
 }) {
+  const startRef = useRef({ pos: 0, size: 0 });
+
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     e.preventDefault();
     e.stopPropagation();
     const el = e.currentTarget;
     el.setPointerCapture(e.pointerId);
+    startRef.current = {
+      pos: axis === "terminal" ? e.clientY : e.clientX,
+      size,
+    };
     document.body.classList.add(
       axis === "terminal" ? "is-resizing-row" : "is-resizing-col",
     );
-    let lastX = e.clientX;
-    let lastY = e.clientY;
 
     const onMove = (ev: PointerEvent) => {
       ev.preventDefault();
+      const { pos, size: startSize } = startRef.current;
       if (axis === "terminal") {
-        const dy = lastY - ev.clientY;
-        lastY = ev.clientY;
-        if (dy !== 0) onDrag(dy);
+        // Drag up (smaller clientY) → taller terminal
+        onResize(startSize + (pos - ev.clientY));
       } else if (axis === "sidebar") {
-        const dx = ev.clientX - lastX;
-        lastX = ev.clientX;
-        if (dx !== 0) onDrag(dx);
+        onResize(startSize + (ev.clientX - pos));
       } else {
-        // changes: handle sits left of panel; drag left → wider
-        const dx = lastX - ev.clientX;
-        lastX = ev.clientX;
-        if (dx !== 0) onDrag(dx);
+        // changes: grip is on the LEFT of the panel; drag left → wider
+        onResize(startSize + (pos - ev.clientX));
       }
     };
     const onUp = (ev: PointerEvent) => {
