@@ -10,6 +10,7 @@ import {
   CONTEXT_LIMIT_MAX,
   CONTEXT_LIMIT_MIN,
   buildModelContextLimitsPatch,
+  normalizeRuleString,
   resolveContextLimit,
   validateMcpServers,
 } from "@claude-desktop/shared";
@@ -54,6 +55,9 @@ type FormState = {
   /** modelId → override 字符串；缺省或 "" = auto */
   modelContextLimitDraft: Record<string, string>;
   mcpServers: McpServerDraft[];
+  /** Claude Code-style rules, one per line: Edit / Edit(src/**) / Bash(npm *) */
+  permissionAllowText: string;
+  permissionDenyText: string;
 };
 
 let mcpDraftSeq = 0;
@@ -159,7 +163,29 @@ function fromSettings(s: PublicSettings | null): FormState {
     defaultContextLimit: String(s?.defaultContextLimit ?? 200_000),
     modelContextLimitDraft: draft,
     mcpServers: mcpServersToDrafts(s?.mcpServers),
+    permissionAllowText: (s?.permissionAllow ?? []).join("\n"),
+    permissionDenyText: (s?.permissionDeny ?? []).join("\n"),
   };
+}
+
+/** Parse a one-per-line rules textarea; returns error on first bad line. */
+function parseRulesText(
+  text: string,
+): { ok: true; rules: string[] } | { ok: false; error: string } {
+  const rules: string[] = [];
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    const n = normalizeRuleString(line);
+    if (!n) {
+      return {
+        ok: false,
+        error: `Invalid rule "${line}" — use Edit, Edit(src/**) or Bash(npm run *)`,
+      };
+    }
+    if (!rules.includes(n)) rules.push(n);
+  }
+  return { ok: true, rules };
 }
 
 export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
@@ -492,6 +518,42 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
     );
   }
 
+  function renderPermissions() {
+    return (
+      <div className="settings-mcp">
+        <div className="settings-context-limits-title">Permissions</div>
+        <p className="settings-hint">
+          Claude Code-style rules, one per line: <code>Edit</code>,{" "}
+          <code>Edit(src/**)</code>, <code>Bash(npm run *)</code>. Allow rules
+          auto-approve matching tools; deny rules silently block them.
+          Destructive Bash and plan mode still override allow rules.
+        </p>
+        <label className="settings-field">
+          Allow rules
+          <textarea
+            rows={3}
+            placeholder={"Bash(npm test)\nEdit(src/**)"}
+            value={form.permissionAllowText}
+            spellCheck={false}
+            onChange={(e) =>
+              setField("permissionAllowText", e.target.value)
+            }
+          />
+        </label>
+        <label className="settings-field">
+          Deny rules
+          <textarea
+            rows={2}
+            placeholder={"Bash(git push *)"}
+            value={form.permissionDenyText}
+            spellCheck={false}
+            onChange={(e) => setField("permissionDenyText", e.target.value)}
+          />
+        </label>
+      </div>
+    );
+  }
+
   function renderMcpServers() {
     return (
       <div className="settings-mcp">
@@ -655,6 +717,17 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
       return;
     }
 
+    const allowRules = parseRulesText(form.permissionAllowText);
+    if (!allowRules.ok) {
+      setLocalError(`Allow rules: ${allowRules.error}`);
+      return;
+    }
+    const denyRules = parseRulesText(form.permissionDenyText);
+    if (!denyRules.ok) {
+      setLocalError(`Deny rules: ${denyRules.error}`);
+      return;
+    }
+
     const patch: Partial<AppSettings> & { token?: string } = {
       cpaExePath: form.cpaExePath.trim(),
       cpaConfigPath: form.cpaConfigPath.trim(),
@@ -665,6 +738,8 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
       defaultContextLimit: Math.floor(defaultContextLimit),
       modelContextLimits: patchLimits.modelContextLimits,
       mcpServers: patchMcp.mcpServers,
+      permissionAllow: allowRules.rules,
+      permissionDeny: denyRules.rules,
     };
     if (form.token.trim()) {
       patch.token = form.token.trim();
@@ -838,6 +913,8 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
           </p>
 
           {renderContextLimitsTable()}
+
+          {renderPermissions()}
 
           {renderMcpServers()}
 

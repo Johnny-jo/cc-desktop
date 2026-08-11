@@ -210,7 +210,7 @@ export type PermissionRequest = {
 };
 
 export type PermissionDecision =
-  | { behavior: "allow"; scope: "once" | "session" }
+  | { behavior: "allow"; scope: "once" | "session" | "always" }
   | { behavior: "deny"; message?: string };
 
 export type AppSettings = {
@@ -229,6 +229,14 @@ export type AppSettings = {
   modelContextLimits: Record<string, number>;
   /** Configured MCP servers (JSON-safe), passed to the SDK on session start */
   mcpServers?: import("./mcp-servers").McpServersMap;
+  /**
+   * Persisted permission rules, Claude Code style:
+   * "Edit", "Edit(src/**)", "Bash(npm run *)". Allow rules auto-approve
+   * before the UI prompt; deny rules hard-block before everything else
+   * (except destructive Bash which still prompts — deny is for silence).
+   */
+  permissionAllow?: string[];
+  permissionDeny?: string[];
 };
 
 export type PublicSettings = Omit<AppSettings, never> & {

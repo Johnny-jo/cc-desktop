@@ -156,4 +156,90 @@ describe("PermissionBroker", () => {
     expect(edit.behavior).toBe("deny");
     expect(requestFromUi).not.toHaveBeenCalled();
   });
+
+  it("persisted allow rules auto-approve in default mode", async () => {
+    const requestFromUi = vi.fn();
+    const broker = new PermissionBroker({
+      getMode: () => "default",
+      getAllowRules: () => ["Edit(src/**)", "Bash(npm run *)"],
+      requestFromUi,
+      timeoutMs: 1000,
+    });
+
+    const edit = await broker.canUseTool("Edit", { file_path: "src/a.ts" }, "s1");
+    expect(edit.behavior).toBe("allow");
+    const bash = await broker.canUseTool("Bash", { command: "npm run build" }, "s1");
+    expect(bash.behavior).toBe("allow");
+    expect(requestFromUi).not.toHaveBeenCalled();
+
+    // Outside the rule → still prompts
+    const pending = broker.canUseTool("Bash", { command: "curl x" }, "s1");
+    expect(requestFromUi).toHaveBeenCalledTimes(1);
+    const req = requestFromUi.mock.calls[0][0] as PermissionRequest;
+    broker.respond(req.requestId, { behavior: "deny" });
+    await pending;
+  });
+
+  it("persisted deny rules hard-block before read-only and mode logic", async () => {
+    const requestFromUi = vi.fn();
+    const broker = new PermissionBroker({
+      getMode: () => "auto",
+      getDenyRules: () => ["Bash(git push *)", "Read(./secrets/**)"],
+      requestFromUi,
+      timeoutMs: 1000,
+    });
+
+    const push = await broker.canUseTool("Bash", { command: "git push origin main" }, "s1");
+    expect(push.behavior).toBe("deny");
+    const readSecret = await broker.canUseTool(
+      "Read",
+      { file_path: "./secrets/key.pem" },
+      "s1",
+    );
+    expect(readSecret.behavior).toBe("deny");
+    expect(requestFromUi).not.toHaveBeenCalled();
+  });
+
+  it("allow rules never bypass destructive Bash or plan mode", async () => {
+    const requestFromUi = vi.fn();
+    const broker = new PermissionBroker({
+      getMode: () => "auto",
+      getAllowRules: () => ["Bash(rm *)"],
+      requestFromUi,
+      timeoutMs: 1000,
+    });
+    const pending = broker.canUseTool("Bash", { command: "rm -rf /tmp/x" }, "s1");
+    expect(requestFromUi).toHaveBeenCalledTimes(1);
+    const req = requestFromUi.mock.calls[0][0] as PermissionRequest;
+    broker.respond(req.requestId, { behavior: "deny" });
+    await pending;
+
+    const planBroker = new PermissionBroker({
+      getMode: () => "plan",
+      getAllowRules: () => ["Edit"],
+      requestFromUi: vi.fn(),
+      timeoutMs: 1000,
+    });
+    const edit = await planBroker.canUseTool("Edit", { file_path: "a.ts" }, "s1");
+    expect(edit.behavior).toBe("deny");
+  });
+
+  it("'always' scope persists a derived allow rule", async () => {
+    const added: string[] = [];
+    const requestFromUi = vi.fn();
+    const broker = new PermissionBroker({
+      getMode: () => "default",
+      onAddAllowRule: (r) => added.push(r),
+      requestFromUi,
+      timeoutMs: 1000,
+    });
+
+    const pending = broker.canUseTool("Bash", { command: "npm test --watch" }, "s1");
+    const req = requestFromUi.mock.calls[0][0] as PermissionRequest;
+    broker.respond(req.requestId, { behavior: "allow", scope: "always" });
+    await pending;
+
+    expect(added).toHaveLength(1);
+    expect(added[0]).toMatch(/^Bash\(npm test/);
+  });
 });

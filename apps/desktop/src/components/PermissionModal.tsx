@@ -63,6 +63,16 @@ export function PermissionModal() {
           </button>
           <button
             type="button"
+            className="btn"
+            title="Persist an allow rule (Settings → Permissions)"
+            onClick={() =>
+              respond({ behavior: "allow", scope: "always" })
+            }
+          >
+            Always allow
+          </button>
+          <button
+            type="button"
             className="btn btn-danger"
             onClick={() =>
               respond({ behavior: "deny", message: "User denied" })

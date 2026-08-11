@@ -6,7 +6,9 @@ import type {
 } from "@claude-desktop/shared";
 import {
   isDestructiveBash,
+  matchPersistedRules,
   matchSessionRule,
+  normalizeRuleString,
   ruleFromToolInput,
   type SessionAllowRule,
 } from "@claude-desktop/shared";
@@ -18,6 +20,11 @@ export type ToolPermissionResult =
 export type PermissionBrokerDeps = {
   getMode: () => PermissionMode;
   requestFromUi: (req: PermissionRequest) => void;
+  /** Persisted Claude Code-style rules from settings (allow wins after deny) */
+  getAllowRules?: () => string[];
+  getDenyRules?: () => string[];
+  /** Persist an allow rule ("Always allow" in the UI) */
+  onAddAllowRule?: (rule: string) => void;
   timeoutMs?: number;
 };
 
@@ -80,6 +87,9 @@ function summarize(toolName: string, input: Record<string, unknown>): string {
 export class PermissionBroker {
   private readonly getMode: PermissionBrokerDeps["getMode"];
   private readonly requestFromUi: PermissionBrokerDeps["requestFromUi"];
+  private readonly getAllowRules: () => string[];
+  private readonly getDenyRules: () => string[];
+  private readonly onAddAllowRule: ((rule: string) => void) | undefined;
   private readonly timeoutMs: number;
 
   private readonly rules = new Map<string, SessionAllowRule[]>();
@@ -88,6 +98,9 @@ export class PermissionBroker {
   constructor(deps: PermissionBrokerDeps) {
     this.getMode = deps.getMode;
     this.requestFromUi = deps.requestFromUi;
+    this.getAllowRules = deps.getAllowRules ?? (() => []);
+    this.getDenyRules = deps.getDenyRules ?? (() => []);
+    this.onAddAllowRule = deps.onAddAllowRule;
     this.timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   }
 
@@ -97,6 +110,12 @@ export class PermissionBroker {
     sessionId: string,
   ): Promise<ToolPermissionResult> {
     const mode = this.getMode();
+    const matchInput = extractMatchInput(toolName, input);
+
+    // Persisted deny rules hard-block first (silent, by design).
+    if (matchPersistedRules(this.getDenyRules(), matchInput)) {
+      return { behavior: "deny", message: `Denied by rule (${toolName})` };
+    }
 
     // Read-only / harmless tools never prompt, regardless of mode. This also
     // covers tools running inside a Task subagent, which otherwise would each
@@ -104,6 +123,10 @@ export class PermissionBroker {
     if (READ_ONLY_TOOLS.has(toolName)) {
       return { behavior: "allow", updatedInput: input };
     }
+
+    // Persisted allow rules auto-approve before mode logic — but never
+    // bypass plan mode or destructive-Bash confirmation below.
+    const allowedByRule = matchPersistedRules(this.getAllowRules(), matchInput);
 
     if (
       mode === "plan" &&
@@ -115,6 +138,10 @@ export class PermissionBroker {
     // Destructive Bash always requires confirmation (even under auto/acceptEdits).
     if (toolName === "Bash" && isDestructiveBash(String(input.command ?? ""))) {
       return this.askUi(toolName, input, sessionId);
+    }
+
+    if (allowedByRule) {
+      return { behavior: "allow", updatedInput: input };
     }
 
     if (
@@ -129,7 +156,6 @@ export class PermissionBroker {
       return { behavior: "allow", updatedInput: input };
     }
 
-    const matchInput = extractMatchInput(toolName, input);
     if (matchSessionRule(this.rules.get(sessionId) ?? [], matchInput)) {
       return { behavior: "allow", updatedInput: input };
     }
@@ -149,6 +175,16 @@ export class PermissionBroker {
         const list = this.rules.get(entry.sessionId) ?? [];
         list.push(ruleFromToolInput(entry.toolName, entry.input));
         this.rules.set(entry.sessionId, list);
+      } else if (decision.scope === "always") {
+        // Persist a Claude Code-style rule derived from this invocation.
+        const r = ruleFromToolInput(entry.toolName, entry.input);
+        const ruleStr = r.commandPrefix
+          ? `${r.toolName}(${r.commandPrefix})`
+          : r.pathPrefix
+            ? `${r.toolName}(${r.pathPrefix}**)`
+            : r.toolName;
+        const normalized = normalizeRuleString(ruleStr);
+        if (normalized) this.onAddAllowRule?.(normalized);
       }
       entry.resolve({ behavior: "allow", updatedInput: entry.input });
     } else {

@@ -1,7 +1,20 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { AppSettings, PermissionMode, PublicSettings } from "@claude-desktop/shared";
-import { sanitizeMcpServers } from "@claude-desktop/shared";
+import { normalizeRuleString, sanitizeMcpServers } from "@claude-desktop/shared";
+
+/** Keep only syntactically valid, normalized rule strings. */
+function sanitizePermissionRules(raw: unknown): string[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const item of raw) {
+    if (typeof item !== "string") continue;
+    const n = normalizeRuleString(item);
+    if (n && !out.includes(n)) out.push(n);
+  }
+  return out;
+}
 
 export type SettingsStoreDeps = {
   userDataDir: string;
@@ -27,6 +40,8 @@ const DEFAULTS: AppSettings = {
   defaultContextLimit: 200_000,
   modelContextLimits: {},
   mcpServers: {},
+  permissionAllow: [],
+  permissionDeny: [],
 };
 
 type StoredFile = Partial<AppSettings> & {
@@ -61,6 +76,8 @@ export class SettingsStore {
       models: [...this.settings.models],
       modelContextLimits: { ...this.settings.modelContextLimits },
       mcpServers: { ...this.settings.mcpServers },
+      permissionAllow: [...(this.settings.permissionAllow ?? [])],
+      permissionDeny: [...(this.settings.permissionDeny ?? [])],
     };
   }
 
@@ -86,6 +103,12 @@ export class SettingsStore {
     }
     if (publicPatch.mcpServers) {
       publicPatch.mcpServers = { ...publicPatch.mcpServers };
+    }
+    if (publicPatch.permissionAllow !== undefined) {
+      publicPatch.permissionAllow = sanitizePermissionRules(publicPatch.permissionAllow);
+    }
+    if (publicPatch.permissionDeny !== undefined) {
+      publicPatch.permissionDeny = sanitizePermissionRules(publicPatch.permissionDeny);
     }
     if (publicPatch.permissionMode !== undefined) {
       publicPatch.permissionMode = publicPatch.permissionMode as PermissionMode;
@@ -148,6 +171,8 @@ export class SettingsStore {
         defaultContextLimit,
         modelContextLimits: limits,
         mcpServers: sanitizeMcpServers(rest.mcpServers),
+        permissionAllow: sanitizePermissionRules(rest.permissionAllow) ?? [],
+        permissionDeny: sanitizePermissionRules(rest.permissionDeny) ?? [],
       };
       this.tokenEnc = tokenEnc;
       if (tokenEnc) {

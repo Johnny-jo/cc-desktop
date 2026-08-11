@@ -112,6 +112,14 @@ function bootstrap() {
 
   const permissions = new PermissionBroker({
     getMode: () => settings.get().permissionMode,
+    getAllowRules: () => settings.get().permissionAllow ?? [],
+    getDenyRules: () => settings.get().permissionDeny ?? [],
+    onAddAllowRule: (rule: string) => {
+      const cur = settings.get().permissionAllow ?? [];
+      if (!cur.includes(rule)) {
+        settings.update({ permissionAllow: [...cur, rule] });
+      }
+    },
     requestFromUi: (req: PermissionRequest) => {
       sendToRenderer(IPC.permissionRequest, req);
     },
