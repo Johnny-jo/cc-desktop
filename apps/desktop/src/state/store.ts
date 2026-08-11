@@ -646,6 +646,29 @@ export async function saveSettings(
   }
 }
 
+/** First-run: persist gateway token + CPA config + optionally start CPA. */
+export async function completeOnboarding(
+  token: string,
+  startCpa = true,
+): Promise<{
+  ok: boolean;
+  error?: string;
+  cpaStatus: CpaStatus;
+}> {
+  const desktop = getDesktop();
+  const res = await desktop.completeOnboarding(token, startCpa);
+  setState({
+    settings: res.settings,
+    cpaStatus: res.cpaStatus,
+    lastError: res.ok ? null : (res.error ?? "Onboarding failed"),
+  });
+  return {
+    ok: res.ok,
+    error: res.error,
+    cpaStatus: res.cpaStatus,
+  };
+}
+
 export function clearLastError(): void {
   setState({ lastError: null });
 }

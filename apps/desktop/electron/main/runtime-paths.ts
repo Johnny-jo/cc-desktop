@@ -157,6 +157,14 @@ export function getCpaUserConfigPath(env: RuntimePathEnv): string {
   return path.join(env.userDataDir, "cpa", "config.yaml");
 }
 
+function readCpaConfigTemplate(env: RuntimePathEnv): string {
+  const template = getCpaConfigTemplatePath(env);
+  if (template && fs.existsSync(template)) {
+    return fs.readFileSync(template, "utf8");
+  }
+  return defaultCpaConfigYaml();
+}
+
 /**
  * Ensure userData/cpa/config.yaml exists.
  * Copies from template (or legacy config) and rewrites host/port/api-keys placeholders.
@@ -173,20 +181,34 @@ export function materializeCpaConfig(
   fs.mkdirSync(path.dirname(dest), { recursive: true });
 
   if (!fs.existsSync(dest)) {
-    const template = getCpaConfigTemplatePath(env);
-    let body: string;
-    if (template && fs.existsSync(template)) {
-      body = fs.readFileSync(template, "utf8");
-    } else {
-      body = defaultCpaConfigYaml();
-    }
-    body = applyCpaConfigDefaults(body, {
+    const body = applyCpaConfigDefaults(readCpaConfigTemplate(env), {
       port: opts?.port ?? 8317,
       apiKey: opts?.apiKey,
     });
     fs.writeFileSync(dest, body, "utf8");
   }
 
+  return dest;
+}
+
+/**
+ * Create or overwrite userData CPA config with the given gateway api key.
+ * Used by first-run onboarding so the client token matches CPA api-keys.
+ */
+export function writeCpaConfigWithApiKey(
+  env: RuntimePathEnv,
+  opts: { port?: number; apiKey: string },
+): string {
+  const dest = getCpaUserConfigPath(env);
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  let base = fs.existsSync(dest)
+    ? fs.readFileSync(dest, "utf8")
+    : readCpaConfigTemplate(env);
+  const body = applyCpaConfigDefaults(base, {
+    port: opts.port ?? 8317,
+    apiKey: opts.apiKey,
+  });
+  fs.writeFileSync(dest, body, "utf8");
   return dest;
 }
 

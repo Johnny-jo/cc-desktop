@@ -74,12 +74,17 @@ Embeds Claude Code CLI + CPA (see `docs/superpowers/plans/2026-08-11-bundled-run
 pnpm prepare:vendor
 # Optional: CLAUDE_DESKTOP_CPA_DIST=C:\path\to\CPA
 
-# 2) Build + electron-builder dir target
+# 2) Build + electron-builder (dir + NSIS)
 pnpm package:win
 ```
 
-Output: `apps/desktop/release/win-unpacked/` — zip that folder for a portable release.  
-Runtime layout: `resources/bin/claude/claude.exe`, `resources/bin/cpa/cli-proxy-api.exe` + template config.
+Outputs under `apps/desktop/release/`:
+
+- **Portable:** `win-unpacked/` — zip for “extract and run”
+- **Installer:** `Claude-Desktop-Setup-*-x64.exe` (NSIS; keeps `%APPDATA%` on uninstall)
+
+Runtime layout: `resources/bin/claude/claude.exe`, `resources/bin/cpa/cli-proxy-api.exe` + template config.  
+First launch shows an onboarding modal if no gateway token is stored.
 
 ## Packages
 

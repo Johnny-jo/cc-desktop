@@ -191,6 +191,18 @@ const desktop = {
   setSettings: (patch: Partial<AppSettings> & { token?: string }) =>
     ipcRenderer.invoke(IPC.settingsSet, patch),
 
+  /** First-run: save gateway token + rewrite CPA config + start CPA. */
+  completeOnboarding: (token: string, startCpa = true) =>
+    ipcRenderer.invoke(IPC.appCompleteOnboarding, {
+      token,
+      startCpa,
+    }) as Promise<{
+      ok: boolean;
+      settings: import("@claude-desktop/shared").PublicSettings;
+      cpaStatus: import("@claude-desktop/shared").CpaStatus;
+      error?: string;
+    }>,
+
   startCpa: () => ipcRenderer.invoke(IPC.cpaStart),
 
   getCpaStatus: () => ipcRenderer.invoke(IPC.cpaStatus),

@@ -25,15 +25,28 @@ extraResources:
     filter:
       - "**/*"
 
-# Windows: directory package (portable). NSIS installer can be added later.
+# Windows: portable dir + NSIS installer.
 # Disable signing/rcedit so packaging works offline without winCodeSign binaries.
 win:
   target:
     - target: dir
       arch:
         - x64
+    - target: nsis
+      arch:
+        - x64
   signAndEditExecutable: false
   verifyUpdateCodeSignature: false
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Claude Desktop
+  # Keep userData (settings, sessions, CPA config) on uninstall.
+  deleteAppDataOnUninstall: false
+  artifactName: Claude-Desktop-Setup-${version}-${arch}.${ext}
 
 forceCodeSigning: false
 

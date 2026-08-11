@@ -7,6 +7,7 @@ import {
   getClaudeExecutablePath,
   getCpaUserConfigPath,
   materializeCpaConfig,
+  writeCpaConfigWithApiKey,
   resolveEffectiveCpaPaths,
   type RuntimePathEnv,
 } from "./runtime-paths";
@@ -125,6 +126,24 @@ describe("runtime-paths", () => {
     });
     expect(resolved.cpaExePath).toBe(customExe);
     expect(resolved.cpaConfigPath).toBe(customCfg);
+  });
+
+  it("writeCpaConfigWithApiKey overwrites api-keys", () => {
+    const root = tmp();
+    const resources = path.join(root, "apps", "desktop", "resources", "cpa");
+    fs.mkdirSync(resources, { recursive: true });
+    fs.writeFileSync(
+      path.join(resources, "config.template.yaml"),
+      'host: ""\nport: 8317\napi-keys:\n  - old\n',
+      "utf8",
+    );
+    const userData = path.join(root, "userdata");
+    const e = env({ userDataDir: userData, projectRoot: root });
+    const dest = writeCpaConfigWithApiKey(e, { apiKey: "new-key-1" });
+    expect(fs.readFileSync(dest, "utf8")).toContain("new-key-1");
+    writeCpaConfigWithApiKey(e, { apiKey: "new-key-2" });
+    expect(fs.readFileSync(dest, "utf8")).toContain("new-key-2");
+    expect(fs.readFileSync(dest, "utf8")).not.toContain("new-key-1");
   });
 
   it("packaged claude path under resources/bin/claude", () => {

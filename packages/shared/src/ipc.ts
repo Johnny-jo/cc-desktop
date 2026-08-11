@@ -66,6 +66,11 @@ export const IPC = {
   fileReveal: "file:reveal",
   /** Git status for the current project (branch + changed paths) */
   projectGitStatus: "project:git-status",
+  /**
+   * First-run onboarding: set gateway token, rewrite CPA config api-keys,
+   * optionally start CPA.
+   */
+  appCompleteOnboarding: "app:complete-onboarding",
   // main → renderer (webContents.send)
   sessionEvent: "session:event",
   permissionRequest: "permission:request",
@@ -243,6 +248,22 @@ export type IpcInvokeMap = {
       branch?: string;
       /** porcelain v1 paths, relative to repo root */
       changed?: string[];
+    };
+  };
+  [IPC.appCompleteOnboarding]: {
+    args: [
+      {
+        /** Gateway client token (CPA api-keys + app encrypted token) */
+        token: string;
+        /** Start CPA after writing config (default true) */
+        startCpa?: boolean;
+      },
+    ];
+    result: {
+      ok: boolean;
+      settings: PublicSettings;
+      cpaStatus: CpaStatus;
+      error?: string;
     };
   };
 };

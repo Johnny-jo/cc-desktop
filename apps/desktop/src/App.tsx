@@ -5,12 +5,20 @@ import { ChangesPanel } from "./components/ChangesPanel";
 import { PermissionModal } from "./components/PermissionModal";
 import { UserPromptModal } from "./components/UserPromptModal";
 import { SettingsDrawer } from "./components/SettingsDrawer";
+import { OnboardingModal } from "./components/OnboardingModal";
 import { ErrorBanner } from "./components/ErrorBanner";
-import { bootstrapStore, flushAllTranscripts } from "./state/store";
+import {
+  bootstrapStore,
+  flushAllTranscripts,
+  useAppStore,
+} from "./state/store";
 
 export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [changesOpen, setChangesOpen] = useState(true);
+  const settings = useAppStore((s) => s.settings);
+  // Show onboarding until a gateway token is stored (first run / fresh install).
+  const needsOnboarding = settings != null && !settings.hasToken;
 
   useEffect(() => {
     void bootstrapStore();
@@ -58,6 +66,7 @@ export function App() {
       </div>
       <PermissionModal />
       <UserPromptModal />
+      <OnboardingModal open={needsOnboarding} />
       <SettingsDrawer
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}

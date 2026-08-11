@@ -2083,6 +2083,38 @@ textarea {
   z-index: 100;
 }
 
+.onboarding-overlay {
+  z-index: 120;
+}
+
+.onboarding-modal {
+  max-width: 520px;
+}
+
+.onboarding-lead {
+  margin: 0 0 16px;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.onboarding-token-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.onboarding-token-row input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
 .modal {
   background: var(--bg-elevated);
   border: 1px solid var(--border-strong);

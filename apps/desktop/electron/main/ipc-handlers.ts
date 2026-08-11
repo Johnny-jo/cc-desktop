@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import { access } from "node:fs/promises";
 import { execFile } from "node:child_process";
-import { dialog, ipcMain, shell, type BrowserWindow } from "electron";
+import { app, dialog, ipcMain, shell, type BrowserWindow } from "electron";
 import { IPC, validateMcpServers } from "@claude-desktop/shared";
 import type {
   AppSettings,
@@ -21,6 +21,11 @@ import type { CpaSupervisor } from "./cpa-supervisor";
 import type { DiffTracker } from "./diff-tracker";
 import type { SnapshotStore } from "./snapshot-store";
 import { listProjectFiles } from "./file-index";
+import {
+  resolveEffectiveCpaPaths,
+  writeCpaConfigWithApiKey,
+  type RuntimePathEnv,
+} from "./runtime-paths";
 
 export type IpcHandlerContext = {
   window: () => BrowserWindow | null;
@@ -399,6 +404,67 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
     async (_e, patch: Partial<AppSettings> & { token?: string }) => {
       ctx.settings.update(patch);
       return ctx.settings.getPublic();
+    },
+  );
+
+  /**
+   * First-run onboarding: save gateway token, rewrite CPA config api-keys to
+   * match, re-resolve bundled paths, optionally start CPA.
+   */
+  ipcMain.handle(
+    IPC.appCompleteOnboarding,
+    async (
+      _e,
+      { token, startCpa }: { token: string; startCpa?: boolean },
+    ) => {
+      const trimmed = (token ?? "").trim();
+      if (!trimmed) {
+        return {
+          ok: false,
+          settings: ctx.settings.getPublic(),
+          cpaStatus: ctx.cpa.getStatus(),
+          error: "Token is required",
+        };
+      }
+      try {
+        const pathEnv: RuntimePathEnv = {
+          isPackaged: app.isPackaged,
+          resourcesPath: process.resourcesPath,
+          userDataDir: app.getPath("userData"),
+        };
+        const current = ctx.settings.get();
+        const configPath = writeCpaConfigWithApiKey(pathEnv, {
+          port: current.cpaPort || 8317,
+          apiKey: trimmed,
+        });
+        const paths = resolveEffectiveCpaPaths(
+          pathEnv,
+          { ...current, cpaConfigPath: configPath },
+          { apiKey: trimmed },
+        );
+        ctx.settings.update({
+          token: trimmed,
+          cpaExePath: paths.cpaExePath,
+          cpaConfigPath: paths.cpaConfigPath,
+        });
+        let cpaStatus = ctx.cpa.getStatus();
+        if (startCpa !== false) {
+          cpaStatus = await ctx.cpa.ensureReady();
+        }
+        return {
+          ok: true,
+          settings: ctx.settings.getPublic(),
+          cpaStatus,
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return {
+          ok: false,
+          settings: ctx.settings.getPublic(),
+          cpaStatus: ctx.cpa.getStatus(),
+          error: message,
+        };
+      }
     },
   );
 

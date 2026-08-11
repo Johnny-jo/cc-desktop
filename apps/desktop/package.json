@@ -11,7 +11,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "dist:dir": "electron-builder --win dir --config electron-builder.yml",
-    "package:win": "electron-vite build && electron-builder --win dir --config electron-builder.yml"
+    "dist:win": "electron-builder --win --config electron-builder.yml",
+    "package:win": "electron-vite build && electron-builder --win --config electron-builder.yml"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.220",
