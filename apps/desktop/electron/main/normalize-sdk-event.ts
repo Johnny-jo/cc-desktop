@@ -1,4 +1,4 @@
-import type { SdkNormalizedEvent, ToolCardState } from "@claude-desktop/shared";
+import type { SdkNormalizedEvent, TodoItem, ToolCardState } from "@claude-desktop/shared";
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -23,7 +23,44 @@ function summarizeTool(name: string, input: UnknownRecord): string {
       input.skill ?? input.name ?? input.path ?? input.skill_name ?? "skill",
     ).slice(0, 120);
   }
+  if (name === "TodoWrite") {
+    return todoSummary(extractTodos(input));
+  }
+  if (name === "Task" || name === "Agent") {
+    // Subagent launch: show the task description (or agent type) as the summary.
+    return String(input.description ?? input.subagent_type ?? input.prompt ?? name).slice(
+      0,
+      120,
+    );
+  }
   return name;
+}
+
+/** Extract the structured todo list from a TodoWrite tool input. */
+function extractTodos(input: UnknownRecord): TodoItem[] {
+  const raw = asArray(input.todos);
+  const out: TodoItem[] = [];
+  for (const t of raw) {
+    if (!isRecord(t)) continue;
+    const content = String(t.content ?? t.task ?? "");
+    if (!content) continue;
+    const status =
+      t.status === "completed" || t.status === "in_progress"
+        ? t.status
+        : "pending";
+    out.push({
+      content,
+      status,
+      ...(typeof t.activeForm === "string" ? { activeForm: t.activeForm } : {}),
+    });
+  }
+  return out;
+}
+
+function todoSummary(todos: TodoItem[]): string {
+  if (!todos.length) return "TodoWrite";
+  const done = todos.filter((t) => t.status === "completed").length;
+  return `${done}/${todos.length} completed`;
 }
 
 /** Skill / long system-injected bodies should not dump open in the chat. */
@@ -38,9 +75,9 @@ export function isCollapsibleSkillText(text: string): boolean {
   );
 }
 
-function toolPreview(content: unknown): string | undefined {
+function toolPreview(content: unknown, maxLen = 200): string | undefined {
   if (typeof content === "string") {
-    return content.slice(0, 200);
+    return content.slice(0, maxLen);
   }
   if (Array.isArray(content)) {
     const texts = content
@@ -50,13 +87,13 @@ function toolPreview(content: unknown): string | undefined {
         return "";
       })
       .filter(Boolean);
-    if (texts.length) return texts.join("\n").slice(0, 200);
+    if (texts.length) return texts.join("\n").slice(0, maxLen);
   }
   if (content == null) return undefined;
   try {
-    return JSON.stringify(content).slice(0, 200);
+    return JSON.stringify(content).slice(0, maxLen);
   } catch {
-    return String(content).slice(0, 200);
+    return String(content).slice(0, maxLen);
   }
 }
 
@@ -86,6 +123,11 @@ export function normalizeSdkEvent(
     default:
       return [];
   }
+}
+
+/** True when the SDK message carries a parent_tool_use_id (ran inside a subagent). */
+function isSubagentMessage(msg: UnknownRecord): boolean {
+  return msg.parent_tool_use_id != null;
 }
 
 function normalizeToolProgress(
@@ -159,11 +201,14 @@ function normalizeAssistant(
       const id = String(block.id ?? "");
       const name = String(block.name ?? "tool");
       const input = isRecord(block.input) ? block.input : {};
+      const isSub = isSubagentMessage(msg);
       const tool: ToolCardState = {
         id,
         name,
         summary: summarizeTool(name, input),
         status: "running",
+        ...(isSub ? { isSubagent: true } : {}),
+        ...(name === "TodoWrite" ? { todos: extractTodos(input) } : {}),
       };
       out.push({ type: "tool_start", sessionId, tool });
     }
@@ -217,14 +262,19 @@ function normalizeUser(
       const id = String(block.tool_use_id ?? block.toolUseId ?? "");
       const isError = Boolean(block.is_error ?? block.isError);
       const name = String(block.name ?? "tool");
+      const isSub = isSubagentMessage(msg);
       // Keep skill bodies in the collapsed card; don't also emit as chat text.
+      // Task/Agent results are the subagent's final report — high value, so widen
+      // the preview cap. TodoWrite relies on structured todos, not resultPreview.
       const preview =
         name === "Skill" || name === "skill"
-          ? toolPreview(block.content)?.slice(0, 4000) ??
+          ? toolPreview(block.content, 4000) ??
             (typeof block.content === "string"
               ? block.content.slice(0, 4000)
               : undefined)
-          : toolPreview(block.content);
+          : name === "Task" || name === "Agent"
+            ? toolPreview(block.content, 2000)
+            : toolPreview(block.content);
       const tool: ToolCardState = {
         id,
         name,
@@ -238,6 +288,7 @@ function normalizeUser(
             : "",
         status: isError ? "error" : "done",
         resultPreview: preview,
+        ...(isSub ? { isSubagent: true } : {}),
       };
       out.push({ type: "tool_end", sessionId, tool });
     }

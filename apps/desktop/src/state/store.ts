@@ -292,6 +292,9 @@ function applySessionEvent(event: SdkNormalizedEvent): void {
             // keep original name/summary if end event omits them
             name: tool.name && tool.name !== "tool" ? tool.name : cur.tool.name,
             summary: tool.summary || cur.tool.summary,
+            // tool_end usually omits todos/isSubagent — preserve from tool_start
+            todos: tool.todos ?? cur.tool.todos,
+            isSubagent: tool.isSubagent ?? cur.tool.isSubagent,
           };
           items[existing] = { kind: "tool", id: cur.id, tool: merged };
         }

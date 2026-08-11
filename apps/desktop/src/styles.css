@@ -1088,6 +1088,71 @@ textarea {
   color: var(--text-muted);
 }
 
+/* Tool chips (subagent / task markers) */
+.tool-chip {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  background: var(--bg-hover);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.tool-chip-subagent {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.tool-chip-task {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+/* TodoWrite structured list */
+.todo-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.todo-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12.5px;
+}
+
+.todo-box {
+  flex-shrink: 0;
+  color: var(--text-faint);
+}
+
+.todo-item.todo-completed .todo-text {
+  color: var(--text-faint);
+  text-decoration: line-through;
+}
+
+.todo-item.todo-completed .todo-box {
+  color: var(--ok);
+}
+
+.todo-item.todo-in_progress .todo-text {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.todo-item.todo-in_progress .todo-box {
+  color: var(--warn);
+}
+
 /* Floating composer shell */
 .composer-shell {
   padding-top: var(--space-2);

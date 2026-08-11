@@ -25,6 +25,12 @@ export type FileChange = {
 
 export type ChatRole = "user" | "assistant" | "system";
 
+export type TodoItem = {
+  content: string;
+  status: "pending" | "in_progress" | "completed";
+  activeForm?: string;
+};
+
 export type ToolCardState = {
   id: string;
   name: string;
@@ -33,6 +39,10 @@ export type ToolCardState = {
   resultPreview?: string;
   /** Elapsed seconds while running (from tool_progress heartbeats) */
   elapsedSeconds?: number;
+  /** True when this tool call ran inside a Task/Agent subagent (parent_tool_use_id set) */
+  isSubagent?: boolean;
+  /** Structured todo list — populated only for TodoWrite tool calls */
+  todos?: TodoItem[];
 };
 
 /** Per-turn token / cost / timing from SDK result message */

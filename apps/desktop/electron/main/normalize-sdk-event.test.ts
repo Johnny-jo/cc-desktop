@@ -252,4 +252,93 @@ describe("normalizeSdkEvent", () => {
     const events = normalizeSdkEvent(msg, sessionId);
     expect(events.map((e) => e.type)).toEqual(["text_done", "tool_start"]);
   });
+
+  it("extracts todos and progress summary from TodoWrite", () => {
+    const msg = {
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "tw1",
+            name: "TodoWrite",
+            input: {
+              todos: [
+                { content: "Explore code", status: "completed", activeForm: "Exploring" },
+                { content: "Implement feature", status: "in_progress" },
+                { content: "Run tests", status: "pending" },
+              ],
+            },
+          },
+        ],
+      },
+    };
+    const events = normalizeSdkEvent(msg, sessionId);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      type: "tool_start",
+      tool: {
+        name: "TodoWrite",
+        summary: "1/3 completed",
+        todos: [
+          { content: "Explore code", status: "completed", activeForm: "Exploring" },
+          { content: "Implement feature", status: "in_progress" },
+          { content: "Run tests", status: "pending" },
+        ],
+      },
+    });
+  });
+
+  it("uses task description as Task summary and widens result preview", () => {
+    const startMsg = {
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "t1",
+            name: "Task",
+            input: { description: "Find flaky tests", subagent_type: "Explore" },
+          },
+        ],
+      },
+    };
+    const start = normalizeSdkEvent(startMsg, sessionId);
+    expect(start[0]).toMatchObject({
+      type: "tool_start",
+      tool: { name: "Task", summary: "Find flaky tests" },
+    });
+
+    const longReport = "subagent report line\n".repeat(200); // > 200 chars
+    const endMsg = {
+      type: "user",
+      message: {
+        content: [
+          { type: "tool_result", tool_use_id: "t1", name: "Task", content: longReport },
+        ],
+      },
+    };
+    const end = normalizeSdkEvent(endMsg, sessionId);
+    const preview = (end[0] as { tool?: { resultPreview?: string } }).tool
+      ?.resultPreview;
+    expect(preview && preview.length > 200).toBe(true);
+    expect(preview && preview.length <= 2000).toBe(true);
+  });
+
+  it("marks tools with parent_tool_use_id as subagent", () => {
+    const msg = {
+      type: "assistant",
+      parent_tool_use_id: "parent-task-1",
+      message: {
+        content: [
+          { type: "tool_use", id: "st1", name: "Read", input: { file_path: "a" } },
+        ],
+      },
+    };
+    const events = normalizeSdkEvent(msg, sessionId);
+    expect(events[0]).toMatchObject({
+      type: "tool_start",
+      tool: { id: "st1", isSubagent: true },
+    });
+  });
 });
