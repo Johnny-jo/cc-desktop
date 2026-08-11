@@ -81,6 +81,13 @@ const desktop = {
   selectFiles: () =>
     ipcRenderer.invoke(IPC.fileSelect) as Promise<{ paths: string[] }>,
 
+  /** Enumerate project files for @-mention autocomplete (paths relative to cwd). */
+  listProjectFiles: (cwd: string, query?: string, limit?: number) =>
+    ipcRenderer.invoke(IPC.projectListFiles, { cwd, query, limit }) as Promise<{
+      files: string[];
+      truncated?: boolean;
+    }>,
+
   respondUserPrompt: (requestId: string, decision: UserPromptDecision) =>
     ipcRenderer.invoke(IPC.userPromptRespond, {
       requestId,

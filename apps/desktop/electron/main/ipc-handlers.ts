@@ -17,6 +17,7 @@ import type { UserPromptBroker } from "./user-prompt-broker";
 import type { SettingsStore } from "./settings-store";
 import type { CpaSupervisor } from "./cpa-supervisor";
 import type { DiffTracker } from "./diff-tracker";
+import { listProjectFiles } from "./file-index";
 
 export type IpcHandlerContext = {
   window: () => BrowserWindow | null;
@@ -89,6 +90,28 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
     }
     return { paths: res.filePaths };
   });
+
+  ipcMain.handle(
+    IPC.projectListFiles,
+    async (
+      _e,
+      { cwd, query, limit }: { cwd: string; query?: string; limit?: number },
+    ) => {
+      // Security: only enumerate the open project or an active session's cwd,
+      // so the renderer can't probe arbitrary filesystem paths. Names only —
+      // contents are never read here.
+      const allowed = new Set<string>();
+      const last = ctx.settings.get().lastProjectPath;
+      if (last) allowed.add(last);
+      for (const s of ctx.sessions.list()) {
+        if (s.cwd) allowed.add(s.cwd);
+      }
+      if (!allowed.has(cwd)) {
+        throw new Error("project:list-files cwd is not an open project");
+      }
+      return listProjectFiles(cwd, query ?? "", limit ?? 50);
+    },
+  );
 
   ipcMain.handle(
     IPC.sessionStart,

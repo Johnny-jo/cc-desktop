@@ -22,6 +22,8 @@ export const IPC = {
   fileReadAttachment: "file:read-attachment",
   /** Renderer → Main: show native file picker and return selected paths */
   fileSelect: "file:select",
+  /** Renderer → Main: enumerate project files for @-mention autocomplete */
+  projectListFiles: "project:list-files",
   sessionStart: "session:start",
   sessionContinue: "session:continue",
   sessionAbort: "session:abort",
@@ -66,6 +68,12 @@ export type IpcInvokeMap = {
   [IPC.fileSelect]: {
     args: [];
     result: { paths: string[] };
+  };
+  [IPC.projectListFiles]: {
+    /** cwd must be the open project or an active session cwd; query filters by substring */
+    args: [{ cwd: string; query?: string; limit?: number }];
+    /** paths relative to cwd; truncated=true when the index hit a cap */
+    result: { files: string[]; truncated?: boolean };
   };
   [IPC.sessionStart]: {
     args: [{ prompt: UserPrompt; cwd?: string }];
