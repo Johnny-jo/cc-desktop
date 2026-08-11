@@ -110,6 +110,32 @@ export function usePanelLayout() {
     }));
   }, []);
 
+  /** Apply a drag delta without stale closure over the last width. */
+  const adjustSidebarWidth = useCallback((dx: number) => {
+    setLayout((prev) => ({
+      ...prev,
+      sidebarWidth: clamp(prev.sidebarWidth + dx, SIDEBAR_MIN, SIDEBAR_MAX),
+    }));
+  }, []);
+
+  const adjustChangesWidth = useCallback((dx: number) => {
+    setLayout((prev) => ({
+      ...prev,
+      changesWidth: clamp(prev.changesWidth + dx, CHANGES_MIN, CHANGES_MAX),
+    }));
+  }, []);
+
+  const adjustTerminalHeight = useCallback((dy: number) => {
+    setLayout((prev) => ({
+      ...prev,
+      terminalHeight: clamp(
+        prev.terminalHeight + dy,
+        TERMINAL_MIN,
+        TERMINAL_MAX,
+      ),
+    }));
+  }, []);
+
   return {
     layout,
     patch,
@@ -119,6 +145,9 @@ export function usePanelLayout() {
     setSidebarWidth,
     setChangesWidth,
     setTerminalHeight,
+    adjustSidebarWidth,
+    adjustChangesWidth,
+    adjustTerminalHeight,
     limits: {
       SIDEBAR_MIN,
       SIDEBAR_MAX,

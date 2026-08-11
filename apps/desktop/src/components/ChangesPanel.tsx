@@ -134,7 +134,7 @@ export function ChangesPanel() {
     <div className="changes-panel">
       <div className="panel-title changes-panel-title">
         <span>
-          Changes
+          变更
           {git?.isRepo && git.branch ? (
             <span className="changes-git-branch" title="git branch">
               {" "}

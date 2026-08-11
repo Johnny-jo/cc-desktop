@@ -139,27 +139,32 @@ textarea {
 }
 
 .titlebar-btn {
-  height: 24px;
-  padding: 0 10px;
-  border: 1px solid transparent;
-  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: 10px;
   background: transparent;
-  color: var(--text-faint);
-  font-size: 11.5px;
+  color: #9a9a9a;
   cursor: pointer;
-  line-height: 1;
+  line-height: 0;
 }
 
 .titlebar-btn:hover {
-  color: var(--text);
-  background: var(--bg-hover);
-  border-color: var(--border);
+  color: #e8e8e8;
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .titlebar-btn.active {
-  color: var(--text);
-  background: var(--bg-active);
-  border-color: var(--border-strong);
+  color: #e8e8e8;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.titlebar-btn svg {
+  display: block;
 }
 
 /* Leave room for Windows min/max/close (titleBarOverlay ~138px). */
@@ -250,31 +255,107 @@ textarea {
   flex: 0 0 auto;
 }
 
-/* Resize handles */
+/* Resize handles — full-height strip between panels (must stay above panels) */
 .resize-handle {
-  flex-shrink: 0;
+  position: relative;
+  flex: 0 0 8px;
+  z-index: 30;
   background: transparent;
-  z-index: 5;
   transition: background 0.12s ease;
-}
-
-.resize-handle:hover,
-.resize-handle:active {
-  background: var(--accent-soft);
+  touch-action: none;
+  user-select: none;
 }
 
 .resize-handle-sidebar,
 .resize-handle-changes {
-  width: 4px;
+  width: 8px;
+  min-width: 8px;
   cursor: col-resize;
   align-self: stretch;
 }
 
+/* Wider invisible hit area so the grip is easy to grab */
+.resize-handle-sidebar::before,
+.resize-handle-changes::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -6px;
+  right: -6px;
+  z-index: 1;
+}
+
+/* Visible 1px line in the middle of the grip */
+.resize-handle-sidebar::after,
+.resize-handle-changes::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
+  background: var(--border-soft);
+  pointer-events: none;
+}
+
+.resize-handle-sidebar:hover::after,
+.resize-handle-changes:hover::after,
+.resize-handle-sidebar:active::after,
+.resize-handle-changes:active::after {
+  background: var(--accent);
+  width: 2px;
+}
+
 .resize-handle-terminal {
-  flex: 0 0 4px;
-  height: 4px;
+  flex: 0 0 8px;
+  height: 8px;
+  min-height: 8px;
   cursor: row-resize;
   width: 100%;
+}
+
+.resize-handle-terminal::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -6px;
+  bottom: -6px;
+}
+
+.resize-handle-terminal::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 1px;
+  transform: translateY(-50%);
+  background: var(--border-soft);
+  pointer-events: none;
+}
+
+.resize-handle-terminal:hover::after,
+.resize-handle-terminal:active::after {
+  background: var(--accent);
+  height: 2px;
+}
+
+body.is-resizing-col {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
+body.is-resizing-row {
+  cursor: row-resize !important;
+  user-select: none !important;
+}
+
+body.is-resizing-col *,
+body.is-resizing-row * {
+  cursor: inherit !important;
 }
 
 /* Bottom terminal — occupies the grid row given by --terminal-h only */

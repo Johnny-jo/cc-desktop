@@ -26,9 +26,9 @@ export function App() {
     toggleSidebar,
     toggleChanges,
     toggleTerminal,
-    setSidebarWidth,
-    setChangesWidth,
-    setTerminalHeight,
+    adjustSidebarWidth,
+    adjustChangesWidth,
+    adjustTerminalHeight,
   } = usePanelLayout();
 
   useEffect(() => {
@@ -107,10 +107,7 @@ export function App() {
               >
                 <SessionList onOpenSettings={() => setSettingsOpen(true)} />
               </aside>
-              <ResizeHandle
-                axis="sidebar"
-                onDrag={(dx) => setSidebarWidth(layout.sidebarWidth + dx)}
-              />
+              <ResizeHandle axis="sidebar" onDrag={adjustSidebarWidth} />
             </>
           ) : null}
 
@@ -120,10 +117,7 @@ export function App() {
 
           {layout.changesOpen ? (
             <>
-              <ResizeHandle
-                axis="changes"
-                onDrag={(dx) => setChangesWidth(layout.changesWidth + dx)}
-              />
+              <ResizeHandle axis="changes" onDrag={adjustChangesWidth} />
               <aside
                 className="panel panel-changes"
                 style={{ width: layout.changesWidth }}
@@ -136,10 +130,7 @@ export function App() {
 
         {layout.terminalOpen ? (
           <>
-            <ResizeHandle
-              axis="terminal"
-              onDrag={(dy) => setTerminalHeight(layout.terminalHeight + dy)}
-            />
+            <ResizeHandle axis="terminal" onDrag={adjustTerminalHeight} />
             <TerminalPanel open height={layout.terminalHeight} />
           </>
         ) : (
