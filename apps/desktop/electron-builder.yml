@@ -39,14 +39,27 @@ win:
   verifyUpdateCodeSignature: false
 
 nsis:
+  # Multi-step wizard (not one-click).
+  # Flow: Welcome → License → Install mode → Directory → Install.
   oneClick: false
+  perMachine: false
+  allowElevation: true
   allowToChangeInstallationDirectory: true
+  # Do not launch the app immediately after install; user opens it when ready.
+  runAfterFinish: false
+  # Extra deliberate step before directory / install.
+  license: build/license.txt
   createDesktopShortcut: true
   createStartMenuShortcut: true
   shortcutName: Claude Desktop
   # Keep userData (settings, sessions, CPA config) on uninstall.
   deleteAppDataOnUninstall: false
   artifactName: Claude-Desktop-Setup-${version}-${arch}.${ext}
+  # Prefer Chinese UI when the OS is zh-CN (falls back to English).
+  installerLanguages:
+    - en_US
+    - zh_CN
+  displayLanguageSelector: false
 
 forceCodeSigning: false
 

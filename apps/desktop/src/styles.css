@@ -2115,6 +2115,80 @@ textarea {
   font-size: 12px;
 }
 
+.onboarding-steps {
+  display: flex;
+  gap: 8px;
+  list-style: none;
+  margin: 0 0 16px;
+  padding: 0;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.onboarding-steps li {
+  flex: 1;
+  text-align: center;
+  padding: 6px 4px;
+  border-bottom: 2px solid var(--border-soft);
+}
+
+.onboarding-steps li.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+.onboarding-list {
+  margin: 0 0 12px;
+  padding-left: 1.2em;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.onboarding-list li {
+  margin-bottom: 6px;
+}
+
+.onboarding-summary {
+  margin: 0 0 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 12.5px;
+}
+
+.onboarding-summary > div {
+  display: grid;
+  grid-template-columns: 7.5em 1fr;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.onboarding-summary dt {
+  margin: 0;
+  color: var(--text-faint);
+}
+
+.onboarding-summary dd {
+  margin: 0;
+  color: var(--text);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.onboarding-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.onboarding-actions {
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .modal {
   background: var(--bg-elevated);
   border: 1px solid var(--border-strong);

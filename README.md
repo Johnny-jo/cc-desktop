@@ -81,7 +81,7 @@ pnpm package:win
 Outputs under `apps/desktop/release/`:
 
 - **Portable:** `win-unpacked/` — zip for “extract and run”
-- **Installer:** `Claude-Desktop-Setup-*-x64.exe` (NSIS; keeps `%APPDATA%` on uninstall)
+- **Installer:** `Claude-Desktop-Setup-*-x64.exe` (NSIS multi-step: Welcome → License → install mode → folder → install; does **not** auto-start the app; keeps `%APPDATA%` on uninstall)
 
 Runtime layout: `resources/bin/claude/claude.exe`, `resources/bin/cpa/cli-proxy-api.exe` + template config.  
 First launch shows an onboarding modal if no gateway token is stored.
