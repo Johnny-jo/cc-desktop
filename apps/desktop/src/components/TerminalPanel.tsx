@@ -153,7 +153,7 @@ export function TerminalPanel({ open, height }: Props) {
   if (!open) return null;
 
   return (
-    <div className="terminal-panel" style={{ height }}>
+    <div className="terminal-panel" style={{ height: "100%" }}>
       <div className="terminal-toolbar">
         <span className="terminal-title">Terminal</span>
         <span className="terminal-meta" title={cwdLabel}>

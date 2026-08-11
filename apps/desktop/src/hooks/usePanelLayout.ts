@@ -17,16 +17,16 @@ const DEFAULTS: PanelLayout = {
   terminalOpen: false,
   sidebarWidth: 260,
   changesWidth: 300,
-  terminalHeight: 220,
+  terminalHeight: 180,
 };
 
 const SIDEBAR_MIN = 180;
 const SIDEBAR_MAX = 420;
 const CHANGES_MIN = 220;
 const CHANGES_MAX = 560;
-const TERMINAL_MIN = 120;
+const TERMINAL_MIN = 100;
 /** Cap so the chat composer is never fully covered. */
-const TERMINAL_MAX = 360;
+const TERMINAL_MAX = 260;
 
 function clamp(n: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, n));

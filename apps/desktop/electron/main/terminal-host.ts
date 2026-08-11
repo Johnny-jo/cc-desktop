@@ -40,14 +40,12 @@ export class TerminalHost {
         : process.cwd();
     const id = randomUUID();
     const isWin = process.platform === "win32";
+    // Prefer cmd on Windows for reliable stdin line feeding without a PTY.
+    // PowerShell -Command - often exits or buffers poorly when not a console.
     const shell = isWin
-      ? process.env.COMSPEC || "powershell.exe"
+      ? process.env.ComSpec || "cmd.exe"
       : process.env.SHELL || "/bin/bash";
-    const args = isWin
-      ? shell.toLowerCase().includes("powershell")
-        ? ["-NoLogo", "-NoExit", "-Command", "-"]
-        : ["/K"]
-      : ["-i"];
+    const args = isWin ? ["/Q", "/K"] : ["-i"];
 
     const child = spawn(shell, args, {
       cwd: dir,
@@ -90,7 +88,12 @@ export class TerminalHost {
     const s = this.sessions.get(id);
     if (!s || s.child.killed) return false;
     try {
-      s.child.stdin.write(data);
+      // Normalize to platform newlines for cmd.exe / shells without PTY.
+      const payload =
+        process.platform === "win32"
+          ? data.replace(/\r?\n/g, "\r\n")
+          : data;
+      s.child.stdin.write(payload);
       return true;
     } catch {
       return false;

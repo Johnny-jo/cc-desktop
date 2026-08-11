@@ -122,30 +122,42 @@ textarea {
   flex: 0 0 auto;
 }
 
+/*
+ * Workspace: CSS grid so the chat row is always 1fr and the terminal is a
+ * fixed band. Flex was letting main-row keep content height and push the
+ * composer under the terminal.
+ */
 .app > .workspace {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-height: 0;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  overflow: hidden;
   /* Room for edge rails (Codex-style chrome). */
   padding-left: 28px;
   padding-right: 28px;
   padding-bottom: 28px;
 }
 
+.app > .workspace.workspace-terminal-open {
+  /* main | resize handle | terminal */
+  grid-template-rows: minmax(0, 1fr) 4px var(--terminal-h, 180px);
+}
+
 .main-row {
   display: flex;
   flex-direction: row;
-  /* Must shrink when the bottom terminal is open so Composer stays visible. */
-  flex: 1 1 0;
   min-height: 0;
+  min-width: 0;
   overflow: hidden;
+  /* grid item: fill the 1fr row only */
+  height: 100%;
+  max-height: 100%;
 }
 
 /* legacy class kept for any external refs */
 .main {
   display: flex;
-  flex: 1 1 0;
   min-height: 0;
   overflow: hidden;
 }
@@ -160,34 +172,33 @@ textarea {
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  /* Stretch to main-row height; do NOT use height:100% or terminal will push chat off-screen. */
-  align-self: stretch;
-  height: auto;
+  height: 100%;
   max-height: 100%;
 }
 
 .panel > * {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-height: 0;
   min-width: 0;
-  max-height: 100%;
 }
 
 .panel-sessions {
   background: var(--bg-sidebar);
   border-right: 1px solid var(--border-soft);
+  flex: 0 0 auto;
 }
 
 .panel-chat {
   background: var(--bg-app);
-  /* Flex child must be allowed to shrink when terminal opens */
+  flex: 1 1 0;
+  min-width: 0;
   min-height: 0;
-  flex: 1 1 0 !important;
 }
 
 .panel-changes {
   background: var(--bg-panel);
   border-left: 1px solid var(--border-soft);
+  flex: 0 0 auto;
 }
 
 /* —— Codex-style edge rails —— */
@@ -283,13 +294,13 @@ textarea {
   width: 100%;
 }
 
-/* Bottom terminal — band under chat; never covers Composer */
+/* Bottom terminal — occupies the grid row given by --terminal-h only */
 .terminal-panel {
-  flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   min-height: 0;
-  max-height: min(40vh, 360px);
+  height: 100%;
+  max-height: 100%;
   overflow: hidden;
   background: #0e0e0e;
   border-top: 1px solid var(--border-soft);
@@ -736,13 +747,12 @@ textarea {
   font-size: 12.5px;
 }
 
-/* Chat — header / scroll body / composer; composer stays at bottom of chat column */
+/* Chat — header / scroll body / composer; composer always pinned to chat bottom */
 .chat-panel {
-  display: grid;
-  grid-template-rows: 52px minmax(0, 1fr) auto;
+  display: flex;
+  flex-direction: column;
   min-height: 0;
   height: 100%;
-  max-height: 100%;
   width: 100%;
   overflow: hidden;
 }
@@ -763,6 +773,7 @@ textarea {
   padding: 0 var(--space-4);
   min-height: 52px;
   min-width: 0;
+  flex: 0 0 auto;
   border-bottom: 1px solid transparent;
   background: transparent;
 }
@@ -905,13 +916,13 @@ textarea {
 }
 
 .chat-body {
+  flex: 1 1 0;
   overflow: auto;
   min-height: 0;
-  height: 100%;
 }
 
 .chat-composer {
-  flex-shrink: 0;
+  flex: 0 0 auto;
   padding: 0 0 var(--space-4);
   background: linear-gradient(
     180deg,
@@ -919,6 +930,7 @@ textarea {
     rgba(20, 20, 20, 0.85) 28%,
     var(--bg-app) 55%
   );
+  z-index: 2;
 }
 
 /* Messages */

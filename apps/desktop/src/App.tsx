@@ -67,6 +67,14 @@ export function App() {
     };
   }, []);
 
+  const workspaceStyle = {
+    ["--sidebar-w" as string]: `${layout.sidebarWidth}px`,
+    ["--changes-w" as string]: `${layout.changesWidth}px`,
+    ["--terminal-h" as string]: layout.terminalOpen
+      ? `${layout.terminalHeight}px`
+      : "0px",
+  } as React.CSSProperties;
+
   return (
     <div className="app">
       <div className="app-titlebar" aria-hidden />
@@ -81,13 +89,18 @@ export function App() {
         onToggleTerminal={toggleTerminal}
       />
 
-      <div className="workspace">
+      <div
+        className={
+          layout.terminalOpen ? "workspace workspace-terminal-open" : "workspace"
+        }
+        style={workspaceStyle}
+      >
         <div className="main-row">
           {layout.sidebarOpen ? (
             <>
               <aside
                 className="panel panel-sessions"
-                style={{ width: layout.sidebarWidth, flex: "0 0 auto" }}
+                style={{ width: layout.sidebarWidth }}
               >
                 <SessionList onOpenSettings={() => setSettingsOpen(true)} />
               </aside>
@@ -110,7 +123,7 @@ export function App() {
               />
               <aside
                 className="panel panel-changes"
-                style={{ width: layout.changesWidth, flex: "0 0 auto" }}
+                style={{ width: layout.changesWidth }}
               >
                 <ChangesPanel />
               </aside>
@@ -127,7 +140,6 @@ export function App() {
             <TerminalPanel open height={layout.terminalHeight} />
           </>
         ) : (
-          // Keep unmounted shell lifecycle simple when closed.
           <TerminalPanel open={false} height={0} />
         )}
       </div>
