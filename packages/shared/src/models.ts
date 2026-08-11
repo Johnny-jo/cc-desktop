@@ -237,6 +237,11 @@ export type AppSettings = {
    */
   permissionAllow?: string[];
   permissionDeny?: string[];
+  /**
+   * Reasoning effort passed to the SDK (omit = model default). Mapped to
+   * the model by the gateway/CLI.
+   */
+  effort?: "low" | "medium" | "high";
 };
 
 export type PublicSettings = Omit<AppSettings, never> & {

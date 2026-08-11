@@ -9,6 +9,7 @@ import { getDesktop } from "../lib/desktop-api";
 import {
   abortActiveSession,
   compressActiveSession,
+  dequeuePrompt,
   getState,
   newChat,
   sendMessage,
@@ -132,6 +133,7 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
   const activeSessionId = useAppStore((s) => s.activeSessionId);
   const settings = useAppStore((s) => s.settings);
   const slashBySession = useAppStore((s) => s.slashBySession);
+  const queuedPrompts = useAppStore((s) => s.queuedPrompts);
 
   const canSend =
     (Boolean(text.trim()) || attachments.length > 0) &&
@@ -535,6 +537,27 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
         <pre className="slash-help-note">{helpNote}</pre>
       ) : null}
 
+      {queuedPrompts.length > 0 ? (
+        <div className="queued-prompts">
+          {queuedPrompts.map((q, i) => (
+            <div key={i} className="queued-prompt">
+              <span className="queued-label">Queued</span>
+              <span className="queued-text" title={q.displayText}>
+                {q.displayText}
+              </span>
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm queued-remove"
+                title="Remove from queue"
+                onClick={() => dequeuePrompt(i)}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
       {attachmentError ? (
         <div className="composer-attachment-error">{attachmentError}</div>
       ) : null}
@@ -644,7 +667,7 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
               disabled={!canSend && !slashOpen}
               onClick={onSend}
             >
-              {running ? "Send anyway" : "Send"}
+              {running ? "Queue" : "Send"}
             </button>
           </div>
         </div>

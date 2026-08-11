@@ -50,6 +50,8 @@ type StoredFile = Partial<AppSettings> & {
 
 export type SettingsUpdate = Partial<AppSettings> & {
   token?: string | null;
+  /** null clears the effort override (back to model default) */
+  effort?: AppSettings["effort"] | null;
 };
 
 export class SettingsStore {
@@ -110,6 +112,16 @@ export class SettingsStore {
     if (publicPatch.permissionDeny !== undefined) {
       publicPatch.permissionDeny = sanitizePermissionRules(publicPatch.permissionDeny);
     }
+    const clearEffort = publicPatch.effort === null;
+    if (
+      publicPatch.effort !== undefined &&
+      publicPatch.effort !== null &&
+      publicPatch.effort !== "low" &&
+      publicPatch.effort !== "medium" &&
+      publicPatch.effort !== "high"
+    ) {
+      delete publicPatch.effort;
+    }
     if (publicPatch.permissionMode !== undefined) {
       publicPatch.permissionMode = publicPatch.permissionMode as PermissionMode;
     }
@@ -119,6 +131,9 @@ export class SettingsStore {
       ...publicPatch,
       models: publicPatch.models ?? this.settings.models,
     };
+    if (clearEffort) {
+      delete this.settings.effort;
+    }
 
     if (token !== undefined) {
       if (token === null || token === "") {
@@ -173,6 +188,11 @@ export class SettingsStore {
         mcpServers: sanitizeMcpServers(rest.mcpServers),
         permissionAllow: sanitizePermissionRules(rest.permissionAllow) ?? [],
         permissionDeny: sanitizePermissionRules(rest.permissionDeny) ?? [],
+        ...(rest.effort === "low" ||
+        rest.effort === "medium" ||
+        rest.effort === "high"
+          ? { effort: rest.effort }
+          : {}),
       };
       this.tokenEnc = tokenEnc;
       if (tokenEnc) {

@@ -788,6 +788,52 @@ textarea {
   font-size: 11px;
 }
 
+/* Queued prompts (type-ahead while a turn runs) */
+.queued-prompts {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 0 6px;
+}
+
+.queued-prompt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  font-size: 12px;
+}
+
+.queued-label {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--warn);
+}
+
+.queued-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+
+.queued-remove {
+  flex-shrink: 0;
+  color: var(--text-faint);
+}
+
+.queued-remove:hover {
+  color: var(--danger);
+}
+
 .bubble-assistant {
   background: transparent;
   padding: 2px 0;

@@ -1040,6 +1040,7 @@ export class SessionManager {
       includePartialMessages: true,
       permissionMode: settings.permissionMode,
       model: settings.defaultModel,
+      ...(settings.effort ? { effort: settings.effort } : {}),
       env,
       tools: SESSION_TOOLS,
       // Auto-approve read-only / harmless tools so they skip the permission

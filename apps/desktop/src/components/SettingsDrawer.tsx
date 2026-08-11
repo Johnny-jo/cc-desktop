@@ -58,6 +58,8 @@ type FormState = {
   /** Claude Code-style rules, one per line: Edit / Edit(src/**) / Bash(npm *) */
   permissionAllowText: string;
   permissionDenyText: string;
+  /** "" = model default */
+  effort: string;
 };
 
 let mcpDraftSeq = 0;
@@ -165,6 +167,7 @@ function fromSettings(s: PublicSettings | null): FormState {
     mcpServers: mcpServersToDrafts(s?.mcpServers),
     permissionAllowText: (s?.permissionAllow ?? []).join("\n"),
     permissionDenyText: (s?.permissionDeny ?? []).join("\n"),
+    effort: s?.effort ?? "",
   };
 }
 
@@ -728,7 +731,12 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
       return;
     }
 
-    const patch: Partial<AppSettings> & { token?: string } = {
+    // `effort: null` clears the override (main-side SettingsStore handles it);
+    // the field sits outside AppSettings' own type on purpose.
+    const patch: Omit<Partial<AppSettings>, "effort"> & {
+      token?: string;
+      effort?: AppSettings["effort"] | null;
+    } = {
       cpaExePath: form.cpaExePath.trim(),
       cpaConfigPath: form.cpaConfigPath.trim(),
       cpaPort: port,
@@ -740,6 +748,13 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
       mcpServers: patchMcp.mcpServers,
       permissionAllow: allowRules.rules,
       permissionDeny: denyRules.rules,
+      // null clears the override back to model default
+      effort:
+        form.effort === "low" ||
+        form.effort === "medium" ||
+        form.effort === "high"
+          ? form.effort
+          : null,
     };
     if (form.token.trim()) {
       patch.token = form.token.trim();
@@ -897,6 +912,24 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
               spellCheck={false}
             />
           </label>
+
+          <label className="settings-field">
+            Effort
+            <select
+              className="select"
+              value={form.effort}
+              onChange={(e) => setField("effort", e.target.value)}
+            >
+              <option value="">Model default</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+            </select>
+          </label>
+          <p className="settings-hint">
+            Reasoning effort for new sessions (mapped by the gateway; not all
+            models honor it).
+          </p>
 
           <label className="settings-field">
             Default context limit (tokens)

@@ -30,6 +30,8 @@ export type AppState = {
   cpaStatus: CpaStatus;
   settings: PublicSettings | null;
   running: boolean;
+  /** Messages queued while a turn is running (sent when it finishes) */
+  queuedPrompts: Array<{ text: string; displayText: string; attachments: Attachment[] }>;
   lastError: string | null;
 };
 
@@ -47,6 +49,7 @@ let state: AppState = {
   cpaStatus: { state: "unknown" },
   settings: null,
   running: false,
+  queuedPrompts: [],
   lastError: null,
 };
 
@@ -390,6 +393,16 @@ function applySessionEvent(event: SdkNormalizedEvent): void {
         lastError: event.ok ? state.lastError : (event.error ?? "Turn failed"),
       });
       // Auto-compress is scheduled from session:updated (has fresh contextUsage).
+      // Send the next queued message (Claude Code-style type-ahead) once the
+      // turn is fully done — but not when auto-compress is about to run, since
+      // compression replaces the transcript first.
+      if (!state.running && state.queuedPrompts.length > 0) {
+        const summary = state.sessions.find((s) => s.id === sessionId);
+        const ratio = summary?.contextUsage?.ratio ?? 0;
+        if (ratio < AUTO_COMPRESS_RATIO) {
+          setTimeout(flushQueuedPrompt, 0);
+        }
+      }
       return;
     }
     case "items_replaced": {
@@ -604,17 +617,27 @@ export async function openProject(path?: string): Promise<void> {
 }
 
 export async function saveSettings(
-  patch: Partial<PublicSettings> & { token?: string },
+  patch: Omit<Partial<PublicSettings>, "effort"> & {
+    token?: string;
+    /** null clears the effort override (main handles the deletion) */
+    effort?: PublicSettings["effort"] | null;
+  },
 ): Promise<void> {
   const desktop = getDesktop();
   try {
-    const { token, hasToken: _hasToken, ...rest } = patch as Partial<PublicSettings> & {
+    const { token, hasToken: _hasToken, ...rest } = patch as Omit<
+      Partial<PublicSettings>,
+      "effort"
+    > & {
       token?: string;
       hasToken?: boolean;
+      effort?: PublicSettings["effort"] | null;
     };
-    const body: Partial<PublicSettings> & { token?: string } = { ...rest };
+    const body = { ...rest } as Record<string, unknown> & { token?: string };
     if (token !== undefined) body.token = token;
-    const settings = (await desktop.setSettings(body)) as PublicSettings;
+    const settings = (await desktop.setSettings(
+      body as Parameters<typeof desktop.setSettings>[0],
+    )) as PublicSettings;
     setState({ settings, lastError: null });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -691,6 +714,18 @@ export function sendMessage(text: string, attachments: Attachment[] = []): void 
   const prompt: UserPrompt = { text: promptText, attachments };
   if (!promptText && attachments.length === 0) return;
 
+  // While a turn is running, queue instead of racing the live stream —
+  // Claude Code style: typed messages send automatically when the turn ends.
+  if (state.running && state.activeSessionId) {
+    setState({
+      queuedPrompts: [
+        ...state.queuedPrompts,
+        { text: promptText, displayText, attachments },
+      ],
+    });
+    return;
+  }
+
   let desktop;
   try {
     desktop = getDesktop();
@@ -755,12 +790,29 @@ export function sendMessage(text: string, attachments: Attachment[] = []): void 
 export function abortActiveSession(): void {
   const id = state.activeSessionId;
   if (!id) return;
+  // Stop means stop: drop queued messages too (Claude Code Esc semantics).
+  setState({ queuedPrompts: [] });
   try {
     const desktop = getDesktop();
     void desktop.abortSession(id);
   } catch {
     // ignore
   }
+}
+
+/** Remove one queued (not yet sent) message by index. */
+export function dequeuePrompt(index: number): void {
+  setState({
+    queuedPrompts: state.queuedPrompts.filter((_, i) => i !== index),
+  });
+}
+
+/** Send the next queued message after a turn finished. */
+function flushQueuedPrompt(): void {
+  const [next, ...rest] = state.queuedPrompts;
+  if (!next) return;
+  setState({ queuedPrompts: rest });
+  sendMessage(next.text, next.attachments);
 }
 
 /**
@@ -969,6 +1021,7 @@ export function __resetStoreForTests(): void {
     cpaStatus: { state: "unknown" },
     settings: null,
     running: false,
+    queuedPrompts: [],
     lastError: null,
   };
   pendingStartPrompt = null;
