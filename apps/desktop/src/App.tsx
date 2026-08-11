@@ -98,7 +98,7 @@ export function App() {
             </>
           ) : null}
 
-          <main className="panel panel-chat" style={{ flex: "1 1 auto" }}>
+          <main className="panel panel-chat">
             <ChatPanel onOpenSettings={() => setSettingsOpen(true)} />
           </main>
 

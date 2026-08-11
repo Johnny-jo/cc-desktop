@@ -136,7 +136,8 @@ textarea {
 .main-row {
   display: flex;
   flex-direction: row;
-  flex: 1 1 auto;
+  /* Must shrink when the bottom terminal is open so Composer stays visible. */
+  flex: 1 1 0;
   min-height: 0;
   overflow: hidden;
 }
@@ -144,7 +145,7 @@ textarea {
 /* legacy class kept for any external refs */
 .main {
   display: flex;
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-height: 0;
   overflow: hidden;
 }
@@ -159,13 +160,17 @@ textarea {
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  height: 100%;
+  /* Stretch to main-row height; do NOT use height:100% or terminal will push chat off-screen. */
+  align-self: stretch;
+  height: auto;
+  max-height: 100%;
 }
 
 .panel > * {
   flex: 1 1 auto;
   min-height: 0;
   min-width: 0;
+  max-height: 100%;
 }
 
 .panel-sessions {
@@ -175,6 +180,9 @@ textarea {
 
 .panel-chat {
   background: var(--bg-app);
+  /* Flex child must be allowed to shrink when terminal opens */
+  min-height: 0;
+  flex: 1 1 0 !important;
 }
 
 .panel-changes {
@@ -269,17 +277,20 @@ textarea {
 }
 
 .resize-handle-terminal {
+  flex: 0 0 4px;
   height: 4px;
   cursor: row-resize;
   width: 100%;
 }
 
-/* Bottom terminal */
+/* Bottom terminal — band under chat; never covers Composer */
 .terminal-panel {
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   min-height: 0;
+  max-height: min(40vh, 360px);
+  overflow: hidden;
   background: #0e0e0e;
   border-top: 1px solid var(--border-soft);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -725,13 +736,15 @@ textarea {
   font-size: 12.5px;
 }
 
-/* Chat */
+/* Chat — header / scroll body / composer; composer stays at bottom of chat column */
 .chat-panel {
   display: grid;
   grid-template-rows: 52px minmax(0, 1fr) auto;
   min-height: 0;
   height: 100%;
+  max-height: 100%;
   width: 100%;
+  overflow: hidden;
 }
 
 .chat-inner {

@@ -25,7 +25,8 @@ const SIDEBAR_MAX = 420;
 const CHANGES_MIN = 220;
 const CHANGES_MAX = 560;
 const TERMINAL_MIN = 120;
-const TERMINAL_MAX = 480;
+/** Cap so the chat composer is never fully covered. */
+const TERMINAL_MAX = 360;
 
 function clamp(n: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, n));
