@@ -255,107 +255,116 @@ textarea {
   flex: 0 0 auto;
 }
 
-/* Resize handles — full-height strip between panels (must stay above panels) */
+/*
+ * Resize handles sit BETWEEN flex children with a real 10px box so they
+ * always receive pointer events (pseudo-element hit targets were flaky).
+ */
 .resize-handle {
   position: relative;
-  flex: 0 0 8px;
-  z-index: 30;
+  z-index: 40;
+  flex: 0 0 10px;
   background: transparent;
-  transition: background 0.12s ease;
   touch-action: none;
   user-select: none;
+  -webkit-user-select: none;
 }
 
 .resize-handle-sidebar,
 .resize-handle-changes {
-  width: 8px;
-  min-width: 8px;
+  width: 10px;
+  min-width: 10px;
+  max-width: 10px;
   cursor: col-resize;
   align-self: stretch;
+  /* Pull slightly over neighboring panels without collapsing the flex gap */
+  margin: 0 -2px;
 }
 
-/* Wider invisible hit area so the grip is easy to grab */
-.resize-handle-sidebar::before,
-.resize-handle-changes::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: -6px;
-  right: -6px;
-  z-index: 1;
-}
-
-/* Visible 1px line in the middle of the grip */
+/* Center hairline */
 .resize-handle-sidebar::after,
 .resize-handle-changes::after {
   content: "";
   position: absolute;
-  top: 0;
-  bottom: 0;
+  top: 12%;
+  bottom: 12%;
   left: 50%;
-  width: 1px;
+  width: 2px;
   transform: translateX(-50%);
-  background: var(--border-soft);
+  border-radius: 1px;
+  background: var(--border);
+  opacity: 0.55;
   pointer-events: none;
+  transition: background 0.12s ease, opacity 0.12s ease, top 0.12s ease,
+    bottom 0.12s ease;
 }
 
 .resize-handle-sidebar:hover::after,
 .resize-handle-changes:hover::after,
 .resize-handle-sidebar:active::after,
-.resize-handle-changes:active::after {
+.resize-handle-changes:active::after,
+body.is-resizing-col .resize-handle-sidebar::after,
+body.is-resizing-col .resize-handle-changes::after {
   background: var(--accent);
-  width: 2px;
+  opacity: 1;
+  top: 0;
+  bottom: 0;
 }
 
 .resize-handle-terminal {
-  flex: 0 0 8px;
-  height: 8px;
-  min-height: 8px;
-  cursor: row-resize;
+  flex: 0 0 10px;
   width: 100%;
-}
-
-.resize-handle-terminal::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: -6px;
-  bottom: -6px;
+  height: 10px;
+  min-height: 10px;
+  max-height: 10px;
+  cursor: row-resize;
+  margin: -2px 0;
 }
 
 .resize-handle-terminal::after {
   content: "";
   position: absolute;
-  left: 0;
-  right: 0;
+  left: 20%;
+  right: 20%;
   top: 50%;
-  height: 1px;
+  height: 2px;
   transform: translateY(-50%);
-  background: var(--border-soft);
+  border-radius: 1px;
+  background: var(--border);
+  opacity: 0.55;
   pointer-events: none;
 }
 
 .resize-handle-terminal:hover::after,
-.resize-handle-terminal:active::after {
+.resize-handle-terminal:active::after,
+body.is-resizing-row .resize-handle-terminal::after {
   background: var(--accent);
-  height: 2px;
+  opacity: 1;
+  left: 0;
+  right: 0;
 }
 
-body.is-resizing-col {
+body.is-resizing-col,
+body.is-resizing-col * {
   cursor: col-resize !important;
   user-select: none !important;
 }
 
-body.is-resizing-row {
+body.is-resizing-row,
+body.is-resizing-row * {
   cursor: row-resize !important;
   user-select: none !important;
 }
 
-body.is-resizing-col *,
-body.is-resizing-row * {
-  cursor: inherit !important;
+/* Chat panel must not paint over the grip */
+.panel-chat,
+.panel-changes,
+.panel-sessions {
+  position: relative;
+  z-index: 1;
+}
+
+.resize-handle {
+  z-index: 50;
 }
 
 /* Bottom terminal — occupies the grid row given by --terminal-h only */
@@ -432,27 +441,37 @@ body.is-resizing-row * {
 }
 
 .terminal-input {
-  flex: 1;
+  flex: 1 1 auto;
   min-width: 0;
-  background: var(--bg-input);
-  border: 1px solid var(--border);
+  width: 100%;
+  background: #1a1a1a;
+  border: 1px solid #333;
   border-radius: 6px;
   outline: none;
-  color: var(--text);
+  color: #e8e8e8;
   font: inherit;
   font-size: 12px;
-  padding: 6px 10px;
-  /* Never leave this disabled via CSS; focus must work when shell starts. */
-  pointer-events: auto;
+  padding: 8px 10px;
+  pointer-events: auto !important;
+  -webkit-user-select: text;
+  user-select: text;
+  caret-color: #e8e8e8;
 }
 
 .terminal-input:focus {
-  border-color: var(--border-strong);
-  box-shadow: var(--focus-ring);
+  border-color: #555;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.25);
 }
 
-.terminal-input:disabled {
-  opacity: 0.55;
+.terminal-panel {
+  position: relative;
+  z-index: 5;
+}
+
+.terminal-input-row {
+  position: relative;
+  z-index: 6;
+  pointer-events: auto;
 }
 
 /* Buttons */

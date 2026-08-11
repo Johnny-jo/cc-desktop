@@ -132,10 +132,18 @@ export function ResizeHandle({
   const startRef = useRef({ pos: 0, size: 0 });
 
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    // Only primary button
+    if (e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
     const el = e.currentTarget;
-    el.setPointerCapture(e.pointerId);
+    const pointerId = e.pointerId;
+    try {
+      el.setPointerCapture(pointerId);
+    } catch {
+      // ignore
+    }
+    // Capture size at drag start (absolute math — no stale React state).
     startRef.current = {
       pos: axis === "terminal" ? e.clientY : e.clientX,
       size,
@@ -145,21 +153,22 @@ export function ResizeHandle({
     );
 
     const onMove = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointerId) return;
       ev.preventDefault();
       const { pos, size: startSize } = startRef.current;
       if (axis === "terminal") {
-        // Drag up (smaller clientY) → taller terminal
         onResize(startSize + (pos - ev.clientY));
       } else if (axis === "sidebar") {
         onResize(startSize + (ev.clientX - pos));
       } else {
-        // changes: grip is on the LEFT of the panel; drag left → wider
+        // changes: grip is LEFT of panel; drag left → wider
         onResize(startSize + (pos - ev.clientX));
       }
     };
     const onUp = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointerId) return;
       try {
-        el.releasePointerCapture(ev.pointerId);
+        el.releasePointerCapture(pointerId);
       } catch {
         // ignore
       }
@@ -168,7 +177,7 @@ export function ResizeHandle({
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onUp);
     };
-    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointermove", onMove, { passive: false });
     window.addEventListener("pointerup", onUp);
     window.addEventListener("pointercancel", onUp);
   };
@@ -178,7 +187,9 @@ export function ResizeHandle({
       className={`resize-handle resize-handle-${axis}`}
       role="separator"
       aria-orientation={axis === "terminal" ? "horizontal" : "vertical"}
+      tabIndex={-1}
       onPointerDown={onPointerDown}
+      onDragStart={(e) => e.preventDefault()}
     />
   );
 }
