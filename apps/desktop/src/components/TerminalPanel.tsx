@@ -9,19 +9,22 @@ type Props = {
 };
 
 /**
- * Codex-style bottom shell panel. Line-oriented input + streamed
- * stdout/stderr (not a full PTY). Enough for project commands and logs.
+ * Bottom command panel. Line input is always editable while open;
+ * shell I/O is line-oriented (not a full PTY).
  */
-export function TerminalPanel({ open, height }: Props) {
+export function TerminalPanel({ open }: Props) {
   const projectPath = useAppStore((s) => s.projectPath);
   const [termId, setTermId] = useState<string | null>(null);
   const [shellLabel, setShellLabel] = useState("shell");
   const [cwdLabel, setCwdLabel] = useState("");
   const [output, setOutput] = useState("");
   const [line, setLine] = useState("");
-  const [status, setStatus] = useState<"idle" | "running" | "exited">("idle");
+  const [status, setStatus] = useState<"idle" | "running" | "exited" | "error">(
+    "idle",
+  );
   const scrollerRef = useRef<HTMLPreElement | null>(null);
-  const termIdRef = useRef<string | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const activeIdRef = useRef<string | null>(null);
 
   const append = useCallback((chunk: string) => {
     setOutput((prev) => {
@@ -31,19 +34,15 @@ export function TerminalPanel({ open, height }: Props) {
   }, []);
 
   useEffect(() => {
-    termIdRef.current = termId;
-  }, [termId]);
-
-  useEffect(() => {
     if (!open) {
-      const id = termIdRef.current;
+      const id = activeIdRef.current;
       if (id) {
         try {
           void getDesktop().killTerminal(id);
         } catch {
           // ignore
         }
-        termIdRef.current = null;
+        activeIdRef.current = null;
         setTermId(null);
         setStatus("idle");
       }
@@ -51,17 +50,19 @@ export function TerminalPanel({ open, height }: Props) {
     }
 
     let cancelled = false;
-    let createdId: string | null = null;
     const desktop = getDesktop();
 
     const unsubData = desktop.on(IPC.terminalData, (payload) => {
       const p = payload as { id: string; stream: string; data: string };
-      if (!p?.data || !createdId || p.id !== createdId) return;
+      if (!p?.data) return;
+      if (activeIdRef.current && p.id !== activeIdRef.current) return;
+      // Accept output even before React state catches up (use ref).
+      if (!activeIdRef.current) activeIdRef.current = p.id;
       append(p.data);
     });
     const unsubExit = desktop.on(IPC.terminalExit, (payload) => {
       const p = payload as { id: string; code: number | null };
-      if (!createdId || p.id !== createdId) return;
+      if (activeIdRef.current && p.id !== activeIdRef.current) return;
       setStatus("exited");
       append(`\r\n[process exited: ${p.code ?? "?"}]\r\n`);
     });
@@ -73,19 +74,19 @@ export function TerminalPanel({ open, height }: Props) {
           void desktop.killTerminal(res.id);
           return;
         }
-        createdId = res.id;
-        termIdRef.current = res.id;
+        activeIdRef.current = res.id;
         setTermId(res.id);
         setShellLabel(res.shell);
         setCwdLabel(res.cwd);
         setStatus("running");
-        setOutput("");
+        // Focus the command line so the user can type immediately.
+        requestAnimationFrame(() => inputRef.current?.focus());
       } catch (err) {
         if (cancelled) return;
+        setStatus("error");
         append(
           `[failed to start shell] ${err instanceof Error ? err.message : String(err)}\r\n`,
         );
-        setStatus("exited");
       }
     })();
 
@@ -93,12 +94,14 @@ export function TerminalPanel({ open, height }: Props) {
       cancelled = true;
       unsubData();
       unsubExit();
-      if (createdId) {
+      const id = activeIdRef.current;
+      if (id) {
         try {
-          void desktop.killTerminal(createdId);
+          void desktop.killTerminal(id);
         } catch {
           // ignore
         }
+        activeIdRef.current = null;
       }
     };
   }, [open, projectPath, append]);
@@ -109,13 +112,29 @@ export function TerminalPanel({ open, height }: Props) {
     el.scrollTop = el.scrollHeight;
   }, [output]);
 
+  useEffect(() => {
+    if (open) {
+      const t = window.setTimeout(() => inputRef.current?.focus(), 50);
+      return () => window.clearTimeout(t);
+    }
+  }, [open]);
+
   const sendLine = async () => {
-    if (!termId || status !== "running") return;
     const text = line;
+    const id = termId ?? activeIdRef.current;
+    if (!text.trim() && !id) return;
     setLine("");
-    append(`\r\n$ ${text}\r\n`);
+    append(`$ ${text}\r\n`);
+    if (!id || status === "exited" || status === "error") {
+      append("[shell not running — click Restart]\r\n");
+      return;
+    }
     try {
-      await getDesktop().writeTerminal(termId, `${text}\n`);
+      const res = await getDesktop().writeTerminal(id, `${text}\n`);
+      if (!res.ok) {
+        append("[write failed — shell may have exited]\r\n");
+        setStatus("exited");
+      }
     } catch (err) {
       append(
         `[write failed] ${err instanceof Error ? err.message : String(err)}\r\n`,
@@ -124,42 +143,48 @@ export function TerminalPanel({ open, height }: Props) {
   };
 
   const restart = async () => {
-    if (termId) {
+    const old = termId ?? activeIdRef.current;
+    if (old) {
       try {
-        await getDesktop().killTerminal(termId);
+        await getDesktop().killTerminal(old);
       } catch {
         // ignore
       }
     }
+    activeIdRef.current = null;
     setTermId(null);
-    termIdRef.current = null;
     setOutput("");
     setStatus("idle");
     try {
       const res = await getDesktop().createTerminal(projectPath ?? undefined);
-      termIdRef.current = res.id;
+      activeIdRef.current = res.id;
       setTermId(res.id);
       setShellLabel(res.shell);
       setCwdLabel(res.cwd);
       setStatus("running");
+      inputRef.current?.focus();
     } catch (err) {
+      setStatus("error");
       append(
         `[failed to restart] ${err instanceof Error ? err.message : String(err)}\r\n`,
       );
-      setStatus("exited");
     }
   };
 
   if (!open) return null;
 
+  const canSend = Boolean(termId ?? activeIdRef.current) && status === "running";
+
   return (
-    <div className="terminal-panel" style={{ height: "100%" }}>
+    <div className="terminal-panel">
       <div className="terminal-toolbar">
         <span className="terminal-title">Terminal</span>
         <span className="terminal-meta" title={cwdLabel}>
           {shellLabel}
           {cwdLabel ? ` · ${cwdLabel}` : ""}
           {status === "exited" ? " · exited" : ""}
+          {status === "error" ? " · error" : ""}
+          {status === "idle" ? " · starting…" : ""}
         </span>
         <button
           type="button"
@@ -177,23 +202,33 @@ export function TerminalPanel({ open, height }: Props) {
         </button>
       </div>
       <pre className="terminal-output" ref={scrollerRef}>
-        {output || (status === "running" ? "Starting shell…\n" : "")}
+        {output ||
+          (status === "running" || status === "idle"
+            ? "Starting shell…\n"
+            : "")}
       </pre>
       <div className="terminal-input-row">
         <span className="terminal-prompt">$</span>
         <input
+          ref={inputRef}
           className="terminal-input"
           value={line}
-          disabled={status !== "running"}
           spellCheck={false}
           autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="off"
           placeholder={
-            status === "running" ? "Enter command…" : "Shell not running"
+            canSend
+              ? "输入命令后回车…"
+              : status === "idle"
+                ? "正在启动 shell…"
+                : "Shell 未运行 — 点 Restart"
           }
           onChange={(e) => setLine(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
+              e.stopPropagation();
               void sendLine();
             }
           }}

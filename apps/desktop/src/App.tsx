@@ -3,7 +3,7 @@ import { SessionList } from "./components/SessionList";
 import { ChatPanel } from "./components/ChatPanel";
 import { ChangesPanel } from "./components/ChangesPanel";
 import { TerminalPanel } from "./components/TerminalPanel";
-import { LayoutChrome, ResizeHandle } from "./components/LayoutChrome";
+import { TitlebarToggles, ResizeHandle } from "./components/LayoutChrome";
 import { PermissionModal } from "./components/PermissionModal";
 import { UserPromptModal } from "./components/UserPromptModal";
 import { SettingsDrawer } from "./components/SettingsDrawer";
@@ -77,17 +77,20 @@ export function App() {
 
   return (
     <div className="app">
-      <div className="app-titlebar" aria-hidden />
+      <div className="app-titlebar">
+        <div className="titlebar-drag" aria-hidden />
+        <TitlebarToggles
+          sidebarOpen={layout.sidebarOpen}
+          changesOpen={layout.changesOpen}
+          terminalOpen={layout.terminalOpen}
+          onToggleSidebar={toggleSidebar}
+          onToggleChanges={toggleChanges}
+          onToggleTerminal={toggleTerminal}
+        />
+        {/* Space for Windows caption buttons (titleBarOverlay). */}
+        <div className="titlebar-caption-space" aria-hidden />
+      </div>
       <ErrorBanner />
-
-      <LayoutChrome
-        sidebarOpen={layout.sidebarOpen}
-        changesOpen={layout.changesOpen}
-        terminalOpen={layout.terminalOpen}
-        onToggleSidebar={toggleSidebar}
-        onToggleChanges={toggleChanges}
-        onToggleTerminal={toggleTerminal}
-      />
 
       <div
         className={

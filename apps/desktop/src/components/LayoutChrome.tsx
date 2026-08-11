@@ -10,10 +10,10 @@ export type LayoutChromeProps = {
 };
 
 /**
- * Codex-style edge controls: collapse/expand sidebar, changes, and terminal.
- * Sits in a fixed rail so toggles stay available when panels are hidden.
+ * Panel toggles live in the frameless title bar (Codex-style top chrome).
+ * Resize handles stay between panels.
  */
-export function LayoutChrome({
+export function TitlebarToggles({
   sidebarOpen,
   changesOpen,
   terminalOpen,
@@ -22,43 +22,35 @@ export function LayoutChrome({
   onToggleTerminal,
 }: LayoutChromeProps) {
   return (
-    <>
-      <div className="edge-rail edge-rail-left" role="toolbar" aria-label="Sidebar">
-        <button
-          type="button"
-          className="edge-btn"
-          title={sidebarOpen ? "收起会话列表" : "展开会话列表"}
-          aria-pressed={sidebarOpen}
-          onClick={onToggleSidebar}
-        >
-          {sidebarOpen ? "⟨" : "⟩"}
-        </button>
-      </div>
-
-      <div className="edge-rail edge-rail-right" role="toolbar" aria-label="Changes">
-        <button
-          type="button"
-          className="edge-btn"
-          title={changesOpen ? "收起 Changes" : "展开 Changes"}
-          aria-pressed={changesOpen}
-          onClick={onToggleChanges}
-        >
-          {changesOpen ? "⟩" : "⟨"}
-        </button>
-      </div>
-
-      <div className="edge-rail edge-rail-bottom" role="toolbar" aria-label="Terminal">
-        <button
-          type="button"
-          className="edge-btn edge-btn-wide"
-          title={terminalOpen ? "收起终端" : "展开终端"}
-          aria-pressed={terminalOpen}
-          onClick={onToggleTerminal}
-        >
-          {terminalOpen ? "▾ Terminal" : "▴ Terminal"}
-        </button>
-      </div>
-    </>
+    <div className="titlebar-toggles" role="toolbar" aria-label="面板">
+      <button
+        type="button"
+        className={sidebarOpen ? "titlebar-btn active" : "titlebar-btn"}
+        title={sidebarOpen ? "收起会话列表" : "展开会话列表"}
+        aria-pressed={sidebarOpen}
+        onClick={onToggleSidebar}
+      >
+        会话
+      </button>
+      <button
+        type="button"
+        className={changesOpen ? "titlebar-btn active" : "titlebar-btn"}
+        title={changesOpen ? "收起 Changes" : "展开 Changes"}
+        aria-pressed={changesOpen}
+        onClick={onToggleChanges}
+      >
+        Changes
+      </button>
+      <button
+        type="button"
+        className={terminalOpen ? "titlebar-btn active" : "titlebar-btn"}
+        title={terminalOpen ? "收起终端" : "展开终端"}
+        aria-pressed={terminalOpen}
+        onClick={onToggleTerminal}
+      >
+        Terminal
+      </button>
+    </div>
   );
 }
 
@@ -80,7 +72,7 @@ export function ResizeHandle({
 
     const onMove = (ev: PointerEvent) => {
       if (axis === "terminal") {
-        const dy = lastY - ev.clientY; // drag up → taller terminal
+        const dy = lastY - ev.clientY;
         lastY = ev.clientY;
         if (dy !== 0) onDrag(dy);
       } else if (axis === "sidebar") {
@@ -88,7 +80,6 @@ export function ResizeHandle({
         lastX = ev.clientX;
         if (dx !== 0) onDrag(dx);
       } else {
-        // changes: drag handle on left edge of panel; moving left grows width
         const dx = lastX - ev.clientX;
         lastX = ev.clientX;
         if (dx !== 0) onDrag(dx);
