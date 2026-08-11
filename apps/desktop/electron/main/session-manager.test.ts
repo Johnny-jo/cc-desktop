@@ -607,6 +607,140 @@ describe("SessionManager", () => {
     expect(snapshots.restore).not.toHaveBeenCalled();
   });
 
+  it("tracks SDK user message uuids and emits user_msg_ids", async () => {
+    const queryFn: QueryFn = async function* (args) {
+      await takeFirstUserText(args.prompt);
+      // SDK replay of the persisted user turn (has uuid, no tool_result).
+      yield {
+        type: "user",
+        uuid: "u-1",
+        session_id: "sdk-1",
+        message: { role: "user", content: "hello" },
+      };
+      yield { type: "result", subtype: "success", total_cost_usd: 0 };
+    };
+    const ctx = makeDeps({ queryFn });
+    const sessionId = await ctx.manager.start(
+      { text: "hello", attachments: [] },
+      "D:/p",
+    );
+    const evt = ctx.emitted.find((e) => e.type === "user_msg_ids");
+    expect(evt).toBeTruthy();
+    expect(evt && "uuids" in evt ? evt.uuids : []).toEqual(["u-1"]);
+
+    // tool_result frames must NOT be tracked as user turns
+    void sessionId;
+  });
+
+  it("does not track tool_result user frames as rewind anchors", async () => {
+    const queryFn: QueryFn = async function* (args) {
+      await takeFirstUserText(args.prompt);
+      yield {
+        type: "user",
+        uuid: "tr-1",
+        session_id: "sdk-1",
+        message: {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "x", content: "ok" }],
+        },
+      };
+      yield {
+        type: "user",
+        uuid: "u-2",
+        session_id: "sdk-1",
+        isSynthetic: true,
+        message: { role: "user", content: "synthetic" },
+      };
+      yield { type: "result", subtype: "success", total_cost_usd: 0 };
+    };
+    const ctx = makeDeps({ queryFn });
+    await ctx.manager.start({ text: "hi", attachments: [] }, "D:/p");
+    expect(ctx.emitted.some((e) => e.type === "user_msg_ids")).toBe(false);
+  });
+
+  it("rewindToUserMessage uses the live query and sets a resume anchor", async () => {
+    const rewindFiles = vi.fn().mockResolvedValue({
+      canRewind: true,
+      filesChanged: ["demo.txt"],
+      insertions: 1,
+      deletions: 2,
+    });
+    const close = vi.fn();
+    const queryFn: QueryFn = function (args) {
+      const gen = (async function* () {
+        await takeFirstUserText(args.prompt);
+        yield {
+          type: "user",
+          uuid: "u-1",
+          session_id: "sdk-1",
+          message: { role: "user", content: "first" },
+        };
+        yield { type: "result", subtype: "success", total_cost_usd: 0 };
+        // Stay open for further pushes until closed
+        for await (const _ of args.prompt as AsyncIterable<unknown>) {
+          yield { type: "result", subtype: "success", total_cost_usd: 0 };
+        }
+      })();
+      return Object.assign(gen, { rewindFiles, close }) as never;
+    };
+    const ctx = makeDeps({ queryFn });
+    const sessionId = await ctx.manager.start(
+      { text: "first", attachments: [] },
+      "D:/p",
+    );
+
+    const res = await ctx.manager.rewindToUserMessage(sessionId, "u-1");
+    expect(res.ok).toBe(true);
+    expect(res.filesChanged).toEqual(["demo.txt"]);
+    expect(rewindFiles).toHaveBeenCalledWith("u-1", { dryRun: false });
+
+    // Next continue must open a NEW query with resume + resumeSessionAt.
+    const captured: Array<Record<string, unknown>> = [];
+    const queryFn2: QueryFn = function (args) {
+      captured.push(args.options);
+      const gen = (async function* () {
+        await takeFirstUserText(args.prompt);
+        yield { type: "result", subtype: "success", total_cost_usd: 0 };
+      })();
+      return Object.assign(gen, {}) as never;
+    };
+    (ctx.manager as unknown as { queryFn: QueryFn }).queryFn = queryFn2;
+    await ctx.manager.continue(sessionId, { text: "again", attachments: [] });
+    expect(captured[0]?.resume).toBe("sdk-1");
+    expect(captured[0]?.resumeSessionAt).toBe("u-1");
+  });
+
+  it("rewindToUserMessage reports canRewind=false without tearing down", async () => {
+    const rewindFiles = vi
+      .fn()
+      .mockResolvedValue({ canRewind: false, error: "no checkpoint" });
+    const queryFn: QueryFn = function (args) {
+      const gen = (async function* () {
+        await takeFirstUserText(args.prompt);
+        yield {
+          type: "result",
+          subtype: "success",
+          total_cost_usd: 0,
+          session_id: "sdk-1",
+        };
+        for await (const _ of args.prompt as AsyncIterable<unknown>) {
+          yield { type: "result", subtype: "success", total_cost_usd: 0 };
+        }
+      })();
+      return Object.assign(gen, { rewindFiles }) as never;
+    };
+    const ctx = makeDeps({ queryFn });
+    const sessionId = await ctx.manager.start(
+      { text: "hi", attachments: [] },
+      "D:/p",
+    );
+    const res = await ctx.manager.rewindToUserMessage(sessionId, "u-x");
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/no checkpoint/);
+    // Stream still usable: continue pushes to the same query.
+    await ctx.manager.continue(sessionId, { text: "next", attachments: [] });
+  });
+
   it("restoreAllChanges restores each file's earliest op snapshot", async () => {
     const ctx = makeDeps();
     (ctx.listDiffs as ReturnType<typeof vi.fn>).mockReturnValue([

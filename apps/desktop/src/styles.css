@@ -747,6 +747,45 @@ textarea {
   border-radius: 18px 18px 6px 18px;
   padding: 10px 14px;
   box-shadow: var(--shadow-1);
+  position: relative;
+}
+
+/* Rewind affordance on checkpointed user messages */
+.rewind-btn {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 10.5px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.bubble-user:hover .rewind-btn,
+.rewind-btn:focus-visible {
+  opacity: 1;
+}
+
+.rewind-btn:hover {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.rewind-btn:disabled {
+  cursor: default;
+  color: var(--text-faint);
+  border-color: var(--border);
+}
+
+.rewind-error {
+  display: block;
+  margin-top: 4px;
+  color: var(--danger);
+  font-size: 11px;
 }
 
 .bubble-assistant {

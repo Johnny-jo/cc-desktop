@@ -58,6 +58,8 @@ export const IPC = {
   diffRestoreFile: "diff:restore-file",
   /** Restore all changed files of a session */
   diffRestoreAll: "diff:restore-all",
+  /** Rewind files + conversation to a user message (SDK checkpointing) */
+  sessionRewind: "session:rewind",
   // main → renderer (webContents.send)
   sessionEvent: "session:event",
   permissionRequest: "permission:request",
@@ -203,6 +205,22 @@ export type IpcInvokeMap = {
   [IPC.diffRestoreAll]: {
     args: [{ sessionId: string }];
     result: { restored: string[]; failed: string[] };
+  };
+  [IPC.sessionRewind]: {
+    /**
+     * userMessageId: SDK uuid of the user message to rewind to (files return
+     * to that message's checkpoint; the conversation is truncated so the next
+     * turn resumes AT that message). dryRun previews file changes only.
+     */
+    args: [{ sessionId: string; userMessageId: string; dryRun?: boolean }];
+    result: {
+      ok: boolean;
+      canRewind?: boolean;
+      filesChanged?: string[];
+      insertions?: number;
+      deletions?: number;
+      error?: string;
+    };
   };
 };
 

@@ -143,7 +143,19 @@ export type ReadAttachmentResult =
   | { ok: false; error: string };
 
 export type ChatItem =
-  | { kind: "text"; id: string; role: ChatRole; text: string; streaming?: boolean }
+  | {
+      kind: "text";
+      id: string;
+      role: ChatRole;
+      text: string;
+      streaming?: boolean;
+      /**
+       * SDK-persisted user message uuid (real user turns only). Bound by
+       * ordinal matching against SDK user messages; enables message-level
+       * rewind (code checkpoint + conversation truncation).
+       */
+      sdkMsgId?: string;
+    }
   | { kind: "tool"; id: string; tool: ToolCardState }
   | { kind: "usage"; id: string; usage: TurnUsage };
 
@@ -245,4 +257,10 @@ export type SdkNormalizedEvent =
       usage?: TurnUsage;
     }
   | { type: "items_replaced"; sessionId: string; items: ChatItem[] }
+  /**
+   * SDK-persisted user message uuids in turn order (real user turns only,
+   * tool_result frames excluded). Renderer binds them to user ChatItems by
+   * ordinal for message-level rewind.
+   */
+  | { type: "user_msg_ids"; sessionId: string; uuids: string[] }
   | { type: "raw"; sessionId: string; payload: unknown };

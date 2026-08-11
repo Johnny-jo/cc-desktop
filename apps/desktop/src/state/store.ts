@@ -61,6 +61,12 @@ let pendingStartPrompt: string | null = null;
  * SDK often re-emits the same user turn after the agent finishes; we drop that echo.
  */
 const optimisticUserTexts = new Map<string, string[]>();
+/**
+ * SDK-persisted user message uuids per session, in turn order (from the
+ * main process via `user_msg_ids` events). Bound to user ChatItems by
+ * ordinal for message-level rewind.
+ */
+const sdkUserMsgIds = new Map<string, string[]>();
 let idCounter = 0;
 
 function nextId(prefix: string): string {
@@ -122,6 +128,25 @@ function setItems(sessionId: string, items: ChatItem[]): void {
     itemsBySession: { ...state.itemsBySession, [sessionId]: items },
   });
   scheduleSaveTranscript(sessionId, items);
+}
+
+/** Bind known SDK user message uuids to user ChatItems by ordinal. */
+function bindSdkUserMsgIds(sessionId: string, items: ChatItem[]): ChatItem[] {
+  const uuids = sdkUserMsgIds.get(sessionId) ?? [];
+  if (!uuids.length) return items;
+  let i = 0;
+  let changed = false;
+  const next = items.map((item) => {
+    if (item.kind === "text" && item.role === "user") {
+      const uuid = uuids[i++];
+      if (uuid && item.sdkMsgId !== uuid) {
+        changed = true;
+        return { ...item, sdkMsgId: uuid };
+      }
+    }
+    return item;
+  });
+  return changed ? next : items;
 }
 
 function pushOptimisticUser(sessionId: string, text: string): void {
@@ -369,8 +394,16 @@ function applySessionEvent(event: SdkNormalizedEvent): void {
     }
     case "items_replaced": {
       // Main finished compression — replace UI transcript with summary + recent.
+      // A fresh SDK session starts afterwards, so rewind uuid bindings reset.
+      sdkUserMsgIds.delete(sessionId);
       setItems(sessionId, event.items);
       saveTranscriptNow(sessionId, event.items);
+      return;
+    }
+    case "user_msg_ids": {
+      sdkUserMsgIds.set(sessionId, event.uuids);
+      const bound = bindSdkUserMsgIds(sessionId, getItems(sessionId));
+      if (bound !== getItems(sessionId)) setItems(sessionId, bound);
       return;
     }
 
@@ -622,7 +655,7 @@ export async function selectSession(sessionId: string): Promise<void> {
       projectPath: cwd || state.projectPath,
       itemsBySession: {
         ...state.itemsBySession,
-        [sessionId]: restoredItems,
+        [sessionId]: bindSdkUserMsgIds(sessionId, restoredItems),
       },
       changesBySession: {
         ...state.changesBySession,
@@ -728,6 +761,41 @@ export function abortActiveSession(): void {
   } catch {
     // ignore
   }
+}
+
+/**
+ * Message-level rewind (Claude Code "Esc Esc"): files return to the
+ * checkpoint taken at that user message, and the conversation is truncated
+ * so the next turn resumes from that point.
+ */
+export async function rewindToMessage(
+  sessionId: string,
+  sdkMsgId: string,
+): Promise<{ ok: boolean; error?: string; filesChanged?: string[] }> {
+  const desktop = getDesktop();
+  const res = await desktop.rewindSession(sessionId, sdkMsgId);
+  if (!res.ok) {
+    return { ok: false, error: res.error ?? "Rewind failed" };
+  }
+  // Truncate transcript AFTER the anchor user message (the anchor stays as
+  // the new tip, matching SDK resumeSessionAt semantics).
+  const items = getItems(sessionId);
+  const idx = items.findIndex(
+    (i) => i.kind === "text" && i.role === "user" && i.sdkMsgId === sdkMsgId,
+  );
+  if (idx >= 0) {
+    const truncated = items.slice(0, idx + 1);
+    setItems(sessionId, truncated);
+    saveTranscriptNow(sessionId, truncated);
+  }
+  const uuids = sdkUserMsgIds.get(sessionId);
+  if (uuids) {
+    const uidx = uuids.indexOf(sdkMsgId);
+    sdkUserMsgIds.set(sessionId, uidx >= 0 ? uuids.slice(0, uidx + 1) : uuids);
+  }
+  // Refresh the change list (main re-emits diff:updated on restore, but the
+  // rewind path bypasses DiffTracker — files may no longer match records).
+  return { ok: true, filesChanged: res.filesChanged ?? [] };
 }
 
 /** Ratio at which renderer auto-compresses after a turn finishes. */

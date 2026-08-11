@@ -3,6 +3,7 @@ import type { ChatItem } from "@claude-desktop/shared";
 import { ToolCard } from "./ToolCard";
 import { MarkdownBody } from "./MarkdownBody";
 import { formatTurnUsageLine } from "../lib/format-usage";
+import { rewindToMessage, useAppStore } from "../state/store";
 
 /** Long skill / system dumps that slipped through as plain text. */
 function looksLikeSkillDump(text: string): boolean {
@@ -44,6 +45,55 @@ function CollapsedTextCard({ text }: { text: string }) {
       </button>
       {open ? <pre className="skill-dump-body">{text}</pre> : null}
     </div>
+  );
+}
+
+/** Rewind affordance on user bubbles that carry an SDK checkpoint id. */
+function RewindButton({ sdkMsgId }: { sdkMsgId: string }) {
+  const activeSessionId = useAppStore((s) => s.activeSessionId);
+  const running = useAppStore((s) => s.running);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (!activeSessionId) return null;
+
+  const onClick = async () => {
+    if (
+      !window.confirm(
+        "Rewind to this message? Files return to their state at this point and later conversation is removed.",
+      )
+    ) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await rewindToMessage(activeSessionId, sdkMsgId);
+      if (!res.ok) setError(res.error ?? "Rewind failed");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <button
+        type="button"
+        className="rewind-btn"
+        disabled={busy || running}
+        title="Rewind files + conversation to this message"
+        onClick={() => void onClick()}
+      >
+        {busy ? "…" : "↩ rewind"}
+      </button>
+      {error ? (
+        <span className="rewind-error" title={error}>
+          {error}
+        </span>
+      ) : null}
+    </>
   );
 }
 
@@ -112,6 +162,9 @@ export function MessageList({ items }: { items: ChatItem[] }) {
               <div className="bubble bubble-user" title={item.text}>
                 {item.text}
                 {item.streaming ? <span className="cursor">▍</span> : null}
+                {item.sdkMsgId ? (
+                  <RewindButton sdkMsgId={item.sdkMsgId} />
+                ) : null}
               </div>
             ) : role === "system" ? (
               <div className="bubble bubble-system">{item.text}</div>

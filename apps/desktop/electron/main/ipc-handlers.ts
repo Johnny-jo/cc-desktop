@@ -276,6 +276,22 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
   );
 
   ipcMain.handle(
+    IPC.sessionRewind,
+    async (
+      _e,
+      {
+        sessionId,
+        userMessageId,
+        dryRun,
+      }: { sessionId: string; userMessageId: string; dryRun?: boolean },
+    ) => {
+      return await ctx.sessions.rewindToUserMessage(sessionId, userMessageId, {
+        dryRun: Boolean(dryRun),
+      });
+    },
+  );
+
+  ipcMain.handle(
     IPC.sessionCompress,
     async (
       _e,

@@ -108,6 +108,24 @@ const desktop = {
       failed: string[];
     }>,
 
+  /**
+   * Rewind files + conversation to a user message (SDK checkpointing).
+   * dryRun previews the file changes without touching disk.
+   */
+  rewindSession: (sessionId: string, userMessageId: string, dryRun?: boolean) =>
+    ipcRenderer.invoke(IPC.sessionRewind, {
+      sessionId,
+      userMessageId,
+      ...(dryRun ? { dryRun: true } : {}),
+    }) as Promise<{
+      ok: boolean;
+      canRewind?: boolean;
+      filesChanged?: string[];
+      insertions?: number;
+      deletions?: number;
+      error?: string;
+    }>,
+
   compressSession: (
     sessionId: string,
     items?: ChatItem[],

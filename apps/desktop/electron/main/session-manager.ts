@@ -113,6 +113,17 @@ type QueryControl = {
     removed: string[];
     errors: Record<string, string>;
   }>;
+  /** SDK control request: rewind tracked files to a user message checkpoint */
+  rewindFiles?: (
+    userMessageId: string,
+    options?: { dryRun?: boolean },
+  ) => Promise<{
+    canRewind: boolean;
+    error?: string;
+    filesChanged?: string[];
+    insertions?: number;
+    deletions?: number;
+  }>;
 };
 
 type SessionEntry = {
@@ -131,6 +142,10 @@ type SessionEntry = {
   turnActive: boolean;
   /** True if context has already been auto-compressed this session */
   compressed: boolean;
+  /** SDK uuids of real user turns (persisted user messages, in order) */
+  sdkUserMsgIds?: string[];
+  /** After rewind: next fresh query resumes at this assistant message uuid */
+  resumeAtAnchor?: string;
   /** Timestamp of last auto-compression (for cooldown) */
   lastCompressedAt?: number;
   /**
@@ -191,6 +206,32 @@ function isResultMessage(msg: unknown): boolean {
     msg !== null &&
     (msg as { type?: string }).type === "result"
   );
+}
+
+/**
+ * True for SDK user messages that represent real user turns (not tool_result
+ * frames or synthetic injections). These get checkpoints and rewind anchors.
+ * In streaming-input mode the SDK does NOT replay pushed user messages back
+ * into the message stream, so observed ones come from the CLI's persisted
+ * transcript (e.g. after resume) — they match user turns by ordinal.
+ */
+function isSdkPersistedUserTurn(msg: unknown): boolean {
+  if (typeof msg !== "object" || msg === null) return false;
+  const rec = msg as Record<string, unknown>;
+  if (rec.type !== "user") return false;
+  if (rec.isSynthetic === true || rec.isReplay === true) return false;
+  const message = rec.message as Record<string, unknown> | undefined;
+  const content = message?.content;
+  if (typeof content === "string") return true;
+  if (Array.isArray(content)) {
+    return !content.some(
+      (b) =>
+        typeof b === "object" &&
+        b !== null &&
+        (b as { type?: string }).type === "tool_result",
+    );
+  }
+  return false;
 }
 
 export class SessionManager {
@@ -566,6 +607,144 @@ export class SessionManager {
     }
   }
 
+  /**
+   * Message-level rewind: restore tracked files to the checkpoint taken at
+   * the given user message AND truncate the conversation so the next turn
+   * resumes at that point (Claude Code "Esc Esc" semantics).
+   *
+   * Implementation: rewindFiles() needs the LIVE query's checkpoint table,
+   * so the current stream is torn down and a throwaway resumed query is
+   * opened to perform the rewind. The next continue() starts a fresh query
+   * with resume + resumeSessionAt so the conversation continues from the
+   * rewound point.
+   */
+  async rewindToUserMessage(
+    sessionId: string,
+    userMessageId: string,
+    opts?: { dryRun?: boolean },
+  ): Promise<{
+    ok: boolean;
+    canRewind?: boolean;
+    filesChanged?: string[];
+    insertions?: number;
+    deletions?: number;
+    error?: string;
+  }> {
+    const entry = this.sessions.get(sessionId);
+    if (!entry) return { ok: false, error: `Unknown session: ${sessionId}` };
+    if (!entry.sdkSessionId) {
+      return { ok: false, error: "Session has no SDK state to rewind" };
+    }
+    if (entry.turnActive) {
+      return { ok: false, error: "Wait for the current turn to finish" };
+    }
+
+    try {
+      // Prefer the live query (has checkpoints in memory); otherwise open a
+      // throwaway resumed query purely to run the rewind.
+      let q = entry.query;
+      let ownQuery = false;
+      if (!q?.rewindFiles) {
+        const settings = this.settings.get();
+        const env = this.cpa.buildProcessEnv(settings.defaultModel);
+        const input = new MessageStream();
+        q = this.queryFn({
+          prompt: input as AsyncIterable<unknown>,
+          options: {
+            cwd: entry.summary.cwd,
+            model: settings.defaultModel,
+            env,
+            permissionMode: "bypassPermissions",
+            allowDangerouslySkipPermissions: true,
+            maxTurns: 1,
+            tools: [],
+            strictMcpConfig: true,
+            enableFileCheckpointing: true,
+            settingSources: [],
+            resume: entry.sdkSessionId,
+          },
+        }) as QueryHandle & QueryControl;
+        ownQuery = true;
+        // Drain in background so the CLI process can exit cleanly later.
+        void (async () => {
+          try {
+            for await (const _ of q as QueryHandle) {
+              // discard
+            }
+          } catch {
+            // ignore
+          }
+        })();
+        input.end();
+      }
+
+      const result = await q.rewindFiles!(userMessageId, {
+        dryRun: Boolean(opts?.dryRun),
+      });
+
+      if (ownQuery) {
+        try {
+          (q as QueryHandle & QueryControl).close?.();
+        } catch {
+          // ignore
+        }
+      }
+
+      if (opts?.dryRun) {
+        return {
+          ok: true,
+          canRewind: result.canRewind,
+          filesChanged: result.filesChanged ?? [],
+          ...(result.insertions != null ? { insertions: result.insertions } : {}),
+          ...(result.deletions != null ? { deletions: result.deletions } : {}),
+          ...(result.error ? { error: result.error } : {}),
+        };
+      }
+
+      if (!result.canRewind) {
+        return {
+          ok: false,
+          canRewind: false,
+          error: result.error ?? "Cannot rewind to this message",
+        };
+      }
+
+      // Real rewind: tear down the live stream so the next continue() opens
+      // a fresh query resuming AT the rewound user message.
+      if (!ownQuery) {
+        try {
+          entry.input?.end();
+          entry.query?.close?.();
+        } catch {
+          // ignore
+        }
+        try {
+          await entry.consumer;
+        } catch {
+          // ignore
+        }
+        entry.input = undefined;
+        entry.query = undefined;
+        entry.consumer = undefined;
+      }
+      entry.resumeAtAnchor = userMessageId;
+      // Truncate the tracked uuid list at the anchor.
+      const idx = (entry.sdkUserMsgIds ?? []).indexOf(userMessageId);
+      if (idx >= 0) {
+        entry.sdkUserMsgIds = entry.sdkUserMsgIds!.slice(0, idx + 1);
+      }
+      return {
+        ok: true,
+        canRewind: true,
+        filesChanged: result.filesChanged ?? [],
+        ...(result.insertions != null ? { insertions: result.insertions } : {}),
+        ...(result.deletions != null ? { deletions: result.deletions } : {}),
+      };
+    } catch (err) {
+      return { ok: false, error: errMessage(err) };
+    }
+  }
+
   abort(sessionId: string): void {
     const entry = this.sessions.get(sessionId);
     if (!entry) return;
@@ -691,6 +870,9 @@ export class SessionManager {
           updatedAt: Date.now(),
         };
         entry.turnActive = true;
+        // Compaction starts a fresh SDK session — rewind anchors/uuids reset.
+        entry.resumeAtAnchor = undefined;
+        entry.sdkUserMsgIds = [];
         this.emitSession({ ...entry.summary });
         this.persistSummary(entry);
 
@@ -717,6 +899,9 @@ export class SessionManager {
 
       // Manual /compact: stash summary for the *next* user message only.
       entry.pendingSummaryPrefix = result.summaryText;
+      // Compaction starts a fresh SDK session — rewind anchors/uuids no longer apply.
+      entry.resumeAtAnchor = undefined;
+      entry.sdkUserMsgIds = [];
       return { ok: true, message: `Compressed ${result.compressedCount} items` };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -789,7 +974,9 @@ export class SessionManager {
     this.persistSummary(entry);
 
     // Live streaming session: just push the next user message.
-    if (entry.input && !entry.input.isClosed && entry.consumer) {
+    // Skipped when a rewind anchor is pending — the conversation must be
+    // re-opened truncated at the anchor, so force the resume path below.
+    if (entry.input && !entry.input.isClosed && entry.consumer && !entry.resumeAtAnchor) {
       entry.input.push(content, entry.sdkSessionId);
       // Wait until this turn's result (or error) so IPC still "awaits the turn".
       await this.waitForTurnIdle(sessionId);
@@ -884,6 +1071,9 @@ export class SessionManager {
       // .mcp.json, user settings, and plugin-declared servers so desktop
       // sessions have a single, explicit MCP surface (Settings → MCP servers).
       strictMcpConfig: true,
+      // Track file checkpoints per user message so the UI can rewind
+      // files (Query.rewindFiles) to any user turn.
+      enableFileCheckpointing: true,
       abortController,
       canUseTool: async (
         name: string,
@@ -945,6 +1135,12 @@ export class SessionManager {
     const options = this.buildOptions(sessionId, entry, abortController);
     if (opts.resume) {
       options.resume = entry.sdkSessionId ?? sessionId;
+      // After a rewind: resume the SDK session truncated at the anchor
+      // (the rewound user message becomes the conversation tip).
+      if (entry.resumeAtAnchor) {
+        options.resumeSessionAt = entry.resumeAtAnchor;
+        entry.resumeAtAnchor = undefined;
+      }
     }
 
     const settings = this.settings.get();
@@ -1004,6 +1200,21 @@ export class SessionManager {
         const sdkId = extractSdkSessionId(msg);
         if (sdkId) {
           entry.sdkSessionId = sdkId;
+        }
+
+        // Track SDK-persisted user message uuids (real user turns only) for
+        // message-level rewind. Emitted to the renderer which binds them to
+        // user ChatItems by ordinal.
+        if (isSdkPersistedUserTurn(msg)) {
+          const uuid = (msg as { uuid?: unknown }).uuid;
+          if (typeof uuid === "string" && uuid) {
+            entry.sdkUserMsgIds = [...(entry.sdkUserMsgIds ?? []), uuid];
+            this.emit({
+              type: "user_msg_ids",
+              sessionId,
+              uuids: [...entry.sdkUserMsgIds],
+            });
+          }
         }
 
         this.handleToolUseForDiff(sessionId, msg);
