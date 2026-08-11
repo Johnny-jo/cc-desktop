@@ -653,22 +653,33 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
             </label>
           </div>
           <div className="composer-actions">
-            {running ? (
-              <button
-                type="button"
-                className="btn btn-danger btn-sm"
-                onClick={() => abortActiveSession()}
-              >
-                Stop
-              </button>
-            ) : null}
             <button
               type="button"
-              className="btn btn-primary btn-send"
-              disabled={!canSend && !slashOpen}
-              onClick={onSend}
+              className={
+                running ? "sendstop-btn sendstop-stop" : "sendstop-btn sendstop-send"
+              }
+              disabled={!running && !canSend && !slashOpen}
+              onClick={running ? () => abortActiveSession() : onSend}
+              title={running ? "Stop" : "Send"}
+              aria-label={running ? "Stop" : "Send"}
             >
-              {running ? "Queue" : "Send"}
+              {running ? (
+                /* Stop: filled rounded square */
+                <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden>
+                  <rect x="2" y="2" width="10" height="10" rx="2.5" fill="currentColor" />
+                </svg>
+              ) : (
+                /* Send: upward arrow */
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+                  <path
+                    d="M8 13V3.5M8 3.5L3.5 8M8 3.5L12.5 8"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              )}
             </button>
           </div>
         </div>

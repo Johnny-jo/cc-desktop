@@ -551,6 +551,53 @@ body.is-resizing-row * {
   min-width: 72px;
 }
 
+/* Unified send/stop circular button (Codex-style) */
+.sendstop-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, transform 0.06s ease;
+}
+
+.sendstop-btn:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+.sendstop-btn:disabled {
+  cursor: default;
+}
+
+/* Send: accent circle, light arrow */
+.sendstop-send {
+  background: var(--accent);
+  color: #fff;
+}
+
+.sendstop-send:hover:not(:disabled) {
+  background: #4b8ff7;
+}
+
+.sendstop-send:disabled {
+  background: var(--bg-active);
+  color: var(--text-faint);
+}
+
+/* Stop: warm circle, white square */
+.sendstop-stop {
+  background: #e0654a;
+  color: #fff;
+}
+
+.sendstop-stop:hover {
+  background: #ea7a60;
+}
+
 .select {
   background: var(--bg-input);
   border: 1px solid transparent;

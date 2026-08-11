@@ -9,62 +9,85 @@ export type LayoutChromeProps = {
   onToggleTerminal: () => void;
 };
 
+/*
+ * Reference-style panel icons: thin ~1px strokes on a 3:4 rounded rectangle
+ * (x 4.5–13.5, y 3.5–14.5, r 2). A filled segment marks the "on" panel side.
+ */
+
+/** 会话 (sidebar left): left segment filled when open. */
 function IconSidebar({ active }: { active: boolean }) {
   return (
-    <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden>
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden>
+      {active ? (
+        <path
+          d="M4.5 5.5 a2 2 0 0 1 2 -2 H6.8 V14.5 H6.5 a2 2 0 0 1 -2 -2 Z"
+          fill="currentColor"
+        />
+      ) : null}
       <rect
-        x="2.75"
-        y="3.75"
-        width="14.5"
-        height="12.5"
-        rx="3.25"
+        x="4.5"
+        y="3.5"
+        width="9"
+        height="11"
+        rx="2"
         stroke="currentColor"
-        strokeWidth="1.5"
-        fill={active ? "currentColor" : "none"}
-        fillOpacity={active ? 0.14 : 0}
+        strokeWidth="1.1"
       />
-      <path
-        d="M8 3.75v12.5"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-      />
+      {!active ? (
+        <path d="M7.2 3.5v11" stroke="currentColor" strokeWidth="1.1" />
+      ) : null}
     </svg>
   );
 }
 
+/** 变更 (panel right): right segment filled when open. */
 function IconChanges({ active }: { active: boolean }) {
   return (
-    <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden>
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden>
+      {active ? (
+        <path
+          d="M13.5 5.5 a2 2 0 0 0 -2 -2 H11.2 V14.5 H11.5 a2 2 0 0 0 2 -2 Z"
+          fill="currentColor"
+        />
+      ) : null}
       <rect
-        x="3.75"
-        y="3.75"
-        width="12.5"
-        height="12.5"
-        rx="3.25"
+        x="4.5"
+        y="3.5"
+        width="9"
+        height="11"
+        rx="2"
         stroke="currentColor"
-        strokeWidth="1.5"
-        fill={active ? "currentColor" : "none"}
-        fillOpacity={active ? 0.14 : 0}
+        strokeWidth="1.1"
       />
+      {!active ? (
+        <path d="M10.8 3.5v11" stroke="currentColor" strokeWidth="1.1" />
+      ) : null}
     </svg>
   );
 }
 
+/** 终端 (panel bottom): bottom segment filled when open. */
 function IconTerminal({ active }: { active: boolean }) {
   return (
-    <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden>
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden>
+      {active ? (
+        <path
+          d="M4.5 12.2 V12.5 a2 2 0 0 0 2 2 H11.5 a2 2 0 0 0 2 -2 V12.2 Z"
+          fill="currentColor"
+        />
+      ) : null}
       <rect
-        x="2.75"
-        y="6"
-        width="14.5"
-        height="8"
-        rx="2.75"
+        x="4.5"
+        y="3.5"
+        width="9"
+        height="11"
+        rx="2"
         stroke="currentColor"
-        strokeWidth="1.5"
-        fill={active ? "currentColor" : "none"}
-        fillOpacity={active ? 0.14 : 0}
+        strokeWidth="1.1"
       />
+      {!active ? (
+        <path d="M4.5 12.2h9" stroke="currentColor" strokeWidth="1.1" />
+      ) : null}
     </svg>
   );
 }
