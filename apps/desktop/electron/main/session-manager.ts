@@ -1083,6 +1083,35 @@ export class SessionManager {
       // Track file checkpoints per user message so the UI can rewind
       // files (Query.rewindFiles) to any user turn.
       enableFileCheckpointing: true,
+      // Custom subagents (Task/Agent tool picks them up by name).
+      ...(settings.agents?.length
+        ? {
+            agents: Object.fromEntries(
+              settings.agents.map((a) => [
+                a.name,
+                {
+                  description: a.description,
+                  prompt: a.prompt,
+                  ...(a.tools?.length ? { tools: a.tools } : {}),
+                  ...(a.model && a.model !== "inherit"
+                    ? { model: a.model }
+                    : {}),
+                },
+              ]),
+            ),
+          }
+        : {}),
+      // Local plugins (skills/hooks/agents/commands). skipMcpDiscovery keeps
+      // app-configured MCP the single MCP surface (strictMcpConfig).
+      ...(settings.pluginPaths?.length
+        ? {
+            plugins: settings.pluginPaths.map((p) => ({
+              type: "local" as const,
+              path: p,
+              skipMcpDiscovery: true,
+            })),
+          }
+        : {}),
       // Surface SDK Notification events (permission needed, idle, task done)
       // for desktop notifications.
       hooks: {

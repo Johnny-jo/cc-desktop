@@ -16,6 +16,43 @@ function sanitizePermissionRules(raw: unknown): string[] | undefined {
   return out;
 }
 
+type AgentDef = NonNullable<AppSettings["agents"]>[number];
+
+/** Keep well-formed agent definitions (name/description/prompt required). */
+function sanitizeAgents(raw: unknown): AgentDef[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) return [];
+  const out: AgentDef[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const a = item as Record<string, unknown>;
+    const name = typeof a.name === "string" ? a.name.trim() : "";
+    const description =
+      typeof a.description === "string" ? a.description.trim() : "";
+    const prompt = typeof a.prompt === "string" ? a.prompt.trim() : "";
+    if (!name || !description || !prompt) continue;
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(name)) continue;
+    const def: AgentDef = { name, description, prompt };
+    if (Array.isArray(a.tools)) {
+      def.tools = a.tools.filter((t): t is string => typeof t === "string");
+    }
+    if (typeof a.model === "string" && a.model.trim()) {
+      def.model = a.model.trim();
+    }
+    out.push(def);
+  }
+  return out;
+}
+
+/** Keep non-empty path strings. */
+function sanitizePluginPaths(raw: unknown): string[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(
+    (p): p is string => typeof p === "string" && p.trim().length > 0,
+  );
+}
+
 export type SettingsStoreDeps = {
   userDataDir: string;
   encrypt: (plain: string) => string;
@@ -42,6 +79,8 @@ const DEFAULTS: AppSettings = {
   mcpServers: {},
   permissionAllow: [],
   permissionDeny: [],
+  agents: [],
+  pluginPaths: [],
 };
 
 type StoredFile = Partial<AppSettings> & {
@@ -80,6 +119,11 @@ export class SettingsStore {
       mcpServers: { ...this.settings.mcpServers },
       permissionAllow: [...(this.settings.permissionAllow ?? [])],
       permissionDeny: [...(this.settings.permissionDeny ?? [])],
+      agents: (this.settings.agents ?? []).map((a) => ({
+        ...a,
+        ...(a.tools ? { tools: [...a.tools] } : {}),
+      })),
+      pluginPaths: [...(this.settings.pluginPaths ?? [])],
     };
   }
 
@@ -111,6 +155,12 @@ export class SettingsStore {
     }
     if (publicPatch.permissionDeny !== undefined) {
       publicPatch.permissionDeny = sanitizePermissionRules(publicPatch.permissionDeny);
+    }
+    if (publicPatch.agents !== undefined) {
+      publicPatch.agents = sanitizeAgents(publicPatch.agents);
+    }
+    if (publicPatch.pluginPaths !== undefined) {
+      publicPatch.pluginPaths = sanitizePluginPaths(publicPatch.pluginPaths);
     }
     const clearEffort = publicPatch.effort === null;
     if (
@@ -188,6 +238,8 @@ export class SettingsStore {
         mcpServers: sanitizeMcpServers(rest.mcpServers),
         permissionAllow: sanitizePermissionRules(rest.permissionAllow) ?? [],
         permissionDeny: sanitizePermissionRules(rest.permissionDeny) ?? [],
+        agents: sanitizeAgents(rest.agents) ?? [],
+        pluginPaths: sanitizePluginPaths(rest.pluginPaths) ?? [],
         ...(rest.effort === "low" ||
         rest.effort === "medium" ||
         rest.effort === "high"

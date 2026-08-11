@@ -242,6 +242,24 @@ export type AppSettings = {
    * the model by the gateway/CLI.
    */
   effort?: "low" | "medium" | "high";
+  /**
+   * Custom subagent definitions (Task/Agent tool picks them up by name).
+   * Passed to the SDK as options.agents.
+   */
+  agents?: Array<{
+    name: string;
+    description: string;
+    prompt: string;
+    /** Comma-separated tool names; empty = inherit all */
+    tools?: string[];
+    /** Model id or alias; empty/'inherit' = main model */
+    model?: string;
+  }>;
+  /**
+   * Local plugin directories loaded into sessions (SDK options.plugins,
+   * with skipMcpDiscovery — app-configured MCP stays the single MCP surface).
+   */
+  pluginPaths?: string[];
 };
 
 export type PublicSettings = Omit<AppSettings, never> & {

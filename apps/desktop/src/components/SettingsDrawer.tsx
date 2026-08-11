@@ -43,6 +43,22 @@ type McpServerDraft = {
   headersText: string;
 };
 
+/** Editable draft of one custom agent. */
+type AgentDraft = {
+  id: string;
+  name: string;
+  description: string;
+  model: string;
+  toolsCsv: string;
+  prompt: string;
+};
+
+let agentDraftSeq = 0;
+function newAgentDraftId(): string {
+  agentDraftSeq += 1;
+  return `agent-${Date.now()}-${agentDraftSeq}`;
+}
+
 type FormState = {
   cpaExePath: string;
   cpaConfigPath: string;
@@ -60,6 +76,9 @@ type FormState = {
   permissionDenyText: string;
   /** "" = model default */
   effort: string;
+  agents: AgentDraft[];
+  /** local plugin dirs, one per line */
+  pluginPathsText: string;
 };
 
 let mcpDraftSeq = 0;
@@ -168,7 +187,53 @@ function fromSettings(s: PublicSettings | null): FormState {
     permissionAllowText: (s?.permissionAllow ?? []).join("\n"),
     permissionDenyText: (s?.permissionDeny ?? []).join("\n"),
     effort: s?.effort ?? "",
+    agents: (s?.agents ?? []).map((a) => ({
+      id: newAgentDraftId(),
+      name: a.name,
+      description: a.description,
+      model: a.model ?? "",
+      toolsCsv: (a.tools ?? []).join(", "),
+      prompt: a.prompt,
+    })),
+    pluginPathsText: (s?.pluginPaths ?? []).join("\n"),
   };
+}
+
+/** Convert agent drafts to the settings shape; error on first invalid row. */
+function buildAgentsPatch(
+  drafts: AgentDraft[],
+): { ok: true; agents: NonNullable<AppSettings["agents"]> } | { ok: false; error: string } {
+  const out: NonNullable<AppSettings["agents"]> = [];
+  const seen = new Set<string>();
+  for (const d of drafts) {
+    const name = d.name.trim();
+    if (!name && !d.description.trim() && !d.prompt.trim()) continue; // blank row
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(name)) {
+      return { ok: false, error: `Agent name "${name}" must start with a letter/digit (letters, digits, . _ -)` };
+    }
+    if (seen.has(name)) {
+      return { ok: false, error: `Duplicate agent name "${name}"` };
+    }
+    seen.add(name);
+    if (!d.description.trim()) {
+      return { ok: false, error: `Agent "${name}": description is required` };
+    }
+    if (!d.prompt.trim()) {
+      return { ok: false, error: `Agent "${name}": prompt is required` };
+    }
+    const tools = d.toolsCsv
+      .split(",")
+      .map((t) => t.trim())
+      .filter(Boolean);
+    out.push({
+      name,
+      description: d.description.trim(),
+      prompt: d.prompt.trim(),
+      ...(tools.length ? { tools } : {}),
+      ...(d.model.trim() ? { model: d.model.trim() } : {}),
+    });
+  }
+  return { ok: true, agents: out };
 }
 
 /** Parse a one-per-line rules textarea; returns error on first bad line. */
@@ -557,6 +622,128 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
     );
   }
 
+  function updateAgentRow(id: string, patch: Partial<AgentDraft>) {
+    setForm((prev) => ({
+      ...prev,
+      agents: prev.agents.map((a) => (a.id === id ? { ...a, ...patch } : a)),
+    }));
+  }
+
+  function addAgentRow() {
+    setForm((prev) => ({
+      ...prev,
+      agents: [
+        ...prev.agents,
+        {
+          id: newAgentDraftId(),
+          name: "",
+          description: "",
+          model: "",
+          toolsCsv: "",
+          prompt: "",
+        },
+      ],
+    }));
+  }
+
+  function removeAgentRow(id: string) {
+    setForm((prev) => ({
+      ...prev,
+      agents: prev.agents.filter((a) => a.id !== id),
+    }));
+  }
+
+  function renderAgents() {
+    return (
+      <div className="settings-mcp">
+        <div className="settings-context-limits-title">Custom agents</div>
+        <p className="settings-hint">
+          Subagents the Task/Agent tool can spawn by name. Tools empty =
+          inherit all; model empty = main model. Applies to new sessions.
+        </p>
+        {form.agents.length === 0 ? (
+          <p className="settings-hint">No custom agents.</p>
+        ) : (
+          form.agents.map((a) => (
+            <div key={a.id} className="settings-mcp-row">
+              <div className="settings-mcp-row-head">
+                <input
+                  className="settings-mcp-name"
+                  placeholder="name"
+                  value={a.name}
+                  spellCheck={false}
+                  onChange={(e) => updateAgentRow(a.id, { name: e.target.value })}
+                />
+                <input
+                  placeholder="model (optional)"
+                  value={a.model}
+                  spellCheck={false}
+                  onChange={(e) => updateAgentRow(a.id, { model: e.target.value })}
+                />
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm settings-mcp-remove"
+                  title="Remove agent"
+                  onClick={() => removeAgentRow(a.id)}
+                >
+                  ×
+                </button>
+              </div>
+              <input
+                placeholder="description (when to use this agent)"
+                value={a.description}
+                spellCheck={false}
+                onChange={(e) =>
+                  updateAgentRow(a.id, { description: e.target.value })
+                }
+              />
+              <input
+                placeholder="tools (comma-separated, optional)"
+                value={a.toolsCsv}
+                spellCheck={false}
+                onChange={(e) =>
+                  updateAgentRow(a.id, { toolsCsv: e.target.value })
+                }
+              />
+              <textarea
+                rows={3}
+                placeholder="system prompt"
+                value={a.prompt}
+                spellCheck={false}
+                onChange={(e) => updateAgentRow(a.id, { prompt: e.target.value })}
+              />
+            </div>
+          ))
+        )}
+        <div className="settings-inline-actions">
+          <button type="button" className="btn btn-sm" onClick={addAgentRow}>
+            + Add agent
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  function renderPlugins() {
+    return (
+      <div className="settings-mcp">
+        <div className="settings-context-limits-title">Plugins</div>
+        <p className="settings-hint">
+          Local plugin directories (one per line). Loads skills / hooks /
+          agents / commands; plugin MCP servers are ignored (app MCP config
+          stays authoritative). Applies to new sessions.
+        </p>
+        <textarea
+          rows={2}
+          placeholder={"D:\\path\\to\\plugin"}
+          value={form.pluginPathsText}
+          spellCheck={false}
+          onChange={(e) => setField("pluginPathsText", e.target.value)}
+        />
+      </div>
+    );
+  }
+
   function renderMcpServers() {
     return (
       <div className="settings-mcp">
@@ -731,6 +918,16 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
       return;
     }
 
+    const agentsPatch = buildAgentsPatch(form.agents);
+    if (!agentsPatch.ok) {
+      setLocalError(agentsPatch.error);
+      return;
+    }
+    const pluginPaths = form.pluginPathsText
+      .split("\n")
+      .map((p) => p.trim())
+      .filter(Boolean);
+
     // `effort: null` clears the override (main-side SettingsStore handles it);
     // the field sits outside AppSettings' own type on purpose.
     const patch: Omit<Partial<AppSettings>, "effort"> & {
@@ -748,6 +945,8 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
       mcpServers: patchMcp.mcpServers,
       permissionAllow: allowRules.rules,
       permissionDeny: denyRules.rules,
+      agents: agentsPatch.agents,
+      pluginPaths,
       // null clears the override back to model default
       effort:
         form.effort === "low" ||
@@ -948,6 +1147,10 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
           {renderContextLimitsTable()}
 
           {renderPermissions()}
+
+          {renderAgents()}
+
+          {renderPlugins()}
 
           {renderMcpServers()}
 
