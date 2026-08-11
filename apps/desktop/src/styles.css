@@ -2168,13 +2168,15 @@ body.is-resizing-row * {
 }
 
 .settings-drawer {
-  width: min(440px, 100vw);
+  width: min(460px, 100vw);
   height: 100%;
   background: var(--bg-elevated);
-  border-left: 1px solid var(--border);
+  /* no hard border — soft shadow only, matches app chrome */
+  border: none;
+  border-radius: var(--radius-md) 0 0 var(--radius-md);
   display: flex;
   flex-direction: column;
-  box-shadow: var(--shadow-2);
+  box-shadow: -16px 0 48px rgba(0, 0, 0, 0.45);
 }
 
 .settings-header {
@@ -2183,6 +2185,38 @@ body.is-resizing-row * {
   justify-content: space-between;
   padding: var(--space-4);
   border-bottom: 1px solid var(--border-soft);
+}
+
+/* Collapsible section headers (基础 / 高级) */
+.settings-section {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  padding: 10px 0 4px;
+  cursor: pointer;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+  text-align: left;
+}
+
+.settings-section:hover {
+  color: var(--accent);
+}
+
+.settings-section .settings-chevron {
+  font-size: 10px;
+  color: var(--text-faint);
+  transition: transform 0.15s ease;
+}
+
+.settings-section-sub {
+  margin: 0 0 6px;
+  font-size: 11px;
+  color: var(--text-faint);
 }
 
 .settings-header h2 {

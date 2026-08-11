@@ -275,6 +275,30 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   const [mcpProbing, setMcpProbing] = useState(false);
   const [mcpBusy, setMcpBusy] = useState<string | null>(null);
   const [mcpNote, setMcpNote] = useState<string | null>(null);
+  /** Advanced sections start collapsed for a cleaner first look */
+  const [showAdvanced, setShowAdvanced] = useState<Record<string, boolean>>({});
+
+  function toggleAdvanced(key: string) {
+    setShowAdvanced((prev) => ({ ...prev, [key]: !prev[key] }));
+  }
+
+  function sectionHeader(key: string, title: string, sub: string) {
+    const openNow = Boolean(showAdvanced[key]);
+    return (
+      <button
+        type="button"
+        className="settings-section"
+        onClick={() => toggleAdvanced(key)}
+        aria-expanded={openNow}
+      >
+        <span className="settings-chevron">{openNow ? "▾" : "▸"}</span>
+        <span>{title}</span>
+        <span className="settings-section-sub" style={{ marginLeft: "auto" }}>
+          {sub}
+        </span>
+      </button>
+    );
+  }
 
   async function refreshCatalog() {
     try {
@@ -1015,52 +1039,18 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
         </header>
 
         <div className="settings-body">
+          {/* ===== 基础：日常最常改的三件事 ===== */}
           <label className="settings-field">
-            CPA executable
+            默认模型
             <input
-              value={form.cpaExePath}
-              onChange={(e) => setField("cpaExePath", e.target.value)}
+              value={form.defaultModel}
+              onChange={(e) => setField("defaultModel", e.target.value)}
               spellCheck={false}
             />
           </label>
 
           <label className="settings-field">
-            CPA config.yaml
-            <input
-              value={form.cpaConfigPath}
-              onChange={(e) => setField("cpaConfigPath", e.target.value)}
-              spellCheck={false}
-            />
-          </label>
-
-          <label className="settings-field">
-            CPA port
-            <input
-              type="number"
-              min={1}
-              max={65535}
-              value={form.cpaPort}
-              onChange={(e) => setField("cpaPort", e.target.value)}
-            />
-          </label>
-
-          <label className="settings-field">
-            Auth token
-            <input
-              type="password"
-              autoComplete="off"
-              placeholder={
-                settings?.hasToken
-                  ? "•••••••• (leave blank to keep)"
-                  : "CPA / Anthropic token"
-              }
-              value={form.token}
-              onChange={(e) => setField("token", e.target.value)}
-            />
-          </label>
-
-          <label className="settings-field">
-            Models (comma-separated)
+            模型列表（逗号分隔）
             <input
               value={form.modelsCsv}
               onChange={(e) => setField("modelsCsv", e.target.value)}
@@ -1096,21 +1086,9 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
                 })();
               }}
             >
-              {syncing ? "Syncing…" : "Sync models from CPA"}
+              {syncing ? "Syncing…" : "从 CPA 同步模型"}
             </button>
-            <span className="settings-hint">
-              Pulls /v1/models (e.g. deepseek-v4-flash)
-            </span>
           </div>
-
-          <label className="settings-field">
-            Default model
-            <input
-              value={form.defaultModel}
-              onChange={(e) => setField("defaultModel", e.target.value)}
-              spellCheck={false}
-            />
-          </label>
 
           <label className="settings-field">
             Effort
@@ -1119,49 +1097,103 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
               value={form.effort}
               onChange={(e) => setField("effort", e.target.value)}
             >
-              <option value="">Model default</option>
+              <option value="">模型默认</option>
               <option value="low">low</option>
               <option value="medium">medium</option>
               <option value="high">high</option>
             </select>
           </label>
-          <p className="settings-hint">
-            Reasoning effort for new sessions (mapped by the gateway; not all
-            models honor it).
-          </p>
 
           <label className="settings-field">
-            Default context limit (tokens)
+            网关 Token
             <input
-              type="number"
-              min={1024}
-              step={1024}
-              value={form.defaultContextLimit}
-              onChange={(e) => setField("defaultContextLimit", e.target.value)}
+              type="password"
+              autoComplete="off"
+              placeholder={
+                settings?.hasToken
+                  ? "••••••••（留空保持不变）"
+                  : "CPA 网关口令"
+              }
+              value={form.token}
+              onChange={(e) => setField("token", e.target.value)}
             />
           </label>
-          <p className="settings-hint">
-            Used when CPA/builtin has no window for the model. Default 200000.
-          </p>
 
-          {renderContextLimitsTable()}
+          {/* ===== 高级：CPA 路径与上下文 ===== */}
+          {sectionHeader("advanced-cpa", "高级 · CPA 与上下文", "exe / config / 端口 / 窗口")}
+          {showAdvanced["advanced-cpa"] ? (
+            <>
+              <label className="settings-field">
+                CPA 可执行文件
+                <input
+                  value={form.cpaExePath}
+                  onChange={(e) => setField("cpaExePath", e.target.value)}
+                  spellCheck={false}
+                />
+              </label>
 
-          {renderPermissions()}
+              <label className="settings-field">
+                CPA config.yaml
+                <input
+                  value={form.cpaConfigPath}
+                  onChange={(e) => setField("cpaConfigPath", e.target.value)}
+                  spellCheck={false}
+                />
+              </label>
 
-          {renderAgents()}
+              <label className="settings-field">
+                CPA 端口
+                <input
+                  type="number"
+                  min={1}
+                  max={65535}
+                  value={form.cpaPort}
+                  onChange={(e) => setField("cpaPort", e.target.value)}
+                />
+              </label>
 
-          {renderPlugins()}
+              <label className="settings-field">
+                默认上下文窗口（tokens）
+                <input
+                  type="number"
+                  min={1024}
+                  step={1024}
+                  value={form.defaultContextLimit}
+                  onChange={(e) => setField("defaultContextLimit", e.target.value)}
+                />
+              </label>
+              <p className="settings-hint">
+                模型无内置窗口时使用。默认 200000。
+              </p>
 
-          {renderMcpServers()}
+              {renderContextLimitsTable()}
 
-          <label className="settings-check">
-            <input
-              type="checkbox"
-              checked={form.shutdownCpaOnQuit}
-              onChange={(e) => setField("shutdownCpaOnQuit", e.target.checked)}
-            />
-            Shut down CPA on quit (only if this app spawned it)
-          </label>
+              <label className="settings-check">
+                <input
+                  type="checkbox"
+                  checked={form.shutdownCpaOnQuit}
+                  onChange={(e) => setField("shutdownCpaOnQuit", e.target.checked)}
+                />
+                退出时关闭 CPA（仅限本应用启动的）
+              </label>
+            </>
+          ) : null}
+
+          {/* ===== 权限 ===== */}
+          {sectionHeader("permissions", "权限规则", "allow / deny")}
+          {showAdvanced["permissions"] ? renderPermissions() : null}
+
+          {/* ===== Agents ===== */}
+          {sectionHeader("agents", "自定义 Agents", "Task 子代理")}
+          {showAdvanced["agents"] ? renderAgents() : null}
+
+          {/* ===== 插件 ===== */}
+          {sectionHeader("plugins", "本地插件", "plugin 目录")}
+          {showAdvanced["plugins"] ? renderPlugins() : null}
+
+          {/* ===== MCP ===== */}
+          {sectionHeader("mcp", "MCP 服务器", `${form.mcpServers.length} 个`)}
+          {showAdvanced["mcp"] ? renderMcpServers() : null}
 
           {localError ? <p className="settings-error">{localError}</p> : null}
           {savedNote ? <p className="settings-ok">{savedNote}</p> : null}
