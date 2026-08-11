@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Attachment, PermissionMode } from "@claude-desktop/shared";
 import { formatFileSize, IMAGE_MIME_TYPES } from "@claude-desktop/shared";
 import { getDesktop } from "../lib/desktop-api";
@@ -19,6 +19,14 @@ import {
   mergeSlashCommands,
   parseLeadingSlash,
 } from "../lib/slash-commands";
+import { parseTrailingAt } from "../lib/at-mention";
+
+/** Join a project-relative path onto the project root, tolerating either separator. */
+function joinProjectPath(root: string, rel: string): string {
+  const sep = root.includes("\\") ? "\\" : "/";
+  const trimmed = root.replace(/[/\\]+$/, "");
+  return `${trimmed}${sep}${rel.replace(/[/\\]+/g, sep)}`;
+}
 
 export type ComposerProps = {
   onToggleChanges?: () => void;
@@ -64,6 +72,9 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [atIndex, setAtIndex] = useState(0);
+  const [atMatches, setAtMatches] = useState<string[]>([]);
+  const [atTruncated, setAtTruncated] = useState(false);
   const modelSelectRef = useRef<HTMLSelectElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -98,6 +109,42 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
         : [],
     [slashOpen, slash?.name, allSlashCommands],
   );
+
+  // @ file-mention autocomplete. Only active when not in slash mode and a
+  // project is open. The trailing `@query` is parsed from the text; matches
+  // are fetched (debounced) from the main-process file index.
+  const atMention = slashOpen ? null : parseTrailingAt(text);
+  const atQuery = atMention?.query ?? null;
+  const atOpen = atMention != null && Boolean(projectPath);
+
+  useEffect(() => {
+    if (!atOpen || !projectPath || atQuery == null) {
+      setAtMatches([]);
+      setAtTruncated(false);
+      return;
+    }
+    const desktop = getDesktopOrNull();
+    if (!desktop) return;
+    let cancelled = false;
+    const t = setTimeout(() => {
+      desktop
+        .listProjectFiles(projectPath, atQuery, 50)
+        .then((res) => {
+          if (cancelled) return;
+          setAtMatches(res.files);
+          setAtTruncated(Boolean(res.truncated));
+        })
+        .catch(() => {
+          if (cancelled) return;
+          setAtMatches([]);
+          setAtTruncated(false);
+        });
+    }, 150);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [atOpen, atQuery, projectPath]);
 
   const validateAndSetAttachments = useCallback((next: Attachment[]) => {
     setAttachmentError(null);
@@ -162,6 +209,30 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
       validateAndSetAttachments(attachments.filter((a) => a.path !== path));
     },
     [attachments, validateAndSetAttachments],
+  );
+
+  // Pick an @-mention candidate: attach the file's content (via the existing
+  // attachment pipeline so size/type checks apply) and replace the `@query`
+  // token in the text with the relative path so the reference stays visible.
+  const pickAtMatch = useCallback(
+    async (rel: string) => {
+      const desktop = getDesktopOrNull();
+      const mention = parseTrailingAt(text);
+      if (!desktop || !projectPath || !mention) return;
+      const abs = joinProjectPath(projectPath, rel);
+      try {
+        const attachment = await desktop.readAttachment(abs);
+        validateAndSetAttachments([...attachments, attachment]);
+      } catch (err) {
+        setAttachmentError(err instanceof Error ? err.message : String(err));
+      }
+      // Replace `@query` with `@relpath ` to close out the token.
+      const next = `${text.slice(0, mention.start)}@${rel} ${text.slice(mention.end)}`;
+      setText(next);
+      setAtMatches([]);
+      setAtIndex(0);
+    },
+    [attachments, projectPath, text, validateAndSetAttachments],
   );
 
   const onDragOver = (e: React.DragEvent) => {
@@ -299,6 +370,31 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
   }, [allSlashCommands, attachments, runSlash, text]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // @-mention menu takes priority over slash (they are mutually exclusive:
+    // slash only triggers at line start, @ only after whitespace/mid-text).
+    if (atOpen && atMatches.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setAtIndex((i) => (i + 1) % atMatches.length);
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setAtIndex((i) => (i - 1 + atMatches.length) % atMatches.length);
+        return;
+      }
+      if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
+        e.preventDefault();
+        const pick = atMatches[atIndex] ?? atMatches[0];
+        if (pick) void pickAtMatch(pick);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setAtMatches([]);
+        return;
+      }
+    }
     if (slashOpen && slashMatches.length > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
@@ -349,6 +445,29 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
               </button>
             </li>
           ))}
+        </ul>
+      ) : null}
+
+      {atOpen && atMatches.length > 0 ? (
+        <ul className="slash-menu at-menu" role="listbox" aria-label="File mentions">
+          {atMatches.map((rel, i) => (
+            <li key={rel}>
+              <button
+                type="button"
+                className={i === atIndex ? "slash-item active" : "slash-item"}
+                onMouseEnter={() => setAtIndex(i)}
+                onClick={() => void pickAtMatch(rel)}
+              >
+                <span className="slash-name at-name">@{rel.split(/[/\\]/).pop()}</span>
+                <span className="slash-desc" title={rel}>
+                  {rel}
+                </span>
+              </button>
+            </li>
+          ))}
+          {atTruncated ? (
+            <li className="at-truncated">结果已截断，继续输入以过滤…</li>
+          ) : null}
         </ul>
       ) : null}
 
@@ -404,6 +523,7 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
           onChange={(e) => {
             setText(e.target.value);
             setSlashIndex(0);
+            setAtIndex(0);
           }}
           onKeyDown={onKeyDown}
           disabled={!projectPath && !activeSessionId}
