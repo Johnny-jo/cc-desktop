@@ -1,11 +1,12 @@
 import fs from "node:fs";
 import { access } from "node:fs/promises";
 import { dialog, ipcMain, type BrowserWindow } from "electron";
-import { IPC } from "@claude-desktop/shared";
+import { IPC, validateMcpServers } from "@claude-desktop/shared";
 import type {
   AppSettings,
   Attachment,
   ChatItem,
+  McpServersMap,
   PermissionDecision,
   UserPromptDecision,
   UserPrompt,
@@ -187,6 +188,58 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
     async (_e, { sessionId }: { sessionId: string }) => {
       const statuses = await ctx.sessions.getMcpStatus(sessionId);
       return { statuses };
+    },
+  );
+
+  ipcMain.handle(
+    IPC.sessionMcpReconnect,
+    async (_e, { sessionId, name }: { sessionId: string; name: string }) => {
+      return await ctx.sessions.reconnectMcpServer(sessionId, name);
+    },
+  );
+
+  ipcMain.handle(
+    IPC.sessionMcpToggle,
+    async (
+      _e,
+      {
+        sessionId,
+        name,
+        enabled,
+      }: { sessionId: string; name: string; enabled: boolean },
+    ) => {
+      return await ctx.sessions.toggleMcpServer(sessionId, name, enabled);
+    },
+  );
+
+  ipcMain.handle(
+    IPC.sessionMcpSetServers,
+    async (
+      _e,
+      { sessionId, servers }: { sessionId: string; servers: McpServersMap },
+    ) => {
+      const validated = validateMcpServers(servers);
+      if (!validated.ok) return { ok: false, error: validated.error };
+      return await ctx.sessions.setMcpServers(
+        sessionId,
+        validated.mcpServers,
+      );
+    },
+  );
+
+  ipcMain.handle(
+    IPC.mcpProbe,
+    async (_e, { servers }: { servers?: McpServersMap } = {}) => {
+      if (servers) {
+        const validated = validateMcpServers(servers);
+        if (!validated.ok) {
+          throw new Error(validated.error);
+        }
+        return {
+          statuses: await ctx.sessions.probeMcpServers(validated.mcpServers),
+        };
+      }
+      return { statuses: await ctx.sessions.probeMcpServers() };
     },
   );
 

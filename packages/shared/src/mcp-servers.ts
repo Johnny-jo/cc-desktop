@@ -36,6 +36,33 @@ export type McpServerConfig = McpStdioConfig | McpSseConfig | McpHttpConfig;
 
 export type McpServersMap = Record<string, McpServerConfig>;
 
+/** Live connection status for one MCP server in a running session. */
+export type SessionMcpServerStatus = {
+  name: string;
+  status: "connected" | "failed" | "needs-auth" | "pending" | "disabled" | string;
+  error?: string;
+  /** Server-reported identity (available when connected) */
+  serverInfo?: { name: string; version: string };
+  /** Configuration scope (project / user / local / app…) */
+  scope?: string;
+  tools?: Array<{
+    name: string;
+    description?: string;
+    annotations?: {
+      readOnly?: boolean;
+      destructive?: boolean;
+      openWorld?: boolean;
+    };
+  }>;
+};
+
+/** Result of applying a new MCP server set to a live session. */
+export type McpSetServersResultDto = {
+  added: string[];
+  removed: string[];
+  errors: Record<string, string>;
+};
+
 /** Validate a single server name (map key). */
 export function validateMcpServerName(name: string): string | null {
   const n = name.trim();

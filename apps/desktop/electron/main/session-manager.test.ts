@@ -403,6 +403,137 @@ describe("SessionManager", () => {
     expect(msg).toMatch(/does not accept image content/i);
     expect(msg).toMatch(/new chat|vision-capable/i);
   });
+
+  it("passes strictMcpConfig and configured mcpServers to queryFn", async () => {
+    const captured: Array<{ options: Record<string, unknown> }> = [];
+    const queryFn: QueryFn = async function* (args) {
+      captured.push({ options: args.options });
+      await takeFirstUserText(args.prompt);
+      yield { type: "result", subtype: "success", total_cost_usd: 0 };
+    };
+    const ctx = makeDeps({ queryFn });
+    (ctx.settings.get as ReturnType<typeof vi.fn>).mockReturnValue({
+      ...baseSettings,
+      mcpServers: { fs: { command: "node", args: ["srv.js"] } },
+    });
+    await ctx.manager.start({ text: "hi", attachments: [] }, "D:/p");
+    expect(captured[0]?.options.strictMcpConfig).toBe(true);
+    expect(captured[0]?.options.mcpServers).toEqual({
+      fs: { command: "node", args: ["srv.js"] },
+    });
+  });
+
+  it("mcp control requests route to the live query handle", async () => {
+    const control = {
+      mcpServerStatus: vi.fn().mockResolvedValue([
+        {
+          name: "fs",
+          status: "connected",
+          serverInfo: { name: "fs", version: "1.0" },
+          tools: [{ name: "read_file" }],
+        },
+      ]),
+      reconnectMcpServer: vi.fn().mockResolvedValue(undefined),
+      toggleMcpServer: vi.fn().mockResolvedValue(undefined),
+      setMcpServers: vi
+        .fn()
+        .mockResolvedValue({ added: ["fs"], removed: [], errors: {} }),
+    };
+    const queryFn: QueryFn = function (args) {
+      const gen = (async function* () {
+        await takeFirstUserText(args.prompt);
+        yield { type: "result", subtype: "success", total_cost_usd: 0 };
+      })();
+      return Object.assign(gen, control) as never;
+    };
+    const ctx = makeDeps({ queryFn });
+    const settingsUpdate = vi.fn();
+    (ctx.settings as unknown as { update: unknown }).update = settingsUpdate;
+    const sessionId = await ctx.manager.start(
+      { text: "hi", attachments: [] },
+      "D:/p",
+    );
+
+    const statuses = await ctx.manager.getMcpStatus(sessionId);
+    expect(statuses?.[0]).toMatchObject({
+      name: "fs",
+      status: "connected",
+      serverInfo: { name: "fs", version: "1.0" },
+    });
+    expect(statuses?.[0]?.tools).toHaveLength(1);
+
+    expect(await ctx.manager.reconnectMcpServer(sessionId, "fs")).toEqual({
+      ok: true,
+    });
+    expect(control.reconnectMcpServer).toHaveBeenCalledWith("fs");
+
+    expect(await ctx.manager.toggleMcpServer(sessionId, "fs", false)).toEqual({
+      ok: true,
+    });
+    expect(control.toggleMcpServer).toHaveBeenCalledWith("fs", false);
+
+    const servers = { fs: { command: "node" } };
+    const setRes = await ctx.manager.setMcpServers(sessionId, servers);
+    expect(setRes.ok).toBe(true);
+    expect(setRes.result).toEqual({ added: ["fs"], removed: [], errors: {} });
+    expect(control.setMcpServers).toHaveBeenCalledWith(servers);
+    // persisted to settings
+    expect(settingsUpdate).toHaveBeenCalledWith({ mcpServers: servers });
+  });
+
+  it("mcp control requests fail gracefully without a live query", async () => {
+    const ctx = makeDeps({
+      queryFn: async function* () {
+        /* no control methods attached */
+      },
+    });
+    const sessionId = await ctx.manager.start(
+      { text: "hi", attachments: [] },
+      "D:/p",
+    );
+    expect(await ctx.manager.getMcpStatus(sessionId)).toBeNull();
+    expect(await ctx.manager.reconnectMcpServer(sessionId, "fs")).toMatchObject(
+      { ok: false },
+    );
+    expect(
+      await ctx.manager.toggleMcpServer(sessionId, "fs", true),
+    ).toMatchObject({ ok: false });
+    expect(await ctx.manager.setMcpServers(sessionId, {})).toMatchObject({
+      ok: false,
+    });
+  });
+
+  it("probeMcpServers spawns a throwaway query with strict config", async () => {
+    const captured: Array<{
+      prompt: unknown;
+      options: Record<string, unknown>;
+    }> = [];
+    const control = {
+      mcpServerStatus: vi.fn().mockResolvedValue([
+        { name: "api", status: "connected", tools: [{ name: "ping" }] },
+      ]),
+      close: vi.fn(),
+    };
+    const queryFn: QueryFn = function (args) {
+      captured.push({ prompt: args.prompt, options: args.options });
+      const gen = (async function* () {
+        yield { type: "result", subtype: "success", total_cost_usd: 0 };
+      })();
+      return Object.assign(gen, control) as never;
+    };
+    const ctx = makeDeps({ queryFn });
+    const statuses = await ctx.manager.probeMcpServers({
+      api: { type: "http", url: "https://x.test/mcp" },
+    });
+    expect(statuses).toHaveLength(1);
+    expect(statuses[0]).toMatchObject({ name: "api", status: "connected" });
+    expect(captured[0]?.options.strictMcpConfig).toBe(true);
+    expect(captured[0]?.options.mcpServers).toEqual({
+      api: { type: "http", url: "https://x.test/mcp" },
+    });
+    expect(captured[0]?.options.permissionMode).toBe("bypassPermissions");
+    expect(control.close).toHaveBeenCalled();
+  });
 });
 
 async function getSessionId(manager: SessionManager): Promise<string> {

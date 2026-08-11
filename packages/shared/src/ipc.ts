@@ -46,6 +46,14 @@ export const IPC = {
   sessionSlashCommands: "session:slash-commands",
   /** Live MCP server connection status for a running session */
   sessionMcpStatus: "session:mcp-status",
+  /** Reconnect a failed/disconnected MCP server in a running session */
+  sessionMcpReconnect: "session:mcp-reconnect",
+  /** Enable or disable an MCP server in a running session */
+  sessionMcpToggle: "session:mcp-toggle",
+  /** Replace the session's dynamic MCP servers; also persists to settings */
+  sessionMcpSetServers: "session:mcp-set-servers",
+  /** Probe MCP servers without a running session (spawns a throwaway query) */
+  mcpProbe: "mcp:probe",
   // main → renderer (webContents.send)
   sessionEvent: "session:event",
   permissionRequest: "permission:request",
@@ -151,13 +159,34 @@ export type IpcInvokeMap = {
   [IPC.sessionMcpStatus]: {
     args: [{ sessionId: string }];
     result: {
-      statuses: Array<{
-        name: string;
-        status: string;
-        error?: string;
-        toolCount?: number;
-      }> | null;
+      statuses: import("./mcp-servers").SessionMcpServerStatus[] | null;
     };
+  };
+  [IPC.sessionMcpReconnect]: {
+    args: [{ sessionId: string; name: string }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.sessionMcpToggle]: {
+    args: [{ sessionId: string; name: string; enabled: boolean }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.sessionMcpSetServers]: {
+    args: [
+      {
+        sessionId: string;
+        servers: import("./mcp-servers").McpServersMap;
+      },
+    ];
+    result: {
+      ok: boolean;
+      result?: import("./mcp-servers").McpSetServersResultDto;
+      error?: string;
+    };
+  };
+  [IPC.mcpProbe]: {
+    /** Servers to probe; when omitted, probes all servers in settings */
+    args: [{ servers?: import("./mcp-servers").McpServersMap }?];
+    result: { statuses: import("./mcp-servers").SessionMcpServerStatus[] };
   };
 };
 

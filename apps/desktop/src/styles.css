@@ -1824,6 +1824,57 @@ textarea {
   color: var(--danger);
 }
 
+/* MCP live status row */
+.settings-mcp-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.mcp-badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border: 1px solid var(--border, #262626);
+  color: var(--text-muted);
+}
+
+.mcp-badge-connected {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.mcp-badge-failed,
+.mcp-badge-needs-auth {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.mcp-badge-pending {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.settings-mcp-error {
+  color: var(--danger);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-mcp-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+}
+
 /* Permission modal */
 .modal-overlay {
   position: fixed;

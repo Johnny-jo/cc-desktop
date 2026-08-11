@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type {
   FileChange,
+  McpServersMap,
+  McpSetServersResultDto,
   SdkNormalizedEvent,
+  SessionMcpServerStatus,
   SessionSummary,
   SessionUsage,
   SlashCommandItem,
@@ -73,9 +76,31 @@ type QueryControl = {
       name: string;
       status: "connected" | "failed" | "needs-auth" | "pending" | "disabled";
       error?: string;
-      tools?: Array<{ name: string; description?: string }>;
+      serverInfo?: { name: string; version: string };
+      scope?: string;
+      tools?: Array<{
+        name: string;
+        description?: string;
+        annotations?: {
+          readOnly?: boolean;
+          destructive?: boolean;
+          openWorld?: boolean;
+        };
+      }>;
     }>
   >;
+  /** SDK control request: reconnect a failed/disconnected MCP server */
+  reconnectMcpServer?: (serverName: string) => Promise<void>;
+  /** SDK control request: enable/disable an MCP server */
+  toggleMcpServer?: (serverName: string, enabled: boolean) => Promise<void>;
+  /** SDK control request: replace the session's dynamic MCP servers */
+  setMcpServers?: (
+    servers: Record<string, unknown>,
+  ) => Promise<{
+    added: string[];
+    removed: string[];
+    errors: Record<string, string>;
+  }>;
 };
 
 type SessionEntry = {
@@ -112,6 +137,10 @@ type SessionEntry = {
  * CLAUDE_SDK_CAN_USE_TOOL_SHADOWED.
  */
 const SESSION_TOOLS = { type: "preset", preset: "claude_code" } as const;
+
+function errMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
 
 function titleFromPrompt(prompt: UserPrompt): string {
   const t = prompt.text.trim().replace(/\s+/g, " ");
@@ -263,14 +292,9 @@ export class SessionManager {
    * Live MCP server status for a running session (connection state + tools).
    * Returns null when the session has no live query or the SDK doesn't support it.
    */
-  async getMcpStatus(sessionId: string): Promise<
-    Array<{
-      name: string;
-      status: string;
-      error?: string;
-      toolCount?: number;
-    }> | null
-  > {
+  async getMcpStatus(
+    sessionId: string,
+  ): Promise<SessionMcpServerStatus[] | null> {
     const entry = this.sessions.get(sessionId);
     if (!entry?.query?.mcpServerStatus) return null;
     try {
@@ -279,10 +303,150 @@ export class SessionManager {
         name: s.name,
         status: s.status,
         ...(s.error ? { error: s.error } : {}),
-        ...(Array.isArray(s.tools) ? { toolCount: s.tools.length } : {}),
+        ...(s.serverInfo ? { serverInfo: s.serverInfo } : {}),
+        ...(s.scope ? { scope: s.scope } : {}),
+        ...(Array.isArray(s.tools) ? { tools: s.tools } : {}),
       }));
     } catch {
       return null;
+    }
+  }
+
+  /** Reconnect a failed/disconnected MCP server in a running session. */
+  async reconnectMcpServer(
+    sessionId: string,
+    name: string,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const entry = this.sessions.get(sessionId);
+    if (!entry?.query?.reconnectMcpServer) {
+      return { ok: false, error: "No live session query" };
+    }
+    try {
+      await entry.query.reconnectMcpServer(name);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: errMessage(err) };
+    }
+  }
+
+  /** Enable/disable an MCP server in a running session (session-scoped). */
+  async toggleMcpServer(
+    sessionId: string,
+    name: string,
+    enabled: boolean,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const entry = this.sessions.get(sessionId);
+    if (!entry?.query?.toggleMcpServer) {
+      return { ok: false, error: "No live session query" };
+    }
+    try {
+      await entry.query.toggleMcpServer(name, enabled);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: errMessage(err) };
+    }
+  }
+
+  /**
+   * Replace the running session's dynamic MCP servers AND persist the new
+   * set to settings so future sessions see the same config.
+   */
+  async setMcpServers(
+    sessionId: string,
+    servers: McpServersMap,
+  ): Promise<{
+    ok: boolean;
+    result?: McpSetServersResultDto;
+    error?: string;
+  }> {
+    const entry = this.sessions.get(sessionId);
+    if (!entry?.query?.setMcpServers) {
+      return { ok: false, error: "No live session query" };
+    }
+    try {
+      const result = await entry.query.setMcpServers(
+        servers as Record<string, unknown>,
+      );
+      this.settings.update({ mcpServers: servers });
+      return {
+        ok: true,
+        result: {
+          added: result.added ?? [],
+          removed: result.removed ?? [],
+          errors: result.errors ?? {},
+        },
+      };
+    } catch (err) {
+      return { ok: false, error: errMessage(err) };
+    }
+  }
+
+  /**
+   * Probe MCP servers without a running session: spawns a throwaway SDK
+   * query (bypass permissions, maxTurns 1, strict MCP config), reads live
+   * mcpServerStatus(), then closes. Used by Settings to test connections.
+   * `servers` overrides the settings map (e.g. an unsaved settings draft).
+   */
+  async probeMcpServers(
+    servers?: McpServersMap,
+  ): Promise<SessionMcpServerStatus[]> {
+    const settings = this.settings.get();
+    const target = servers ?? settings.mcpServers ?? {};
+    if (!Object.keys(target).length) return [];
+
+    const env = this.cpa.buildProcessEnv(settings.defaultModel);
+    const q = this.queryFn({
+      prompt: "Reply with exactly: ok",
+      options: {
+        cwd: process.cwd(),
+        model: settings.defaultModel,
+        env,
+        // Bypass tool permission prompts — the probe prompt needs no tools.
+        permissionMode: "bypassPermissions",
+        allowDangerouslySkipPermissions: true,
+        maxTurns: 1,
+        tools: [],
+        strictMcpConfig: true,
+        mcpServers: target,
+        // Don't load CLAUDE.md / project settings into the probe.
+        settingSources: [],
+      },
+    });
+    const control = q as QueryHandle & QueryControl;
+    try {
+      const deadline = Date.now() + 30_000;
+      // MCP servers connect asynchronously on startup; poll until every
+      // server leaves "pending" or the deadline passes.
+      let statuses: SessionMcpServerStatus[] = [];
+      for (;;) {
+        const raw = (await control.mcpServerStatus?.()) ?? [];
+        statuses = raw.map((s) => ({
+          name: s.name,
+          status: s.status,
+          ...(s.error ? { error: s.error } : {}),
+          ...(s.serverInfo ? { serverInfo: s.serverInfo } : {}),
+          ...(s.scope ? { scope: s.scope } : {}),
+          ...(Array.isArray(s.tools) ? { tools: s.tools } : {}),
+        }));
+        const pending = statuses.some((s) => s.status === "pending");
+        if (!pending || Date.now() > deadline) break;
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      return statuses;
+    } finally {
+      try {
+        control.close?.();
+      } catch {
+        // ignore
+      }
+      // Drain the generator so the CLI subprocess exits.
+      try {
+        for await (const _ of q) {
+          break;
+        }
+      } catch {
+        // ignore
+      }
     }
   }
 
@@ -600,6 +764,10 @@ export class SessionManager {
       ...(Object.keys(settings.mcpServers ?? {}).length
         ? { mcpServers: settings.mcpServers }
         : {}),
+      // Only use the MCP servers this app passes in — ignore project
+      // .mcp.json, user settings, and plugin-declared servers so desktop
+      // sessions have a single, explicit MCP surface (Settings → MCP servers).
+      strictMcpConfig: true,
       abortController,
       canUseTool: async (
         name: string,

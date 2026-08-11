@@ -1,5 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { Attachment, PermissionMode } from "@claude-desktop/shared";
+import type {
+  Attachment,
+  PermissionMode,
+  SessionMcpServerStatus,
+} from "@claude-desktop/shared";
 import { formatFileSize, IMAGE_MIME_TYPES } from "@claude-desktop/shared";
 import { getDesktop } from "../lib/desktop-api";
 import {
@@ -77,8 +81,7 @@ async function buildMcpNote(): Promise<string> {
   }
 
   const lines: string[] = [];
-  let live: Array<{ name: string; status: string; error?: string; toolCount?: number }> | null =
-    null;
+  let live: SessionMcpServerStatus[] | null = null;
   const sessionId = state.activeSessionId;
   if (desktop && sessionId) {
     try {
@@ -99,7 +102,7 @@ async function buildMcpNote(): Promise<string> {
     const type = cfg?.type ?? "stdio";
     const liveInfo = liveByName.get(name);
     const statusPart = liveInfo
-      ? ` — ${liveInfo.status}${liveInfo.toolCount != null ? `, ${liveInfo.toolCount} tools` : ""}${liveInfo.error ? ` (${liveInfo.error})` : ""}`
+      ? ` — ${liveInfo.status}${liveInfo.tools ? `, ${liveInfo.tools.length} tools` : ""}${liveInfo.error ? ` (${liveInfo.error})` : ""}`
       : "";
     lines.push(`${name} [${type}] ${target}${statusPart}`);
   }

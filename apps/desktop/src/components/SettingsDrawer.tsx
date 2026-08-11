@@ -4,6 +4,7 @@ import type {
   McpServersMap,
   ModelInfo,
   PublicSettings,
+  SessionMcpServerStatus,
 } from "@claude-desktop/shared";
 import {
   CONTEXT_LIMIT_MAX,
@@ -163,12 +164,23 @@ function fromSettings(s: PublicSettings | null): FormState {
 
 export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   const settings = useAppStore((s) => s.settings);
+  const activeSessionId = useAppStore((s) => s.activeSessionId);
+  const sessionStatus = useAppStore((s) =>
+    s.activeSessionId
+      ? s.sessions.find((x) => x.id === s.activeSessionId)?.status
+      : undefined,
+  );
   const [form, setForm] = useState<FormState>(() => fromSettings(settings));
   const [catalog, setCatalog] = useState<ModelInfo[]>([]);
   const [saving, setSaving] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const [savedNote, setSavedNote] = useState<string | null>(null);
+  /** Live MCP status by server name (from running session or probe) */
+  const [mcpLive, setMcpLive] = useState<Record<string, SessionMcpServerStatus>>({});
+  const [mcpProbing, setMcpProbing] = useState(false);
+  const [mcpBusy, setMcpBusy] = useState<string | null>(null);
+  const [mcpNote, setMcpNote] = useState<string | null>(null);
 
   async function refreshCatalog() {
     try {
@@ -194,8 +206,104 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
     setForm(fromSettings(settings));
     setLocalError(null);
     setSavedNote(null);
+    setMcpNote(null);
+    setMcpLive({});
     void refreshCatalog();
+    void refreshMcpLive();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, settings]);
+
+  /**
+   * Load live MCP status: prefer the active session's control request;
+   * fall back to a throwaway probe query when no session is running.
+   */
+  async function refreshMcpLive() {
+    try {
+      const desktop = getDesktop();
+      let statuses: SessionMcpServerStatus[] | null = null;
+      if (activeSessionId) {
+        const res = await desktop.getSessionMcpStatus(activeSessionId);
+        statuses = res?.statuses ?? null;
+      }
+      if (statuses === null) {
+        setMcpProbing(true);
+        try {
+          const res = await desktop.probeMcpServers();
+          statuses = res.statuses;
+        } finally {
+          setMcpProbing(false);
+        }
+      }
+      setMcpLive(
+        Object.fromEntries((statuses ?? []).map((s) => [s.name, s])),
+      );
+    } catch {
+      // best-effort; status badges just stay hidden
+    }
+  }
+
+  async function onMcpReconnect(name: string) {
+    if (!activeSessionId) return;
+    setMcpBusy(name);
+    setMcpNote(null);
+    try {
+      const res = await getDesktop().reconnectSessionMcpServer(
+        activeSessionId,
+        name,
+      );
+      if (!res.ok) setMcpNote(`Reconnect ${name}: ${res.error ?? "failed"}`);
+      await refreshMcpLive();
+    } catch (err) {
+      setMcpNote(err instanceof Error ? err.message : String(err));
+    } finally {
+      setMcpBusy(null);
+    }
+  }
+
+  async function onMcpToggle(name: string, enabled: boolean) {
+    if (!activeSessionId) return;
+    setMcpBusy(name);
+    setMcpNote(null);
+    try {
+      const res = await getDesktop().toggleSessionMcpServer(
+        activeSessionId,
+        name,
+        enabled,
+      );
+      if (!res.ok) setMcpNote(`Toggle ${name}: ${res.error ?? "failed"}`);
+      await refreshMcpLive();
+    } catch (err) {
+      setMcpNote(err instanceof Error ? err.message : String(err));
+    } finally {
+      setMcpBusy(null);
+    }
+  }
+
+  async function onMcpProbeDraft() {
+    setMcpNote(null);
+    const patchMcp = buildMcpServersPatch(form.mcpServers);
+    if (!patchMcp.ok) {
+      setLocalError(patchMcp.error);
+      return;
+    }
+    setMcpProbing(true);
+    try {
+      const res = await getDesktop().probeMcpServers(patchMcp.mcpServers);
+      setMcpLive(
+        Object.fromEntries(res.statuses.map((s) => [s.name, s])),
+      );
+      const failed = res.statuses.filter((s) => s.status === "failed");
+      setMcpNote(
+        failed.length
+          ? `Probe: ${failed.length} server(s) failed`
+          : `Probe: ${res.statuses.length} server(s) connected`,
+      );
+    } catch (err) {
+      setMcpNote(err instanceof Error ? err.message : String(err));
+    } finally {
+      setMcpProbing(false);
+    }
+  }
 
   if (!open) return null;
 
@@ -336,13 +444,62 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
     }));
   }
 
+  function renderMcpStatus(row: McpServerDraft) {
+    const live = mcpLive[row.name.trim()];
+    if (!live) return null;
+    const enabled = live.status !== "disabled";
+    return (
+      <div className="settings-mcp-status">
+        <span className={`mcp-badge mcp-badge-${live.status}`}>
+          {live.status}
+        </span>
+        {live.serverInfo ? (
+          <span className="settings-hint">
+            {live.serverInfo.name}@{live.serverInfo.version}
+          </span>
+        ) : null}
+        {live.tools ? (
+          <span className="settings-hint" title={live.tools.map((t) => t.name).join(", ")}>
+            {live.tools.length} tools
+          </span>
+        ) : null}
+        {live.error ? (
+          <span className="settings-mcp-error" title={live.error}>
+            {live.error}
+          </span>
+        ) : null}
+        {activeSessionId && sessionStatus !== "running" ? (
+          <span className="settings-mcp-actions">
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              disabled={mcpBusy === row.name}
+              onClick={() => void onMcpReconnect(row.name.trim())}
+            >
+              Reconnect
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              disabled={mcpBusy === row.name}
+              onClick={() => void onMcpToggle(row.name.trim(), !enabled)}
+            >
+              {enabled ? "Disable" : "Enable"}
+            </button>
+          </span>
+        ) : null}
+      </div>
+    );
+  }
+
   function renderMcpServers() {
     return (
       <div className="settings-mcp">
         <div className="settings-context-limits-title">MCP servers</div>
         <p className="settings-hint">
           stdio runs a local command; sse/http connect to a URL. Env / headers:
-          one KEY=VALUE per line. Applies to new sessions.
+          one KEY=VALUE per line. Applies to new sessions. Only these servers
+          are loaded (project .mcp.json / user MCP settings are ignored).
         </p>
         {form.mcpServers.length === 0 ? (
           <p className="settings-hint">No MCP servers configured.</p>
@@ -379,6 +536,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
                   ×
                 </button>
               </div>
+              {renderMcpStatus(row)}
               {row.type === "stdio" ? (
                 <>
                   <input
@@ -433,7 +591,17 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
           <button type="button" className="btn btn-sm" onClick={addMcpRow}>
             + Add MCP server
           </button>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            disabled={mcpProbing || form.mcpServers.length === 0}
+            title="Spawn a throwaway session and test every server in this form"
+            onClick={() => void onMcpProbeDraft()}
+          >
+            {mcpProbing ? "Probing…" : "Test connections"}
+          </button>
         </div>
+        {mcpNote ? <p className="settings-hint">{mcpNote}</p> : null}
       </div>
     );
   }
@@ -507,6 +675,34 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
       await saveSettings(patch);
       setForm((prev) => ({ ...prev, token: "" }));
       setSavedNote("Saved");
+
+      // Push the new MCP set into the running session so it takes effect
+      // immediately (also persists — setMcpServers updates settings too).
+      const mcpChanged =
+        JSON.stringify(settings?.mcpServers ?? {}) !==
+        JSON.stringify(patchMcp.mcpServers);
+      if (mcpChanged && activeSessionId && sessionStatus === "running") {
+        try {
+          const res = await getDesktop().setSessionMcpServers(
+            activeSessionId,
+            patchMcp.mcpServers,
+          );
+          if (!res.ok) {
+            setMcpNote(`Saved; live apply failed: ${res.error ?? "unknown"}`);
+          } else if (res.result && Object.keys(res.result.errors).length) {
+            setMcpNote(
+              `Saved; connect errors: ${Object.entries(res.result.errors)
+                .map(([n, e]) => `${n}: ${e}`)
+                .join("; ")}`,
+            );
+          } else {
+            setMcpNote("Applied to running session");
+          }
+          await refreshMcpLive();
+        } catch {
+          setMcpNote("Saved; live apply failed (session query gone)");
+        }
+      }
     } catch (err) {
       setLocalError(err instanceof Error ? err.message : String(err));
     } finally {

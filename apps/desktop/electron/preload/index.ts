@@ -55,12 +55,36 @@ const desktop = {
 
   getSessionMcpStatus: (sessionId: string) =>
     ipcRenderer.invoke(IPC.sessionMcpStatus, { sessionId }) as Promise<{
-      statuses: Array<{
-        name: string;
-        status: string;
-        error?: string;
-        toolCount?: number;
-      }> | null;
+      statuses: import("@claude-desktop/shared").SessionMcpServerStatus[] | null;
+    }>,
+
+  reconnectSessionMcpServer: (sessionId: string, name: string) =>
+    ipcRenderer.invoke(IPC.sessionMcpReconnect, { sessionId, name }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+
+  toggleSessionMcpServer: (sessionId: string, name: string, enabled: boolean) =>
+    ipcRenderer.invoke(IPC.sessionMcpToggle, {
+      sessionId,
+      name,
+      enabled,
+    }) as Promise<{ ok: boolean; error?: string }>,
+
+  setSessionMcpServers: (
+    sessionId: string,
+    servers: import("@claude-desktop/shared").McpServersMap,
+  ) =>
+    ipcRenderer.invoke(IPC.sessionMcpSetServers, { sessionId, servers }) as Promise<{
+      ok: boolean;
+      result?: import("@claude-desktop/shared").McpSetServersResultDto;
+      error?: string;
+    }>,
+
+  /** Probe MCP servers without a running session (throwaway SDK query). */
+  probeMcpServers: (servers?: import("@claude-desktop/shared").McpServersMap) =>
+    ipcRenderer.invoke(IPC.mcpProbe, servers ? { servers } : {}) as Promise<{
+      statuses: import("@claude-desktop/shared").SessionMcpServerStatus[];
     }>,
 
   compressSession: (
