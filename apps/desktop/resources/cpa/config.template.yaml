@@ -1,0 +1,26 @@
+# Claude Desktop — bundled CPA (CLIProxyAPI) template
+# On first run this is copied to userData/cpa/config.yaml and adjusted.
+
+# Bind localhost only (desktop embedding).
+host: "127.0.0.1"
+port: 8317
+
+tls:
+  enable: false
+  cert: ""
+  key: ""
+
+remote-management:
+  allow-remote: false
+  secret-key: ""
+  disable-control-panel: true
+
+# Reuse the same credential store as a standalone CPA install when present.
+auth-dir: "~/.cli-proxy-api"
+
+# Client keys accepted by the local gateway. Claude Desktop stores the matching
+# token in its own encrypted settings (Settings → Auth token).
+api-keys:
+  - change-me
+
+debug: false

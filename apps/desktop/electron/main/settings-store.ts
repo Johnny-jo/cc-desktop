@@ -60,9 +60,10 @@ export type SettingsStoreDeps = {
   logger?: { warn: (msg: string) => void };
 };
 
+/** Placeholder defaults — bootstrap overwrites with runtime-paths when possible. */
 const DEFAULTS: AppSettings = {
-  cpaExePath: "D:\\gitrep\\CC\\CPA\\cli-proxy-api.exe",
-  cpaConfigPath: "D:\\gitrep\\CC\\CPA\\config.yaml",
+  cpaExePath: "",
+  cpaConfigPath: "",
   cpaPort: 8317,
   defaultModel: "kimi-for-coding",
   models: [

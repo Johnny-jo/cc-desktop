@@ -29,6 +29,11 @@ import { SessionArchive } from "./session-archive";
 import { SessionManager, type QueryFn } from "./session-manager";
 import { createContextCompressor } from "./context-compressor";
 import { registerIpcHandlers } from "./ipc-handlers";
+import {
+  getClaudeExecutablePath,
+  resolveEffectiveCpaPaths,
+  type RuntimePathEnv,
+} from "./runtime-paths";
 
 /** Match the renderer charcoal theme (`--bg-app`). */
 const APP_BG = "#141414";
@@ -124,6 +129,28 @@ function bootstrap() {
     decrypt,
   });
 
+  // Resolve bundled Claude + CPA paths (packaged resources/ or vendor/ dev).
+  const pathEnv: RuntimePathEnv = {
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+    userDataDir,
+  };
+  const claudeExe = getClaudeExecutablePath(pathEnv);
+  const current = settings.get();
+  const cpaPaths = resolveEffectiveCpaPaths(pathEnv, current, {
+    apiKey: settings.getToken(),
+  });
+  // Seed settings when empty or still on legacy hard-coded paths.
+  if (
+    current.cpaExePath !== cpaPaths.cpaExePath ||
+    current.cpaConfigPath !== cpaPaths.cpaConfigPath
+  ) {
+    settings.update({
+      cpaExePath: cpaPaths.cpaExePath,
+      cpaConfigPath: cpaPaths.cpaConfigPath,
+    });
+  }
+
   const archive = new SessionArchive(userDataDir);
 
   const diffs = new DiffTracker({
@@ -174,6 +201,8 @@ function bootstrap() {
     settings,
     archive,
     snapshots,
+    isPackaged: app.isPackaged,
+    claudeExecutablePath: claudeExe,
     compressor: createContextCompressor(
       () => settings.get(),
       () => settings.getToken(),

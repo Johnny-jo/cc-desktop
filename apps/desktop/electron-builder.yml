@@ -13,7 +13,19 @@ files:
 # Workspace package is bundled into out/ by electron-vite; no asarUnpack of node_modules required for shared.
 asar: true
 
-# Windows: directory package only for MVP (NSIS installer can be added later).
+# Ship Claude Code CLI + CPA outside asar so they can be spawned.
+# Populate vendor/ via: node scripts/prepare-vendor.mjs (from monorepo root).
+extraResources:
+  - from: ../../vendor/win-x64/claude
+    to: bin/claude
+    filter:
+      - "**/*"
+  - from: ../../vendor/win-x64/cpa
+    to: bin/cpa
+    filter:
+      - "**/*"
+
+# Windows: directory package (portable). NSIS installer can be added later.
 # Disable signing/rcedit so packaging works offline without winCodeSign binaries.
 win:
   target:

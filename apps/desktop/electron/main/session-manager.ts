@@ -29,6 +29,7 @@ import {
   KEEP_RECENT_ITEMS,
   type ContextCompressor,
 } from "./context-compressor";
+import { getClaudeExecutablePath } from "./runtime-paths";
 
 /**
  * Production query may receive a string (legacy/tests) or AsyncIterable (streaming).
@@ -63,7 +64,11 @@ export type SessionManagerDeps = {
     title?: string;
     message: string;
     notificationType?: string;
-  }) => void;  /**
+  }) => void;
+  /** Packaged Electron app? Controls bundled claude.exe resolution. */
+  isPackaged?: boolean;
+  /** Explicit Claude Code CLI path (overrides auto-detect). */
+  claudeExecutablePath?: string | null;  /**
    * Optional: per-operation content snapshots for change rollback.
    * When present, FileChangeEvent payloads carry canRestore flags.
    */
@@ -253,6 +258,8 @@ export class SessionManager {
   private readonly emitDiff: SessionManagerDeps["emitDiff"];
   private readonly emitSlashCommands: SessionManagerDeps["emitSlashCommands"];
   private readonly onNotification: SessionManagerDeps["onNotification"];
+  private readonly isPackaged: boolean;
+  private readonly claudeExecutablePath: string | null | undefined;
 
   private readonly sessions = new Map<string, SessionEntry>();
   private readonly compressor: ContextCompressor | undefined;
@@ -273,6 +280,8 @@ export class SessionManager {
     this.onNotification = deps.onNotification;
     this.compressor = deps.compressor;
     this.snapshots = deps.snapshots;
+    this.isPackaged = Boolean(deps.isPackaged);
+    this.claudeExecutablePath = deps.claudeExecutablePath;
 
     // Hydrate session list + file changes from disk (no live query until continue).
     if (this.archive) {
@@ -1042,6 +1051,15 @@ export class SessionManager {
   ): Record<string, unknown> {
     const settings = this.settings.get();
     const env = this.cpa.buildProcessEnv(settings.defaultModel);
+    // Prefer the bundled / vendor Claude Code binary so the app does not
+    // require a global `claude` on PATH (packaged installs ship claude.exe).
+    const claudePath =
+      this.claudeExecutablePath ??
+      getClaudeExecutablePath({
+        isPackaged: this.isPackaged,
+        resourcesPath: process.resourcesPath,
+        userDataDir: "",
+      });
 
     return {
       cwd: entry.summary.cwd,
@@ -1049,6 +1067,7 @@ export class SessionManager {
       permissionMode: settings.permissionMode,
       model: settings.defaultModel,
       ...(settings.effort ? { effort: settings.effort } : {}),
+      ...(claudePath ? { pathToClaudeCodeExecutable: claudePath } : {}),
       env,
       tools: SESSION_TOOLS,
       // Auto-approve read-only / harmless tools so they skip the permission

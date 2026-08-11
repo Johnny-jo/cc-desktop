@@ -18,13 +18,8 @@ An Electron desktop client for Claude Code: Codex-style chat / tool cards / Diff
 ## Prerequisites
 
 - **Node.js 20+** and **pnpm** (`packageManager`: pnpm@9.15.0)
-- **Claude Code CLI** available on `PATH` (Agent SDK spawns the `claude` subprocess)
-- **Optional but recommended — local CPA** for model routing:
-  - Default exe: `D:\gitrep\CC\CPA\cli-proxy-api.exe`
-  - Default config: `D:\gitrep\CC\CPA\config.yaml`
-  - Default port: `8317`
-  - CPA **auth token** (same as used with `claude-cpa.ps1` / `.cmd`)
-- CPA `host` should be **`127.0.0.1`** (do not bind all interfaces)
+- **Development:** Agent SDK optional package provides `claude.exe` (no global Claude Code install required). CPA can be a local `cli-proxy-api.exe` (env `CLAUDE_DESKTOP_CPA_DIST` or default `D:\gitrep\CC\CPA`).
+- **Packaged builds** embed `claude.exe` + CPA under `resources/bin/` — end users do **not** need a separate Claude Code or CPA install. They still need a **CPA gateway token** and upstream model credentials (`~/.cli-proxy-api` is reused when present).
 
 ## Commands
 
@@ -70,14 +65,21 @@ Default models: `kimi-for-coding`, `k3`, `grok-4.5`. Switch model in the top bar
 - Default permission mode is `default` (ask); no global `bypassPermissions` in MVP.
 - Product positioning: **self-hosted local proxy + user-supplied credentials** — no account sharing.
 
-## Packaging (Windows)
+## Packaging (Windows, portable)
+
+Embeds Claude Code CLI + CPA (see `docs/superpowers/plans/2026-08-11-bundled-runtime-packaging.md`).
 
 ```bash
-pnpm --filter @claude-desktop/desktop build
-pnpm --filter @claude-desktop/desktop dist:dir
+# 1) Copy claude.exe + cli-proxy-api.exe into vendor/win-x64
+pnpm prepare:vendor
+# Optional: CLAUDE_DESKTOP_CPA_DIST=C:\path\to\CPA
+
+# 2) Build + electron-builder dir target
+pnpm package:win
 ```
 
-Produces an **unpacked directory** under `apps/desktop/release/win-unpacked/` (installer can be added later). Config: `apps/desktop/electron-builder.yml`.
+Output: `apps/desktop/release/win-unpacked/` — zip that folder for a portable release.  
+Runtime layout: `resources/bin/claude/claude.exe`, `resources/bin/cpa/cli-proxy-api.exe` + template config.
 
 ## Packages
 

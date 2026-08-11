@@ -9,3 +9,5 @@ coverage
 release
 *.local
 .superpowers
+# Prepared binaries for electron-builder (scripts/prepare-vendor.mjs)
+vendor/
