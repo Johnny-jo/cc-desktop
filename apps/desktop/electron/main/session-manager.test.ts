@@ -90,6 +90,8 @@ function makeDeps(overrides: {
   const diffTracker = {
     onToolUse,
     list: listDiffs,
+    remove: vi.fn(),
+    has: vi.fn().mockReturnValue(false),
   } as unknown as DiffTracker;
 
   const ensureReady =
@@ -533,6 +535,70 @@ describe("SessionManager", () => {
     });
     expect(captured[0]?.options.permissionMode).toBe("bypassPermissions");
     expect(control.close).toHaveBeenCalled();
+  });
+
+  it("restoreChange rolls back a file and updates the change set", async () => {
+    const ctx = makeDeps();
+    const snapshots = {
+      has: vi.fn().mockReturnValue(true),
+      restore: vi.fn().mockReturnValue(true),
+      restoreAll: vi.fn(),
+      drop: vi.fn(),
+      dropAll: vi.fn(),
+    };
+    (ctx.manager as unknown as { snapshots: unknown }).snapshots = snapshots;
+    const sessionId = await ctx.manager.start(
+      { text: "hi", attachments: [] },
+      "D:/p",
+    );
+
+    const res = ctx.manager.restoreChange(sessionId, "src/a.ts");
+    expect(res).toEqual({ ok: true });
+    expect(snapshots.restore).toHaveBeenCalledWith(sessionId, "src/a.ts");
+    expect(snapshots.drop).toHaveBeenCalledWith(sessionId, "src/a.ts");
+    // diff re-emitted after restore
+    expect(ctx.emitDiff).toHaveBeenCalled();
+  });
+
+  it("restoreChange fails cleanly without a snapshot", async () => {
+    const ctx = makeDeps();
+    const snapshots = {
+      has: vi.fn().mockReturnValue(false),
+      restore: vi.fn(),
+      restoreAll: vi.fn(),
+      drop: vi.fn(),
+      dropAll: vi.fn(),
+    };
+    (ctx.manager as unknown as { snapshots: unknown }).snapshots = snapshots;
+    const sessionId = await ctx.manager.start(
+      { text: "hi", attachments: [] },
+      "D:/p",
+    );
+    const res = ctx.manager.restoreChange(sessionId, "src/a.ts");
+    expect(res.ok).toBe(false);
+    expect(snapshots.restore).not.toHaveBeenCalled();
+  });
+
+  it("restoreAllChanges restores everything and drops restored entries", async () => {
+    const ctx = makeDeps();
+    const snapshots = {
+      has: vi.fn().mockReturnValue(true),
+      restore: vi.fn(),
+      restoreAll: vi
+        .fn()
+        .mockReturnValue({ restored: ["a.ts"], failed: ["b.ts"] }),
+      drop: vi.fn(),
+      dropAll: vi.fn(),
+    };
+    (ctx.manager as unknown as { snapshots: unknown }).snapshots = snapshots;
+    const sessionId = await ctx.manager.start(
+      { text: "hi", attachments: [] },
+      "D:/p",
+    );
+    const res = ctx.manager.restoreAllChanges(sessionId);
+    expect(res).toEqual({ restored: ["a.ts"], failed: ["b.ts"] });
+    expect(snapshots.drop).toHaveBeenCalledWith(sessionId, "a.ts");
+    expect(ctx.emitDiff).toHaveBeenCalled();
   });
 });
 

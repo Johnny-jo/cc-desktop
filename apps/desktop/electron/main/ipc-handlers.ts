@@ -18,6 +18,7 @@ import type { UserPromptBroker } from "./user-prompt-broker";
 import type { SettingsStore } from "./settings-store";
 import type { CpaSupervisor } from "./cpa-supervisor";
 import type { DiffTracker } from "./diff-tracker";
+import type { SnapshotStore } from "./snapshot-store";
 import { listProjectFiles } from "./file-index";
 
 export type IpcHandlerContext = {
@@ -28,6 +29,7 @@ export type IpcHandlerContext = {
   settings: SettingsStore;
   cpa: CpaSupervisor;
   diffs: DiffTracker;
+  snapshots: SnapshotStore;
 };
 
 export function registerIpcHandlers(ctx: IpcHandlerContext): void {
@@ -160,7 +162,7 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
         sessionId,
         cwd: summary.cwd,
         items,
-        changes: ctx.diffs.list(sessionId),
+        changes: ctx.sessions.getChangesForSelect(sessionId),
       };
     },
   );
@@ -240,6 +242,26 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
         };
       }
       return { statuses: await ctx.sessions.probeMcpServers() };
+    },
+  );
+
+  ipcMain.handle(
+    IPC.diffRestoreFile,
+    async (_e, { sessionId, path }: { sessionId: string; path: string }) => {
+      if (!ctx.sessions.getSummary(sessionId)) {
+        return { ok: false, error: `Unknown session: ${sessionId}` };
+      }
+      return ctx.sessions.restoreChange(sessionId, path);
+    },
+  );
+
+  ipcMain.handle(
+    IPC.diffRestoreAll,
+    async (_e, { sessionId }: { sessionId: string }) => {
+      if (!ctx.sessions.getSummary(sessionId)) {
+        return { restored: [], failed: [] };
+      }
+      return ctx.sessions.restoreAllChanges(sessionId);
     },
   );
 

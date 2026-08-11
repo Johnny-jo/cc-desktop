@@ -14,6 +14,7 @@ import type {
 } from "@claude-desktop/shared";
 import { SettingsStore } from "./settings-store";
 import { DiffTracker } from "./diff-tracker";
+import { SnapshotStore } from "./snapshot-store";
 import { PermissionBroker } from "./permission-broker";
 import { UserPromptBroker } from "./user-prompt-broker";
 import { CpaSupervisor } from "./cpa-supervisor";
@@ -103,6 +104,12 @@ function bootstrap() {
     readFile: (filePath) => fs.readFileSync(filePath, "utf8"),
   });
 
+  // Pre-session content snapshots for change rollback (persisted on disk).
+  const snapshots = new SnapshotStore(userDataDir);
+  diffs.onFirstWrite = (sessionId, filePath) => {
+    snapshots.capture(sessionId, filePath);
+  };
+
   const permissions = new PermissionBroker({
     getMode: () => settings.get().permissionMode,
     requestFromUi: (req: PermissionRequest) => {
@@ -132,6 +139,7 @@ function bootstrap() {
     cpa,
     settings,
     archive,
+    snapshots,
     compressor: createContextCompressor(
       () => settings.get(),
       () => settings.getToken(),
@@ -158,6 +166,7 @@ function bootstrap() {
     settings,
     cpa,
     diffs,
+    snapshots,
   });
 
   createWindow();

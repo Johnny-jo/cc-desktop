@@ -21,6 +21,11 @@ export type FileChange = {
     at: number;
     hunk: string;
   }>;
+  /**
+   * True when a pre-session content snapshot exists for this file, i.e. the
+   * change can be rolled back. Main-process only; hydrated on IPC payloads.
+   */
+  canRestore?: boolean;
 };
 
 export type ChatRole = "user" | "assistant" | "system";

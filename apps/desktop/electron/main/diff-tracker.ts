@@ -46,10 +46,29 @@ export class DiffTracker {
   private readonly sessions = new Map<string, Map<string, FileChange>>();
   private readonly readFile?: DiffTrackerDeps["readFile"];
   private readonly now: () => number;
+  /**
+   * Called the first time a file is touched within a session (before the
+   * change event is recorded) — used by the main process to snapshot the
+   * file's pre-session content for rollback.
+   */
+  onFirstWrite?: (sessionId: string, path: string) => void;
 
   constructor(deps: DiffTrackerDeps = {}) {
     this.readFile = deps.readFile;
     this.now = deps.now ?? (() => Date.now());
+  }
+
+  private notifyFirstWrite(
+    sessionId: string,
+    map: Map<string, FileChange>,
+    path: string,
+  ): void {
+    if (map.has(path)) return;
+    try {
+      this.onFirstWrite?.(sessionId, path);
+    } catch {
+      // snapshot failure must not break diff tracking
+    }
   }
 
   onToolUse(
@@ -80,6 +99,7 @@ export class DiffTracker {
       map = new Map();
       this.sessions.set(sessionId, map);
     }
+    this.notifyFirstWrite(sessionId, map, path);
 
     if (toolName === "Edit") {
       const oldString = String(input.old_string ?? "");
@@ -141,6 +161,7 @@ export class DiffTracker {
       map = new Map();
       this.sessions.set(sessionId, map);
     }
+    this.notifyFirstWrite(sessionId, map, path);
 
     let previousContent: string | null = null;
     let nextContent = "";
@@ -227,6 +248,21 @@ export class DiffTracker {
     const map = this.sessions.get(sessionId);
     if (!map) return [];
     return changesToArray(map);
+  }
+
+  /** True when the session has tracked changes for the file. */
+  has(sessionId: string, path: string): boolean {
+    return this.sessions.get(sessionId)?.has(path) ?? false;
+  }
+
+  /** Remove one file from the session's change set (e.g. after rollback). */
+  remove(sessionId: string, path: string): void {
+    const map = this.sessions.get(sessionId);
+    if (!map) return;
+    if (!map.has(path)) return;
+    const next = new Map(map);
+    next.delete(path);
+    this.sessions.set(sessionId, next);
   }
 
   /** Restore a full change set from disk (overwrites in-memory map for session). */

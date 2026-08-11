@@ -54,6 +54,10 @@ export const IPC = {
   sessionMcpSetServers: "session:mcp-set-servers",
   /** Probe MCP servers without a running session (spawns a throwaway query) */
   mcpProbe: "mcp:probe",
+  /** Restore one changed file to its pre-session content */
+  diffRestoreFile: "diff:restore-file",
+  /** Restore all changed files of a session */
+  diffRestoreAll: "diff:restore-all",
   // main → renderer (webContents.send)
   sessionEvent: "session:event",
   permissionRequest: "permission:request",
@@ -187,6 +191,14 @@ export type IpcInvokeMap = {
     /** Servers to probe; when omitted, probes all servers in settings */
     args: [{ servers?: import("./mcp-servers").McpServersMap }?];
     result: { statuses: import("./mcp-servers").SessionMcpServerStatus[] };
+  };
+  [IPC.diffRestoreFile]: {
+    args: [{ sessionId: string; path: string }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.diffRestoreAll]: {
+    args: [{ sessionId: string }];
+    result: { restored: string[]; failed: string[] };
   };
 };
 

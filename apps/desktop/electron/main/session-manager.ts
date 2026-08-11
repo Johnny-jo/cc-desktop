@@ -57,6 +57,17 @@ export type SessionManagerDeps = {
   emitSlashCommands?: (sessionId: string, commands: SlashCommandItem[]) => void;
   /** Optional: context compressor for /compact and renderer-driven auto-compress */
   compressor?: ContextCompressor;
+  /**
+   * Optional: pre-session content snapshots for change rollback.
+   * When present, FileChange payloads carry canRestore flags.
+   */
+  snapshots?: {
+    has(sessionId: string, path: string): boolean;
+    restore(sessionId: string, path: string): boolean;
+    restoreAll(sessionId: string): { restored: string[]; failed: string[] };
+    drop(sessionId: string, path: string): void;
+    dropAll(sessionId: string): void;
+  };
 };
 
 type QueryControl = {
@@ -196,6 +207,7 @@ export class SessionManager {
 
   private readonly sessions = new Map<string, SessionEntry>();
   private readonly compressor: ContextCompressor | undefined;
+  private readonly snapshots: SessionManagerDeps["snapshots"];
 
   constructor(deps: SessionManagerDeps) {
     this.queryFn = deps.queryFn;
@@ -210,6 +222,7 @@ export class SessionManager {
     this.emitDiff = deps.emitDiff;
     this.emitSlashCommands = deps.emitSlashCommands;
     this.compressor = deps.compressor;
+    this.snapshots = deps.snapshots;
 
     // Hydrate session list + file changes from disk (no live query until continue).
     if (this.archive) {
@@ -277,8 +290,63 @@ export class SessionManager {
     this.archive.saveChanges(sessionId, this.diffTracker.list(sessionId));
   }
 
-  private emitDiffAndPersist(sessionId: string): void {
+  /** Transcript + changes for IPC session:select (with canRestore flags). */
+  getChangesForSelect(sessionId: string): FileChange[] {
+    return this.listChanges(sessionId);
+  }
+
+  /** DiffTracker list + canRestore flags from the snapshot store. */
+  listChanges(sessionId: string): FileChange[] {
     const list = this.diffTracker.list(sessionId);
+    if (!this.snapshots) return list;
+    return list.map((c) => ({
+      ...c,
+      canRestore: this.snapshots!.has(sessionId, c.path),
+    }));
+  }
+
+  /**
+   * Roll back one file to its pre-session content. Removes the file from the
+   * session change set and drops its snapshot on success.
+   */
+  restoreChange(
+    sessionId: string,
+    path: string,
+  ): { ok: boolean; error?: string } {
+    if (!this.snapshots) return { ok: false, error: "Snapshots unavailable" };
+    if (!this.snapshots.has(sessionId, path)) {
+      return { ok: false, error: "No snapshot for this file" };
+    }
+    const ok = this.snapshots.restore(sessionId, path);
+    if (!ok) return { ok: false, error: "Failed to write restored content" };
+    this.snapshots.drop(sessionId, path);
+    this.diffTracker.remove(sessionId, path);
+    this.emitDiffAndPersist(sessionId);
+    return { ok: true };
+  }
+
+  /**
+   * Roll back every snapshotted file of the session. Restored files leave
+   * the change set; failed files stay tracked so the user can retry.
+   */
+  restoreAllChanges(sessionId: string): {
+    restored: string[];
+    failed: string[];
+  } {
+    if (!this.snapshots) {
+      return { restored: [], failed: this.diffTracker.list(sessionId).map((c) => c.path) };
+    }
+    const { restored, failed } = this.snapshots.restoreAll(sessionId);
+    for (const p of restored) {
+      this.snapshots.drop(sessionId, p);
+      this.diffTracker.remove(sessionId, p);
+    }
+    this.emitDiffAndPersist(sessionId);
+    return { restored, failed };
+  }
+
+  private emitDiffAndPersist(sessionId: string): void {
+    const list = this.listChanges(sessionId);
     this.emitDiff(sessionId, list);
     this.persistChanges(sessionId);
   }
