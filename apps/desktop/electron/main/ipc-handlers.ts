@@ -247,9 +247,19 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
 
   ipcMain.handle(
     IPC.diffRestoreFile,
-    async (_e, { sessionId, path }: { sessionId: string; path: string }) => {
+    async (
+      _e,
+      {
+        sessionId,
+        path,
+        eventId,
+      }: { sessionId: string; path: string; eventId?: string },
+    ) => {
       if (!ctx.sessions.getSummary(sessionId)) {
         return { ok: false, error: `Unknown session: ${sessionId}` };
+      }
+      if (eventId) {
+        return ctx.sessions.restoreChangeEvent(sessionId, eventId);
       }
       return ctx.sessions.restoreChange(sessionId, path);
     },

@@ -58,14 +58,15 @@ export type SessionManagerDeps = {
   /** Optional: context compressor for /compact and renderer-driven auto-compress */
   compressor?: ContextCompressor;
   /**
-   * Optional: pre-session content snapshots for change rollback.
-   * When present, FileChange payloads carry canRestore flags.
+   * Optional: per-operation content snapshots for change rollback.
+   * When present, FileChangeEvent payloads carry canRestore flags.
    */
   snapshots?: {
-    has(sessionId: string, path: string): boolean;
-    restore(sessionId: string, path: string): boolean;
-    restoreAll(sessionId: string): { restored: string[]; failed: string[] };
-    drop(sessionId: string, path: string): void;
+    has(sessionId: string, eventId: string): boolean;
+    pathOf(sessionId: string, eventId: string): string | null;
+    restore(sessionId: string, eventId: string): boolean;
+    list(sessionId: string): string[];
+    drop(sessionId: string, eventId: string): void;
     dropAll(sessionId: string): void;
   };
 };
@@ -295,51 +296,98 @@ export class SessionManager {
     return this.listChanges(sessionId);
   }
 
-  /** DiffTracker list + canRestore flags from the snapshot store. */
+  /** DiffTracker list + per-event canRestore flags from the snapshot store. */
   listChanges(sessionId: string): FileChange[] {
     const list = this.diffTracker.list(sessionId);
     if (!this.snapshots) return list;
-    return list.map((c) => ({
-      ...c,
-      canRestore: this.snapshots!.has(sessionId, c.path),
-    }));
+    const snaps = this.snapshots;
+    return list.map((c) => {
+      const events = c.events.map((e) => ({
+        ...e,
+        canRestore: snaps.has(sessionId, e.id),
+      }));
+      return {
+        ...c,
+        events,
+        canRestore: events.some((e) => e.canRestore),
+      };
+    });
   }
 
   /**
-   * Roll back one file to its pre-session content. Removes the file from the
-   * session change set and drops its snapshot on success.
+   * Roll back ONE write operation: restore the file to its content captured
+   * just before eventId ran (i.e. after the previous operation on the file),
+   * then drop eventId and all later events of the same file. Later
+   * operations on OTHER files are untouched.
+   */
+  restoreChangeEvent(
+    sessionId: string,
+    eventId: string,
+  ): { ok: boolean; error?: string } {
+    if (!this.snapshots) return { ok: false, error: "Snapshots unavailable" };
+    if (!this.snapshots.has(sessionId, eventId)) {
+      return { ok: false, error: "No snapshot for this operation" };
+    }
+    const found = this.diffTracker.findByEvent(sessionId, eventId);
+    if (!found) {
+      return { ok: false, error: "No tracked change for this operation" };
+    }
+    const ok = this.snapshots.restore(sessionId, eventId);
+    if (!ok) return { ok: false, error: "Failed to write restored content" };
+    // Drop snapshots for the restored event and all later events of the file.
+    const idx = found.change.events.findIndex((e) => e.id === eventId);
+    for (const e of found.change.events.slice(idx)) {
+      this.snapshots.drop(sessionId, e.id);
+    }
+    this.diffTracker.truncateAt(sessionId, found.path, eventId);
+    this.emitDiffAndPersist(sessionId);
+    return { ok: true };
+  }
+
+  /**
+   * Legacy file-level rollback: restore the file to its pre-session content
+   * (snapshot of its EARLIEST tracked operation).
    */
   restoreChange(
     sessionId: string,
     path: string,
   ): { ok: boolean; error?: string } {
     if (!this.snapshots) return { ok: false, error: "Snapshots unavailable" };
-    if (!this.snapshots.has(sessionId, path)) {
+    const change = this.diffTracker.list(sessionId).find((c) => c.path === path);
+    const first = change?.events[0];
+    if (!first || !this.snapshots.has(sessionId, first.id)) {
       return { ok: false, error: "No snapshot for this file" };
     }
-    const ok = this.snapshots.restore(sessionId, path);
-    if (!ok) return { ok: false, error: "Failed to write restored content" };
-    this.snapshots.drop(sessionId, path);
-    this.diffTracker.remove(sessionId, path);
-    this.emitDiffAndPersist(sessionId);
-    return { ok: true };
+    return this.restoreChangeEvent(sessionId, first.id);
   }
 
   /**
-   * Roll back every snapshotted file of the session. Restored files leave
-   * the change set; failed files stay tracked so the user can retry.
+   * Roll back every snapshotted operation of the session (each file returns
+   * to its pre-session content). Failures stay tracked so the user can retry.
    */
   restoreAllChanges(sessionId: string): {
     restored: string[];
     failed: string[];
   } {
+    const restored: string[] = [];
+    const failed: string[] = [];
     if (!this.snapshots) {
-      return { restored: [], failed: this.diffTracker.list(sessionId).map((c) => c.path) };
+      return {
+        restored,
+        failed: this.diffTracker.list(sessionId).map((c) => c.path),
+      };
     }
-    const { restored, failed } = this.snapshots.restoreAll(sessionId);
-    for (const p of restored) {
-      this.snapshots.drop(sessionId, p);
-      this.diffTracker.remove(sessionId, p);
+    // Earliest event per file = pre-session content for that file.
+    for (const change of this.diffTracker.list(sessionId)) {
+      const first = change.events[0];
+      if (!first || !this.snapshots.has(sessionId, first.id)) continue;
+      if (this.snapshots.restore(sessionId, first.id)) {
+        for (const e of change.events) this.snapshots.drop(sessionId, e.id);
+        this.diffTracker.remove(sessionId, change.path);
+        restored.push(change.path);
+      } else {
+        failed.push(change.path);
+      }
     }
     this.emitDiffAndPersist(sessionId);
     return { restored, failed };

@@ -1,4 +1,11 @@
-import type { FileChange, FileChangeStatus } from "./models";
+import type { FileChange, FileChangeEvent, FileChangeStatus } from "./models";
+
+let eventSeq = 0;
+/** Unique id for one tracked write operation. */
+export function newChangeEventId(): string {
+  eventSeq += 1;
+  return `ev-${Date.now().toString(36)}-${eventSeq}`;
+}
 
 function lineDiff(oldText: string, newText: string): string {
   const oldLines = oldText.split("\n");
@@ -57,6 +64,7 @@ export function buildWriteHunk(input: {
 export function upsertFileChange(
   map: Map<string, FileChange>,
   event: {
+    id: string;
     path: string;
     tool: "Edit" | "Write" | "Bash";
     hunk: string;
@@ -66,17 +74,23 @@ export function upsertFileChange(
 ): Map<string, FileChange> {
   const next = new Map(map);
   const prev = next.get(event.path);
+  const entry: FileChangeEvent = {
+    id: event.id,
+    tool: event.tool,
+    at: event.at,
+    hunk: event.hunk,
+  };
   if (!prev) {
     next.set(event.path, {
       path: event.path,
       status: event.status,
       hunks: event.hunk,
       updatedAt: event.at,
-      events: [{ tool: event.tool, at: event.at, hunk: event.hunk }],
+      events: [entry],
     });
     return next;
   }
-  const events = [...prev.events, { tool: event.tool, at: event.at, hunk: event.hunk }];
+  const events = [...prev.events, entry];
   // MVP aggregate display: last event hunk + count header
   const hunks = [
     `# ${events.length} change(s) in session (showing latest)`,
@@ -90,6 +104,29 @@ export function upsertFileChange(
     events,
   });
   return next;
+}
+
+/**
+ * Truncate a file's change events at (and excluding) `fromEventId` — used
+ * after rolling back to just before that operation. Returns undefined when
+ * no events remain (file should leave the change set).
+ */
+export function truncateFileChange(
+  change: FileChange,
+  fromEventId: string,
+): FileChange | undefined {
+  const idx = change.events.findIndex((e) => e.id === fromEventId);
+  if (idx < 0) return change;
+  const events = change.events.slice(0, idx);
+  if (!events.length) return undefined;
+  const last = events[events.length - 1]!;
+  return {
+    path: change.path,
+    status: change.status,
+    hunks: last.hunk,
+    updatedAt: last.at,
+    events,
+  };
 }
 
 export function changesToArray(map: Map<string, FileChange>): FileChange[] {

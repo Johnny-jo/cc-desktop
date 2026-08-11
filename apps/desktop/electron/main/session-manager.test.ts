@@ -92,6 +92,8 @@ function makeDeps(overrides: {
     list: listDiffs,
     remove: vi.fn(),
     has: vi.fn().mockReturnValue(false),
+    findByEvent: vi.fn().mockReturnValue(null),
+    truncateAt: vi.fn(),
   } as unknown as DiffTracker;
 
   const ensureReady =
@@ -143,6 +145,7 @@ function makeDeps(overrides: {
     emitDiff,
     queryFn,
     permissionBroker,
+    diffTracker,
     onToolUse,
     listDiffs,
     ensureReady,
@@ -248,7 +251,7 @@ describe("SessionManager", () => {
         status: "M",
         hunks: "+b",
         updatedAt: 1,
-        events: [{ tool: "Edit", at: 1, hunk: "+b" }],
+        events: [{ id: "ev-1", tool: "Edit", at: 1, hunk: "+b" }],
       },
     ];
     const onToolUse = vi.fn();
@@ -537,35 +540,60 @@ describe("SessionManager", () => {
     expect(control.close).toHaveBeenCalled();
   });
 
-  it("restoreChange rolls back a file and updates the change set", async () => {
+  it("restoreChangeEvent rolls back one operation and truncates later events", async () => {
     const ctx = makeDeps();
+    const change = {
+      path: "demo.txt",
+      status: "M" as const,
+      hunks: "h3",
+      updatedAt: 3,
+      events: [
+        { id: "ev-1", tool: "Write" as const, at: 1, hunk: "h1" },
+        { id: "ev-2", tool: "Edit" as const, at: 2, hunk: "h2" },
+        { id: "ev-3", tool: "Edit" as const, at: 3, hunk: "h3" },
+      ],
+    };
     const snapshots = {
       has: vi.fn().mockReturnValue(true),
+      pathOf: vi.fn().mockReturnValue("demo.txt"),
       restore: vi.fn().mockReturnValue(true),
-      restoreAll: vi.fn(),
+      list: vi.fn().mockReturnValue(["ev-1", "ev-2", "ev-3"]),
       drop: vi.fn(),
       dropAll: vi.fn(),
     };
     (ctx.manager as unknown as { snapshots: unknown }).snapshots = snapshots;
+    (ctx.diffTracker.findByEvent as ReturnType<typeof vi.fn>).mockReturnValue({
+      path: "demo.txt",
+      change,
+    });
     const sessionId = await ctx.manager.start(
       { text: "hi", attachments: [] },
       "D:/p",
     );
 
-    const res = ctx.manager.restoreChange(sessionId, "src/a.ts");
+    // Roll back the SECOND op: file returns to after-op1 content, and
+    // ev-2 + ev-3 events/snapshots are dropped.
+    const res = ctx.manager.restoreChangeEvent(sessionId, "ev-2");
     expect(res).toEqual({ ok: true });
-    expect(snapshots.restore).toHaveBeenCalledWith(sessionId, "src/a.ts");
-    expect(snapshots.drop).toHaveBeenCalledWith(sessionId, "src/a.ts");
-    // diff re-emitted after restore
+    expect(snapshots.restore).toHaveBeenCalledWith(sessionId, "ev-2");
+    expect(snapshots.drop).toHaveBeenCalledWith(sessionId, "ev-2");
+    expect(snapshots.drop).toHaveBeenCalledWith(sessionId, "ev-3");
+    expect(snapshots.drop).not.toHaveBeenCalledWith(sessionId, "ev-1");
+    expect(ctx.diffTracker.truncateAt).toHaveBeenCalledWith(
+      sessionId,
+      "demo.txt",
+      "ev-2",
+    );
     expect(ctx.emitDiff).toHaveBeenCalled();
   });
 
-  it("restoreChange fails cleanly without a snapshot", async () => {
+  it("restoreChangeEvent fails cleanly without a snapshot or event", async () => {
     const ctx = makeDeps();
     const snapshots = {
       has: vi.fn().mockReturnValue(false),
+      pathOf: vi.fn().mockReturnValue(null),
       restore: vi.fn(),
-      restoreAll: vi.fn(),
+      list: vi.fn().mockReturnValue([]),
       drop: vi.fn(),
       dropAll: vi.fn(),
     };
@@ -574,19 +602,37 @@ describe("SessionManager", () => {
       { text: "hi", attachments: [] },
       "D:/p",
     );
-    const res = ctx.manager.restoreChange(sessionId, "src/a.ts");
+    const res = ctx.manager.restoreChangeEvent(sessionId, "ev-x");
     expect(res.ok).toBe(false);
     expect(snapshots.restore).not.toHaveBeenCalled();
   });
 
-  it("restoreAllChanges restores everything and drops restored entries", async () => {
+  it("restoreAllChanges restores each file's earliest op snapshot", async () => {
     const ctx = makeDeps();
+    (ctx.listDiffs as ReturnType<typeof vi.fn>).mockReturnValue([
+      {
+        path: "a.ts",
+        status: "M",
+        hunks: "h2",
+        updatedAt: 2,
+        events: [
+          { id: "ev-a1", tool: "Write", at: 1, hunk: "h1" },
+          { id: "ev-a2", tool: "Edit", at: 2, hunk: "h2" },
+        ],
+      },
+      {
+        path: "b.ts",
+        status: "M",
+        hunks: "hb",
+        updatedAt: 3,
+        events: [{ id: "ev-b1", tool: "Edit", at: 3, hunk: "hb" }],
+      },
+    ]);
     const snapshots = {
       has: vi.fn().mockReturnValue(true),
-      restore: vi.fn(),
-      restoreAll: vi
-        .fn()
-        .mockReturnValue({ restored: ["a.ts"], failed: ["b.ts"] }),
+      pathOf: vi.fn(),
+      restore: vi.fn().mockReturnValue(true),
+      list: vi.fn(),
       drop: vi.fn(),
       dropAll: vi.fn(),
     };
@@ -596,8 +642,16 @@ describe("SessionManager", () => {
       "D:/p",
     );
     const res = ctx.manager.restoreAllChanges(sessionId);
-    expect(res).toEqual({ restored: ["a.ts"], failed: ["b.ts"] });
-    expect(snapshots.drop).toHaveBeenCalledWith(sessionId, "a.ts");
+    expect(res.failed).toEqual([]);
+    expect(res.restored.sort()).toEqual(["a.ts", "b.ts"]);
+    // earliest op per file
+    expect(snapshots.restore).toHaveBeenCalledWith(sessionId, "ev-a1");
+    expect(snapshots.restore).toHaveBeenCalledWith(sessionId, "ev-b1");
+    // all events of restored files dropped
+    expect(snapshots.drop).toHaveBeenCalledWith(sessionId, "ev-a1");
+    expect(snapshots.drop).toHaveBeenCalledWith(sessionId, "ev-a2");
+    expect(ctx.diffTracker.remove).toHaveBeenCalledWith(sessionId, "a.ts");
+    expect(ctx.diffTracker.remove).toHaveBeenCalledWith(sessionId, "b.ts");
     expect(ctx.emitDiff).toHaveBeenCalled();
   });
 });

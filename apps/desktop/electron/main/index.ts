@@ -104,10 +104,10 @@ function bootstrap() {
     readFile: (filePath) => fs.readFileSync(filePath, "utf8"),
   });
 
-  // Pre-session content snapshots for change rollback (persisted on disk).
+  // Per-operation content snapshots for change rollback (persisted on disk).
   const snapshots = new SnapshotStore(userDataDir);
-  diffs.onFirstWrite = (sessionId, filePath) => {
-    snapshots.capture(sessionId, filePath);
+  diffs.onBeforeWrite = (sessionId, filePath, eventId) => {
+    snapshots.capture(sessionId, eventId, filePath);
   };
 
   const permissions = new PermissionBroker({

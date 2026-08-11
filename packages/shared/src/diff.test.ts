@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { buildEditHunk, buildWriteHunk, upsertFileChange } from "./diff";
+import {
+  buildEditHunk,
+  buildWriteHunk,
+  truncateFileChange,
+  upsertFileChange,
+} from "./diff";
 import type { FileChange } from "./models";
 
 describe("buildEditHunk", () => {
@@ -43,6 +48,7 @@ describe("upsertFileChange", () => {
     const t0 = 1000;
     let map = new Map<string, FileChange>();
     map = upsertFileChange(map, {
+      id: "ev-1",
       path: "src/a.ts",
       tool: "Edit",
       hunk: "h1",
@@ -50,6 +56,7 @@ describe("upsertFileChange", () => {
       status: "M",
     });
     map = upsertFileChange(map, {
+      id: "ev-2",
       path: "src/a.ts",
       tool: "Edit",
       hunk: "h2",
@@ -58,7 +65,37 @@ describe("upsertFileChange", () => {
     });
     const item = map.get("src/a.ts")!;
     expect(item.events).toHaveLength(2);
+    expect(item.events.map((e) => e.id)).toEqual(["ev-1", "ev-2"]);
     expect(item.hunks).toContain("h2");
     expect(item.status).toBe("M");
+  });
+});
+
+describe("truncateFileChange", () => {
+  const change: FileChange = {
+    path: "src/a.ts",
+    status: "M",
+    hunks: "h3",
+    updatedAt: 3,
+    events: [
+      { id: "ev-1", tool: "Write", at: 1, hunk: "h1" },
+      { id: "ev-2", tool: "Edit", at: 2, hunk: "h2" },
+      { id: "ev-3", tool: "Edit", at: 3, hunk: "h3" },
+    ],
+  };
+
+  it("drops the target event and all later events", () => {
+    const t = truncateFileChange(change, "ev-2");
+    expect(t?.events.map((e) => e.id)).toEqual(["ev-1"]);
+    expect(t?.hunks).toBe("h1");
+    expect(t?.updatedAt).toBe(1);
+  });
+
+  it("returns undefined when no events remain", () => {
+    expect(truncateFileChange(change, "ev-1")).toBeUndefined();
+  });
+
+  it("returns the change unchanged for an unknown event id", () => {
+    expect(truncateFileChange(change, "nope")).toBe(change);
   });
 });

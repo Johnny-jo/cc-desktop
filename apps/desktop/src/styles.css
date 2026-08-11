@@ -1470,6 +1470,14 @@ textarea {
   color: var(--warn);
 }
 
+.change-op-meta {
+  flex-shrink: 0;
+  margin-left: auto;
+  color: var(--text-faint);
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
 .change-item {
   width: 100%;
   min-width: 0;

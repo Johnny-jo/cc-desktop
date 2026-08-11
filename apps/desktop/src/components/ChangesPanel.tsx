@@ -1,8 +1,24 @@
-import React, { useState } from "react";
-import type { FileChange } from "@claude-desktop/shared";
+import React, { useMemo, useState } from "react";
+import type { FileChangeEvent } from "@claude-desktop/shared";
 import { getDesktop } from "../lib/desktop-api";
 import { useAppStore } from "../state/store";
 import { DiffView } from "./DiffView";
+
+/** One row in the panel: a single write operation on a file. */
+type OpRow = {
+  eventId: string;
+  path: string;
+  status: "A" | "M";
+  event: FileChangeEvent;
+};
+
+function formatTime(at: number): string {
+  const d = new Date(at);
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  const ss = String(d.getSeconds()).padStart(2, "0");
+  return `${hh}:${mm}:${ss}`;
+}
 
 export function ChangesPanel() {
   const activeSessionId = useAppStore((s) => s.activeSessionId);
@@ -11,20 +27,40 @@ export function ChangesPanel() {
     ? (changesBySession[activeSessionId] ?? [])
     : [];
 
-  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
-  const selected = changes.find((c) => c.path === selectedPath) ?? changes[0];
-  const restorable = changes.filter((c) => c.canRestore);
 
-  async function restoreOne(path: string) {
+  // Flatten per-file changes into per-operation rows, newest first.
+  const rows = useMemo<OpRow[]>(() => {
+    const out: OpRow[] = [];
+    for (const c of changes) {
+      for (const e of c.events) {
+        out.push({ eventId: e.id, path: c.path, status: c.status, event: e });
+      }
+    }
+    return out.sort((a, b) => b.event.at - a.event.at);
+  }, [changes]);
+
+  const selected = rows.find((r) => r.eventId === selectedEventId) ?? rows[0];
+  const restorable = rows.filter((r) => r.event.canRestore);
+
+  async function restoreOp(row: OpRow) {
     if (!activeSessionId) return;
-    setBusy(path);
+    setBusy(row.eventId);
     setNote(null);
     try {
-      const res = await getDesktop().restoreChange(activeSessionId, path);
-      if (!res.ok) setNote(`Restore failed: ${res.error ?? "unknown"}`);
-      else if (selectedPath === path) setSelectedPath(null);
+      const res = await getDesktop().restoreChange(
+        activeSessionId,
+        row.path,
+        row.eventId,
+      );
+      if (!res.ok) {
+        setNote(`Restore failed: ${res.error ?? "unknown"}`);
+      } else {
+        setNote(`Restored ${row.path} to before this edit`);
+        if (selectedEventId === row.eventId) setSelectedEventId(null);
+      }
     } catch (err) {
       setNote(err instanceof Error ? err.message : String(err));
     } finally {
@@ -42,7 +78,7 @@ export function ChangesPanel() {
         setNote(`Restored ${res.restored.length}; failed: ${res.failed.join(", ")}`);
       } else {
         setNote(`Restored ${res.restored.length} file(s)`);
-        setSelectedPath(null);
+        setSelectedEventId(null);
       }
     } catch (err) {
       setNote(err instanceof Error ? err.message : String(err));
@@ -68,44 +104,57 @@ export function ChangesPanel() {
         ) : null}
       </div>
       {note ? <p className="muted changes-note">{note}</p> : null}
-      {changes.length === 0 ? (
+      {rows.length === 0 ? (
         <p className="muted">No file changes yet.</p>
       ) : (
         <>
           <ul className="changes-list">
-            {changes.map((c) => (
-              <li key={c.path} className="change-item-row">
+            {rows.map((r) => (
+              <li key={r.eventId} className="change-item-row">
                 <button
                   type="button"
                   className={
-                    selected?.path === c.path
+                    selected?.eventId === r.eventId
                       ? "change-item active"
                       : "change-item"
                   }
-                  onClick={() => setSelectedPath(c.path)}
+                  onClick={() => setSelectedEventId(r.eventId)}
                 >
-                  <span className={`change-status status-${c.status}`}>
-                    {c.status}
+                  <span className={`change-status status-${r.status}`}>
+                    {r.status}
                   </span>
-                  <span className="change-path" title={c.path}>
-                    {c.path}
+                  <span className="change-path" title={r.path}>
+                    {r.path}
+                  </span>
+                  <span className="change-op-meta">
+                    {r.event.tool} · {formatTime(r.event.at)}
                   </span>
                 </button>
-                {c.canRestore ? (
+                {r.event.canRestore ? (
                   <button
                     type="button"
                     className="btn btn-ghost btn-sm change-restore"
                     disabled={busy !== null}
-                    title="Restore this file to its content before this session"
-                    onClick={() => void restoreOne(c.path)}
+                    title="Roll back to before this edit (also undoes later edits of this file)"
+                    onClick={() => void restoreOp(r)}
                   >
-                    {busy === c.path ? "…" : "↩"}
+                    {busy === r.eventId ? "…" : "↩"}
                   </button>
                 ) : null}
               </li>
             ))}
           </ul>
-          {selected ? <DiffView change={selected} /> : null}
+          {selected ? (
+            <DiffView
+              change={{
+                path: selected.path,
+                status: selected.status,
+                hunks: selected.event.hunk,
+                updatedAt: selected.event.at,
+                events: [selected.event],
+              }}
+            />
+          ) : null}
         </>
       )}
     </div>

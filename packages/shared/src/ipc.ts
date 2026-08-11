@@ -193,7 +193,11 @@ export type IpcInvokeMap = {
     result: { statuses: import("./mcp-servers").SessionMcpServerStatus[] };
   };
   [IPC.diffRestoreFile]: {
-    args: [{ sessionId: string; path: string }];
+    /**
+     * eventId: roll back to just before that write operation (also undoes
+     * later ops on the same file). path-only = legacy restore-all-of-file.
+     */
+    args: [{ sessionId: string; path: string; eventId?: string }];
     result: { ok: boolean; error?: string };
   };
   [IPC.diffRestoreAll]: {

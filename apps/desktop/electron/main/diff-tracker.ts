@@ -2,6 +2,8 @@ import {
   buildEditHunk,
   buildWriteHunk,
   changesToArray,
+  newChangeEventId,
+  truncateFileChange,
   upsertFileChange,
   type FileChange,
 } from "@claude-desktop/shared";
@@ -47,25 +49,25 @@ export class DiffTracker {
   private readonly readFile?: DiffTrackerDeps["readFile"];
   private readonly now: () => number;
   /**
-   * Called the first time a file is touched within a session (before the
-   * change event is recorded) — used by the main process to snapshot the
-   * file's pre-session content for rollback.
+   * Called for EVERY tracked write operation BEFORE its change event is
+   * recorded — the main process snapshots the file's current (pre-op)
+   * content under the event id so the operation can be rolled back
+   * individually.
    */
-  onFirstWrite?: (sessionId: string, path: string) => void;
+  onBeforeWrite?: (sessionId: string, path: string, eventId: string) => void;
 
   constructor(deps: DiffTrackerDeps = {}) {
     this.readFile = deps.readFile;
     this.now = deps.now ?? (() => Date.now());
   }
 
-  private notifyFirstWrite(
+  private notifyBeforeWrite(
     sessionId: string,
-    map: Map<string, FileChange>,
     path: string,
+    eventId: string,
   ): void {
-    if (map.has(path)) return;
     try {
-      this.onFirstWrite?.(sessionId, path);
+      this.onBeforeWrite?.(sessionId, path, eventId);
     } catch {
       // snapshot failure must not break diff tracking
     }
@@ -94,12 +96,13 @@ export class DiffTracker {
     if (!path) return;
 
     const at = this.now();
+    const eventId = newChangeEventId();
+    this.notifyBeforeWrite(sessionId, path, eventId);
     let map = this.sessions.get(sessionId);
     if (!map) {
       map = new Map();
       this.sessions.set(sessionId, map);
     }
-    this.notifyFirstWrite(sessionId, map, path);
 
     if (toolName === "Edit") {
       const oldString = String(input.old_string ?? "");
@@ -108,6 +111,7 @@ export class DiffTracker {
       this.sessions.set(
         sessionId,
         upsertFileChange(map, {
+          id: eventId,
           path,
           tool: "Edit",
           hunk,
@@ -133,6 +137,7 @@ export class DiffTracker {
     this.sessions.set(
       sessionId,
       upsertFileChange(map, {
+        id: eventId,
         path,
         tool: "Write",
         hunk,
@@ -156,12 +161,13 @@ export class DiffTracker {
     if (!path) return;
 
     const at = this.now();
+    const eventId = newChangeEventId();
+    this.notifyBeforeWrite(sessionId, path, eventId);
     let map = this.sessions.get(sessionId);
     if (!map) {
       map = new Map();
       this.sessions.set(sessionId, map);
     }
-    this.notifyFirstWrite(sessionId, map, path);
 
     let previousContent: string | null = null;
     let nextContent = "";
@@ -198,6 +204,7 @@ export class DiffTracker {
     this.sessions.set(
       sessionId,
       upsertFileChange(map, {
+        id: eventId,
         path,
         tool: "Bash",
         hunk: annotated,
@@ -209,7 +216,8 @@ export class DiffTracker {
 
   /**
    * After Bash completes, re-read disk for paths already tracked via Bash
-   * so hunks reflect real content.
+   * so hunks reflect real content. The refresh is itself a tracked write
+   * operation (snapshot first) so rollback stays step-accurate.
    */
   refreshBashWritesFromDisk(sessionId: string): void {
     if (!this.readFile) return;
@@ -233,7 +241,10 @@ export class DiffTracker {
         previousContent: prevForHunk,
         nextContent: content,
       });
+      const eventId = newChangeEventId();
+      this.notifyBeforeWrite(sessionId, path, eventId);
       next = upsertFileChange(next, {
+        id: eventId,
         path,
         tool: "Bash",
         hunk: `${hunk}\n# via Bash (disk)`,
@@ -253,6 +264,37 @@ export class DiffTracker {
   /** True when the session has tracked changes for the file. */
   has(sessionId: string, path: string): boolean {
     return this.sessions.get(sessionId)?.has(path) ?? false;
+  }
+
+  /** Find the change entry containing an event (for rollback). */
+  findByEvent(
+    sessionId: string,
+    eventId: string,
+  ): { path: string; change: FileChange } | null {
+    const map = this.sessions.get(sessionId);
+    if (!map) return null;
+    for (const [path, change] of map) {
+      if (change.events.some((e) => e.id === eventId)) {
+        return { path, change };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Drop the given event and all LATER events of its file (post-rollback:
+   * the file no longer carries those operations). Removes the file entry
+   * when no events remain.
+   */
+  truncateAt(sessionId: string, path: string, fromEventId: string): void {
+    const map = this.sessions.get(sessionId);
+    const change = map?.get(path);
+    if (!map || !change) return;
+    const next = new Map(map);
+    const truncated = truncateFileChange(change, fromEventId);
+    if (truncated) next.set(path, truncated);
+    else next.delete(path);
+    this.sessions.set(sessionId, next);
   }
 
   /** Remove one file from the session's change set (e.g. after rollback). */
@@ -275,7 +317,21 @@ export class DiffTracker {
         status: c.status === "A" || c.status === "M" ? c.status : "M",
         hunks: c.hunks ?? "",
         updatedAt: c.updatedAt ?? Date.now(),
-        events: Array.isArray(c.events) ? [...c.events] : [],
+        events: Array.isArray(c.events)
+          ? c.events.map((e, i) => ({
+              id:
+                typeof e.id === "string" && e.id
+                  ? e.id
+                  : // Legacy archives (pre event-ids): synthesize stable ids.
+                    `legacy-${i}-${Number(e.at) || 0}`,
+              tool:
+                e.tool === "Edit" || e.tool === "Write" || e.tool === "Bash"
+                  ? e.tool
+                  : "Write",
+              at: Number(e.at) || Date.now(),
+              hunk: String(e.hunk ?? ""),
+            }))
+          : [],
       });
     }
     this.sessions.set(sessionId, map);

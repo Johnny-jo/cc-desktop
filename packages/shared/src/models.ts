@@ -9,21 +9,34 @@ export type CpaStatus =
 
 export type FileChangeStatus = "A" | "M";
 
+/**
+ * One tracked file-write operation (Edit / Write / Bash redirect).
+ * Snapshots are per-event: `canRestore` means a pre-op content snapshot
+ * exists, so the file can be rolled back to its state before this operation.
+ */
+export type FileChangeEvent = {
+  id: string;
+  tool: "Edit" | "Write" | "Bash";
+  at: number;
+  hunk: string;
+  /**
+   * True when a pre-op snapshot exists for this event (main-process only;
+   * hydrated on IPC payloads).
+   */
+  canRestore?: boolean;
+};
+
 export type FileChange = {
   path: string;
   status: FileChangeStatus;
   /** unified diff text for display */
   hunks: string;
   updatedAt: number;
-  /** event-level entries newest last */
-  events: Array<{
-    tool: "Edit" | "Write" | "Bash";
-    at: number;
-    hunk: string;
-  }>;
+  /** event-level entries oldest → newest */
+  events: FileChangeEvent[];
   /**
-   * True when a pre-session content snapshot exists for this file, i.e. the
-   * change can be rolled back. Main-process only; hydrated on IPC payloads.
+   * True when ANY event of this file has a snapshot (legacy compat for
+   * UI that shows one restore affordance per file).
    */
   canRestore?: boolean;
 };

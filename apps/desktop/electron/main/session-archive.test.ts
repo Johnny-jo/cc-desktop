@@ -81,14 +81,16 @@ describe("SessionArchive", () => {
         status: "M",
         hunks: "--- a/src/a.ts\n+++ b/src/a.ts\n+hello",
         updatedAt: 123,
-        events: [{ tool: "Edit", at: 123, hunk: "+hello" }],
+        events: [{ id: "ev-1", tool: "Edit", at: 123, hunk: "+hello" }],
       },
       {
         path: "UIManager.cs",
         status: "A",
         hunks: "@@ new file\n+using UnityEngine;",
         updatedAt: 124,
-        events: [{ tool: "Bash", at: 124, hunk: "+using UnityEngine;" }],
+        events: [
+          { id: "ev-2", tool: "Bash", at: 124, hunk: "+using UnityEngine;" },
+        ],
       },
     ];
     arch.saveChanges("s1", changes);

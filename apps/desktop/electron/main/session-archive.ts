@@ -179,7 +179,11 @@ export class SessionArchive {
           hunks: String(c.hunks ?? ""),
           updatedAt: Number(c.updatedAt) || Date.now(),
           events: Array.isArray(c.events)
-            ? c.events.map((e) => ({
+            ? c.events.map((e, i) => ({
+                id:
+                  typeof e.id === "string" && e.id
+                    ? e.id
+                    : `legacy-${i}-${Number(e.at) || 0}`,
                 tool:
                   e.tool === "Edit" || e.tool === "Write" || e.tool === "Bash"
                     ? e.tool

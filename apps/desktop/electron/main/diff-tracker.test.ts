@@ -39,7 +39,7 @@ describe("DiffTracker", () => {
         status: "M",
         hunks: "+x",
         updatedAt: 1,
-        events: [{ tool: "Edit", at: 1, hunk: "+x" }],
+        events: [{ id: "ev-1", tool: "Edit", at: 1, hunk: "+x" }],
       },
     ]);
     expect(tracker.list("s1")).toHaveLength(1);

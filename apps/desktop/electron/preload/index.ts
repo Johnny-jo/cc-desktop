@@ -87,9 +87,16 @@ const desktop = {
       statuses: import("@claude-desktop/shared").SessionMcpServerStatus[];
     }>,
 
-  /** Restore one changed file to its pre-session content. */
-  restoreChange: (sessionId: string, path: string) =>
-    ipcRenderer.invoke(IPC.diffRestoreFile, { sessionId, path }) as Promise<{
+  /**
+   * Restore a file to its content before one write operation (eventId) or,
+   * without eventId, to its pre-session content.
+   */
+  restoreChange: (sessionId: string, path: string, eventId?: string) =>
+    ipcRenderer.invoke(IPC.diffRestoreFile, {
+      sessionId,
+      path,
+      ...(eventId ? { eventId } : {}),
+    }) as Promise<{
       ok: boolean;
       error?: string;
     }>,

@@ -2,15 +2,17 @@ import fs from "node:fs";
 import path from "node:path";
 
 /**
- * Pre-edit content snapshots per session, enabling change rollback.
+ * Pre-edit content snapshots per write OPERATION, enabling per-step rollback.
  *
- * On the FIRST tracked write of a file within a session (Edit / Write /
- * Bash-redirect) we snapshot the file's original on-disk content. Restoring
- * writes that original content back (or deletes the file when it did not
- * exist before the session).
+ * Every tracked write (Edit / Write / Bash redirect) snapshots the file's
+ * on-disk content immediately before the tool runs, keyed by event id.
+ * Restoring event N writes back the content captured before event N — i.e.
+ * the file returns to its state after event N-1 (or is deleted when the
+ * file did not exist before event N).
  *
- * Snapshots persist under userData/snapshots/<sessionId>/ so rollback still
- * works after an app restart, matching the session changes archive.
+ * Snapshots persist under userData/snapshots/<sessionId>/ as
+ * `<eventId>.snap` files with a JSON sidecar `<eventId>.json` holding the
+ * file path, so rollback still works after an app restart.
  */
 export class SnapshotStore {
   private readonly root: string;
@@ -24,55 +26,69 @@ export class SnapshotStore {
     return sessionId.replace(/[^a-zA-Z0-9_-]/g, "_");
   }
 
-  private encodePath(p: string): string {
-    return Buffer.from(p, "utf8").toString("base64url");
-  }
-
-  private decodePath(s: string): string {
-    return Buffer.from(s, "base64url").toString("utf8");
+  private safeEventId(eventId: string): string {
+    return eventId.replace(/[^a-zA-Z0-9_-]/g, "_");
   }
 
   private dir(sessionId: string): string {
     return path.join(this.root, this.safeId(sessionId));
   }
 
-  private snapPath(sessionId: string, filePath: string): string {
-    return path.join(this.dir(sessionId), `${this.encodePath(filePath)}.snap`);
+  private snapPath(sessionId: string, eventId: string): string {
+    return path.join(this.dir(sessionId), `${this.safeEventId(eventId)}.snap`);
   }
 
-  /** True when a snapshot already exists for this session+file. */
-  has(sessionId: string, filePath: string): boolean {
+  private metaPath(sessionId: string, eventId: string): string {
+    return path.join(this.dir(sessionId), `${this.safeEventId(eventId)}.json`);
+  }
+
+  /** True when a snapshot exists for this event. */
+  has(sessionId: string, eventId: string): boolean {
     try {
-      return fs.existsSync(this.snapPath(sessionId, filePath));
+      return fs.existsSync(this.snapPath(sessionId, eventId));
     } catch {
       return false;
     }
   }
 
+  /** File path recorded for an event snapshot (null when unknown). */
+  pathOf(sessionId: string, eventId: string): string | null {
+    try {
+      const raw = fs.readFileSync(this.metaPath(sessionId, eventId), "utf8");
+      const data = JSON.parse(raw) as { path?: unknown };
+      return typeof data.path === "string" ? data.path : null;
+    } catch {
+      return null;
+    }
+  }
+
   /**
-   * Record the pre-edit state of filePath for the session. No-op when a
-   * snapshot already exists (first-write-wins: rollback returns the file to
-   * its state before this session touched it).
+   * Snapshot filePath's current content under eventId. When the file does
+   * not exist, an ABSENT marker is stored — restore then deletes the file.
+   * No-op when a snapshot already exists for the event.
    */
-  capture(sessionId: string, filePath: string): void {
-    if (this.has(sessionId, filePath)) return;
+  capture(sessionId: string, eventId: string, filePath: string): void {
+    if (this.has(sessionId, eventId)) return;
     try {
       fs.mkdirSync(this.dir(sessionId), { recursive: true });
       let data: Buffer;
       try {
         data = fs.readFileSync(filePath);
       } catch {
-        // File did not exist before the session — restore will delete it.
-        fs.writeFileSync(this.snapPath(sessionId, filePath), "__ABSENT__");
-        return;
+        data = Buffer.from("__ABSENT__", "utf8");
       }
-      fs.writeFileSync(this.snapPath(sessionId, filePath), data);
+      fs.writeFileSync(this.snapPath(sessionId, eventId), data);
+      fs.writeFileSync(
+        this.metaPath(sessionId, eventId),
+        JSON.stringify({ path: filePath }),
+        "utf8",
+      );
     } catch {
-      // best-effort; rollback just won't be offered for this file
+      // best-effort; rollback just won't be offered for this event
     }
   }
 
-  /** List file paths with snapshots for a session. */
+  /** Event ids with snapshots for a session. */
   list(sessionId: string): string[] {
     try {
       const dir = this.dir(sessionId);
@@ -80,21 +96,23 @@ export class SnapshotStore {
       return fs
         .readdirSync(dir)
         .filter((f) => f.endsWith(".snap"))
-        .map((f) => this.decodePath(f.slice(0, -".snap".length)));
+        .map((f) => f.slice(0, -".snap".length));
     } catch {
       return [];
     }
   }
 
   /**
-   * Restore one file to its pre-session state. Returns false when no
-   * snapshot exists for the file. Deletes the file when it was absent
-   * before the session.
+   * Restore the file recorded for eventId to its pre-op content. Returns
+   * false when no snapshot exists. Deletes the file when it was absent
+   * before the operation.
    */
-  restore(sessionId: string, filePath: string): boolean {
-    const snap = this.snapPath(sessionId, filePath);
+  restore(sessionId: string, eventId: string): boolean {
+    const snap = this.snapPath(sessionId, eventId);
     try {
       if (!fs.existsSync(snap)) return false;
+      const filePath = this.pathOf(sessionId, eventId);
+      if (!filePath) return false;
       const data = fs.readFileSync(snap);
       if (data.toString("utf8") === "__ABSENT__") {
         try {
@@ -112,27 +130,17 @@ export class SnapshotStore {
     }
   }
 
-  /** Restore every snapshotted file; returns per-file outcomes. */
-  restoreAll(sessionId: string): { restored: string[]; failed: string[] } {
-    const restored: string[] = [];
-    const failed: string[] = [];
-    for (const p of this.list(sessionId)) {
-      if (this.restore(sessionId, p)) restored.push(p);
-      else failed.push(p);
-    }
-    return { restored, failed };
-  }
-
-  /** Remove the snapshot after a successful restore (change is undone). */
-  drop(sessionId: string, filePath: string): void {
+  /** Remove one event snapshot after a successful restore. */
+  drop(sessionId: string, eventId: string): void {
     try {
-      fs.unlinkSync(this.snapPath(sessionId, filePath));
+      fs.unlinkSync(this.snapPath(sessionId, eventId));
+      fs.unlinkSync(this.metaPath(sessionId, eventId));
     } catch {
       // ignore
     }
   }
 
-  /** Drop all snapshots for a session (e.g. after restore-all). */
+  /** Drop all snapshots for a session. */
   dropAll(sessionId: string): void {
     try {
       fs.rmSync(this.dir(sessionId), { recursive: true, force: true });
