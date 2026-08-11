@@ -235,6 +235,11 @@ const desktop = {
   killTerminal: (id: string) =>
     ipcRenderer.invoke(IPC.terminalKill, { id }) as Promise<{ ok: boolean }>,
 
+  resizeTerminal: (id: string, cols: number, rows: number) =>
+    ipcRenderer.invoke(IPC.terminalResize, { id, cols, rows }) as Promise<{
+      ok: boolean;
+    }>,
+
   on: (channel: string, listener: (...args: unknown[]) => void) => {
     const allowed = new Set<string>(Object.values(IPC));
     if (!allowed.has(channel)) return () => {};

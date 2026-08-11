@@ -13,6 +13,11 @@ files:
 # Workspace package is bundled into out/ by electron-vite; no asarUnpack of node_modules required for shared.
 asar: true
 
+# node-pty is a native module (pty.node + conpty.dll / OpenConsole.exe) — it
+# must live outside the asar archive to load and spawn shells.
+asarUnpack:
+  - "**/node_modules/node-pty/**"
+
 # Ship Claude Code CLI + CPA outside asar so they can be spawned.
 # Populate vendor/ via: node scripts/prepare-vendor.mjs (from monorepo root).
 extraResources:

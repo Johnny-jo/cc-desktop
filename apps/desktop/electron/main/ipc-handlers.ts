@@ -522,4 +522,12 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
       return { ok: ctx.terminal.kill(id) };
     },
   );
+
+  ipcMain.handle(
+    IPC.terminalResize,
+    async (_e, { id, cols, rows }: { id: string; cols: number; rows: number }) => {
+      ctx.terminal.resize(id, cols, rows);
+      return { ok: true };
+    },
+  );
 }

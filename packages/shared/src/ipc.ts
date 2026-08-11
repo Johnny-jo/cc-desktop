@@ -75,6 +75,8 @@ export const IPC = {
   terminalCreate: "terminal:create",
   terminalWrite: "terminal:write",
   terminalKill: "terminal:kill",
+  /** Renderer → Main: resize PTY to match xterm grid */
+  terminalResize: "terminal:resize",
   // main → renderer (webContents.send)
   sessionEvent: "session:event",
   permissionRequest: "permission:request",
@@ -86,6 +88,8 @@ export const IPC = {
   appError: "app:error",
   terminalData: "terminal:data",
   terminalExit: "terminal:exit",
+  /** Shell-reported window title (OSC 0/2) */
+  terminalTitle: "terminal:title",
 } as const;
 
 export type IpcInvokeMap = {
@@ -284,6 +288,10 @@ export type IpcInvokeMap = {
     args: [{ id: string }];
     result: { ok: boolean };
   };
+  [IPC.terminalResize]: {
+    args: [{ id: string; cols: number; rows: number }];
+    result: { ok: boolean };
+  };
 };
 
 export type IpcEventMap = {
@@ -304,6 +312,7 @@ export type IpcEventMap = {
     data: string;
   };
   [IPC.terminalExit]: { id: string; code: number | null };
+  [IPC.terminalTitle]: { id: string; title: string };
   // also permission mode can piggyback via settings
   permissionMode?: PermissionMode;
 };
