@@ -383,6 +383,9 @@ textarea {
   min-width: 0;
   max-width: 100%;
   overflow: hidden;
+  /* Keep each row at its natural height; the list scrolls instead of
+     squashing items when sessions outgrow the sidebar. */
+  flex-shrink: 0;
 }
 
 .session-empty {
