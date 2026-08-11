@@ -97,14 +97,6 @@ export function ChatPanel({
           >
             {changesOpen ? "⟩" : "⟨"} Diff
           </button>
-          <button
-            type="button"
-            className="btn btn-ghost btn-icon"
-            onClick={onOpenSettings}
-            title="Settings"
-          >
-            ⚙
-          </button>
         </div>
       </header>
 
