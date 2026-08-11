@@ -36,6 +36,8 @@ export function App() {
 
   return (
     <div className="app">
+      {/* Frameless window drag strip (matches titleBarOverlay height). */}
+      <div className="app-titlebar" aria-hidden />
       <ErrorBanner />
       <div className={changesOpen ? "main" : "main main-no-changes"}>
         <aside className="panel panel-sessions">

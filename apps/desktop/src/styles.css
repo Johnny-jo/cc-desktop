@@ -38,6 +38,8 @@
   --radius-pill: 999px;
   --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.25);
   --shadow-2: 0 12px 40px rgba(0, 0, 0, 0.35);
+  /* Match Electron titleBarOverlay height (Windows caption buttons). */
+  --titlebar-h: 36px;
   --focus-ring: 0 0 0 2px rgba(59, 130, 246, 0.28);
 
   --space-1: 4px;
@@ -99,6 +101,21 @@ textarea {
   min-height: 0;
   overflow: hidden;
   background: var(--bg-app);
+  /* Room for the frameless titleBarOverlay (min/max/close only). */
+  padding-top: var(--titlebar-h);
+}
+
+/* Drag region under the OS caption buttons; no icon / title text. */
+.app-titlebar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--titlebar-h);
+  background: var(--bg-app);
+  z-index: 200;
+  -webkit-app-region: drag;
+  app-region: drag;
 }
 
 .app > .error-banner {

@@ -87,6 +87,13 @@ function createWindow() {
     backgroundColor: APP_BG,
     // No File/Edit/View menu bar — this is a desktop chat app, not an editor.
     autoHideMenuBar: true,
+    // Hide OS title (icon + "Claude Desktop"); keep only dark min/max/close.
+    titleBarStyle: "hidden",
+    titleBarOverlay: {
+      color: APP_BG,
+      symbolColor: "#e8e8e8",
+      height: 36,
+    },
     webPreferences: {
       preload: path.join(__dirname, "../preload/index.js"),
       contextIsolation: true,
