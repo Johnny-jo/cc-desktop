@@ -11,27 +11,27 @@ import {
   formatTokens,
 } from "../lib/format-usage";
 
-const PERMISSION_MODES: PermissionMode[] = ["default", "acceptEdits", "plan", "auto"];
+const PERMISSION_MODES: PermissionMode[] = [
+  "default",
+  "acceptEdits",
+  "plan",
+  "auto",
+];
 
 export type ChatPanelProps = {
-  changesOpen: boolean;
-  onToggleChanges: () => void;
   onOpenSettings: () => void;
 };
 
-export function ChatPanel({
-  changesOpen,
-  onToggleChanges,
-  onOpenSettings,
-}: ChatPanelProps) {
+export function ChatPanel({ onOpenSettings }: ChatPanelProps) {
   const activeSessionId = useAppStore((s) => s.activeSessionId);
   const itemsBySession = useAppStore((s) => s.itemsBySession);
   const sessions = useAppStore((s) => s.sessions);
   const running = useAppStore((s) => s.running);
   const settings = useAppStore((s) => s.settings);
 
-  // sessionId -> dismissed for this app lifetime
-  const [bannerDismissed, setBannerDismissed] = useState<Record<string, true>>({});
+  const [bannerDismissed, setBannerDismissed] = useState<Record<string, true>>(
+    {},
+  );
 
   const items = activeSessionId ? (itemsBySession[activeSessionId] ?? []) : [];
   const active = sessions.find((s) => s.id === activeSessionId);
@@ -88,15 +88,6 @@ export function ChatPanel({
               ))}
             </select>
           </label>
-          <button
-            type="button"
-            className="btn btn-ghost btn-icon"
-            onClick={onToggleChanges}
-            title={changesOpen ? "Hide changes" : "Show changes"}
-            aria-pressed={changesOpen}
-          >
-            {changesOpen ? "⟩" : "⟨"} Diff
-          </button>
         </div>
       </header>
 
@@ -109,8 +100,8 @@ export function ChatPanel({
             >
               <div className="context-banner-text">
                 上下文已用 <strong>{formatContextPercent(ctx.ratio)}</strong>
-                （{formatTokens(ctx.usedTokens)} / {formatTokens(ctx.limitTokens)}）。
-                接近窗口上限，建议新开对话或压缩历史。
+                （{formatTokens(ctx.usedTokens)} /{" "}
+                {formatTokens(ctx.limitTokens)}）。 接近窗口上限，建议新开对话或压缩历史。
               </div>
               <button
                 type="button"
@@ -133,10 +124,7 @@ export function ChatPanel({
 
       <div className="chat-composer">
         <div className="chat-inner">
-          <Composer
-            onToggleChanges={onToggleChanges}
-            onOpenSettings={onOpenSettings}
-          />
+          <Composer onOpenSettings={onOpenSettings} />
         </div>
       </div>
     </div>

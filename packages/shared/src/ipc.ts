@@ -71,6 +71,10 @@ export const IPC = {
    * optionally start CPA.
    */
   appCompleteOnboarding: "app:complete-onboarding",
+  /** Bottom terminal: create shell in project cwd */
+  terminalCreate: "terminal:create",
+  terminalWrite: "terminal:write",
+  terminalKill: "terminal:kill",
   // main → renderer (webContents.send)
   sessionEvent: "session:event",
   permissionRequest: "permission:request",
@@ -80,6 +84,8 @@ export const IPC = {
   sessionUpdated: "session:updated",
   sessionSlashCommandsEvent: "session:slash-commands-event",
   appError: "app:error",
+  terminalData: "terminal:data",
+  terminalExit: "terminal:exit",
 } as const;
 
 export type IpcInvokeMap = {
@@ -266,6 +272,18 @@ export type IpcInvokeMap = {
       error?: string;
     };
   };
+  [IPC.terminalCreate]: {
+    args: [{ cwd?: string }?];
+    result: { id: string; cwd: string; shell: string };
+  };
+  [IPC.terminalWrite]: {
+    args: [{ id: string; data: string }];
+    result: { ok: boolean };
+  };
+  [IPC.terminalKill]: {
+    args: [{ id: string }];
+    result: { ok: boolean };
+  };
 };
 
 export type IpcEventMap = {
@@ -280,6 +298,12 @@ export type IpcEventMap = {
     commands: SlashCommandItem[];
   };
   [IPC.appError]: { message: string; detail?: string };
+  [IPC.terminalData]: {
+    id: string;
+    stream: "stdout" | "stderr" | "system";
+    data: string;
+  };
+  [IPC.terminalExit]: { id: string; code: number | null };
   // also permission mode can piggyback via settings
   permissionMode?: PermissionMode;
 };

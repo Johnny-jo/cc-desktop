@@ -318,6 +318,7 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
           return;
         case "diff":
           onToggleChanges?.();
+          window.dispatchEvent(new Event("cd:toggle-changes"));
           setText("");
           return;
         case "settings":

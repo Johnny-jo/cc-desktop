@@ -35,6 +35,7 @@ import {
   resolveEffectiveCpaPaths,
   type RuntimePathEnv,
 } from "./runtime-paths";
+import { TerminalHost } from "./terminal-host";
 
 /** Match the renderer charcoal theme (`--bg-app`). */
 const APP_BG = "#141414";
@@ -247,6 +248,11 @@ function bootstrap() {
     },
   });
 
+  const terminal = new TerminalHost(
+    (e) => sendToRenderer(IPC.terminalData, e),
+    (e) => sendToRenderer(IPC.terminalExit, e),
+  );
+
   registerIpcHandlers({
     window: getMainWindow,
     sessions,
@@ -256,6 +262,7 @@ function bootstrap() {
     cpa,
     diffs,
     snapshots,
+    terminal,
   });
 
   createWindow();
@@ -264,6 +271,7 @@ function bootstrap() {
     // stopIfManaged is a no-op unless this app spawned CPA.
     // Always call it so managed children are not orphaned on quit.
     cpa.stopIfManaged();
+    terminal.killAll();
     // Close streaming sessions so consumers finish cleanly.
     for (const s of sessions.list()) {
       try {

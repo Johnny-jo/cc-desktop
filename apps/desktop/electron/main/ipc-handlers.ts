@@ -26,6 +26,7 @@ import {
   writeCpaConfigWithApiKey,
   type RuntimePathEnv,
 } from "./runtime-paths";
+import type { TerminalHost } from "./terminal-host";
 
 export type IpcHandlerContext = {
   window: () => BrowserWindow | null;
@@ -36,6 +37,7 @@ export type IpcHandlerContext = {
   cpa: CpaSupervisor;
   diffs: DiffTracker;
   snapshots: SnapshotStore;
+  terminal: TerminalHost;
 };
 
 export function registerIpcHandlers(ctx: IpcHandlerContext): void {
@@ -495,4 +497,29 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
     ctx.settings.update({ defaultModel: model });
     return { model };
   });
+
+  ipcMain.handle(
+    IPC.terminalCreate,
+    async (_e, payload?: { cwd?: string }) => {
+      const cwd =
+        payload?.cwd?.trim() ||
+        ctx.settings.get().lastProjectPath ||
+        undefined;
+      return ctx.terminal.create(cwd);
+    },
+  );
+
+  ipcMain.handle(
+    IPC.terminalWrite,
+    async (_e, { id, data }: { id: string; data: string }) => {
+      return { ok: ctx.terminal.write(id, data) };
+    },
+  );
+
+  ipcMain.handle(
+    IPC.terminalKill,
+    async (_e, { id }: { id: string }) => {
+      return { ok: ctx.terminal.kill(id) };
+    },
+  );
 }

@@ -221,6 +221,20 @@ const desktop = {
   setModel: (model: string) =>
     ipcRenderer.invoke(IPC.modelSet, { model }) as Promise<{ model: string }>,
 
+  createTerminal: (cwd?: string) =>
+    ipcRenderer.invoke(
+      IPC.terminalCreate,
+      cwd !== undefined ? { cwd } : {},
+    ) as Promise<{ id: string; cwd: string; shell: string }>,
+
+  writeTerminal: (id: string, data: string) =>
+    ipcRenderer.invoke(IPC.terminalWrite, { id, data }) as Promise<{
+      ok: boolean;
+    }>,
+
+  killTerminal: (id: string) =>
+    ipcRenderer.invoke(IPC.terminalKill, { id }) as Promise<{ ok: boolean }>,
+
   on: (channel: string, listener: (...args: unknown[]) => void) => {
     const allowed = new Set<string>(Object.values(IPC));
     if (!allowed.has(channel)) return () => {};
