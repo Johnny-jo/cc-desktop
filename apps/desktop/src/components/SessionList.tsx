@@ -47,6 +47,18 @@ export function SessionList({ onOpenSettings }: SessionListProps) {
   return (
     <div className="session-list">
       <div className="sidebar-brand">
+        <svg
+          className="brand-icon"
+          width="20"
+          height="20"
+          viewBox="0 0 20 20"
+          aria-hidden
+        >
+          <path
+            d="M10 2c0.5 3.4 1.1 4.9 2.4 6.2s2.8 1.9 6.2 2.4c-3.4 0.5-4.9 1.1-6.2 2.4s-1.9 2.8-2.4 6.2c-0.5-3.4-1.1-4.9-2.4-6.2S4.8 11.1 1.4 10.6c3.4-0.5 4.9-1.1 6.2-2.4S9.5 5.4 10 2z"
+            fill="currentColor"
+          />
+        </svg>
         <span className="brand-mark">Claude</span>
         <span className="brand-sub">Desktop</span>
       </div>

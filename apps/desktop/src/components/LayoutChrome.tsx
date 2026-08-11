@@ -136,6 +136,46 @@ export function TitlebarToggles({
   );
 }
 
+/** Sun (currently light → click for dark) / moon (currently dark → light). */
+export function ThemeToggle({
+  isLight,
+  onToggle,
+}: {
+  isLight: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="titlebar-btn titlebar-theme"
+      title={isLight ? "切换到夜间模式" : "切换到日间模式"}
+      aria-label={isLight ? "切换到夜间模式" : "切换到日间模式"}
+      onClick={onToggle}
+    >
+      {isLight ? (
+        <svg width="17" height="17" viewBox="0 0 17 17" fill="none" aria-hidden>
+          <circle cx="8.5" cy="8.5" r="3.2" stroke="currentColor" strokeWidth="1.3" />
+          <path
+            d="M8.5 1.5v1.6M8.5 13.9v1.6M1.5 8.5h1.6M13.9 8.5h1.6M3.5 3.5l1.1 1.1M12.4 12.4l1.1 1.1M13.5 3.5l-1.1 1.1M4.6 12.4l-1.1 1.1"
+            stroke="currentColor"
+            strokeWidth="1.3"
+            strokeLinecap="round"
+          />
+        </svg>
+      ) : (
+        <svg width="17" height="17" viewBox="0 0 17 17" fill="none" aria-hidden>
+          <path
+            d="M14.2 10.6A6 6 0 0 1 6.4 2.8a6 6 0 1 0 7.8 7.8Z"
+            stroke="currentColor"
+            strokeWidth="1.3"
+            strokeLinejoin="round"
+          />
+        </svg>
+      )}
+    </button>
+  );
+}
+
 type ResizeAxis = "sidebar" | "changes" | "terminal";
 
 /**

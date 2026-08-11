@@ -242,6 +242,8 @@ export type AppSettings = {
    * the model by the gateway/CLI.
    */
   effort?: "low" | "medium" | "high";
+  /** UI theme: dark / light / follow system (omit = system). */
+  theme?: "dark" | "light" | "system";
   /**
    * Custom subagent definitions (Task/Agent tool picks them up by name).
    * Passed to the SDK as options.agents.

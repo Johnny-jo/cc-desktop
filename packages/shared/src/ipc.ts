@@ -71,6 +71,8 @@ export const IPC = {
    * optionally start CPA.
    */
   appCompleteOnboarding: "app:complete-onboarding",
+  /** Renderer → Main: current UI theme changed (sync window chrome) */
+  appThemeChanged: "app:theme-changed",
   /** Bottom terminal: create shell in project cwd */
   terminalCreate: "terminal:create",
   terminalWrite: "terminal:write",
@@ -290,6 +292,10 @@ export type IpcInvokeMap = {
   };
   [IPC.terminalResize]: {
     args: [{ id: string; cols: number; rows: number }];
+    result: { ok: boolean };
+  };
+  [IPC.appThemeChanged]: {
+    args: [{ theme: "dark" | "light" }];
     result: { ok: boolean };
   };
 };

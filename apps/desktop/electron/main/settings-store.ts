@@ -173,6 +173,14 @@ export class SettingsStore {
     ) {
       delete publicPatch.effort;
     }
+    if (
+      publicPatch.theme !== undefined &&
+      publicPatch.theme !== "dark" &&
+      publicPatch.theme !== "light" &&
+      publicPatch.theme !== "system"
+    ) {
+      delete publicPatch.theme;
+    }
     if (publicPatch.permissionMode !== undefined) {
       publicPatch.permissionMode = publicPatch.permissionMode as PermissionMode;
     }
@@ -230,6 +238,11 @@ export class SettingsStore {
           ? Math.floor(rest.defaultContextLimit)
           : DEFAULTS.defaultContextLimit;
 
+      const theme =
+        rest.theme === "dark" || rest.theme === "light" || rest.theme === "system"
+          ? rest.theme
+          : undefined;
+
       this.settings = {
         ...DEFAULTS,
         ...rest,
@@ -246,7 +259,11 @@ export class SettingsStore {
         rest.effort === "high"
           ? { effort: rest.effort }
           : {}),
+        ...(theme ? { theme } : {}),
       };
+      if (!theme) {
+        delete this.settings.theme;
+      }
       this.tokenEnc = tokenEnc;
       if (tokenEnc) {
         try {

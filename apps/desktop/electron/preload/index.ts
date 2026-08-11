@@ -240,6 +240,12 @@ const desktop = {
       ok: boolean;
     }>,
 
+  /** Tell the main process the effective UI theme (window chrome sync). */
+  notifyTheme: (theme: "dark" | "light") =>
+    ipcRenderer.invoke(IPC.appThemeChanged, { theme }) as Promise<{
+      ok: boolean;
+    }>,
+
   on: (channel: string, listener: (...args: unknown[]) => void) => {
     const allowed = new Set<string>(Object.values(IPC));
     if (!allowed.has(channel)) return () => {};

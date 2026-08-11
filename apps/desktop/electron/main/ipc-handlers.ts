@@ -38,6 +38,8 @@ export type IpcHandlerContext = {
   diffs: DiffTracker;
   snapshots: SnapshotStore;
   terminal: TerminalHost;
+  /** Sync native window chrome when the UI theme flips */
+  onThemeChanged?: (theme: "dark" | "light") => void;
 };
 
 export function registerIpcHandlers(ctx: IpcHandlerContext): void {
@@ -527,6 +529,14 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
     IPC.terminalResize,
     async (_e, { id, cols, rows }: { id: string; cols: number; rows: number }) => {
       ctx.terminal.resize(id, cols, rows);
+      return { ok: true };
+    },
+  );
+
+  ipcMain.handle(
+    IPC.appThemeChanged,
+    (_e, { theme }: { theme: "dark" | "light" }) => {
+      ctx.onThemeChanged?.(theme);
       return { ok: true };
     },
   );

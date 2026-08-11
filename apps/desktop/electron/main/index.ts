@@ -39,8 +39,28 @@ import { TerminalHost } from "./terminal-host";
 
 /** Match the renderer charcoal theme (`--bg-app`). */
 const APP_BG = "#141414";
+/** Light theme chrome (`--bg-app` for light). */
+const APP_BG_LIGHT = "#f7f7f8";
+const TITLE_SYMBOL_DARK = "#e8e8e8";
+const TITLE_SYMBOL_LIGHT = "#1c1c1e";
 
 let mainWindow: BrowserWindow | null = null;
+
+/** Sync frameless window chrome (titleBarOverlay) with the UI theme. */
+function applyWindowTheme(theme: "dark" | "light"): void {
+  const win = getMainWindow();
+  if (!win || win.isDestroyed()) return;
+  try {
+    win.setTitleBarOverlay({
+      color: theme === "light" ? APP_BG_LIGHT : APP_BG,
+      symbolColor: theme === "light" ? TITLE_SYMBOL_LIGHT : TITLE_SYMBOL_DARK,
+      height: 36,
+    });
+    win.setBackgroundColor(theme === "light" ? APP_BG_LIGHT : APP_BG);
+  } catch {
+    // older Electron without setTitleBarOverlay — ignore
+  }
+}
 
 function getMainWindow(): BrowserWindow | null {
   return mainWindow;
@@ -263,6 +283,7 @@ function bootstrap() {
     diffs,
     snapshots,
     terminal,
+    onThemeChanged: applyWindowTheme,
   });
 
   createWindow();

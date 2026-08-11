@@ -3,16 +3,28 @@ import { SessionList } from "./components/SessionList";
 import { ChatPanel } from "./components/ChatPanel";
 import { ChangesPanel } from "./components/ChangesPanel";
 import { TerminalPanel } from "./components/TerminalPanel";
-import { TitlebarToggles, ResizeHandle } from "./components/LayoutChrome";
+import {
+  TitlebarToggles,
+  ThemeToggle,
+  ResizeHandle,
+} from "./components/LayoutChrome";
 import { PermissionModal } from "./components/PermissionModal";
 import { UserPromptModal } from "./components/UserPromptModal";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { OnboardingModal } from "./components/OnboardingModal";
 import { ErrorBanner } from "./components/ErrorBanner";
+import { getDesktop } from "./lib/desktop-api";
 import { usePanelLayout } from "./hooks/usePanelLayout";
+import {
+  applyTheme,
+  effectiveTheme,
+  nextTheme,
+  onSystemThemeChange,
+} from "./lib/theme";
 import {
   bootstrapStore,
   flushAllTranscripts,
+  setTheme,
   useAppStore,
 } from "./state/store";
 
@@ -34,6 +46,20 @@ export function App() {
   useEffect(() => {
     void bootstrapStore();
   }, []);
+
+  // Apply theme on load + whenever settings change; follow OS in system mode.
+  useEffect(() => {
+    applyTheme(settings?.theme);
+    try {
+      getDesktop()
+        .notifyTheme(effectiveTheme(settings?.theme))
+        .catch(() => undefined);
+    } catch {
+      // not in electron
+    }
+    if (settings?.theme && settings.theme !== "system") return;
+    return onSystemThemeChange(() => applyTheme(settings?.theme));
+  }, [settings?.theme]);
 
   // Slash /diff and other UI can request panel toggles without prop drilling.
   useEffect(() => {
@@ -86,6 +112,10 @@ export function App() {
           onToggleSidebar={toggleSidebar}
           onToggleChanges={toggleChanges}
           onToggleTerminal={toggleTerminal}
+        />
+        <ThemeToggle
+          isLight={effectiveTheme(settings?.theme) === "light"}
+          onToggle={() => void setTheme(nextTheme(settings?.theme))}
         />
         {/* Space for Windows caption buttons (titleBarOverlay). */}
         <div className="titlebar-caption-space" aria-hidden />

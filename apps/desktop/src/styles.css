@@ -1,6 +1,7 @@
-/* DEEIX-inspired charcoal chat UI for Claude Desktop */
+/* Charcoal chat UI for Claude Desktop — token-driven dark/light themes */
 
-:root {
+:root,
+[data-theme="dark"] {
   color-scheme: dark;
   font-family:
     "Segoe UI",
@@ -20,6 +21,9 @@
   --bg-input: #242424;
   --bg-bubble-user: #2c2c2c;
   --bg-bubble-assistant: transparent;
+  --bg-terminal: #0e0e0e;
+  --bg-terminal-tab: #0e0e0e;
+  --bg-code: #0f0f0f;
   --border: #262626;
   --border-soft: #1f1f1f;
   --border-strong: #333333;
@@ -27,10 +31,15 @@
   --text-muted: #8a8a8a;
   --text-faint: #666666;
   --accent: #3b82f6;
+  --accent-strong: #4b8ff7;
   --accent-soft: rgba(59, 130, 246, 0.14);
+  --on-accent: #ffffff;
+  --stop: #e0654a;
+  --stop-strong: #ea7a60;
   --ok: #34d399;
   --warn: #fbbf24;
   --danger: #f87171;
+  --terminal-text: #d4d4d4;
 
   --radius-sm: 8px;
   --radius-md: 12px;
@@ -38,6 +47,7 @@
   --radius-pill: 999px;
   --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.25);
   --shadow-2: 0 12px 40px rgba(0, 0, 0, 0.35);
+  --shadow-drawer: -16px 0 48px rgba(0, 0, 0, 0.45);
   /* Match Electron titleBarOverlay height (Windows caption buttons). */
   --titlebar-h: 36px;
   --focus-ring: 0 0 0 2px rgba(59, 130, 246, 0.28);
@@ -51,6 +61,84 @@
   --sidebar-w: 260px;
   --changes-w: 300px;
   --chat-max: 820px;
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  background: #f7f7f8;
+  color: #1c1c1e;
+
+  --bg-app: #f7f7f8;
+  --bg-sidebar: #efeff1;
+  --bg-elevated: #ffffff;
+  --bg-panel: #f2f2f4;
+  --bg-hover: #e4e4e8;
+  --bg-active: #d8d8de;
+  --bg-input: #ffffff;
+  --bg-bubble-user: #e8e8ec;
+  --bg-bubble-assistant: transparent;
+  --bg-terminal: #1e1e24;
+  --bg-terminal-tab: #1e1e24;
+  --bg-code: #f0f0f2;
+  --border: #d9d9de;
+  --border-soft: #e6e6ea;
+  --border-strong: #c9c9d0;
+  --text: #1c1c1e;
+  --text-muted: #5f5f66;
+  --text-faint: #8e8e96;
+  --accent: #2563eb;
+  --accent-strong: #1d4ed8;
+  --accent-soft: rgba(37, 99, 235, 0.12);
+  --on-accent: #ffffff;
+  --stop: #dc5035;
+  --stop-strong: #e86a50;
+  --ok: #059669;
+  --warn: #b45309;
+  --danger: #dc2626;
+  --terminal-text: #d4d4d4;
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-2: 0 12px 40px rgba(0, 0, 0, 0.12);
+  --shadow-drawer: -16px 0 48px rgba(0, 0, 0, 0.16);
+  --focus-ring: 0 0 0 2px rgba(37, 99, 235, 0.25);
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]):not([data-theme="light"]) {
+    color-scheme: light;
+    background: #f7f7f8;
+    color: #1c1c1e;
+
+    --bg-app: #f7f7f8;
+    --bg-sidebar: #efeff1;
+    --bg-elevated: #ffffff;
+    --bg-panel: #f2f2f4;
+    --bg-hover: #e4e4e8;
+    --bg-active: #d8d8de;
+    --bg-input: #ffffff;
+    --bg-bubble-user: #e8e8ec;
+    --bg-terminal: #1e1e24;
+    --bg-terminal-tab: #1e1e24;
+    --bg-code: #f0f0f2;
+    --border: #d9d9de;
+    --border-soft: #e6e6ea;
+    --border-strong: #c9c9d0;
+    --text: #1c1c1e;
+    --text-muted: #5f5f66;
+    --text-faint: #8e8e96;
+    --accent: #2563eb;
+    --accent-strong: #1d4ed8;
+    --accent-soft: rgba(37, 99, 235, 0.12);
+    --stop: #dc5035;
+    --stop-strong: #e86a50;
+    --ok: #059669;
+    --warn: #b45309;
+    --danger: #dc2626;
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.06);
+    --shadow-2: 0 12px 40px rgba(0, 0, 0, 0.12);
+    --shadow-drawer: -16px 0 48px rgba(0, 0, 0, 0.16);
+    --focus-ring: 0 0 0 2px rgba(37, 99, 235, 0.25);
+  }
 }
 
 * {
@@ -86,11 +174,11 @@ textarea {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #2e2e2e;
+  background: var(--border-strong);
   border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #3a3a3a;
+  background: var(--text-faint);
 }
 
 /* App shell — flex so optional ErrorBanner doesn't leave a blank track */
@@ -127,6 +215,15 @@ textarea {
   z-index: 0;
 }
 
+/* Interactive children sit above the drag surface and never drag. */
+.titlebar-toggles,
+.titlebar-theme {
+  position: relative;
+  z-index: 2;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
 .titlebar-toggles {
   position: relative;
   z-index: 1;
@@ -148,23 +245,32 @@ textarea {
   border: none;
   border-radius: 10px;
   background: transparent;
-  color: #9a9a9a;
+  color: var(--text-faint);
   cursor: pointer;
   line-height: 0;
+  /* Frameless window: buttons must opt OUT of the drag region or clicks
+     are swallowed by window dragging (Electron app-region semantics). */
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+  pointer-events: auto;
 }
 
 .titlebar-btn:hover {
-  color: #e8e8e8;
-  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+  background: var(--bg-hover);
 }
 
 .titlebar-btn.active {
-  color: #e8e8e8;
-  background: rgba(255, 255, 255, 0.1);
+  color: var(--text);
+  background: var(--bg-active);
 }
 
 .titlebar-btn svg {
   display: block;
+}
+
+.titlebar-theme {
+  margin-left: 4px;
 }
 
 /* Leave room for Windows min/max/close (titleBarOverlay ~138px). */
@@ -454,7 +560,7 @@ body.is-resizing-row * {
 
 .terminal-tab-close:hover {
   color: var(--danger);
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--bg-hover);
 }
 
 .terminal-tab-add {
@@ -540,12 +646,12 @@ body.is-resizing-row * {
 .btn-primary {
   background: var(--accent);
   border-color: transparent;
-  color: #fff;
+  color: var(--on-accent);
   font-weight: 600;
 }
 
 .btn-primary:hover:not(:disabled) {
-  background: #4b8ff7;
+  background: var(--accent-strong);
 }
 
 .btn-danger {
@@ -605,11 +711,11 @@ body.is-resizing-row * {
 /* Send: accent circle, light arrow */
 .sendstop-send {
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
 }
 
 .sendstop-send:hover:not(:disabled) {
-  background: #4b8ff7;
+  background: var(--accent-strong);
 }
 
 .sendstop-send:disabled {
@@ -619,12 +725,12 @@ body.is-resizing-row * {
 
 /* Stop: warm circle, white square */
 .sendstop-stop {
-  background: #e0654a;
-  color: #fff;
+  background: var(--stop);
+  color: var(--on-accent);
 }
 
 .sendstop-stop:hover {
-  background: #ea7a60;
+  background: var(--stop-strong);
 }
 
 .select {
@@ -681,6 +787,12 @@ body.is-resizing-row * {
   overflow: hidden;
   padding: var(--space-3);
   gap: var(--space-2);
+}
+
+.brand-icon {
+  color: var(--accent);
+  flex-shrink: 0;
+  align-self: center;
 }
 
 .sidebar-brand {
@@ -1356,7 +1468,7 @@ body.is-resizing-row * {
 .md-inline-code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.9em;
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--bg-input);
   border: 1px solid var(--border-soft);
   border-radius: 5px;
   padding: 0.1em 0.35em;
@@ -1365,7 +1477,7 @@ body.is-resizing-row * {
 .md-body pre {
   margin: 0.65em 0 0.9em;
   padding: 12px 14px;
-  background: #0f0f0f;
+  background: var(--bg-code);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   overflow: auto;
@@ -1406,9 +1518,9 @@ body.is-resizing-row * {
 }
 
 .md-body th {
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--bg-panel);
   font-weight: 600;
-  color: #f3f3f3;
+  color: var(--text);
   white-space: nowrap;
 }
 
@@ -1596,7 +1708,7 @@ body.is-resizing-row * {
 .tool-preview {
   margin: 8px 0 0;
   padding: 8px 10px;
-  background: #0f0f0f;
+  background: var(--bg-code);
   border-radius: var(--radius-sm);
   font-size: 11.5px;
   overflow: auto;
@@ -1793,7 +1905,7 @@ body.is-resizing-row * {
 
 .composer-attachment-remove:hover {
   background: var(--danger);
-  color: #fff;
+  color: var(--on-accent);
 }
 
 .composer-attachment-error {
@@ -2105,7 +2217,7 @@ body.is-resizing-row * {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11.5px;
   line-height: 1.45;
-  background: #0f0f0f;
+  background: var(--bg-code);
 }
 
 .diff-line {
@@ -2362,7 +2474,7 @@ body.is-resizing-row * {
   opacity: 0.85;
   padding: 1px 5px;
   border-radius: 4px;
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--bg-input);
 }
 
 .settings-context-limits-source.source-override {
@@ -2657,7 +2769,7 @@ body.is-resizing-row * {
 .permission-json {
   margin: 0;
   padding: 10px;
-  background: #0f0f0f;
+  background: var(--bg-code);
   border-radius: var(--radius-sm);
   font-size: 11.5px;
   overflow: auto;

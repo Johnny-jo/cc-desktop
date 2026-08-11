@@ -994,6 +994,15 @@ export async function setPermissionMode(mode: PermissionMode): Promise<void> {
   setState({ settings });
 }
 
+/** Persist theme choice; renderer applies via data-theme on <html>. */
+export async function setTheme(
+  theme: NonNullable<PublicSettings["theme"]>,
+): Promise<void> {
+  const desktop = getDesktop();
+  const settings = (await desktop.setSettings({ theme })) as PublicSettings;
+  setState({ settings });
+}
+
 export async function startCpa(): Promise<void> {
   const desktop = getDesktop();
   try {
