@@ -9,14 +9,19 @@ directories:
 files:
   - out/**/*
   - package.json
+  # Native PTY module (externalized by electron-vite, not bundled into out/)
+  - node_modules/node-pty/**
 
 # Workspace package is bundled into out/ by electron-vite; no asarUnpack of node_modules required for shared.
 asar: true
 
-# node-pty is a native module (pty.node + conpty.dll / OpenConsole.exe) — it
-# must live outside the asar archive to load and spawn shells.
-asarUnpack:
-  - "**/node_modules/node-pty/**"
+# node-pty ships prebuilt binaries (build/Release with conpty.dll etc.) and is
+# EXTERNAL to asar (externalizeDepsPlugin keeps it in app node_modules).
+# electron-builder's @electron/rebuild would invoke node-gyp and fail without
+# a C++ toolchain — skip rebuilding entirely; the prebuilds work as-is.
+# (No asarUnpack needed: real files live outside asar already.)
+buildDependenciesFromSource: false
+npmRebuild: false
 
 # Ship Claude Code CLI + CPA outside asar so they can be spawned.
 # Populate vendor/ via: node scripts/prepare-vendor.mjs (from monorepo root).
