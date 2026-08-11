@@ -7,6 +7,7 @@ import {
   getClaudeExecutablePath,
   getCpaUserConfigPath,
   materializeCpaConfig,
+  repairCpaManagementConfig,
   writeCpaConfigWithApiKey,
   resolveEffectiveCpaPaths,
   type RuntimePathEnv,
@@ -70,15 +71,33 @@ describe("runtime-paths", () => {
     expect(fs.readFileSync(dest, "utf8")).toBe("keep\n");
   });
 
-  it("applyCpaConfigDefaults forces localhost and auth-dir", () => {
+  it("applyCpaConfigDefaults forces localhost, panel, and secret-key", () => {
     const out = applyCpaConfigDefaults(
-      'host: ""\nport: 1\nauth-dir: "x"\napi-keys:\n  - a\n',
+      'host: ""\nport: 1\nauth-dir: "x"\nremote-management:\n  allow-remote: false\n  secret-key: ""\n  disable-control-panel: true\napi-keys:\n  - a\n',
       { port: 8317, apiKey: "k" },
     );
     expect(out).toMatch(/host:\s*"127\.0\.0\.1"/);
     expect(out).toMatch(/port:\s*8317/);
     expect(out).toContain("api-keys:");
     expect(out).toContain("- k");
+    expect(out).toMatch(/disable-control-panel:\s*false/);
+    expect(out).toMatch(/secret-key:\s*"k"/);
+  });
+
+  it("repairCpaManagementConfig enables panel and secret-key on old configs", () => {
+    const root = tmp();
+    const cfg = path.join(root, "config.yaml");
+    fs.writeFileSync(
+      cfg,
+      'host: "127.0.0.1"\nport: 8317\nremote-management:\n  allow-remote: false\n  secret-key: ""\n  disable-control-panel: true\napi-keys:\n  - tok123\n',
+      "utf8",
+    );
+    expect(repairCpaManagementConfig(cfg, { apiKey: "tok123" })).toBe(true);
+    const body = fs.readFileSync(cfg, "utf8");
+    expect(body).toMatch(/disable-control-panel:\s*false/);
+    expect(body).toMatch(/secret-key:\s*"tok123"/);
+    // Second pass is a no-op when already healthy.
+    expect(repairCpaManagementConfig(cfg, { apiKey: "tok123" })).toBe(false);
   });
 
   it("resolveEffectiveCpaPaths prefers bundled over legacy defaults", () => {

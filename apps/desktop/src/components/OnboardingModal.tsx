@@ -116,8 +116,13 @@ export function OnboardingModal({ open }: { open: boolean }) {
               </p>
               <ul className="onboarding-list">
                 <li>
-                  只需配置一个<strong>网关 Token</strong>（本机加密保存，对应
-                  CPA 的 api-keys）
+                  只需配置一个<strong>网关 Token</strong>（本机加密保存；同时用于
+                  CPA 的 api-keys 与管理页登录）
+                </li>
+                <li>
+                  管理页地址：{" "}
+                  <code>http://127.0.0.1:8317/management.html</code>
+                  （与网关 Token 相同密码）
                 </li>
                 <li>
                   上游模型账号（Kimi 等）仍使用{" "}

@@ -267,6 +267,18 @@ export function applyCpaConfigDefaults(
   } else {
     out = `auth-dir: "${authDir}"\n` + out;
   }
+  // Management panel must be enabled for /management.html.
+  if (/disable-control-panel:\s*/m.test(out)) {
+    out = out.replace(
+      /disable-control-panel:\s*.*$/m,
+      "disable-control-panel: false",
+    );
+  } else if (/^remote-management:\s*$/m.test(out) || /^remote-management:/m.test(out)) {
+    out = out.replace(
+      /^(remote-management:\s*\n)/m,
+      "$1  disable-control-panel: false\n",
+    );
+  }
   if (opts.apiKey) {
     // Replace first api-keys list item or inject a minimal block.
     if (/^api-keys:\s*$/m.test(out) || /^api-keys:/m.test(out)) {
@@ -275,8 +287,65 @@ export function applyCpaConfigDefaults(
         `api-keys:\n  - ${opts.apiKey}\n`,
       );
     }
+    // CPA disables all /v0/management routes when secret-key is empty.
+    // Use the same gateway token so one password works for API + panel login.
+    if (/secret-key:\s*/m.test(out)) {
+      out = out.replace(
+        /secret-key:\s*.*$/m,
+        `secret-key: "${opts.apiKey}"`,
+      );
+    } else if (/^remote-management:/m.test(out)) {
+      out = out.replace(
+        /^(remote-management:\s*\n)/m,
+        `$1  secret-key: "${opts.apiKey}"\n`,
+      );
+    }
   }
   return out;
+}
+
+/**
+ * Repair an existing userData CPA config so the management panel works:
+ * - enable control panel
+ * - ensure secret-key is non-empty (use apiKey when provided)
+ * Returns true if the file was modified.
+ */
+export function repairCpaManagementConfig(
+  configPath: string,
+  opts?: { apiKey?: string | null; port?: number },
+): boolean {
+  if (!configPath || !fs.existsSync(configPath)) return false;
+  let body: string;
+  try {
+    body = fs.readFileSync(configPath, "utf8");
+  } catch {
+    return false;
+  }
+  const needsPanel =
+    /disable-control-panel:\s*true/i.test(body) ||
+    !/disable-control-panel:\s*/i.test(body);
+  const secretEmpty =
+    /secret-key:\s*(""|''|)\s*$/m.test(body) ||
+    /secret-key:\s*$/m.test(body) ||
+    !/secret-key:\s*/m.test(body);
+  if (!needsPanel && !secretEmpty) return false;
+
+  const next = applyCpaConfigDefaults(body, {
+    port: opts?.port ?? 8317,
+    apiKey: opts?.apiKey ?? extractFirstApiKey(body) ?? "change-me",
+  });
+  if (next === body) return false;
+  try {
+    fs.writeFileSync(configPath, next, "utf8");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function extractFirstApiKey(yaml: string): string | null {
+  const m = yaml.match(/api-keys:\s*\n\s*-\s*["']?([^\s"'#]+)/);
+  return m?.[1] ?? null;
 }
 
 export function defaultCpaConfigYaml(): string {
@@ -287,8 +356,8 @@ tls:
   enable: false
 remote-management:
   allow-remote: false
-  secret-key: ""
-  disable-control-panel: true
+  secret-key: "change-me"
+  disable-control-panel: false
 auth-dir: "~/.cli-proxy-api"
 api-keys:
   - change-me

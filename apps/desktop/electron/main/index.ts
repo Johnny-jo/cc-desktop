@@ -31,6 +31,7 @@ import { createContextCompressor } from "./context-compressor";
 import { registerIpcHandlers } from "./ipc-handlers";
 import {
   getClaudeExecutablePath,
+  repairCpaManagementConfig,
   resolveEffectiveCpaPaths,
   type RuntimePathEnv,
 } from "./runtime-paths";
@@ -150,6 +151,13 @@ function bootstrap() {
       cpaConfigPath: cpaPaths.cpaConfigPath,
     });
   }
+  // Older installs used disable-control-panel: true and empty secret-key,
+  // which makes /management.html fail with a network/404 error even though
+  // GET / still works. Repair in place when we control the userData config.
+  repairCpaManagementConfig(cpaPaths.cpaConfigPath, {
+    apiKey: settings.getToken(),
+    port: current.cpaPort,
+  });
 
   const archive = new SessionArchive(userDataDir);
 

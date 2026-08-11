@@ -11,9 +11,13 @@ tls:
   key: ""
 
 remote-management:
+  # Localhost-only management UI (/management.html).
+  # secret-key is required — empty disables the whole Management API (404).
+  # First-run / onboarding fills this with the same gateway token as api-keys
+  # so one password works for API + control panel login.
   allow-remote: false
-  secret-key: ""
-  disable-control-panel: true
+  secret-key: "change-me"
+  disable-control-panel: false
 
 # Reuse the same credential store as a standalone CPA install when present.
 auth-dir: "~/.cli-proxy-api"
