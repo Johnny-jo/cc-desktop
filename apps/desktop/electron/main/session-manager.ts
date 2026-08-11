@@ -540,10 +540,21 @@ export class SessionManager {
       env,
       tools: SESSION_TOOLS,
       // Auto-approve read-only / harmless tools so they skip the permission
-      // modal. TodoWrite is pure in-memory agent state (no file side effects),
-      // matching Claude Code which never prompts for it. PermissionBroker adds
-      // a second direct-allow layer for these.
-      allowedTools: ["Read", "Glob", "Grep", "WebFetch", "WebSearch", "TodoWrite"],
+      // modal. Task/Todo tools are pure in-memory agent state (no file side
+      // effects), matching Claude Code which never prompts for them.
+      // PermissionBroker adds a second direct-allow layer for these.
+      allowedTools: [
+        "Read",
+        "Glob",
+        "Grep",
+        "WebFetch",
+        "WebSearch",
+        "TodoWrite",
+        "TaskCreate",
+        "TaskUpdate",
+        "TaskList",
+        "TaskGet",
+      ],
       // Load CLAUDE.md hierarchy (user → project → local) into the system
       // prompt, matching Claude Code. Must include 'project' for project CLAUDE.md.
       settingSources: ["user", "project", "local"],

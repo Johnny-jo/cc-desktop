@@ -341,4 +341,57 @@ describe("normalizeSdkEvent", () => {
       tool: { id: "st1", isSubagent: true },
     });
   });
+
+  it("maps TaskCreate to a single pending todo with subject summary", () => {
+    const msg = {
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "tc1",
+            name: "TaskCreate",
+            input: { subject: "Design schema", description: "...", activeForm: "Designing" },
+          },
+        ],
+      },
+    };
+    const events = normalizeSdkEvent(msg, sessionId);
+    expect(events[0]).toMatchObject({
+      type: "tool_start",
+      tool: {
+        name: "TaskCreate",
+        summary: "Design schema",
+        todos: [{ content: "Design schema", status: "pending", activeForm: "Designing" }],
+      },
+    });
+  });
+
+  it("extracts todos from TaskList tool_result JSON", () => {
+    const payload = JSON.stringify({
+      tasks: [
+        { id: "1", subject: "Design schema", status: "completed", blockedBy: [] },
+        { id: "2", subject: "Run tests", status: "in_progress", blockedBy: ["1"] },
+      ],
+    });
+    const msg = {
+      type: "user",
+      message: {
+        content: [
+          { type: "tool_result", tool_use_id: "tl1", name: "TaskList", content: payload },
+        ],
+      },
+    };
+    const events = normalizeSdkEvent(msg, sessionId);
+    expect(events[0]).toMatchObject({
+      type: "tool_end",
+      tool: {
+        name: "TaskList",
+        todos: [
+          { content: "Design schema", status: "completed" },
+          { content: "Run tests", status: "in_progress" },
+        ],
+      },
+    });
+  });
 });

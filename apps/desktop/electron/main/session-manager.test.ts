@@ -201,6 +201,10 @@ describe("SessionManager", () => {
       "WebFetch",
       "WebSearch",
       "TodoWrite",
+      "TaskCreate",
+      "TaskUpdate",
+      "TaskList",
+      "TaskGet",
     ]);
     // CLAUDE.md hierarchy auto-loaded into the system prompt
     expect(opts.settingSources).toEqual(["user", "project", "local"]);

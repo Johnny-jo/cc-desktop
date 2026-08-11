@@ -26,6 +26,13 @@ function summarizeTool(name: string, input: UnknownRecord): string {
   if (name === "TodoWrite") {
     return todoSummary(extractTodos(input));
   }
+  if (name === "TaskCreate") {
+    // Single-task creation: show its subject; full card renders from todos.
+    return String(input.subject ?? input.description ?? "TaskCreate").slice(0, 120);
+  }
+  if (name === "TaskUpdate") {
+    return `Update #${String(input.taskId ?? "")} → ${String(input.status ?? "")}`.trim();
+  }
   if (name === "Task" || name === "Agent") {
     // Subagent launch: show the task description (or agent type) as the summary.
     return String(input.description ?? input.subagent_type ?? input.prompt ?? name).slice(
@@ -61,6 +68,60 @@ function todoSummary(todos: TodoItem[]): string {
   if (!todos.length) return "TodoWrite";
   const done = todos.filter((t) => t.status === "completed").length;
   return `${done}/${todos.length} completed`;
+}
+
+/** TaskCreate input → a single pending todo (subject + activeForm). */
+function taskCreateTodo(input: UnknownRecord): TodoItem[] {
+  const content = String(input.subject ?? input.description ?? "");
+  if (!content) return [];
+  return [
+    {
+      content,
+      status: "pending",
+      ...(typeof input.activeForm === "string"
+        ? { activeForm: input.activeForm }
+        : {}),
+    },
+  ];
+}
+
+/** TaskList tool_result content → todos (id, subject, status). */
+function taskListTodos(content: unknown): TodoItem[] {
+  // content may be a JSON string or a parsed object/array depending on SDK framing.
+  let parsed: unknown = content;
+  if (typeof content === "string") {
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+      return [];
+    }
+  }
+  if (Array.isArray(content)) {
+    // content blocks: find a text block holding JSON
+    for (const c of content) {
+      if (isRecord(c) && typeof c.text === "string") {
+        try {
+          parsed = JSON.parse(c.text);
+          break;
+        } catch {
+          // keep looking
+        }
+      }
+    }
+  }
+  const tasks = isRecord(parsed) ? asArray(parsed.tasks) : asArray(parsed);
+  const out: TodoItem[] = [];
+  for (const t of tasks) {
+    if (!isRecord(t)) continue;
+    const content = String(t.subject ?? t.content ?? "");
+    if (!content) continue;
+    const status =
+      t.status === "completed" || t.status === "in_progress"
+        ? t.status
+        : "pending";
+    out.push({ content, status });
+  }
+  return out;
 }
 
 /** Skill / long system-injected bodies should not dump open in the chat. */
@@ -209,6 +270,7 @@ function normalizeAssistant(
         status: "running",
         ...(isSub ? { isSubagent: true } : {}),
         ...(name === "TodoWrite" ? { todos: extractTodos(input) } : {}),
+        ...(name === "TaskCreate" ? { todos: taskCreateTodo(input) } : {}),
       };
       out.push({ type: "tool_start", sessionId, tool });
     }
@@ -289,6 +351,7 @@ function normalizeUser(
         status: isError ? "error" : "done",
         resultPreview: preview,
         ...(isSub ? { isSubagent: true } : {}),
+        ...(name === "TaskList" ? { todos: taskListTodos(block.content) } : {}),
       };
       out.push({ type: "tool_end", sessionId, tool });
     }

@@ -44,7 +44,12 @@ const READ_ONLY_TOOLS = new Set([
   "Grep",
   "WebFetch",
   "WebSearch",
+  // In-memory task/todo state — no file side effects, like TodoWrite.
   "TodoWrite",
+  "TaskCreate",
+  "TaskUpdate",
+  "TaskList",
+  "TaskGet",
 ]);
 
 function extractMatchInput(

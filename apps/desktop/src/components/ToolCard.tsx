@@ -25,7 +25,11 @@ function TodoList({ todos }: { todos: TodoItem[] }) {
 export function ToolCard({ tool }: { tool: ToolCardState }) {
   // Collapsed by default — user expands to inspect details.
   const [open, setOpen] = useState(false);
-  const isTodo = tool.name === "TodoWrite" && Boolean(tool.todos?.length);
+  const isTodo =
+    (tool.name === "TodoWrite" ||
+      tool.name === "TaskCreate" ||
+      tool.name === "TaskList") &&
+    Boolean(tool.todos?.length);
   const isTask = tool.name === "Task" || tool.name === "Agent";
   const hasBody = Boolean(
     tool.summary || tool.resultPreview || isTodo || (isTask && tool.summary),
