@@ -53,6 +53,16 @@ const desktop = {
       commands: import("@claude-desktop/shared").SlashCommandItem[];
     }>,
 
+  getSessionMcpStatus: (sessionId: string) =>
+    ipcRenderer.invoke(IPC.sessionMcpStatus, { sessionId }) as Promise<{
+      statuses: Array<{
+        name: string;
+        status: string;
+        error?: string;
+        toolCount?: number;
+      }> | null;
+    }>,
+
   compressSession: (
     sessionId: string,
     items?: ChatItem[],

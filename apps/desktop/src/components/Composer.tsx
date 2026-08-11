@@ -5,6 +5,7 @@ import { getDesktop } from "../lib/desktop-api";
 import {
   abortActiveSession,
   compressActiveSession,
+  getState,
   newChat,
   sendMessage,
   setModel,
@@ -63,6 +64,51 @@ function validateAttachment(a: Attachment): string | null {
     return `${a.name} is not a supported text/image file`;
   }
   return null;
+}
+
+/** Build the /mcp help note: configured servers + live status when a session is running. */
+async function buildMcpNote(): Promise<string> {
+  const desktop = getDesktopOrNull();
+  const state = getState();
+  const configured = state.settings?.mcpServers ?? {};
+  const names = Object.keys(configured);
+  if (names.length === 0) {
+    return "No MCP servers configured.\nAdd them in Settings → MCP servers.";
+  }
+
+  const lines: string[] = [];
+  let live: Array<{ name: string; status: string; error?: string; toolCount?: number }> | null =
+    null;
+  const sessionId = state.activeSessionId;
+  if (desktop && sessionId) {
+    try {
+      const res = await desktop.getSessionMcpStatus(sessionId);
+      live = res?.statuses ?? null;
+    } catch {
+      live = null;
+    }
+  }
+  const liveByName = new Map((live ?? []).map((s) => [s.name, s]));
+
+  for (const name of names) {
+    const cfg = configured[name];
+    const target =
+      cfg && (cfg.type === "sse" || cfg.type === "http")
+        ? cfg.url
+        : (cfg as { command?: string } | undefined)?.command ?? "";
+    const type = cfg?.type ?? "stdio";
+    const liveInfo = liveByName.get(name);
+    const statusPart = liveInfo
+      ? ` — ${liveInfo.status}${liveInfo.toolCount != null ? `, ${liveInfo.toolCount} tools` : ""}${liveInfo.error ? ` (${liveInfo.error})` : ""}`
+      : "";
+    lines.push(`${name} [${type}] ${target}${statusPart}`);
+  }
+  if (live === null && sessionId) {
+    lines.push("", "(live status unavailable — session may not be running)");
+  } else if (!sessionId) {
+    lines.push("", "(start a session to see live connection status)");
+  }
+  return lines.join("\n");
 }
 
 export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
@@ -323,6 +369,17 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
           );
           setText("");
           return;
+        case "mcp": {
+          setText("");
+          setHelpNote("Loading MCP servers…");
+          try {
+            const note = await buildMcpNote();
+            setHelpNote(note);
+          } catch (err) {
+            setHelpNote(err instanceof Error ? err.message : String(err));
+          }
+          return;
+        }
         default: {
           // SDK skill / unknown: send as prompt (agent expands slash commands)
           const skill = allSlashCommands.find((c) => c.name === name);

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { AppSettings, PermissionMode, PublicSettings } from "@claude-desktop/shared";
+import { sanitizeMcpServers } from "@claude-desktop/shared";
 
 export type SettingsStoreDeps = {
   userDataDir: string;
@@ -25,6 +26,7 @@ const DEFAULTS: AppSettings = {
   shutdownCpaOnQuit: false,
   defaultContextLimit: 200_000,
   modelContextLimits: {},
+  mcpServers: {},
 };
 
 type StoredFile = Partial<AppSettings> & {
@@ -58,6 +60,7 @@ export class SettingsStore {
       ...this.settings,
       models: [...this.settings.models],
       modelContextLimits: { ...this.settings.modelContextLimits },
+      mcpServers: { ...this.settings.mcpServers },
     };
   }
 
@@ -80,6 +83,9 @@ export class SettingsStore {
     }
     if (publicPatch.modelContextLimits) {
       publicPatch.modelContextLimits = { ...publicPatch.modelContextLimits };
+    }
+    if (publicPatch.mcpServers) {
+      publicPatch.mcpServers = { ...publicPatch.mcpServers };
     }
     if (publicPatch.permissionMode !== undefined) {
       publicPatch.permissionMode = publicPatch.permissionMode as PermissionMode;
@@ -141,6 +147,7 @@ export class SettingsStore {
         models: rest.models ? [...rest.models] : [...DEFAULTS.models],
         defaultContextLimit,
         modelContextLimits: limits,
+        mcpServers: sanitizeMcpServers(rest.mcpServers),
       };
       this.tokenEnc = tokenEnc;
       if (tokenEnc) {

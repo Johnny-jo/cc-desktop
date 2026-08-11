@@ -47,4 +47,27 @@ describe("SettingsStore", () => {
     expect(again.get().modelContextLimits["deepseek-v4-flash"]).toBe(64_000);
     expect(again.getPublic().defaultContextLimit).toBe(256_000);
   });
+
+  it("persists and reloads MCP servers, dropping invalid entries", () => {
+    const crypto = {
+      encrypt: (s: string) => Buffer.from(s, "utf8").toString("base64"),
+      decrypt: (s: string) => Buffer.from(s, "base64").toString("utf8"),
+    };
+    const store = new SettingsStore({ userDataDir: dir, ...crypto });
+    expect(store.get().mcpServers).toEqual({});
+
+    store.update({
+      mcpServers: {
+        fs: { type: "stdio", command: "node", args: ["srv.js"], env: { KEY: "v" } },
+        api: { type: "http", url: "https://x.test/mcp", headers: { Auth: "Bearer t" } },
+      },
+    });
+
+    const again = new SettingsStore({ userDataDir: dir, ...crypto });
+    const loaded = again.get().mcpServers ?? {};
+    expect(loaded.fs).toMatchObject({ command: "node", args: ["srv.js"], env: { KEY: "v" } });
+    expect(loaded.api).toMatchObject({ url: "https://x.test/mcp" });
+    // public view exposes config (no secrets-redaction layer for env/headers in v1)
+    expect(Object.keys(again.getPublic().mcpServers ?? {})).toEqual(["fs", "api"]);
+  });
 });

@@ -197,6 +197,8 @@ export type AppSettings = {
   defaultContextLimit: number;
   /** Per-model id overrides for context window */
   modelContextLimits: Record<string, number>;
+  /** Configured MCP servers (JSON-safe), passed to the SDK on session start */
+  mcpServers?: import("./mcp-servers").McpServersMap;
 };
 
 export type PublicSettings = Omit<AppSettings, never> & {

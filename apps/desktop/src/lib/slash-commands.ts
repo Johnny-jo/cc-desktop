@@ -38,6 +38,10 @@ export const APP_SLASH_COMMANDS: SlashCommandItem[] = [
     name: "compact",
     description: "Compress conversation history to reduce context usage",
   },
+  {
+    name: "mcp",
+    description: "List configured MCP servers (and live status if a session is running)",
+  },
 ];
 
 /** Merge app commands with SDK skills (app names win on conflict). */

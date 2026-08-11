@@ -44,6 +44,8 @@ export const IPC = {
   modelSet: "model:set",
   /** SDK skills / slash commands for a live session */
   sessionSlashCommands: "session:slash-commands",
+  /** Live MCP server connection status for a running session */
+  sessionMcpStatus: "session:mcp-status",
   // main → renderer (webContents.send)
   sessionEvent: "session:event",
   permissionRequest: "permission:request",
@@ -145,6 +147,17 @@ export type IpcInvokeMap = {
   [IPC.sessionSlashCommands]: {
     args: [{ sessionId: string }];
     result: { commands: SlashCommandItem[] };
+  };
+  [IPC.sessionMcpStatus]: {
+    args: [{ sessionId: string }];
+    result: {
+      statuses: Array<{
+        name: string;
+        status: string;
+        error?: string;
+        toolCount?: number;
+      }> | null;
+    };
   };
 };
 

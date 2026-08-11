@@ -1,10 +1,16 @@
 import React, { useEffect, useState } from "react";
-import type { AppSettings, ModelInfo, PublicSettings } from "@claude-desktop/shared";
+import type {
+  AppSettings,
+  McpServersMap,
+  ModelInfo,
+  PublicSettings,
+} from "@claude-desktop/shared";
 import {
   CONTEXT_LIMIT_MAX,
   CONTEXT_LIMIT_MIN,
   buildModelContextLimitsPatch,
   resolveContextLimit,
+  validateMcpServers,
 } from "@claude-desktop/shared";
 import { getDesktop } from "../lib/desktop-api";
 import {
@@ -19,6 +25,22 @@ export type SettingsDrawerProps = {
   onClose: () => void;
 };
 
+/** Editable draft of one MCP server row (strings for free typing). */
+type McpServerDraft = {
+  /** stable local key for React list rendering */
+  id: string;
+  name: string;
+  type: "stdio" | "sse" | "http";
+  command: string;
+  /** space-separated args (stdio) */
+  argsText: string;
+  url: string;
+  /** one KEY=VALUE per line (stdio env) */
+  envText: string;
+  /** one KEY=VALUE per line (sse/http headers) */
+  headersText: string;
+};
+
 type FormState = {
   cpaExePath: string;
   cpaConfigPath: string;
@@ -30,7 +52,95 @@ type FormState = {
   defaultContextLimit: string;
   /** modelId → override 字符串；缺省或 "" = auto */
   modelContextLimitDraft: Record<string, string>;
+  mcpServers: McpServerDraft[];
 };
+
+let mcpDraftSeq = 0;
+function newMcpDraftId(): string {
+  mcpDraftSeq += 1;
+  return `mcp-${Date.now()}-${mcpDraftSeq}`;
+}
+
+function kvRecordToText(rec?: Record<string, string>): string {
+  if (!rec) return "";
+  return Object.entries(rec)
+    .map(([k, v]) => `${k}=${v}`)
+    .join("\n");
+}
+
+function kvTextToRecord(text: string): Record<string, string> | undefined {
+  const out: Record<string, string> = {};
+  for (const line of text.split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    const eq = t.indexOf("=");
+    if (eq <= 0) continue;
+    out[t.slice(0, eq).trim()] = t.slice(eq + 1).trim();
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+function mcpServersToDrafts(map?: McpServersMap): McpServerDraft[] {
+  return Object.entries(map ?? {}).map(([name, cfg]) => {
+    if (cfg.type === "sse" || cfg.type === "http") {
+      return {
+        id: newMcpDraftId(),
+        name,
+        type: cfg.type,
+        command: "",
+        argsText: "",
+        url: cfg.url ?? "",
+        envText: "",
+        headersText: kvRecordToText(cfg.headers),
+      };
+    }
+    return {
+      id: newMcpDraftId(),
+      name,
+      type: "stdio",
+      command: cfg.command ?? "",
+      argsText: (cfg.args ?? []).join(" "),
+      url: "",
+      envText: kvRecordToText(cfg.env),
+      headersText: "",
+    };
+  });
+}
+
+/** Convert draft rows to a validated McpServersMap, or return an error. */
+function buildMcpServersPatch(
+  drafts: McpServerDraft[],
+): { ok: true; mcpServers: McpServersMap } | { ok: false; error: string } {
+  const map: McpServersMap = {};
+  const seen = new Set<string>();
+  for (const d of drafts) {
+    const name = d.name.trim();
+    if (!name) continue; // skip empty rows
+    if (seen.has(name)) return { ok: false, error: `Duplicate MCP server name "${name}"` };
+    seen.add(name);
+    if (d.type === "stdio") {
+      map[name] = {
+        type: "stdio",
+        command: d.command.trim(),
+        ...(d.argsText.trim()
+          ? { args: d.argsText.trim().split(/\s+/) }
+          : {}),
+        ...(kvTextToRecord(d.envText) ? { env: kvTextToRecord(d.envText) } : {}),
+      };
+    } else {
+      map[name] = {
+        type: d.type,
+        url: d.url.trim(),
+        ...(kvTextToRecord(d.headersText)
+          ? { headers: kvTextToRecord(d.headersText) }
+          : {}),
+      };
+    }
+  }
+  const validated = validateMcpServers(map);
+  if (!validated.ok) return { ok: false, error: validated.error };
+  return { ok: true, mcpServers: map };
+}
 
 function fromSettings(s: PublicSettings | null): FormState {
   const draft: Record<string, string> = {};
@@ -47,6 +157,7 @@ function fromSettings(s: PublicSettings | null): FormState {
     shutdownCpaOnQuit: s?.shutdownCpaOnQuit ?? false,
     defaultContextLimit: String(s?.defaultContextLimit ?? 200_000),
     modelContextLimitDraft: draft,
+    mcpServers: mcpServersToDrafts(s?.mcpServers),
   };
 }
 
@@ -190,6 +301,143 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
     );
   }
 
+  function updateMcpRow(id: string, patch: Partial<McpServerDraft>) {
+    setForm((prev) => ({
+      ...prev,
+      mcpServers: prev.mcpServers.map((r) =>
+        r.id === id ? { ...r, ...patch } : r,
+      ),
+    }));
+  }
+
+  function addMcpRow() {
+    setForm((prev) => ({
+      ...prev,
+      mcpServers: [
+        ...prev.mcpServers,
+        {
+          id: newMcpDraftId(),
+          name: "",
+          type: "stdio",
+          command: "",
+          argsText: "",
+          url: "",
+          envText: "",
+          headersText: "",
+        },
+      ],
+    }));
+  }
+
+  function removeMcpRow(id: string) {
+    setForm((prev) => ({
+      ...prev,
+      mcpServers: prev.mcpServers.filter((r) => r.id !== id),
+    }));
+  }
+
+  function renderMcpServers() {
+    return (
+      <div className="settings-mcp">
+        <div className="settings-context-limits-title">MCP servers</div>
+        <p className="settings-hint">
+          stdio runs a local command; sse/http connect to a URL. Env / headers:
+          one KEY=VALUE per line. Applies to new sessions.
+        </p>
+        {form.mcpServers.length === 0 ? (
+          <p className="settings-hint">No MCP servers configured.</p>
+        ) : (
+          form.mcpServers.map((row) => (
+            <div key={row.id} className="settings-mcp-row">
+              <div className="settings-mcp-row-head">
+                <input
+                  className="settings-mcp-name"
+                  placeholder="name"
+                  value={row.name}
+                  spellCheck={false}
+                  onChange={(e) => updateMcpRow(row.id, { name: e.target.value })}
+                />
+                <select
+                  className="select settings-mcp-type"
+                  value={row.type}
+                  onChange={(e) =>
+                    updateMcpRow(row.id, {
+                      type: e.target.value as McpServerDraft["type"],
+                    })
+                  }
+                >
+                  <option value="stdio">stdio</option>
+                  <option value="sse">sse</option>
+                  <option value="http">http</option>
+                </select>
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm settings-mcp-remove"
+                  title="Remove server"
+                  onClick={() => removeMcpRow(row.id)}
+                >
+                  ×
+                </button>
+              </div>
+              {row.type === "stdio" ? (
+                <>
+                  <input
+                    placeholder="command (e.g. node)"
+                    value={row.command}
+                    spellCheck={false}
+                    onChange={(e) =>
+                      updateMcpRow(row.id, { command: e.target.value })
+                    }
+                  />
+                  <input
+                    placeholder="args (space-separated)"
+                    value={row.argsText}
+                    spellCheck={false}
+                    onChange={(e) =>
+                      updateMcpRow(row.id, { argsText: e.target.value })
+                    }
+                  />
+                  <textarea
+                    rows={2}
+                    placeholder={"env (KEY=VALUE per line, optional)"}
+                    value={row.envText}
+                    spellCheck={false}
+                    onChange={(e) =>
+                      updateMcpRow(row.id, { envText: e.target.value })
+                    }
+                  />
+                </>
+              ) : (
+                <>
+                  <input
+                    placeholder="url (https://…)"
+                    value={row.url}
+                    spellCheck={false}
+                    onChange={(e) => updateMcpRow(row.id, { url: e.target.value })}
+                  />
+                  <textarea
+                    rows={2}
+                    placeholder={"headers (KEY=VALUE per line, optional)"}
+                    value={row.headersText}
+                    spellCheck={false}
+                    onChange={(e) =>
+                      updateMcpRow(row.id, { headersText: e.target.value })
+                    }
+                  />
+                </>
+              )}
+            </div>
+          ))
+        )}
+        <div className="settings-inline-actions">
+          <button type="button" className="btn btn-sm" onClick={addMcpRow}>
+            + Add MCP server
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   const onSave = async () => {
     setLocalError(null);
     setSavedNote(null);
@@ -233,6 +481,12 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
       return;
     }
 
+    const patchMcp = buildMcpServersPatch(form.mcpServers);
+    if (!patchMcp.ok) {
+      setLocalError(patchMcp.error);
+      return;
+    }
+
     const patch: Partial<AppSettings> & { token?: string } = {
       cpaExePath: form.cpaExePath.trim(),
       cpaConfigPath: form.cpaConfigPath.trim(),
@@ -242,6 +496,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
       shutdownCpaOnQuit: form.shutdownCpaOnQuit,
       defaultContextLimit: Math.floor(defaultContextLimit),
       modelContextLimits: patchLimits.modelContextLimits,
+      mcpServers: patchMcp.mcpServers,
     };
     if (form.token.trim()) {
       patch.token = form.token.trim();
@@ -387,6 +642,8 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
           </p>
 
           {renderContextLimitsTable()}
+
+          {renderMcpServers()}
 
           <label className="settings-check">
             <input

@@ -67,6 +67,15 @@ type QueryControl = {
   >;
   interrupt?: () => Promise<unknown>;
   close?: () => void;
+  /** SDK control request: live MCP server connection status + tool list */
+  mcpServerStatus?: () => Promise<
+    Array<{
+      name: string;
+      status: "connected" | "failed" | "needs-auth" | "pending" | "disabled";
+      error?: string;
+      tools?: Array<{ name: string; description?: string }>;
+    }>
+  >;
 };
 
 type SessionEntry = {
@@ -248,6 +257,33 @@ export class SessionManager {
   /** SDK skills / slash commands cached for a session (empty if none yet). */
   getSlashCommands(sessionId: string): SlashCommandItem[] {
     return [...(this.sessions.get(sessionId)?.slashCommands ?? [])];
+  }
+
+  /**
+   * Live MCP server status for a running session (connection state + tools).
+   * Returns null when the session has no live query or the SDK doesn't support it.
+   */
+  async getMcpStatus(sessionId: string): Promise<
+    Array<{
+      name: string;
+      status: string;
+      error?: string;
+      toolCount?: number;
+    }> | null
+  > {
+    const entry = this.sessions.get(sessionId);
+    if (!entry?.query?.mcpServerStatus) return null;
+    try {
+      const statuses = await entry.query.mcpServerStatus();
+      return (statuses ?? []).map((s) => ({
+        name: s.name,
+        status: s.status,
+        ...(s.error ? { error: s.error } : {}),
+        ...(Array.isArray(s.tools) ? { toolCount: s.tools.length } : {}),
+      }));
+    } catch {
+      return null;
+    }
   }
 
   abort(sessionId: string): void {
@@ -558,6 +594,12 @@ export class SessionManager {
       // Load CLAUDE.md hierarchy (user → project → local) into the system
       // prompt, matching Claude Code. Must include 'project' for project CLAUDE.md.
       settingSources: ["user", "project", "local"],
+      // Configured MCP servers (stdio/sse/http). Passed through as-is; the
+      // config shape matches the SDK. Kept out of `env` so the CPA token is
+      // never leaked into MCP server subprocesses.
+      ...(Object.keys(settings.mcpServers ?? {}).length
+        ? { mcpServers: settings.mcpServers }
+        : {}),
       abortController,
       canUseTool: async (
         name: string,

@@ -183,6 +183,14 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
   );
 
   ipcMain.handle(
+    IPC.sessionMcpStatus,
+    async (_e, { sessionId }: { sessionId: string }) => {
+      const statuses = await ctx.sessions.getMcpStatus(sessionId);
+      return { statuses };
+    },
+  );
+
+  ipcMain.handle(
     IPC.sessionCompress,
     async (
       _e,
