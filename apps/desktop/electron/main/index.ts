@@ -1,6 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
-import { app, BrowserWindow, Notification, safeStorage } from "electron";
+import {
+  app,
+  BrowserWindow,
+  Menu,
+  nativeTheme,
+  Notification,
+  safeStorage,
+} from "electron";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { IPC } from "@claude-desktop/shared";
 import type {
@@ -22,6 +29,9 @@ import { SessionArchive } from "./session-archive";
 import { SessionManager, type QueryFn } from "./session-manager";
 import { createContextCompressor } from "./context-compressor";
 import { registerIpcHandlers } from "./ipc-handlers";
+
+/** Match the renderer charcoal theme (`--bg-app`). */
+const APP_BG = "#141414";
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -68,15 +78,24 @@ function createTokenCrypto(): {
 }
 
 function createWindow() {
+  // Dark chrome to match the in-app charcoal UI (title bar / window frame).
+  nativeTheme.themeSource = "dark";
+
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
+    backgroundColor: APP_BG,
+    // No File/Edit/View menu bar — this is a desktop chat app, not an editor.
+    autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, "../preload/index.js"),
       contextIsolation: true,
       nodeIntegration: false,
     },
   });
+
+  // Fully remove the default application menu (File / Edit / View / …).
+  Menu.setApplicationMenu(null);
 
   if (process.env.ELECTRON_RENDERER_URL) {
     mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
