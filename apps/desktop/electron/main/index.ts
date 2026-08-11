@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { app, BrowserWindow, safeStorage } from "electron";
+import { app, BrowserWindow, Notification, safeStorage } from "electron";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { IPC } from "@claude-desktop/shared";
 import type {
@@ -163,6 +163,24 @@ function bootstrap() {
     },
     emitSlashCommands: (sessionId: string, commands: SlashCommandItem[]) => {
       sendToRenderer(IPC.sessionSlashCommandsEvent, { sessionId, commands });
+    },
+    onNotification: (n) => {
+      // Desktop notification only when the window isn't focused — when the
+      // user is looking at the app, the in-app UI already shows everything.
+      const win = getMainWindow();
+      if (win && !win.isDestroyed() && win.isFocused()) return;
+      if (!Notification.isSupported()) return;
+      const title = n.title || "Claude Desktop";
+      const body = n.message.length > 200 ? `${n.message.slice(0, 200)}…` : n.message;
+      const notification = new Notification({ title, body });
+      notification.on("click", () => {
+        const w = getMainWindow();
+        if (w && !w.isDestroyed()) {
+          w.show();
+          w.focus();
+        }
+      });
+      notification.show();
     },
   });
 

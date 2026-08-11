@@ -57,7 +57,13 @@ export type SessionManagerDeps = {
   emitSlashCommands?: (sessionId: string, commands: SlashCommandItem[]) => void;
   /** Optional: context compressor for /compact and renderer-driven auto-compress */
   compressor?: ContextCompressor;
-  /**
+  /** Optional: surface SDK Notification hook events (desktop notifications) */
+  onNotification?: (n: {
+    sessionId: string;
+    title?: string;
+    message: string;
+    notificationType?: string;
+  }) => void;  /**
    * Optional: per-operation content snapshots for change rollback.
    * When present, FileChangeEvent payloads carry canRestore flags.
    */
@@ -246,6 +252,7 @@ export class SessionManager {
   private readonly emitSession: SessionManagerDeps["emitSession"];
   private readonly emitDiff: SessionManagerDeps["emitDiff"];
   private readonly emitSlashCommands: SessionManagerDeps["emitSlashCommands"];
+  private readonly onNotification: SessionManagerDeps["onNotification"];
 
   private readonly sessions = new Map<string, SessionEntry>();
   private readonly compressor: ContextCompressor | undefined;
@@ -263,6 +270,7 @@ export class SessionManager {
     this.emitSession = deps.emitSession;
     this.emitDiff = deps.emitDiff;
     this.emitSlashCommands = deps.emitSlashCommands;
+    this.onNotification = deps.onNotification;
     this.compressor = deps.compressor;
     this.snapshots = deps.snapshots;
 
@@ -1075,6 +1083,31 @@ export class SessionManager {
       // Track file checkpoints per user message so the UI can rewind
       // files (Query.rewindFiles) to any user turn.
       enableFileCheckpointing: true,
+      // Surface SDK Notification events (permission needed, idle, task done)
+      // for desktop notifications.
+      hooks: {
+        Notification: [
+          {
+            hooks: [
+              async (input: {
+                message?: string;
+                title?: string;
+                notification_type?: string;
+              }) => {
+                this.onNotification?.({
+                  sessionId,
+                  message: String(input.message ?? ""),
+                  ...(input.title ? { title: String(input.title) } : {}),
+                  ...(input.notification_type
+                    ? { notificationType: String(input.notification_type) }
+                    : {}),
+                });
+                return {};
+              },
+            ],
+          },
+        ],
+      },
       abortController,
       canUseTool: async (
         name: string,
