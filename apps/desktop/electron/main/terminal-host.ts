@@ -1,4 +1,8 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import {
+  spawn,
+  type ChildProcess,
+  type ChildProcessWithoutNullStreams,
+} from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -19,7 +23,7 @@ type Session = {
   child: ChildProcessWithoutNullStreams | null;
   cwd: string;
   /** In-flight one-shot command process */
-  running: ChildProcessWithoutNullStreams | null;
+  running: ChildProcess | null;
 };
 
 /**
@@ -140,7 +144,7 @@ export class TerminalHost {
       ? ["/d", "/s", "/c", command]
       : ["-lc", command];
 
-    let child: ChildProcessWithoutNullStreams;
+    let child: ChildProcess;
     try {
       child = spawn(shell, args, {
         cwd: s.cwd,
@@ -158,12 +162,12 @@ export class TerminalHost {
     }
 
     s.running = child;
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => {
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
       this.emitOutput({ id, stream: "stdout", data: chunk });
     });
-    child.stderr.on("data", (chunk: string) => {
+    child.stderr?.on("data", (chunk: string) => {
       this.emitOutput({ id, stream: "stderr", data: chunk });
     });
     child.on("error", (err) => {
@@ -195,7 +199,7 @@ export class TerminalHost {
     return true;
   }
 
-  private killProc(child: ChildProcessWithoutNullStreams | null): void {
+  private killProc(child: ChildProcess | null): void {
     if (!child || child.killed) return;
     try {
       if (process.platform === "win32" && child.pid) {
