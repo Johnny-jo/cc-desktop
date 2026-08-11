@@ -31,6 +31,22 @@ type PendingEntry = {
 
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 
+/**
+ * Read-only / harmless tools that never require a permission prompt, in any
+ * mode. TodoWrite is pure in-memory agent state (no file side effects),
+ * matching Claude Code. This is a second direct-allow layer on top of the SDK
+ * `allowedTools` list — the broker evaluates tools independently, so without
+ * this these read-only tools would still hit the modal under `default` mode.
+ */
+const READ_ONLY_TOOLS = new Set([
+  "Read",
+  "Glob",
+  "Grep",
+  "WebFetch",
+  "WebSearch",
+  "TodoWrite",
+]);
+
 function extractMatchInput(
   toolName: string,
   input: Record<string, unknown>,
@@ -76,6 +92,13 @@ export class PermissionBroker {
     sessionId: string,
   ): Promise<ToolPermissionResult> {
     const mode = this.getMode();
+
+    // Read-only / harmless tools never prompt, regardless of mode. This also
+    // covers tools running inside a Task subagent, which otherwise would each
+    // hit the modal. (Plan mode below still hard-blocks writes.)
+    if (READ_ONLY_TOOLS.has(toolName)) {
+      return { behavior: "allow", updatedInput: input };
+    }
 
     if (
       mode === "plan" &&

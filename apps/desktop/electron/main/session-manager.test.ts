@@ -191,24 +191,19 @@ describe("SessionManager", () => {
     expect(opts.cwd).toBe("D:/work");
     expect(opts.includePartialMessages).toBe(true);
     expect(opts.permissionMode).toBe("default");
-    // tools = availability; allowedTools = auto-allow (read-only) so canUseTool still gates writes
-    expect(opts.tools).toEqual([
-      "Read",
-      "Edit",
-      "Write",
-      "Bash",
-      "Glob",
-      "Grep",
-      "WebFetch",
-      "WebSearch",
-    ]);
+    // tools = full Claude Code preset (availability); allowedTools = auto-allow
+    // (read-only + TodoWrite) so canUseTool still gates writes
+    expect(opts.tools).toEqual({ type: "preset", preset: "claude_code" });
     expect(opts.allowedTools).toEqual([
       "Read",
       "Glob",
       "Grep",
       "WebFetch",
       "WebSearch",
+      "TodoWrite",
     ]);
+    // CLAUDE.md hierarchy auto-loaded into the system prompt
+    expect(opts.settingSources).toEqual(["user", "project", "local"]);
     expect(opts.env).toMatchObject({
       ANTHROPIC_BASE_URL: "http://127.0.0.1:8317",
     });

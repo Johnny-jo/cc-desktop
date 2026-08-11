@@ -96,20 +96,13 @@ type SessionEntry = {
 };
 
 /**
- * Base tool set for the agent. Prefer `tools` (availability) over bare
- * `allowedTools` (auto-approve). Using bare allowedTools shadows canUseTool
- * and skips the permission modal — see CLAUDE_SDK_CAN_USE_TOOL_SHADOWED.
+ * Base tool set: use the full Claude Code preset so the agent gets Task/Agent,
+ * TodoWrite, NotebookEdit, etc. — not just the original 8-tool whitelist.
+ * Prefer `tools` (availability) over bare `allowedTools` (auto-approve). Using
+ * bare allowedTools shadows canUseTool and skips the permission modal — see
+ * CLAUDE_SDK_CAN_USE_TOOL_SHADOWED.
  */
-const SESSION_TOOLS = [
-  "Read",
-  "Edit",
-  "Write",
-  "Bash",
-  "Glob",
-  "Grep",
-  "WebFetch",
-  "WebSearch",
-] as const;
+const SESSION_TOOLS = { type: "preset", preset: "claude_code" } as const;
 
 function titleFromPrompt(prompt: UserPrompt): string {
   const t = prompt.text.trim().replace(/\s+/g, " ");
@@ -545,8 +538,15 @@ export class SessionManager {
       permissionMode: settings.permissionMode,
       model: settings.defaultModel,
       env,
-      tools: [...SESSION_TOOLS],
-      allowedTools: ["Read", "Glob", "Grep", "WebFetch", "WebSearch"],
+      tools: SESSION_TOOLS,
+      // Auto-approve read-only / harmless tools so they skip the permission
+      // modal. TodoWrite is pure in-memory agent state (no file side effects),
+      // matching Claude Code which never prompts for it. PermissionBroker adds
+      // a second direct-allow layer for these.
+      allowedTools: ["Read", "Glob", "Grep", "WebFetch", "WebSearch", "TodoWrite"],
+      // Load CLAUDE.md hierarchy (user → project → local) into the system
+      // prompt, matching Claude Code. Must include 'project' for project CLAUDE.md.
+      settingSources: ["user", "project", "local"],
       abortController,
       canUseTool: async (
         name: string,

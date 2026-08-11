@@ -125,4 +125,35 @@ describe("PermissionBroker", () => {
     expect(res.behavior).toBe("deny");
     expect(requestFromUi).toHaveBeenCalledTimes(1);
   });
+
+  it("direct-allows read-only tools in default mode without UI", async () => {
+    const requestFromUi = vi.fn();
+    const broker = new PermissionBroker({
+      getMode: () => "default",
+      requestFromUi,
+      timeoutMs: 1000,
+    });
+
+    for (const tool of ["Read", "Glob", "Grep", "WebFetch", "WebSearch", "TodoWrite"]) {
+      const res = await broker.canUseTool(tool, { file_path: "src/a.ts" }, "sess1");
+      expect(res.behavior).toBe("allow");
+    }
+    expect(requestFromUi).not.toHaveBeenCalled();
+  });
+
+  it("plan mode still hard-blocks writes even though reads pass through", async () => {
+    const requestFromUi = vi.fn();
+    const broker = new PermissionBroker({
+      getMode: () => "plan",
+      requestFromUi,
+      timeoutMs: 1000,
+    });
+
+    const read = await broker.canUseTool("Read", { file_path: "src/a.ts" }, "sess1");
+    expect(read.behavior).toBe("allow");
+
+    const edit = await broker.canUseTool("Edit", { file_path: "src/a.ts" }, "sess1");
+    expect(edit.behavior).toBe("deny");
+    expect(requestFromUi).not.toHaveBeenCalled();
+  });
 });
