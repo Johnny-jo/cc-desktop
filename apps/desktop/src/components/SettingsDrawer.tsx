@@ -14,7 +14,7 @@ import {
   resolveContextLimit,
   validateMcpServers,
 } from "@claude-desktop/shared";
-import { getDesktop } from "../lib/desktop-api";
+import { getDesktop, hasDesktopApi } from "../lib/desktop-api";
 import {
   getState,
   saveSettings,
@@ -806,6 +806,19 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   }
 
   function renderSkills() {
+    // Preload from an older build won't have the skills API — say so instead
+    // of throwing "is not a function" at click time.
+    if (!hasDesktopApi("listSkills")) {
+      return (
+        <div className="settings-mcp">
+          <div className="settings-context-limits-title">Skills</div>
+          <p className="settings-hint">
+            当前运行的程序版本较旧，不包含 Skills 管理。请重启应用（开发模式请重启
+            pnpm dev）后重试。
+          </p>
+        </div>
+      );
+    }
     return (
       <div className="settings-mcp">
         <div className="settings-context-limits-title">Skills</div>
