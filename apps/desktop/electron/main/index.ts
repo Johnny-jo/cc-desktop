@@ -36,6 +36,7 @@ import {
   writeCpaConfigWithApiKey,
   type RuntimePathEnv,
 } from "./runtime-paths";
+import { userSkillsDir } from "./skill-store";
 import { TerminalHost } from "./terminal-host";
 
 /** Match the renderer charcoal theme (`--bg-app`). */
@@ -211,6 +212,15 @@ function bootstrap() {
       apiKey: settings.getToken()!,
     });
     settings.update({ setupCompleted: true });
+  }
+
+  // Fresh machines have no ~/.claude at all. Create the skills root so
+  // Settings → Skills「打开目录」always works and the dir is discoverable
+  // by the CLI's skill loader (it reads but may not create it).
+  try {
+    fs.mkdirSync(userSkillsDir(), { recursive: true });
+  } catch {
+    // ignore — non-fatal
   }
 
   const archive = new SessionArchive(userDataDir);
