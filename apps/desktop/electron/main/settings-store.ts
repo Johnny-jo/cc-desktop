@@ -65,6 +65,8 @@ const DEFAULTS: AppSettings = {
   cpaExePath: "",
   cpaConfigPath: "",
   cpaPort: 8317,
+  /** True once the first-run wizard finished — old installs get one repair pass */
+  setupCompleted: false,
   defaultModel: "kimi-for-coding",
   models: [
     "kimi-for-coding",

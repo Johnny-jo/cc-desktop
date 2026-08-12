@@ -245,6 +245,12 @@ export type AppSettings = {
   /** UI theme: dark / light / follow system (omit = system). */
   theme?: "dark" | "light" | "system";
   /**
+   * True once the first-run onboarding finished. Old installs (pre-onboarding)
+   * have a token but no flag — main uses this to run a one-time CPA config
+   * repair so the management panel works without re-running the wizard.
+   */
+  setupCompleted?: boolean;
+  /**
    * Custom subagent definitions (Task/Agent tool picks them up by name).
    * Passed to the SDK as options.agents.
    */

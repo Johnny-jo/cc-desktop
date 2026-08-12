@@ -63,8 +63,10 @@ nsis:
   createDesktopShortcut: true
   createStartMenuShortcut: true
   shortcutName: Claude Desktop
-  # Keep userData (settings, sessions, CPA config) on uninstall.
-  deleteAppDataOnUninstall: false
+  # Uninstall removes app userData (settings/sessions/CPA config) and stops
+  # the managed CPA process; shared ~/.cli-proxy-api credentials are kept.
+  deleteAppDataOnUninstall: true
+  include: build/uninstall.nsh
   artifactName: Claude-Desktop-Setup-${version}-${arch}.${ext}
   # Prefer Chinese UI when the OS is zh-CN (falls back to English).
   installerLanguages:

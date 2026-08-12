@@ -450,6 +450,7 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
           token: trimmed,
           cpaExePath: paths.cpaExePath,
           cpaConfigPath: paths.cpaConfigPath,
+          setupCompleted: true,
         });
         let cpaStatus = ctx.cpa.getStatus();
         if (startCpa !== false) {

@@ -33,6 +33,7 @@ import {
   getClaudeExecutablePath,
   repairCpaManagementConfig,
   resolveEffectiveCpaPaths,
+  writeCpaConfigWithApiKey,
   type RuntimePathEnv,
 } from "./runtime-paths";
 import { TerminalHost } from "./terminal-host";
@@ -201,6 +202,16 @@ function bootstrap() {
     apiKey: settings.getToken(),
     port: current.cpaPort,
   });
+  // Token exists but the wizard never ran (pre-onboarding install): do one
+  // full config rewrite so api-keys + secret-key + panel are guaranteed,
+  // then mark setup complete.
+  if (settings.getToken() && !settings.get().setupCompleted) {
+    writeCpaConfigWithApiKey(pathEnv, {
+      port: settings.get().cpaPort || 8317,
+      apiKey: settings.getToken()!,
+    });
+    settings.update({ setupCompleted: true });
+  }
 
   const archive = new SessionArchive(userDataDir);
 
