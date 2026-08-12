@@ -2327,7 +2327,12 @@ body.is-resizing-row * {
 /* Settings drawer */
 .settings-overlay {
   position: fixed;
-  inset: 0;
+  /* Start below the frameless title bar so the window caption buttons and
+     titlebar toggles stay reachable and unshaded. */
+  top: var(--titlebar-h);
+  left: 0;
+  right: 0;
+  bottom: 0;
   background: var(--overlay-bg);
   z-index: 40;
   display: flex;
