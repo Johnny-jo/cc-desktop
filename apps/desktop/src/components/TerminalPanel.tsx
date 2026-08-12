@@ -23,7 +23,7 @@ type Tab = {
   exited: boolean;
 };
 
-const XTERM_THEME = {
+const XTERM_THEME_DARK = {
   background: "#0e0e0e",
   foreground: "#d4d4d4",
   cursor: "#d4d4d4",
@@ -47,6 +47,36 @@ const XTERM_THEME = {
   brightWhite: "#e8e8e8",
 };
 
+const XTERM_THEME_LIGHT = {
+  background: "#f4f4f6",
+  foreground: "#2a2a2e",
+  cursor: "#2a2a2e",
+  cursorAccent: "#f4f4f6",
+  selectionBackground: "#b6d3f8",
+  black: "#2a2a2e",
+  brightBlack: "#7a7a82",
+  red: "#c72e2e",
+  brightRed: "#c72e2e",
+  green: "#0e7a4f",
+  brightGreen: "#0e7a4f",
+  yellow: "#9a6700",
+  brightYellow: "#9a6700",
+  blue: "#1d4ed8",
+  brightBlue: "#1d4ed8",
+  magenta: "#a21caf",
+  brightMagenta: "#a21caf",
+  cyan: "#0e7490",
+  brightCyan: "#0e7490",
+  white: "#2a2a2e",
+  brightWhite: "#101014",
+};
+
+function xtermTheme() {
+  return document.documentElement.dataset.theme === "light"
+    ? XTERM_THEME_LIGHT
+    : XTERM_THEME_DARK;
+}
+
 /** One xterm instance bound to a PTY session (kept alive across tab switches). */
 function XtermView({
   termId,
@@ -67,7 +97,7 @@ function XtermView({
     const desktop = getDesktop();
 
     const term = new Terminal({
-      theme: XTERM_THEME,
+      theme: xtermTheme(),
       fontFamily: 'Cascadia Mono, Consolas, ui-monospace, Menlo, monospace',
       fontSize: 13,
       lineHeight: 1.25,
@@ -120,8 +150,18 @@ function XtermView({
     });
     ro.observe(el);
 
+    // Follow app theme switches without recreating the PTY session.
+    const themeObserver = new MutationObserver(() => {
+      term.options.theme = xtermTheme();
+    });
+    themeObserver.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-theme"],
+    });
+
     return () => {
       ro.disconnect();
+      themeObserver.disconnect();
       dataSub.dispose();
       resizeSub.dispose();
       unsubData();
@@ -166,8 +206,12 @@ export function TerminalPanel({ open }: Props) {
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const nextIndex = useRef(1);
+  /** Guard against double-add (effect re-run / rapid toggle). */
+  const addingRef = useRef(false);
 
   const addTab = useCallback(async () => {
+    if (addingRef.current) return;
+    addingRef.current = true;
     const desktop = getDesktop();
     try {
       const res = await desktop.createTerminal(projectPath ?? undefined);
@@ -179,13 +223,18 @@ export function TerminalPanel({ open }: Props) {
       setActiveId(res.id);
     } catch {
       // surface as a dead tab note
+    } finally {
+      addingRef.current = false;
     }
   }, [projectPath]);
 
   // Create the first tab when opening.
   useEffect(() => {
-    if (open && tabs.length === 0) {
-      void addTab();
+    if (open) {
+      setTabs((cur) => {
+        if (cur.length === 0) void addTab();
+        return cur;
+      });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
