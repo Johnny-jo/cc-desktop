@@ -40,6 +40,10 @@
   --warn: #fbbf24;
   --danger: #f87171;
   --terminal-text: #d4d4d4;
+  --diff-add: #86efac;
+  --diff-add-bg: rgba(52, 211, 153, 0.08);
+  --diff-del: #fca5a5;
+  --diff-del-bg: rgba(248, 113, 113, 0.08);
 
   --radius-sm: 8px;
   --radius-md: 12px;
@@ -97,6 +101,11 @@
   --warn: #b45309;
   --danger: #dc2626;
   --terminal-text: #d4d4d4;
+  /* Light mode: deep, readable diff colors */
+  --diff-add: #047857;
+  --diff-add-bg: rgba(5, 150, 105, 0.12);
+  --diff-del: #b91c1c;
+  --diff-del-bg: rgba(220, 38, 38, 0.10);
 
   --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.06);
   --shadow-2: 0 12px 40px rgba(0, 0, 0, 0.12);
@@ -140,6 +149,10 @@
     --shadow-2: 0 12px 40px rgba(0, 0, 0, 0.12);
     --shadow-drawer: -16px 0 48px rgba(0, 0, 0, 0.16);
     --overlay-bg: rgba(30, 30, 36, 0.28);
+    --diff-add: #047857;
+    --diff-add-bg: rgba(5, 150, 105, 0.12);
+    --diff-del: #b91c1c;
+    --diff-del-bg: rgba(220, 38, 38, 0.10);
     --focus-ring: 0 0 0 2px rgba(37, 99, 235, 0.25);
   }
 }
@@ -1493,7 +1506,7 @@ body.is-resizing-row * {
 
 .md-body em {
   font-style: italic;
-  color: #d4d4d4;
+  color: var(--text-muted);
 }
 
 .md-body blockquote {
@@ -1527,6 +1540,13 @@ body.is-resizing-row * {
   overflow: auto;
   font-size: 12.5px;
   line-height: 1.45;
+  /* Explicit text color — dark-mode inherited text is too faint on the
+     light code background */
+  color: var(--text);
+}
+
+.md-body pre code {
+  color: inherit;
 }
 
 .md-body pre code {
@@ -1645,8 +1665,8 @@ body.is-resizing-row * {
 }
 
 .bubble-system {
-  background: rgba(248, 113, 113, 0.08);
-  color: #fca5a5;
+  background: var(--diff-del-bg);
+  color: var(--diff-del);
   border-radius: var(--radius-md);
   padding: 10px 12px;
   font-size: 13px;
@@ -2282,13 +2302,13 @@ body.is-resizing-row * {
 }
 
 .diff-add {
-  color: #86efac;
-  background: rgba(52, 211, 153, 0.08);
+  color: var(--diff-add);
+  background: var(--diff-add-bg);
 }
 
 .diff-del {
-  color: #fca5a5;
-  background: rgba(248, 113, 113, 0.08);
+  color: var(--diff-del);
+  background: var(--diff-del-bg);
 }
 
 .diff-ctx {
@@ -2297,7 +2317,7 @@ body.is-resizing-row * {
 
 .diff-hunk {
   color: var(--accent);
-  background: rgba(59, 130, 246, 0.08);
+  background: var(--accent-soft);
 }
 
 /* Error banner */
@@ -2539,15 +2559,15 @@ body.is-resizing-row * {
 }
 
 .settings-context-limits-source.source-override {
-  color: #7dd3fc;
+  color: var(--accent);
 }
 
 .settings-context-limits-source.source-cpa {
-  color: #86efac;
+  color: var(--diff-add);
 }
 
 .settings-context-limits-source.source-builtin {
-  color: #fcd34d;
+  color: var(--warn);
 }
 
 .settings-context-limits-source.source-default {
