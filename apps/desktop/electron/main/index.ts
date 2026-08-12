@@ -137,6 +137,28 @@ function createWindow() {
     mainWindow.loadFile(path.join(__dirname, "../renderer/index.html"));
   }
 
+  // DevTools access (menu bar is removed, so bind it explicitly):
+  // - F12 / Ctrl+Shift+I toggles DevTools
+  // - Dev mode (ELECTRON_RENDERER_URL) opens them detached automatically
+  mainWindow.webContents.on("before-input-event", (_e, input) => {
+    if (input.type !== "keyDown") return;
+    if (
+      input.key === "F12" ||
+      ((input.control || input.meta) &&
+        input.shift &&
+        input.key.toLowerCase() === "i")
+    ) {
+      if (mainWindow?.webContents.isDevToolsOpened()) {
+        mainWindow.webContents.closeDevTools();
+      } else {
+        mainWindow?.webContents.openDevTools({ mode: "detach" });
+      }
+    }
+  });
+  if (process.env.ELECTRON_RENDERER_URL) {
+    mainWindow.webContents.openDevTools({ mode: "detach" });
+  }
+
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
