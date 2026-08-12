@@ -73,6 +73,14 @@ export const IPC = {
   appCompleteOnboarding: "app:complete-onboarding",
   /** Renderer → Main: current UI theme changed (sync window chrome) */
   appThemeChanged: "app:theme-changed",
+  /** List installed skills (user dir + project dir) */
+  skillsList: "skills:list",
+  /** Open the user skills directory in the OS file manager */
+  skillsOpenDir: "skills:open-dir",
+  /** Delete an installed skill directory */
+  skillsDelete: "skills:delete",
+  /** Reload skills in the running session (Query.reloadSkills) */
+  skillsReload: "skills:reload",
   /** Bottom terminal: create shell in project cwd */
   terminalCreate: "terminal:create",
   terminalWrite: "terminal:write",
@@ -297,6 +305,26 @@ export type IpcInvokeMap = {
   [IPC.appThemeChanged]: {
     args: [{ theme: "dark" | "light" }];
     result: { ok: boolean };
+  };
+  [IPC.skillsList]: {
+    args: [];
+    result: {
+      userDir: string;
+      projectDir: string | null;
+      skills: Array<{ name: string; scope: "user" | "project"; path: string }>;
+    };
+  };
+  [IPC.skillsOpenDir]: {
+    args: [{ scope: "user" | "project" }];
+    result: { ok: boolean; path?: string; error?: string };
+  };
+  [IPC.skillsDelete]: {
+    args: [{ name: string; scope: "user" | "project" }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.skillsReload]: {
+    args: [{ sessionId: string }];
+    result: { ok: boolean; error?: string };
   };
 };
 

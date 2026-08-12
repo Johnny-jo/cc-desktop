@@ -246,6 +246,35 @@ const desktop = {
       ok: boolean;
     }>,
 
+  /** List installed skills (user + project scope). */
+  listSkills: () =>
+    ipcRenderer.invoke(IPC.skillsList) as Promise<{
+      userDir: string;
+      projectDir: string | null;
+      skills: Array<{ name: string; scope: "user" | "project"; path: string }>;
+    }>,
+
+  /** Open the skills directory (created if missing) in the file manager. */
+  openSkillsDir: (scope: "user" | "project") =>
+    ipcRenderer.invoke(IPC.skillsOpenDir, { scope }) as Promise<{
+      ok: boolean;
+      path?: string;
+      error?: string;
+    }>,
+
+  deleteSkill: (name: string, scope: "user" | "project") =>
+    ipcRenderer.invoke(IPC.skillsDelete, { name, scope }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+
+  /** Reload skills in the running session after install/remove. */
+  reloadSkills: (sessionId: string) =>
+    ipcRenderer.invoke(IPC.skillsReload, { sessionId }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+
   on: (channel: string, listener: (...args: unknown[]) => void) => {
     const allowed = new Set<string>(Object.values(IPC));
     if (!allowed.has(channel)) return () => {};

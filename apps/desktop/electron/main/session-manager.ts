@@ -93,6 +93,8 @@ type QueryControl = {
   >;
   interrupt?: () => Promise<unknown>;
   close?: () => void;
+  /** SDK control request: reload skills from disk */
+  reloadSkills?: () => Promise<unknown>;
   /** SDK control request: live MCP server connection status + tool list */
   mcpServerStatus?: () => Promise<
     Array<{
@@ -483,6 +485,23 @@ export class SessionManager {
       }));
     } catch {
       return null;
+    }
+  }
+
+  /** Reload skills from disk for a running session + refresh slash list. */
+  async reloadSkills(
+    sessionId: string,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const entry = this.sessions.get(sessionId);
+    if (!entry?.query?.reloadSkills) {
+      return { ok: false, error: "No live session query" };
+    }
+    try {
+      await entry.query.reloadSkills();
+      await this.refreshSlashCommands(sessionId);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: errMessage(err) };
     }
   }
 

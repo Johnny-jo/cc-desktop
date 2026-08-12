@@ -22,6 +22,11 @@ import type { DiffTracker } from "./diff-tracker";
 import type { SnapshotStore } from "./snapshot-store";
 import { listProjectFiles } from "./file-index";
 import {
+  deleteSkill,
+  ensureSkillsDir,
+  listSkills,
+} from "./skill-store";
+import {
   resolveEffectiveCpaPaths,
   writeCpaConfigWithApiKey,
   type RuntimePathEnv,
@@ -539,6 +544,46 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
     (_e, { theme }: { theme: "dark" | "light" }) => {
       ctx.onThemeChanged?.(theme);
       return { ok: true };
+    },
+  );
+
+  ipcMain.handle(IPC.skillsList, async () => {
+    const cwd = ctx.settings.get().lastProjectPath ?? null;
+    return listSkills(cwd);
+  });
+
+  ipcMain.handle(
+    IPC.skillsOpenDir,
+    async (_e, { scope }: { scope: "user" | "project" }) => {
+      try {
+        const cwd = ctx.settings.get().lastProjectPath ?? null;
+        const dir = ensureSkillsDir(scope, cwd);
+        const err = await shell.openPath(dir);
+        return err ? { ok: false, error: err } : { ok: true, path: dir };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    },
+  );
+
+  ipcMain.handle(
+    IPC.skillsDelete,
+    async (
+      _e,
+      { name, scope }: { name: string; scope: "user" | "project" },
+    ) => {
+      const cwd = ctx.settings.get().lastProjectPath ?? null;
+      return deleteSkill(name, scope, cwd);
+    },
+  );
+
+  ipcMain.handle(
+    IPC.skillsReload,
+    async (_e, { sessionId }: { sessionId: string }) => {
+      return await ctx.sessions.reloadSkills(sessionId);
     },
   );
 }

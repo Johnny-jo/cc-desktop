@@ -277,6 +277,61 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   const [mcpNote, setMcpNote] = useState<string | null>(null);
   /** Advanced sections start collapsed for a cleaner first look */
   const [showAdvanced, setShowAdvanced] = useState<Record<string, boolean>>({});
+  const [skillsInfo, setSkillsInfo] = useState<{
+    userDir: string;
+    projectDir: string | null;
+    skills: Array<{ name: string; scope: "user" | "project"; path: string }>;
+  } | null>(null);
+  const [skillsNote, setSkillsNote] = useState<string | null>(null);
+
+  async function refreshSkills() {
+    try {
+      const info = await getDesktop().listSkills();
+      setSkillsInfo(info);
+    } catch {
+      setSkillsInfo(null);
+    }
+  }
+
+  async function onOpenSkillsDir(scope: "user" | "project") {
+    setSkillsNote(null);
+    try {
+      const res = await getDesktop().openSkillsDir(scope);
+      if (!res.ok) setSkillsNote(res.error ?? "打开失败");
+    } catch (err) {
+      setSkillsNote(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function onDeleteSkill(name: string, scope: "user" | "project") {
+    if (!window.confirm(`删除 skill「${name}」？该操作会移除整个目录。`)) return;
+    setSkillsNote(null);
+    try {
+      const res = await getDesktop().deleteSkill(name, scope);
+      if (!res.ok) {
+        setSkillsNote(res.error ?? "删除失败");
+        return;
+      }
+      await refreshSkills();
+      if (activeSessionId) {
+        void getDesktop().reloadSkills(activeSessionId);
+      }
+      setSkillsNote(`已删除「${name}」`);
+    } catch (err) {
+      setSkillsNote(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function onReloadSkills() {
+    if (!activeSessionId) return;
+    setSkillsNote(null);
+    try {
+      const res = await getDesktop().reloadSkills(activeSessionId);
+      setSkillsNote(res.ok ? "已重载到当前会话" : res.error ?? "重载失败");
+    } catch (err) {
+      setSkillsNote(err instanceof Error ? err.message : String(err));
+    }
+  }
 
   function toggleAdvanced(key: string) {
     setShowAdvanced((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -328,6 +383,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
     setMcpLive({});
     void refreshCatalog();
     void refreshMcpLive();
+    void refreshSkills();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, settings]);
 
@@ -745,6 +801,86 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
             + 添加 Agent
           </button>
         </div>
+      </div>
+    );
+  }
+
+  function renderSkills() {
+    return (
+      <div className="settings-mcp">
+        <div className="settings-context-limits-title">Skills</div>
+        <p className="settings-hint">
+          把 skill 文件夹（含 SKILL.md）放入下列目录即可安装；支持 /
+          命令自动出现。删除后可点「重载」让运行中的会话立即生效。
+        </p>
+        <div className="settings-skills-dirs">
+          <div className="settings-skills-dir">
+            <span className="settings-hint">用户级（所有项目可用）</span>
+            <code className="settings-skills-path">{skillsInfo?.userDir ?? "…"}</code>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={() => void onOpenSkillsDir("user")}
+            >
+              打开目录
+            </button>
+          </div>
+          <div className="settings-skills-dir">
+            <span className="settings-hint">项目级（仅当前项目）</span>
+            <code className="settings-skills-path">
+              {skillsInfo?.projectDir ?? "（先打开项目）"}
+            </code>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              disabled={!skillsInfo?.projectDir}
+              onClick={() => void onOpenSkillsDir("project")}
+            >
+              打开目录
+            </button>
+          </div>
+        </div>
+        {skillsInfo && skillsInfo.skills.length > 0 ? (
+          <ul className="settings-skills-list">
+            {skillsInfo.skills.map((s) => (
+              <li key={`${s.scope}-${s.name}`} className="settings-skills-item">
+                <span className="settings-skills-name">{s.name}</span>
+                <span className="settings-hint">
+                  {s.scope === "user" ? "用户" : "项目"}
+                </span>
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm settings-mcp-remove"
+                  title="删除该 skill"
+                  onClick={() => void onDeleteSkill(s.name, s.scope)}
+                >
+                  ×
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="settings-hint">尚未安装任何 skill。</p>
+        )}
+        <div className="settings-inline-actions">
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={() => void refreshSkills()}
+          >
+            刷新列表
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            disabled={!activeSessionId}
+            title="让运行中的会话重新扫描 skills"
+            onClick={() => void onReloadSkills()}
+          >
+            重载到当前会话
+          </button>
+        </div>
+        {skillsNote ? <p className="settings-hint">{skillsNote}</p> : null}
       </div>
     );
   }
@@ -1187,6 +1323,14 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
           {/* ===== Agents ===== */}
           {sectionHeader("agents", "自定义 Agents", "Task 子代理")}
           {showAdvanced["agents"] ? renderAgents() : null}
+
+          {/* ===== Skills ===== */}
+          {sectionHeader(
+            "skills",
+            "Skills",
+            `${skillsInfo?.skills.length ?? 0} 个`,
+          )}
+          {showAdvanced["skills"] ? renderSkills() : null}
 
           {/* ===== 插件 ===== */}
           {sectionHeader("plugins", "本地插件", "plugin 目录")}
