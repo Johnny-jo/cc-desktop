@@ -269,20 +269,52 @@ textarea {
   -webkit-app-region: no-drag;
   app-region: no-drag;
   pointer-events: auto;
+  transition:
+    color 150ms ease,
+    background 150ms ease,
+    transform 120ms cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 .titlebar-btn:hover {
   color: var(--text);
   background: var(--bg-hover);
+  transform: translateY(-1px);
+}
+
+.titlebar-btn:active {
+  transform: translateY(0) scale(0.92);
+  transition-duration: 60ms;
 }
 
 .titlebar-btn.active {
-  color: var(--text);
-  background: var(--bg-active);
+  color: var(--accent);
+  background: var(--accent-soft);
 }
 
 .titlebar-btn svg {
   display: block;
+  transition: transform 220ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* Pop the glyph on state flip (panel open/close) */
+.titlebar-btn.active svg {
+  transform: scale(1.08);
+}
+
+/* Sun/moon: rotate + fade between icons */
+.titlebar-theme svg {
+  animation: theme-icon-in 280ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@keyframes theme-icon-in {
+  from {
+    opacity: 0;
+    transform: rotate(-120deg) scale(0.6);
+  }
+  to {
+    opacity: 1;
+    transform: rotate(0deg) scale(1);
+  }
 }
 
 .titlebar-theme {
@@ -816,6 +848,182 @@ body.is-resizing-row * {
   background: var(--bg-hover);
   border-color: var(--border-strong);
   box-shadow: var(--focus-ring);
+}
+
+/* —— Themed dropdown (replaces native select popups) —— */
+.themed-select {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+}
+
+.themed-select-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  padding: 5px 10px 5px 12px;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.themed-select-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border);
+}
+
+.themed-select.open .themed-select-btn,
+.themed-select-btn:focus-visible {
+  outline: none;
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.themed-select-btn:disabled {
+  color: var(--text-faint);
+  cursor: default;
+}
+
+.themed-select-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.themed-select-chevron {
+  flex-shrink: 0;
+  color: var(--text-faint);
+  transition: transform 160ms ease;
+}
+
+.themed-select.open .themed-select-chevron {
+  transform: rotate(180deg);
+  color: var(--text-muted);
+}
+
+.themed-select-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 300;
+  min-width: 100%;
+  width: max-content;
+  max-width: 280px;
+  margin: 0;
+  padding: 5px;
+  list-style: none;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+  overflow-y: auto;
+  animation: select-menu-in 130ms ease;
+}
+
+.themed-select-menu.drop-up {
+  top: auto;
+  bottom: calc(100% + 6px);
+  animation-name: select-menu-in-up;
+}
+
+@keyframes select-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes select-menu-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.themed-select-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.themed-select-option.active {
+  background: var(--bg-hover);
+}
+
+.themed-select-option.selected {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.themed-select-option.selected .themed-select-option-label {
+  color: var(--accent);
+}
+
+.themed-select-option-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.themed-select-option svg {
+  flex-shrink: 0;
+}
+
+/* Ghost variants keep their own paddings */
+.select-ghost-wrap .themed-select-btn {
+  padding: 5px 10px 5px 12px;
+}
+
+.composer-model-select-wrap {
+  max-width: 100%;
+  min-width: 0;
+}
+
+.composer-model-select-wrap .themed-select-btn {
+  border: none;
+  padding: 3px 8px 3px 2px;
+  color: var(--text-muted);
+  background: transparent;
+}
+
+.composer-model-select-wrap .themed-select-btn:hover:not(:disabled),
+.composer-model-select-wrap.open .themed-select-btn,
+.composer-model-select-wrap .themed-select-btn:focus-visible {
+  background: transparent;
+  border: none;
+  color: var(--text);
+  box-shadow: none;
+}
+
+.composer-model-select-wrap .themed-select-menu {
+  min-width: 200px;
 }
 
 .input {
@@ -1578,7 +1786,7 @@ body.is-resizing-row * {
   border: none;
   padding: 0;
   font-size: inherit;
-  color: #e2e8f0;
+  color: inherit;
 }
 
 .md-table-wrap {

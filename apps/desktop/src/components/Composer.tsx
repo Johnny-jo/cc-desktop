@@ -6,6 +6,7 @@ import type {
 } from "@claude-desktop/shared";
 import { formatFileSize, IMAGE_MIME_TYPES } from "@claude-desktop/shared";
 import { getDesktop } from "../lib/desktop-api";
+import { ThemedSelect } from "./Select";
 import {
   abortActiveSession,
   compressActiveSession,
@@ -125,7 +126,6 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
   const [atIndex, setAtIndex] = useState(0);
   const [atMatches, setAtMatches] = useState<string[]>([]);
   const [atTruncated, setAtTruncated] = useState(false);
-  const modelSelectRef = useRef<HTMLSelectElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const running = useAppStore((s) => s.running);
@@ -311,11 +311,15 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
           setText("");
           setAttachments([]);
           return;
-        case "model":
+        case "model": {
           setText("");
-          modelSelectRef.current?.focus();
-          modelSelectRef.current?.click();
+          const btn = document.querySelector<HTMLButtonElement>(
+            ".composer-model-select-wrap .themed-select-btn",
+          );
+          btn?.focus();
+          btn?.click();
           return;
+        }
         case "diff":
           onToggleChanges?.();
           window.dispatchEvent(new Event("cd:toggle-changes"));
@@ -637,19 +641,13 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
             </button>
             <label className="composer-model-field" title="Model">
               <span className="composer-model-prefix">✦</span>
-              <select
-                ref={modelSelectRef}
-                className="select select-ghost composer-model-select"
+              <ThemedSelect
+                className="composer-model-select-wrap"
                 value={settings?.defaultModel ?? ""}
                 disabled={!settings || models.length === 0}
-                onChange={(e) => void setModel(e.target.value)}
-              >
-                {models.map((m) => (
-                  <option key={m} value={m}>
-                    {m}
-                  </option>
-                ))}
-              </select>
+                onChange={(v) => void setModel(v)}
+                options={models.map((m) => ({ value: m }))}
+              />
             </label>
           </div>
           <div className="composer-actions">

@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import type { PermissionMode } from "@claude-desktop/shared";
 import { MessageList } from "./MessageList";
 import { Composer } from "./Composer";
+import { ThemedSelect } from "./Select";
 import { setPermissionMode, useAppStore } from "../state/store";
 import {
   contextLevel,
@@ -72,21 +73,14 @@ export function ChatPanel({ onOpenSettings }: ChatPanelProps) {
         </div>
         <div className="chat-header-right">
           <label className="chat-header-field">
-            <select
-              className="select select-ghost"
+            <ThemedSelect
+              className="select-ghost-wrap"
               value={settings?.permissionMode ?? "default"}
               disabled={!settings}
-              onChange={(e) =>
-                void setPermissionMode(e.target.value as PermissionMode)
-              }
+              onChange={(v) => void setPermissionMode(v as PermissionMode)}
               title="Permission mode"
-            >
-              {PERMISSION_MODES.map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-            </select>
+              options={PERMISSION_MODES.map((m) => ({ value: m }))}
+            />
           </label>
         </div>
       </header>
