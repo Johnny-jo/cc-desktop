@@ -48,6 +48,7 @@
   --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.25);
   --shadow-2: 0 12px 40px rgba(0, 0, 0, 0.35);
   --shadow-drawer: -16px 0 48px rgba(0, 0, 0, 0.45);
+  --overlay-bg: rgba(0, 0, 0, 0.5);
   /* Match Electron titleBarOverlay height (Windows caption buttons). */
   --titlebar-h: 36px;
   --focus-ring: 0 0 0 2px rgba(59, 130, 246, 0.28);
@@ -100,6 +101,7 @@
   --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.06);
   --shadow-2: 0 12px 40px rgba(0, 0, 0, 0.12);
   --shadow-drawer: -16px 0 48px rgba(0, 0, 0, 0.16);
+  --overlay-bg: rgba(30, 30, 36, 0.28);
   --focus-ring: 0 0 0 2px rgba(37, 99, 235, 0.25);
 }
 
@@ -137,6 +139,7 @@
     --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.06);
     --shadow-2: 0 12px 40px rgba(0, 0, 0, 0.12);
     --shadow-drawer: -16px 0 48px rgba(0, 0, 0, 0.16);
+    --overlay-bg: rgba(30, 30, 36, 0.28);
     --focus-ring: 0 0 0 2px rgba(37, 99, 235, 0.25);
   }
 }
@@ -1254,11 +1257,11 @@ body.is-resizing-row * {
 .chat-composer {
   flex: 0 0 auto;
   padding: 0 0 var(--space-4);
+  /* Fade from transparent to app bg (works in both themes) */
   background: linear-gradient(
     180deg,
-    rgba(20, 20, 20, 0) 0%,
-    rgba(20, 20, 20, 0.85) 28%,
-    var(--bg-app) 55%
+    transparent 0%,
+    var(--bg-app) 38%
   );
   z-index: 2;
 }
@@ -2325,7 +2328,7 @@ body.is-resizing-row * {
 .settings-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.5);
+  background: var(--overlay-bg);
   z-index: 40;
   display: flex;
   justify-content: flex-end;
@@ -2335,12 +2338,13 @@ body.is-resizing-row * {
   width: min(460px, 100vw);
   height: 100%;
   background: var(--bg-elevated);
-  /* no hard border — soft shadow only, matches app chrome */
+  /* Flush with the window edge — no border, no rounding (rounding creates a
+     visible seam against the overlay, especially in light mode). */
   border: none;
-  border-radius: var(--radius-md) 0 0 var(--radius-md);
+  border-radius: 0;
   display: flex;
   flex-direction: column;
-  box-shadow: -16px 0 48px rgba(0, 0, 0, 0.45);
+  box-shadow: none;
 }
 
 .settings-header {
@@ -2660,7 +2664,7 @@ body.is-resizing-row * {
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.55);
+  background: var(--overlay-bg);
   display: flex;
   align-items: center;
   justify-content: center;
