@@ -618,6 +618,17 @@ body.is-resizing-row * {
   height: 100%;
 }
 
+/*
+ * Keep every xterm internal layer on the themed background. The viewport
+ * doesn't always wrap the scrollable element after resizes, leaving a dark
+ * strip visible at the bottom edge.
+ */
+.terminal-xterm .xterm-viewport,
+.terminal-xterm .xterm-screen,
+.terminal-xterm .xterm-scrollable-element {
+  background: var(--bg-terminal) !important;
+}
+
 .terminal-empty {
   display: flex;
   align-items: center;
@@ -1525,10 +1536,12 @@ body.is-resizing-row * {
 .md-inline-code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.9em;
-  background: var(--bg-input);
+  background: var(--bg-code);
   border: 1px solid var(--border-soft);
   border-radius: 5px;
   padding: 0.1em 0.35em;
+  /* Explicit dark-on-light / light-on-dark text */
+  color: var(--text);
 }
 
 .md-body pre {
