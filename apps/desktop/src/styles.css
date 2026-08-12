@@ -24,6 +24,7 @@
   --bg-terminal: #0e0e0e;
   --bg-terminal-tab: #0e0e0e;
   --bg-code: #0f0f0f;
+  --code-text: #e8e8e8;
   --border: #262626;
   --border-soft: #1f1f1f;
   --border-strong: #333333;
@@ -88,6 +89,7 @@
   --bg-terminal: #f4f4f6;
   --bg-terminal-tab: #f4f4f6;
   --bg-code: #ececf0;
+  --code-text: #111;
   --border: #d9d9de;
   --border-soft: #e6e6ea;
   --border-strong: #c9c9d0;
@@ -137,6 +139,7 @@
     --bg-terminal: #f4f4f6;
     --bg-terminal-tab: #f4f4f6;
     --bg-code: #ececf0;
+    --code-text: #111;
     --border: #d9d9de;
     --border-soft: #e6e6ea;
     --border-strong: #c9c9d0;
@@ -1770,7 +1773,7 @@ body.is-resizing-row * {
   border: 1px solid var(--border-soft);
   border-radius: 5px;
   padding: 0.1em 0.35em;
-  color: #111;
+  color: var(--code-text);
 }
 
 .md-body pre {
@@ -1782,9 +1785,7 @@ body.is-resizing-row * {
   overflow: auto;
   font-size: 12.5px;
   line-height: 1.45;
-  /* Explicit text color — dark-mode inherited text is too faint on the
-     light code background */
-  color: #111;
+  color: var(--code-text);
 }
 
 .md-body pre code {
