@@ -671,18 +671,24 @@ body.is-resizing-row * {
 /* Buttons */
 .btn {
   background: var(--bg-active);
-  border: 1px solid transparent;
+  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: 6px 12px;
   cursor: pointer;
   font-size: 13px;
   line-height: 1.35;
+  color: var(--text);
   transition:
     background 140ms ease,
     border-color 140ms ease,
     opacity 140ms ease,
     box-shadow 140ms ease,
     transform 60ms ease;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
 }
 
 .btn:focus-visible {
@@ -2693,17 +2699,39 @@ body.is-resizing-row * {
   color: var(--text-muted);
 }
 
-.settings-field input {
+.settings-field input,
+.settings-field textarea,
+.settings-field select {
   background: var(--bg-input);
-  border: 1px solid transparent;
+  /* Always visible frame — fields must not require a click to be seen */
+  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: 8px 10px;
   color: var(--text);
+  transition: border-color 140ms ease, box-shadow 140ms ease;
 }
 
-.settings-field input:focus-visible {
+.settings-field input:hover,
+.settings-field textarea:hover,
+.settings-field select:hover {
+  border-color: var(--border-strong);
+}
+
+.settings-field input:focus-visible,
+.settings-field textarea:focus-visible,
+.settings-field select:focus-visible {
   outline: none;
+  border-color: var(--accent);
   box-shadow: var(--focus-ring);
+}
+
+/* Rule / path textareas: monospace + slightly roomier */
+.settings-codearea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+  min-height: 56px;
 }
 
 .settings-check {
@@ -2859,13 +2887,28 @@ body.is-resizing-row * {
 .settings-mcp-row input,
 .settings-mcp-row textarea,
 .settings-mcp-row select {
-  background: var(--bg-input, #242424);
-  border: 1px solid var(--border, #262626);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
   border-radius: 6px;
-  color: inherit;
+  color: var(--text);
   padding: 6px 8px;
   font-size: 12px;
   font-family: inherit;
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.settings-mcp-row input:hover,
+.settings-mcp-row textarea:hover,
+.settings-mcp-row select:hover {
+  border-color: var(--border-strong);
+}
+
+.settings-mcp-row input:focus-visible,
+.settings-mcp-row textarea:focus-visible,
+.settings-mcp-row select:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
 }
 
 .settings-mcp-row textarea {

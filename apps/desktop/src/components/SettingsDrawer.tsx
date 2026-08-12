@@ -458,24 +458,24 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
 
     return (
       <div className="settings-context-limits">
-        <div className="settings-context-limits-title">Per-model context limits</div>
+        <div className="settings-context-limits-title">按模型覆盖上下文窗口</div>
         <p className="settings-hint">
-          Empty override = CPA / builtin / default. Changes apply on the next turn.
+          留空 = CPA / 内置 / 默认值；下一轮生效。
         </p>
         <div className="settings-context-limits-table-wrap">
           <table className="settings-context-limits-table">
             <thead>
               <tr>
-                <th>Model</th>
-                <th>Effective</th>
-                <th>Override</th>
+                <th>模型</th>
+                <th>生效值</th>
+                <th>覆盖</th>
               </tr>
             </thead>
             <tbody>
               {ids.length === 0 ? (
                 <tr>
                   <td colSpan={3} className="settings-hint">
-                    No models — edit Models list or Sync from CPA
+                    暂无模型 — 请编辑模型列表或从 CPA 同步
                   </td>
                 </tr>
               ) : (
@@ -503,7 +503,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
                           type="number"
                           min={CONTEXT_LIMIT_MIN}
                           step={1024}
-                          placeholder="auto"
+                          placeholder="自动"
                           value={form.modelContextLimitDraft[id] ?? ""}
                           onChange={(e) =>
                             setForm((prev) => ({
@@ -578,7 +578,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
         ) : null}
         {live.tools ? (
           <span className="settings-hint" title={live.tools.map((t) => t.name).join(", ")}>
-            {live.tools.length} tools
+            {live.tools.length} 个工具
           </span>
         ) : null}
         {live.error ? (
@@ -594,7 +594,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
               disabled={mcpBusy === row.name}
               onClick={() => void onMcpReconnect(row.name.trim())}
             >
-              Reconnect
+              重连
             </button>
             <button
               type="button"
@@ -602,7 +602,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
               disabled={mcpBusy === row.name}
               onClick={() => void onMcpToggle(row.name.trim(), !enabled)}
             >
-              {enabled ? "Disable" : "Enable"}
+              {enabled ? "停用" : "启用"}
             </button>
           </span>
         ) : null}
@@ -613,16 +613,17 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   function renderPermissions() {
     return (
       <div className="settings-mcp">
-        <div className="settings-context-limits-title">Permissions</div>
+        <div className="settings-context-limits-title">权限规则</div>
         <p className="settings-hint">
-          Claude Code-style rules, one per line: <code>Edit</code>,{" "}
-          <code>Edit(src/**)</code>, <code>Bash(npm run *)</code>. Allow rules
-          auto-approve matching tools; deny rules silently block them.
-          Destructive Bash and plan mode still override allow rules.
+          Claude Code 风格规则，每行一条：<code>Edit</code>、{" "}
+          <code>Edit(src/**)</code>、<code>Bash(npm run *)</code>。
+          允许规则命中即自动放行；拒绝规则静默拦截。
+          破坏性命令与 plan 模式不受允许规则影响。
         </p>
         <label className="settings-field">
-          Allow rules
+          允许规则
           <textarea
+            className="settings-codearea"
             rows={3}
             placeholder={"Bash(npm test)\nEdit(src/**)"}
             value={form.permissionAllowText}
@@ -633,8 +634,9 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
           />
         </label>
         <label className="settings-field">
-          Deny rules
+          拒绝规则
           <textarea
+            className="settings-codearea"
             rows={2}
             placeholder={"Bash(git push *)"}
             value={form.permissionDenyText}
@@ -680,26 +682,25 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   function renderAgents() {
     return (
       <div className="settings-mcp">
-        <div className="settings-context-limits-title">Custom agents</div>
+        <div className="settings-context-limits-title">自定义 Agents</div>
         <p className="settings-hint">
-          Subagents the Task/Agent tool can spawn by name. Tools empty =
-          inherit all; model empty = main model. Applies to new sessions.
+          Task/Agent 工具可按名称调用的子代理。工具留空 = 继承全部；模型留空 = 主模型。新会话生效。
         </p>
         {form.agents.length === 0 ? (
-          <p className="settings-hint">No custom agents.</p>
+          <p className="settings-hint">暂无自定义 Agent。</p>
         ) : (
           form.agents.map((a) => (
             <div key={a.id} className="settings-mcp-row">
               <div className="settings-mcp-row-head">
                 <input
                   className="settings-mcp-name"
-                  placeholder="name"
+                  placeholder="名称"
                   value={a.name}
                   spellCheck={false}
                   onChange={(e) => updateAgentRow(a.id, { name: e.target.value })}
                 />
                 <input
-                  placeholder="model (optional)"
+                  placeholder="模型（可选）"
                   value={a.model}
                   spellCheck={false}
                   onChange={(e) => updateAgentRow(a.id, { model: e.target.value })}
@@ -707,14 +708,14 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
                 <button
                   type="button"
                   className="btn btn-ghost btn-sm settings-mcp-remove"
-                  title="Remove agent"
+                  title="删除 agent"
                   onClick={() => removeAgentRow(a.id)}
                 >
                   ×
                 </button>
               </div>
               <input
-                placeholder="description (when to use this agent)"
+                placeholder="描述（何时使用此 agent）"
                 value={a.description}
                 spellCheck={false}
                 onChange={(e) =>
@@ -722,7 +723,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
                 }
               />
               <input
-                placeholder="tools (comma-separated, optional)"
+                placeholder="工具（逗号分隔，可选）"
                 value={a.toolsCsv}
                 spellCheck={false}
                 onChange={(e) =>
@@ -731,7 +732,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
               />
               <textarea
                 rows={3}
-                placeholder="system prompt"
+                placeholder="系统提示词"
                 value={a.prompt}
                 spellCheck={false}
                 onChange={(e) => updateAgentRow(a.id, { prompt: e.target.value })}
@@ -741,7 +742,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
         )}
         <div className="settings-inline-actions">
           <button type="button" className="btn btn-sm" onClick={addAgentRow}>
-            + Add agent
+            + 添加 Agent
           </button>
         </div>
       </div>
@@ -751,19 +752,21 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   function renderPlugins() {
     return (
       <div className="settings-mcp">
-        <div className="settings-context-limits-title">Plugins</div>
+        <div className="settings-context-limits-title">本地插件</div>
         <p className="settings-hint">
-          Local plugin directories (one per line). Loads skills / hooks /
-          agents / commands; plugin MCP servers are ignored (app MCP config
-          stays authoritative). Applies to new sessions.
+          本地插件目录（每行一个）。加载其中的 skills / hooks / agents / 命令；插件自带的 MCP 服务器会被忽略（以应用内 MCP 配置为准）。新会话生效。
         </p>
-        <textarea
-          rows={2}
-          placeholder={"D:\\path\\to\\plugin"}
-          value={form.pluginPathsText}
-          spellCheck={false}
-          onChange={(e) => setField("pluginPathsText", e.target.value)}
-        />
+        <label className="settings-field">
+          插件目录
+          <textarea
+            className="settings-codearea"
+            rows={2}
+            placeholder={"插件目录路径，每行一个"}
+            value={form.pluginPathsText}
+            spellCheck={false}
+            onChange={(e) => setField("pluginPathsText", e.target.value)}
+          />
+        </label>
       </div>
     );
   }
@@ -771,21 +774,19 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   function renderMcpServers() {
     return (
       <div className="settings-mcp">
-        <div className="settings-context-limits-title">MCP servers</div>
+        <div className="settings-context-limits-title">MCP 服务器</div>
         <p className="settings-hint">
-          stdio runs a local command; sse/http connect to a URL. Env / headers:
-          one KEY=VALUE per line. Applies to new sessions. Only these servers
-          are loaded (project .mcp.json / user MCP settings are ignored).
+          stdio 运行本地命令；sse/http 连接 URL。env / headers：每行一个 KEY=VALUE。新会话生效；仅加载此处配置（项目的 .mcp.json 与用户级 MCP 设置会被忽略）。
         </p>
         {form.mcpServers.length === 0 ? (
-          <p className="settings-hint">No MCP servers configured.</p>
+          <p className="settings-hint">尚未配置 MCP 服务器。</p>
         ) : (
           form.mcpServers.map((row) => (
             <div key={row.id} className="settings-mcp-row">
               <div className="settings-mcp-row-head">
                 <input
                   className="settings-mcp-name"
-                  placeholder="name"
+                  placeholder="名称"
                   value={row.name}
                   spellCheck={false}
                   onChange={(e) => updateMcpRow(row.id, { name: e.target.value })}
@@ -806,7 +807,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
                 <button
                   type="button"
                   className="btn btn-ghost btn-sm settings-mcp-remove"
-                  title="Remove server"
+                  title="删除服务器"
                   onClick={() => removeMcpRow(row.id)}
                 >
                   ×
@@ -816,7 +817,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
               {row.type === "stdio" ? (
                 <>
                   <input
-                    placeholder="command (e.g. node)"
+                    placeholder="命令（如 node）"
                     value={row.command}
                     spellCheck={false}
                     onChange={(e) =>
@@ -824,7 +825,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
                     }
                   />
                   <input
-                    placeholder="args (space-separated)"
+                    placeholder="参数（空格分隔）"
                     value={row.argsText}
                     spellCheck={false}
                     onChange={(e) =>
@@ -833,7 +834,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
                   />
                   <textarea
                     rows={2}
-                    placeholder={"env (KEY=VALUE per line, optional)"}
+                    placeholder={"env（每行 KEY=VALUE，可选）"}
                     value={row.envText}
                     spellCheck={false}
                     onChange={(e) =>
@@ -851,7 +852,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
                   />
                   <textarea
                     rows={2}
-                    placeholder={"headers (KEY=VALUE per line, optional)"}
+                    placeholder={"headers（每行 KEY=VALUE，可选）"}
                     value={row.headersText}
                     spellCheck={false}
                     onChange={(e) =>
@@ -865,16 +866,16 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
         )}
         <div className="settings-inline-actions">
           <button type="button" className="btn btn-sm" onClick={addMcpRow}>
-            + Add MCP server
+            + 添加 MCP 服务器
           </button>
           <button
             type="button"
             className="btn btn-ghost btn-sm"
             disabled={mcpProbing || form.mcpServers.length === 0}
-            title="Spawn a throwaway session and test every server in this form"
+            title="启动临时会话，测试表单中的所有服务器"
             onClick={() => void onMcpProbeDraft()}
           >
-            {mcpProbing ? "Probing…" : "Test connections"}
+            {mcpProbing ? "测试中…" : "测试连接"}
           </button>
         </div>
         {mcpNote ? <p className="settings-hint">{mcpNote}</p> : null}
@@ -933,12 +934,12 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
 
     const allowRules = parseRulesText(form.permissionAllowText);
     if (!allowRules.ok) {
-      setLocalError(`Allow rules: ${allowRules.error}`);
+      setLocalError(`允许规则：${allowRules.error}`);
       return;
     }
     const denyRules = parseRulesText(form.permissionDenyText);
     if (!denyRules.ok) {
-      setLocalError(`Deny rules: ${denyRules.error}`);
+      setLocalError(`拒绝规则：${denyRules.error}`);
       return;
     }
 
@@ -1032,7 +1033,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
         onClick={(e) => e.stopPropagation()}
       >
         <header className="settings-header">
-          <h2>Settings</h2>
+          <h2>设置</h2>
           <button type="button" className="btn" onClick={onClose}>
             Close
           </button>
@@ -1086,7 +1087,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
                 })();
               }}
             >
-              {syncing ? "Syncing…" : "从 CPA 同步模型"}
+              {syncing ? "同步中…" : "从 CPA 同步模型"}
             </button>
           </div>
 
@@ -1206,7 +1207,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
             disabled={saving}
             onClick={() => void onSave()}
           >
-            {saving ? "Saving…" : "Save"}
+            {saving ? "保存中…" : "保存"}
           </button>
         </footer>
       </aside>
