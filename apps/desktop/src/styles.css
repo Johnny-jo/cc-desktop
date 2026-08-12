@@ -798,13 +798,24 @@ body.is-resizing-row * {
 
 .select-ghost {
   background: transparent;
-  color: var(--text-muted);
-  max-width: 160px;
+  border: 1px solid transparent;
+  color: var(--text);
+  max-width: 180px;
+  /* Clean pill shape; visible affordance without a heavy box */
+  border-radius: var(--radius-pill);
+  padding: 5px 24px 5px 12px;
 }
 
-.select-ghost:hover {
+.select-ghost:hover:not(:disabled) {
   background: var(--bg-hover);
-  color: var(--text);
+  border-color: var(--border);
+}
+
+.select-ghost:focus-visible {
+  outline: none;
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+  box-shadow: var(--focus-ring);
 }
 
 .input {
@@ -1540,8 +1551,7 @@ body.is-resizing-row * {
   border: 1px solid var(--border-soft);
   border-radius: 5px;
   padding: 0.1em 0.35em;
-  /* Explicit dark-on-light / light-on-dark text */
-  color: var(--text);
+  color: #111;
 }
 
 .md-body pre {
@@ -1555,7 +1565,7 @@ body.is-resizing-row * {
   line-height: 1.45;
   /* Explicit text color — dark-mode inherited text is too faint on the
      light code background */
-  color: var(--text);
+  color: #111;
 }
 
 .md-body pre code {
@@ -2008,28 +2018,55 @@ body.is-resizing-row * {
 .composer-model-field {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   min-width: 0;
   max-width: 55%;
   color: var(--text-muted);
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  padding: 1px 4px 1px 10px;
+  transition: background 140ms ease, border-color 140ms ease;
+}
+
+.composer-model-field:hover {
+  background: var(--bg-hover);
+  border-color: var(--border);
 }
 
 .composer-model-prefix {
   flex-shrink: 0;
   font-size: 12px;
-  opacity: 0.85;
+  color: var(--accent);
+  opacity: 1;
 }
 
 .composer-model-select {
   max-width: 100%;
   min-width: 0;
-  padding: 2px 4px;
+  /* ghost inside the pill field — no own chrome */
+  padding: 4px 18px 4px 2px;
+  border: none;
+  background: transparent;
   font-size: 12px;
   color: var(--text-muted);
 }
 
-.composer-model-select:hover:not(:disabled) {
+.composer-model-select:hover:not(:disabled),
+.composer-model-field:hover .composer-model-select {
   color: var(--text);
+  background: transparent;
+  border-color: transparent;
+}
+
+.composer-model-select:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+.composer-model-field:focus-within {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+  box-shadow: var(--focus-ring);
 }
 
 .composer-actions {
