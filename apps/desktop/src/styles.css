@@ -423,9 +423,10 @@ textarea {
 
 /* —— File tree (sidebar pull-up) —— */
 .sidebar-files {
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-md);
-  background: var(--bg-panel);
+  /* Seamless with the footer rows below (no card chrome) */
+  border: none;
+  border-radius: 0;
+  background: transparent;
   overflow: hidden;
 }
 
@@ -439,10 +440,11 @@ textarea {
   flex: 1;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   background: transparent;
   border: none;
-  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  padding: 9px 12px;
   cursor: pointer;
   color: var(--text-muted);
   font-size: 12.5px;
@@ -486,12 +488,14 @@ textarea {
   border-color: var(--accent);
 }
 
-/* Cap height so the open tree never pushes past the New chat row */
+/* Cap height so the open tree never crosses the New chat row */
 .sidebar-files-body {
-  max-height: min(38vh, 340px);
+  max-height: min(32vh, 280px);
   overflow: auto;
   border-top: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--border-soft);
   padding: 4px 0;
+  margin-bottom: 2px;
 }
 
 .ft-node {
@@ -661,6 +665,8 @@ textarea {
   flex: 1 1 0;
   min-height: 0;
   overflow: auto;
+  /* background on the scroller so horizontal overflow stays covered */
+  background: var(--bg-code);
 }
 
 .file-editor-code {
@@ -671,6 +677,9 @@ textarea {
   line-height: 1.5;
   color: var(--code-text);
   background: var(--bg-code);
+  /* Cover the full scroll width when lines overflow horizontally */
+  display: inline-block;
+  min-width: 100%;
   min-height: 100%;
   white-space: pre;
 }

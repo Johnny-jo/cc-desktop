@@ -188,16 +188,32 @@ export function App() {
 
           <main className="panel panel-chat">
             <div className="chat-editor-row">
-              {editorFile && !editorFull ? (
-                <div
-                  className="chat-col"
-                  style={{ flex: `0 0 ${(1 - editorRatio) * 100}%` }}
-                >
-                  <ChatPanel onOpenSettings={() => setSettingsOpen(true)} />
-                </div>
-              ) : null}
               {editorFile ? (
                 <>
+                  {/* Editor on the LEFT of chat */}
+                  <div
+                    className="editor-col"
+                    style={
+                      editorFull
+                        ? { flex: "1 1 0" }
+                        : { flex: `0 0 ${editorRatio * 100}%` }
+                    }
+                  >
+                    {editorFull ? (
+                      <button
+                        type="button"
+                        className="editor-collapse-btn"
+                        title="收缩编辑栏"
+                        onClick={() => {
+                          setEditorFull(false);
+                          setEditorRatio(0.5);
+                        }}
+                      >
+                        ⇥ 收缩
+                      </button>
+                    ) : null}
+                    <FileEditor rel={editorFile} onClose={closeEditor} />
+                  </div>
                   {!editorFull && settingsOpen === false ? (
                     <div
                       className="editor-divider"
@@ -212,10 +228,10 @@ export function App() {
                         const startRatio = editorRatio;
                         el.setPointerCapture(e.pointerId);
                         const onMove = (ev: PointerEvent) => {
+                          // editor is LEFT: dragging right widens it
                           const dx = ev.clientX - startX;
                           let next = startRatio + dx / rowW;
                           if (next < 0.18) {
-                            // drag too narrow → collapse the editor pane
                             closeEditor();
                             cleanup();
                             return;
@@ -240,32 +256,17 @@ export function App() {
                       }}
                     />
                   ) : null}
-                  <div
-                    className="editor-col"
-                    style={
-                      editorFull
-                        ? { flex: "1 1 0" }
-                        : { flex: `0 0 ${editorRatio * 100}%` }
-                    }
-                  >
-                    {editorFull ? (
-                      <button
-                        type="button"
-                        className="editor-collapse-btn"
-                        title="收缩编辑栏"
-                        onClick={() => {
-                          setEditorFull(false);
-                          setEditorRatio(0.5);
-                        }}
-                      >
-                        ⇤ 收缩
-                      </button>
-                    ) : null}
-                    <FileEditor rel={editorFile} onClose={closeEditor} />
-                  </div>
                 </>
-              ) : (
-                <div className="chat-col" style={{ flex: "1 1 0" }}>
+              ) : null}
+              {editorFile && editorFull ? null : (
+                <div
+                  className="chat-col"
+                  style={
+                    editorFile
+                      ? { flex: `0 0 ${(1 - editorRatio) * 100}%` }
+                      : { flex: "1 1 0" }
+                  }
+                >
                   <ChatPanel onOpenSettings={() => setSettingsOpen(true)} />
                 </div>
               )}
