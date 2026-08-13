@@ -180,6 +180,21 @@ const desktop = {
       truncated?: boolean;
     }>,
 
+  /** List direct children of a project dir (file tree; "" = root). */
+  listProjectDir: (cwd: string, rel?: string) =>
+    ipcRenderer.invoke(IPC.projectListDir, { cwd, rel: rel ?? "" }) as Promise<{
+      entries: Array<{ name: string; rel: string; kind: "dir" | "file" }>;
+    }>,
+
+  /** Read a project file as UTF-8 text (bounded). */
+  readProjectFile: (cwd: string, rel: string, maxBytes?: number) =>
+    ipcRenderer.invoke(IPC.fileReadText, { cwd, rel, maxBytes }) as Promise<{
+      ok: boolean;
+      content?: string;
+      truncated?: boolean;
+      error?: string;
+    }>,
+
   respondUserPrompt: (requestId: string, decision: UserPromptDecision) =>
     ipcRenderer.invoke(IPC.userPromptRespond, {
       requestId,

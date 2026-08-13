@@ -7,6 +7,7 @@ import {
   useAppStore,
 } from "../state/store";
 import { StatusDot } from "./StatusDot";
+import { FileTree } from "./FileTree";
 
 function formatTime(ts: number): string {
   try {
@@ -23,9 +24,26 @@ function formatTime(ts: number): string {
 
 export type SessionListProps = {
   onOpenSettings: () => void;
+  /** File tree (pull-up) panel state and callbacks */
+  fileTreeOpen: boolean;
+  onToggleFileTree: () => void;
+  selectedFile: string | null;
+  onSelectFile: (rel: string) => void;
+  onOpenFile: (rel: string) => void;
+  editorOpen: boolean;
+  onToggleEditor: () => void;
 };
 
-export function SessionList({ onOpenSettings }: SessionListProps) {
+export function SessionList({
+  onOpenSettings,
+  fileTreeOpen,
+  onToggleFileTree,
+  selectedFile,
+  onSelectFile,
+  onOpenFile,
+  editorOpen,
+  onToggleEditor,
+}: SessionListProps) {
   const sessions = useAppStore((s) => s.sessions);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
   const projectPath = useAppStore((s) => s.projectPath);
@@ -113,6 +131,43 @@ export function SessionList({ onOpenSettings }: SessionListProps) {
       </ul>
 
       <div className="sidebar-footer">
+        {/* Pull-up file tree above the project folder row (VSCode style) */}
+        <div className={`sidebar-files${fileTreeOpen ? " open" : ""}`}>
+          <div className="sidebar-files-head">
+            <button
+              type="button"
+              className="sidebar-files-toggle"
+              onClick={onToggleFileTree}
+              aria-expanded={fileTreeOpen}
+              title={fileTreeOpen ? "收起文件结构" : "展开文件结构"}
+            >
+              <span className={`sidebar-files-chevron${fileTreeOpen ? " open" : ""}`}>
+                ▴
+              </span>
+              <span className="sidebar-files-label">文件</span>
+            </button>
+            {fileTreeOpen && selectedFile && !editorOpen ? (
+              <button
+                type="button"
+                className="sidebar-files-sidebtn"
+                title="在编辑栏打开"
+                onClick={onToggleEditor}
+              >
+                ⇥
+              </button>
+            ) : null}
+          </div>
+          {fileTreeOpen ? (
+            <div className="sidebar-files-body">
+              <FileTree
+                selected={selectedFile}
+                onSelectFile={onSelectFile}
+                onOpenFile={onOpenFile}
+              />
+            </div>
+          ) : null}
+        </div>
+
         <button
           type="button"
           className="sidebar-footer-row"

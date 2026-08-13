@@ -81,6 +81,10 @@ export const IPC = {
   skillsDelete: "skills:delete",
   /** Reload skills in the running session (Query.reloadSkills) */
   skillsReload: "skills:reload",
+  /** List direct children of a project directory (file tree, lazy) */
+  projectListDir: "project:list-dir",
+  /** Read a project file as text (editor panel) */
+  fileReadText: "file:read-text",
   /** Bottom terminal: create shell in project cwd */
   terminalCreate: "terminal:create",
   terminalWrite: "terminal:write",
@@ -325,6 +329,23 @@ export type IpcInvokeMap = {
   [IPC.skillsReload]: {
     args: [{ sessionId: string }];
     result: { ok: boolean; error?: string };
+  };
+  [IPC.projectListDir]: {
+    /** rel is a project-relative directory; "" = project root */
+    args: [{ cwd: string; rel?: string }];
+    result: {
+      entries: Array<{ name: string; rel: string; kind: "dir" | "file" }>;
+    };
+  };
+  [IPC.fileReadText]: {
+    /** rel is project-relative; must stay inside cwd */
+    args: [{ cwd: string; rel: string; maxBytes?: number }];
+    result: {
+      ok: boolean;
+      content?: string;
+      truncated?: boolean;
+      error?: string;
+    };
   };
 };
 

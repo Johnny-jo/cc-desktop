@@ -26,6 +26,7 @@ import {
   ensureSkillsDir,
   listSkills,
 } from "./skill-store";
+import path from "node:path";
 import {
   resolveEffectiveCpaPaths,
   writeCpaConfigWithApiKey,
@@ -128,6 +129,105 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
         throw new Error("project:list-files cwd is not an open project");
       }
       return listProjectFiles(cwd, query ?? "", limit ?? 50);
+    },
+  );
+
+  /** Allowed cwd roots for project file browsing (open project / session cwds). */
+  function allowedProjectRoots(): Set<string> {
+    const allowed = new Set<string>();
+    const last = ctx.settings.get().lastProjectPath;
+    if (last) allowed.add(last);
+    for (const s of ctx.sessions.list()) {
+      if (s.cwd) allowed.add(s.cwd);
+    }
+    return allowed;
+  }
+
+  /** Resolve rel inside cwd; null when it escapes. */
+  function resolveInside(cwd: string, rel: string): string | null {
+    const base = path.resolve(cwd);
+    const target = path.resolve(base, rel || ".");
+    if (target !== base && !target.startsWith(base + path.sep)) return null;
+    return target;
+  }
+
+  const TREE_IGNORED = new Set([
+    "node_modules",
+    ".git",
+    "dist",
+    "build",
+    "out",
+    ".next",
+    ".cache",
+    "coverage",
+    "target",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".turbo",
+  ]);
+
+  ipcMain.handle(
+    IPC.projectListDir,
+    async (_e, { cwd, rel }: { cwd: string; rel?: string }) => {
+      if (!allowedProjectRoots().has(cwd)) {
+        throw new Error("project:list-dir cwd is not an open project");
+      }
+      const dir = resolveInside(cwd, rel ?? "");
+      if (!dir) throw new Error("path escapes project");
+      const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+      const out: Array<{ name: string; rel: string; kind: "dir" | "file" }> = [];
+      for (const e of entries) {
+        if (e.name.startsWith(".") && e.name !== ".claude") continue;
+        const childRel = rel ? `${rel}/${e.name}` : e.name;
+        if (e.isDirectory()) {
+          if (TREE_IGNORED.has(e.name)) continue;
+          out.push({ name: e.name, rel: childRel, kind: "dir" });
+        } else if (e.isFile()) {
+          out.push({ name: e.name, rel: childRel, kind: "file" });
+        }
+      }
+      out.sort((a, b) =>
+        a.kind !== b.kind
+          ? a.kind === "dir"
+            ? -1
+            : 1
+          : a.name.localeCompare(b.name),
+      );
+      return { entries: out };
+    },
+  );
+
+  ipcMain.handle(
+    IPC.fileReadText,
+    async (
+      _e,
+      { cwd, rel, maxBytes }: { cwd: string; rel: string; maxBytes?: number },
+    ) => {
+      if (!allowedProjectRoots().has(cwd)) {
+        return { ok: false, error: "not an open project" };
+      }
+      const target = resolveInside(cwd, rel);
+      if (!target) return { ok: false, error: "path escapes project" };
+      try {
+        const stat = await fs.promises.stat(target);
+        if (!stat.isFile()) return { ok: false, error: "not a file" };
+        const cap = Math.min(maxBytes ?? 512 * 1024, 2 * 1024 * 1024);
+        const buf = await fs.promises.readFile(target);
+        if (buf.includes(0)) {
+          return { ok: false, error: "binary file" };
+        }
+        const truncated = buf.length > cap;
+        const content = buf
+          .subarray(0, truncated ? cap : buf.length)
+          .toString("utf8");
+        return { ok: true, content, truncated };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
     },
   );
 

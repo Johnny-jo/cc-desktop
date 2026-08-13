@@ -421,6 +421,266 @@ textarea {
   flex: 0 0 auto;
 }
 
+/* —— File tree (sidebar pull-up) —— */
+.sidebar-files {
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+  overflow: hidden;
+}
+
+.sidebar-files-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.sidebar-files-toggle {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  border: none;
+  padding: 8px 12px;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  text-align: left;
+}
+
+.sidebar-files-toggle:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+.sidebar-files-chevron {
+  display: inline-block;
+  font-size: 10px;
+  transition: transform 160ms ease;
+  color: var(--text-faint);
+}
+
+.sidebar-files-chevron.open {
+  transform: rotate(180deg);
+}
+
+.sidebar-files-label {
+  font-weight: 600;
+}
+
+.sidebar-files-sidebtn {
+  flex-shrink: 0;
+  margin-right: 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 2px 8px;
+}
+
+.sidebar-files-sidebtn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* Cap height so the open tree never pushes past the New chat row */
+.sidebar-files-body {
+  max-height: min(38vh, 340px);
+  overflow: auto;
+  border-top: 1px solid var(--border-soft);
+  padding: 4px 0;
+}
+
+.ft-node {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-top: 3px;
+  padding-bottom: 3px;
+  padding-right: 8px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: none;
+}
+
+.ft-node:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.ft-node.selected {
+  background: var(--bg-active);
+  color: var(--text);
+}
+
+.ft-chevron {
+  display: inline-block;
+  width: 10px;
+  font-size: 9px;
+  color: var(--text-faint);
+  transition: transform 120ms ease;
+  flex-shrink: 0;
+}
+
+.ft-chevron.open {
+  transform: rotate(90deg);
+}
+
+.ft-icon {
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.ft-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ft-empty,
+.ft-hint {
+  padding: 8px 12px;
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+/* —— Chat + editor split —— */
+.chat-editor-row {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.chat-col {
+  /* Allow the split view: chat must stay usable at ~half width */
+  min-width: 340px;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.editor-col {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  border-left: 1px solid var(--border-soft);
+}
+
+.editor-divider {
+  flex: 0 0 6px;
+  cursor: col-resize;
+  background: transparent;
+  position: relative;
+  z-index: 30;
+}
+
+.editor-divider::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
+  background: var(--border);
+}
+
+.editor-divider:hover::after,
+.editor-divider:active::after {
+  background: var(--accent);
+  width: 2px;
+}
+
+.editor-collapse-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 10;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  font-size: 11px;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+
+.editor-collapse-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* File editor pane */
+.file-editor {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.file-editor-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  flex-shrink: 0;
+}
+
+.file-editor-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.file-editor-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--text-faint);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.file-editor-body {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.file-editor-code {
+  margin: 0;
+  padding: 12px 14px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--code-text);
+  background: var(--bg-code);
+  min-height: 100%;
+  white-space: pre;
+}
+
+.file-editor-hint {
+  padding: 12px 14px;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
 /*
  * Resize handles sit BETWEEN flex children with a real 10px box so they
  * always receive pointer events (pseudo-element hit targets were flaky).

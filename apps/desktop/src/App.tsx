@@ -13,6 +13,7 @@ import { UserPromptModal } from "./components/UserPromptModal";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { OnboardingModal } from "./components/OnboardingModal";
 import { ErrorBanner } from "./components/ErrorBanner";
+import { FileEditor } from "./components/FileEditor";
 import { getDesktop } from "./lib/desktop-api";
 import { usePanelLayout } from "./hooks/usePanelLayout";
 import {
@@ -32,6 +33,26 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const settings = useAppStore((s) => s.settings);
   const needsOnboarding = settings != null && !settings.hasToken;
+
+  // ---- File tree + editor pane state ----
+  const [fileTreeOpen, setFileTreeOpen] = useState(false);
+  const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  const [editorFile, setEditorFile] = useState<string | null>(null);
+  /** Editor pane width as fraction of (chat+editor) area; 1 = full cover */
+  const [editorRatio, setEditorRatio] = useState(0.5);
+  const [editorFull, setEditorFull] = useState(false);
+
+  const onSelectFile = (rel: string) => setSelectedFile(rel);
+  const onOpenFile = (rel: string) => {
+    setSelectedFile(rel);
+    setEditorFile(rel);
+    setEditorFull(false);
+    setEditorRatio((r) => (r >= 0.35 && r <= 0.7 ? r : 0.5));
+  };
+  const closeEditor = () => {
+    setEditorFile(null);
+    setEditorFull(false);
+  };
 
   const {
     layout,
@@ -138,7 +159,22 @@ export function App() {
                   flex: `0 0 ${layout.sidebarWidth}px`,
                 }}
               >
-                <SessionList onOpenSettings={() => setSettingsOpen(true)} />
+                <SessionList
+                  onOpenSettings={() => setSettingsOpen(true)}
+                  fileTreeOpen={fileTreeOpen}
+                  onToggleFileTree={() => setFileTreeOpen((v) => !v)}
+                  selectedFile={selectedFile}
+                  onSelectFile={onSelectFile}
+                  onOpenFile={onOpenFile}
+                  editorOpen={editorFile !== null}
+                  onToggleEditor={() => {
+                    if (editorFile) {
+                      closeEditor();
+                    } else if (selectedFile) {
+                      onOpenFile(selectedFile);
+                    }
+                  }}
+                />
               </aside>
               {settingsOpen ? null : (
                 <ResizeHandle
@@ -151,7 +187,89 @@ export function App() {
           ) : null}
 
           <main className="panel panel-chat">
-            <ChatPanel onOpenSettings={() => setSettingsOpen(true)} />
+            <div className="chat-editor-row">
+              {editorFile && !editorFull ? (
+                <div
+                  className="chat-col"
+                  style={{ flex: `0 0 ${(1 - editorRatio) * 100}%` }}
+                >
+                  <ChatPanel onOpenSettings={() => setSettingsOpen(true)} />
+                </div>
+              ) : null}
+              {editorFile ? (
+                <>
+                  {!editorFull && settingsOpen === false ? (
+                    <div
+                      className="editor-divider"
+                      role="separator"
+                      aria-orientation="vertical"
+                      onPointerDown={(e) => {
+                        e.preventDefault();
+                        const el = e.currentTarget;
+                        const row = el.parentElement as HTMLElement;
+                        const startX = e.clientX;
+                        const rowW = row.getBoundingClientRect().width;
+                        const startRatio = editorRatio;
+                        el.setPointerCapture(e.pointerId);
+                        const onMove = (ev: PointerEvent) => {
+                          const dx = ev.clientX - startX;
+                          let next = startRatio + dx / rowW;
+                          if (next < 0.18) {
+                            // drag too narrow → collapse the editor pane
+                            closeEditor();
+                            cleanup();
+                            return;
+                          }
+                          if (next > 0.7) {
+                            setEditorFull(true);
+                            cleanup();
+                            return;
+                          }
+                          next = Math.max(0.3, Math.min(0.7, next));
+                          setEditorRatio(next);
+                        };
+                        const cleanup = () => {
+                          window.removeEventListener("pointermove", onMove);
+                          window.removeEventListener("pointerup", onUp);
+                          window.removeEventListener("pointercancel", onUp);
+                        };
+                        const onUp = () => cleanup();
+                        window.addEventListener("pointermove", onMove);
+                        window.addEventListener("pointerup", onUp);
+                        window.addEventListener("pointercancel", onUp);
+                      }}
+                    />
+                  ) : null}
+                  <div
+                    className="editor-col"
+                    style={
+                      editorFull
+                        ? { flex: "1 1 0" }
+                        : { flex: `0 0 ${editorRatio * 100}%` }
+                    }
+                  >
+                    {editorFull ? (
+                      <button
+                        type="button"
+                        className="editor-collapse-btn"
+                        title="收缩编辑栏"
+                        onClick={() => {
+                          setEditorFull(false);
+                          setEditorRatio(0.5);
+                        }}
+                      >
+                        ⇤ 收缩
+                      </button>
+                    ) : null}
+                    <FileEditor rel={editorFile} onClose={closeEditor} />
+                  </div>
+                </>
+              ) : (
+                <div className="chat-col" style={{ flex: "1 1 0" }}>
+                  <ChatPanel onOpenSettings={() => setSettingsOpen(true)} />
+                </div>
+              )}
+            </div>
           </main>
 
           {layout.changesOpen ? (
