@@ -17,6 +17,40 @@ type TranscriptFile = {
   items: ChatItem[];
 };
 
+/** First paint / each "load older" page. */
+export const TRANSCRIPT_PAGE = 40;
+
+export type TranscriptPage = {
+  items: ChatItem[];
+  total: number;
+  hasMore: boolean;
+};
+
+function stripStreaming(item: ChatItem): ChatItem {
+  if (item.kind === "text") {
+    return { ...item, streaming: false };
+  }
+  return item;
+}
+
+/** Merge a renderer window into the on-disk transcript without dropping unread history. */
+export function mergeTranscriptItems(
+  disk: ChatItem[],
+  incoming: ChatItem[],
+): ChatItem[] {
+  if (incoming.length === 0) return disk;
+  if (disk.length === 0) return incoming.map(stripStreaming);
+  const byId = new Map<string, ChatItem>();
+  for (const item of disk) byId.set(item.id, item);
+  for (const item of incoming) byId.set(item.id, stripStreaming(item));
+  const diskIds = new Set(disk.map((i) => i.id));
+  const out = disk.map((i) => byId.get(i.id) ?? i);
+  for (const item of incoming) {
+    if (!diskIds.has(item.id)) out.push(stripStreaming(item));
+  }
+  return out;
+}
+
 type ChangesFile = {
   version: 1;
   sessionId: string;
@@ -136,15 +170,36 @@ export class SessionArchive {
       const data = JSON.parse(raw) as TranscriptFile;
       if (!Array.isArray(data.items)) return [];
       // Drop streaming flags on load
-      return data.items.map((item) => {
-        if (item.kind === "text") {
-          return { ...item, streaming: false };
-        }
-        return item;
-      });
+      return data.items.map(stripStreaming);
     } catch {
       return [];
     }
+  }
+
+  /**
+   * Tail (or the page ending just before `beforeId`) for incremental UI restore.
+   * Disk still holds the full transcript.
+   */
+  loadItemsPage(
+    sessionId: string,
+    opts?: { beforeId?: string; limit?: number },
+  ): TranscriptPage {
+    const all = this.loadItems(sessionId);
+    const limit = opts?.limit && opts.limit > 0 ? opts.limit : TRANSCRIPT_PAGE;
+    let end = all.length;
+    if (opts?.beforeId) {
+      const idx = all.findIndex((i) => i.id === opts.beforeId);
+      if (idx < 0) {
+        return { items: [], total: all.length, hasMore: all.length > 0 };
+      }
+      end = idx;
+    }
+    const start = Math.max(0, end - limit);
+    return {
+      items: all.slice(start, end),
+      total: all.length,
+      hasMore: start > 0,
+    };
   }
 
   saveItems(sessionId: string, items: ChatItem[]): void {
@@ -152,16 +207,16 @@ export class SessionArchive {
     const payload: TranscriptFile = {
       version: 1,
       sessionId,
-      items: items.map((item) => {
-        if (item.kind === "text") {
-          const { streaming: _s, ...rest } = item;
-          return { ...rest, streaming: false };
-        }
-        return item;
-      }),
+      items: items.map(stripStreaming),
     };
     fs.mkdirSync(this.root, { recursive: true });
     fs.writeFileSync(file, JSON.stringify(payload, null, 2), "utf8");
+  }
+
+  /** Persist a renderer window / live tail without wiping older disk rows. */
+  mergeSaveItems(sessionId: string, incoming: ChatItem[]): void {
+    const merged = mergeTranscriptItems(this.loadItems(sessionId), incoming);
+    this.saveItems(sessionId, merged);
   }
 
   loadChanges(sessionId: string): FileChange[] {

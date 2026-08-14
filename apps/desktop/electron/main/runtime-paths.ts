@@ -98,13 +98,23 @@ export function getClaudeExecutablePath(env: RuntimePathEnv): string | null {
   return resolveSdkClaudeExecutable(platform);
 }
 
+/** True when the saved exe lives inside a previous Claude Desktop install. */
+export function isBundledAppCpaPath(exePath: string): boolean {
+  const n = exePath.replace(/\\/g, "/").toLowerCase();
+  return (
+    n.includes("/resources/bin/cpa/") ||
+    n.endsWith("/resources/bin/cpa/cli-proxy-api.exe") ||
+    n.endsWith("/resources/bin/cpa/cli-proxy-api")
+  );
+}
+
 export function getCpaExecutablePath(env: RuntimePathEnv): string {
   const platform = env.platform ?? process.platform;
   const name = cpaBinaryName(platform);
 
   if (env.isPackaged) {
-    const p = path.join(bundledBinRoot(env), "cpa", name);
-    if (fs.existsSync(p)) return p;
+    // Packaged builds must never fall back to a developer machine path.
+    return path.join(bundledBinRoot(env), "cpa", name);
   }
 
   const root = env.projectRoot ?? findProjectRoot();
@@ -184,6 +194,7 @@ export function materializeCpaConfig(
     const body = applyCpaConfigDefaults(readCpaConfigTemplate(env), {
       port: opts?.port ?? 8317,
       apiKey: opts?.apiKey,
+      mode: "full",
     });
     fs.writeFileSync(dest, body, "utf8");
   }
@@ -201,12 +212,15 @@ export function writeCpaConfigWithApiKey(
 ): string {
   const dest = getCpaUserConfigPath(env);
   fs.mkdirSync(path.dirname(dest), { recursive: true });
+  // Onboarding only: prefer template seed if missing; otherwise patch existing.
+  // Callers must not use this on every boot — use repairCpaManagementConfig.
   let base = fs.existsSync(dest)
     ? fs.readFileSync(dest, "utf8")
     : readCpaConfigTemplate(env);
   const body = applyCpaConfigDefaults(base, {
     port: opts.port ?? 8317,
     apiKey: opts.apiKey,
+    mode: "full",
   });
   fs.writeFileSync(dest, body, "utf8");
   return dest;
@@ -239,10 +253,17 @@ export function resolveEffectiveCpaPaths(
     settings.cpaConfigPath.includes("D:\\gitrep\\CC\\CPA") ||
     settings.cpaConfigPath.includes("D:/gitrep/CC/CPA");
 
-  const cpaExePath =
-    !exeIsLegacy && fs.existsSync(settings.cpaExePath)
-      ? settings.cpaExePath
-      : bundledExe;
+  // Packaged: always the exe shipped next to this build. Settings often still
+  // point at a previous install dir after upgrade / reinstall; that leftover
+  // file can exist but be incomplete, so existence is not enough.
+  const preferBundled =
+    env.isPackaged ||
+    exeIsLegacy ||
+    !settings.cpaExePath ||
+    !fs.existsSync(settings.cpaExePath) ||
+    isBundledAppCpaPath(settings.cpaExePath);
+
+  const cpaExePath = preferBundled ? bundledExe : settings.cpaExePath;
 
   const cpaConfigPath =
     !configIsLegacy && fs.existsSync(settings.cpaConfigPath)
@@ -252,12 +273,27 @@ export function resolveEffectiveCpaPaths(
   return { cpaExePath, cpaConfigPath };
 }
 
+export type CpaConfigApplyMode =
+  /** First-time seed / onboarding: may write api-keys + secret-key. */
+  | "full"
+  /**
+   * Bootstrap repair only: enable management panel + fill EMPTY secret-key.
+   * NEVER overwrites non-empty api-keys / secret-key / provider blocks.
+   */
+  | "repair-panel";
+
 export function applyCpaConfigDefaults(
   yaml: string,
-  opts: { port: number; apiKey?: string | null },
+  opts: {
+    port: number;
+    apiKey?: string | null;
+    /** default "full" for onboarding/seed; use "repair-panel" on every boot */
+    mode?: CpaConfigApplyMode;
+  },
 ): string {
+  const mode = opts.mode ?? "full";
   let out = yaml;
-  // Force localhost binding for desktop embedding.
+  // Force localhost binding for desktop embedding (safe; desktop must bind local).
   out = out.replace(/^host:\s*.*$/m, 'host: "127.0.0.1"');
   out = out.replace(/^port:\s*\d+\s*$/m, `port: ${opts.port}`);
   // Prefer user home auth-dir so existing CPA logins are reused.
@@ -279,8 +315,32 @@ export function applyCpaConfigDefaults(
       "$1  disable-control-panel: false\n",
     );
   }
+
+  if (mode === "repair-panel") {
+    // Only fill secret-key when missing/empty. Never touch api-keys or a
+    // non-empty secret-key (user may have set providers / hashed secret).
+    const secretEmpty =
+      !/secret-key:\s*/m.test(out) ||
+      /secret-key:\s*(""|''|)\s*$/m.test(out) ||
+      /secret-key:\s*$/m.test(out);
+    if (secretEmpty && opts.apiKey) {
+      if (/secret-key:\s*/m.test(out)) {
+        out = out.replace(
+          /secret-key:\s*.*$/m,
+          `secret-key: "${opts.apiKey}"`,
+        );
+      } else if (/^remote-management:/m.test(out)) {
+        out = out.replace(
+          /^(remote-management:\s*\n)/m,
+          `$1  secret-key: "${opts.apiKey}"\n`,
+        );
+      }
+    }
+    return out;
+  }
+
+  // mode === "full": onboarding / first materialize only
   if (opts.apiKey) {
-    // Replace first api-keys list item or inject a minimal block.
     if (/^api-keys:\s*$/m.test(out) || /^api-keys:/m.test(out)) {
       out = out.replace(
         /api-keys:\s*\n(?:\s*-\s*.*\n)*/m,
@@ -307,7 +367,8 @@ export function applyCpaConfigDefaults(
 /**
  * Repair an existing userData CPA config so the management panel works:
  * - enable control panel
- * - ensure secret-key is non-empty (use apiKey when provided)
+ * - fill secret-key ONLY when empty (never overwrite hashed/user keys)
+ * - NEVER rewrite api-keys / provider credentials
  * Returns true if the file was modified.
  */
 export function repairCpaManagementConfig(
@@ -332,7 +393,9 @@ export function repairCpaManagementConfig(
 
   const next = applyCpaConfigDefaults(body, {
     port: opts?.port ?? 8317,
-    apiKey: opts?.apiKey ?? extractFirstApiKey(body) ?? "change-me",
+    // Only used when secret is empty — never clobbers existing keys.
+    apiKey: secretEmpty ? opts?.apiKey ?? extractFirstApiKey(body) : null,
+    mode: "repair-panel",
   });
   if (next === body) return false;
   try {
@@ -341,6 +404,19 @@ export function repairCpaManagementConfig(
   } catch {
     return false;
   }
+}
+
+/**
+ * True when the CPA config still looks like the virgin template
+ * (placeholder change-me keys) and is safe to overwrite on first wizard.
+ */
+export function isPlaceholderCpaConfig(yaml: string): boolean {
+  const hasChangeMe =
+    /secret-key:\s*["']?change-me["']?/i.test(yaml) ||
+    /api-keys:[\s\S]*?-\s*["']?change-me["']?/i.test(yaml);
+  // Hashed secret-key from CPA startup is never a placeholder.
+  const hashedSecret = /secret-key:\s*["']?\$2[aby]\$/i.test(yaml);
+  return hasChangeMe && !hashedSecret;
 }
 
 function extractFirstApiKey(yaml: string): string | null {

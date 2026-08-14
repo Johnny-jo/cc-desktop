@@ -1,5 +1,17 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { CpaSupervisor, preferUnprefixedModels } from "./cpa-supervisor";
+
+function touchCpaFiles(): { cpaExePath: string; cpaConfigPath: string } {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cpa-sup-"));
+  const cpaExePath = path.join(dir, "cli-proxy-api.exe");
+  const cpaConfigPath = path.join(dir, "config.yaml");
+  fs.writeFileSync(cpaExePath, "x");
+  fs.writeFileSync(cpaConfigPath, "port: 8317\n");
+  return { cpaExePath, cpaConfigPath };
+}
 
 const baseSettings = {
   cpaExePath: "x",
@@ -49,9 +61,10 @@ describe("CpaSupervisor", () => {
       .fn()
       .mockReturnValueOnce(child1)
       .mockReturnValueOnce(child2);
+    const paths = touchCpaFiles();
 
     const cpa = new CpaSupervisor({
-      getSettings: () => ({ ...baseSettings }),
+      getSettings: () => ({ ...baseSettings, ...paths }),
       getToken: () => "tok",
       // Port never becomes ready — forces spawn + ready timeout path.
       probePort: async () => false,
@@ -79,6 +92,32 @@ describe("CpaSupervisor", () => {
     // First child was already cleaned on timeout; second retry should not
     // re-kill it as a "previous managed child" beyond that cleanup.
     expect(kill1).toHaveBeenCalledTimes(1);
+  });
+
+  it("ensureReady reports error when child exits during start", async () => {
+    const paths = touchCpaFiles();
+    const child = {
+      kill: vi.fn(() => true),
+      on: (event: string, listener: (...args: unknown[]) => void) => {
+        if (event === "exit") {
+          queueMicrotask(() => listener(1, null));
+        }
+      },
+      stderr: { on: vi.fn() },
+    };
+    const cpa = new CpaSupervisor({
+      getSettings: () => ({ ...baseSettings, ...paths }),
+      getToken: () => "tok",
+      probePort: async () => false,
+      spawnProcess: vi.fn().mockReturnValue(child),
+      pollIntervalMs: 10,
+      readyTimeoutMs: 80,
+    });
+    const status = await cpa.ensureReady();
+    expect(status.state).toBe("error");
+    if (status.state === "error") {
+      expect(status.message).toMatch(/立即退出|exit 1/);
+    }
   });
 
   it("preferUnprefixedModels drops provider/path duplicates", () => {

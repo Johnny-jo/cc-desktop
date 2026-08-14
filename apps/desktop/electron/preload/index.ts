@@ -34,18 +34,36 @@ const desktop = {
 
   listSessions: () => ipcRenderer.invoke(IPC.sessionList),
 
-  selectSession: (sessionId: string) =>
-    ipcRenderer.invoke(IPC.sessionSelect, { sessionId }) as Promise<{
+  selectSession: (sessionId: string, limit?: number) =>
+    ipcRenderer.invoke(IPC.sessionSelect, { sessionId, limit }) as Promise<{
       sessionId: string;
       cwd: string;
       items: ChatItem[];
+      total: number;
+      hasMore: boolean;
       changes: import("@claude-desktop/shared").FileChange[];
     }>,
 
-  saveSessionTranscript: (sessionId: string, items: ChatItem[]) =>
+  loadOlderMessages: (sessionId: string, beforeId: string, limit?: number) =>
+    ipcRenderer.invoke(IPC.sessionLoadOlder, {
+      sessionId,
+      beforeId,
+      limit,
+    }) as Promise<{
+      items: ChatItem[];
+      total: number;
+      hasMore: boolean;
+    }>,
+
+  saveSessionTranscript: (
+    sessionId: string,
+    items: ChatItem[],
+    replace?: boolean,
+  ) =>
     ipcRenderer.invoke(IPC.sessionSaveTranscript, {
       sessionId,
       items,
+      replace,
     }) as Promise<{ ok: boolean }>,
 
   getSessionSlashCommands: (sessionId: string) =>
@@ -186,12 +204,40 @@ const desktop = {
       entries: Array<{ name: string; rel: string; kind: "dir" | "file" }>;
     }>,
 
-  /** Read a project file as UTF-8 text (bounded). */
-  readProjectFile: (cwd: string, rel: string, maxBytes?: number) =>
-    ipcRenderer.invoke(IPC.fileReadText, { cwd, rel, maxBytes }) as Promise<{
+  /** Read a project file as text (bounded). encoding: utf-8 | gbk | … */
+  readProjectFile: (
+    cwd: string,
+    rel: string,
+    maxBytes?: number,
+    encoding?: string,
+  ) =>
+    ipcRenderer.invoke(IPC.fileReadText, {
+      cwd,
+      rel,
+      maxBytes,
+      encoding,
+    }) as Promise<{
       ok: boolean;
       content?: string;
       truncated?: boolean;
+      encoding?: string;
+      error?: string;
+    }>,
+
+  /** Write a project file as text (full replace). encoding matches open mode. */
+  writeProjectFile: (
+    cwd: string,
+    rel: string,
+    content: string,
+    encoding?: string,
+  ) =>
+    ipcRenderer.invoke(IPC.fileWriteText, {
+      cwd,
+      rel,
+      content,
+      encoding,
+    }) as Promise<{
+      ok: boolean;
       error?: string;
     }>,
 
@@ -242,6 +288,19 @@ const desktop = {
       cwd !== undefined ? { cwd } : {},
     ) as Promise<{ id: string; cwd: string; shell: string }>,
 
+  attachCliSession: (sessionId?: string | null) =>
+    ipcRenderer.invoke(
+      IPC.sessionAttachCli,
+      sessionId !== undefined ? { sessionId } : {},
+    ) as Promise<{
+      ok: boolean;
+      id?: string;
+      cwd?: string;
+      shell?: string;
+      sdkSessionId?: string;
+      error?: string;
+    }>,
+
   writeTerminal: (id: string, data: string) =>
     ipcRenderer.invoke(IPC.terminalWrite, { id, data }) as Promise<{
       ok: boolean;
@@ -259,6 +318,126 @@ const desktop = {
   notifyTheme: (theme: "dark" | "light") =>
     ipcRenderer.invoke(IPC.appThemeChanged, { theme }) as Promise<{
       ok: boolean;
+    }>,
+
+  /** Hot update: current status / check / download / quit-and-install */
+  getUpdateStatus: () =>
+    ipcRenderer.invoke(IPC.appUpdateGetStatus) as Promise<
+      import("@claude-desktop/shared").UpdateStatusDto
+    >,
+  checkForUpdate: () =>
+    ipcRenderer.invoke(IPC.appUpdateCheck) as Promise<
+      import("@claude-desktop/shared").UpdateStatusDto
+    >,
+  downloadUpdate: () =>
+    ipcRenderer.invoke(IPC.appUpdateDownload) as Promise<
+      import("@claude-desktop/shared").UpdateStatusDto
+    >,
+  installUpdate: () =>
+    ipcRenderer.invoke(IPC.appUpdateInstall) as Promise<{ ok: boolean }>,
+  getAppVersion: () =>
+    ipcRenderer.invoke(IPC.appGetVersion) as Promise<{ version: string }>,
+
+  createRoom: (opts: {
+    name: string;
+    password?: string;
+    port?: number;
+    requireMods?: boolean;
+    autoApprove?: boolean;
+  }) =>
+    ipcRenderer.invoke(IPC.roomCreate, opts) as Promise<{
+      ok: boolean;
+      room?: import("@claude-desktop/shared").RoomSnapshot;
+      error?: string;
+    }>,
+  joinRoom: (opts: {
+    host: string;
+    port: number;
+    password?: string;
+    name?: string;
+    modChecksum?: string;
+    hosts?: string[];
+  }) =>
+    ipcRenderer.invoke(IPC.roomJoin, opts) as Promise<{
+      ok: boolean;
+      room?: import("@claude-desktop/shared").RoomSnapshot;
+      error?: string;
+    }>,
+  leaveRoom: (roomId: string) =>
+    ipcRenderer.invoke(IPC.roomLeave, { roomId }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+  endRoom: (roomId: string) =>
+    ipcRenderer.invoke(IPC.roomEnd, { roomId }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+  listRooms: () =>
+    ipcRenderer.invoke(IPC.roomList) as Promise<{
+      rooms: import("@claude-desktop/shared").RoomListItem[];
+    }>,
+  getRoom: (roomId: string) =>
+    ipcRenderer.invoke(IPC.roomGet, { roomId }) as Promise<{
+      room: import("@claude-desktop/shared").RoomSnapshot | null;
+    }>,
+  addRoomSeat: (
+    roomId: string,
+    kind: import("@claude-desktop/shared").RoomSeatKind,
+    name: string,
+    agentName?: string,
+  ) =>
+    ipcRenderer.invoke(IPC.roomAddSeat, {
+      roomId,
+      kind,
+      name,
+      agentName,
+    }) as Promise<{
+      ok: boolean;
+      room?: import("@claude-desktop/shared").RoomSnapshot;
+      error?: string;
+    }>,
+  takeoverSeat: (roomId: string, seatId: string) =>
+    ipcRenderer.invoke(IPC.roomTakeover, { roomId, seatId }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+  returnSeat: (roomId: string, seatId: string) =>
+    ipcRenderer.invoke(IPC.roomReturnSeat, { roomId, seatId }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+  sendRoomMessage: (roomId: string, seatId: string, text: string) =>
+    ipcRenderer.invoke(IPC.roomSend, { roomId, seatId, text }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+  roomDice: (roomId: string, seatId: string) =>
+    ipcRenderer.invoke(IPC.roomDice, { roomId, seatId }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+  roomRps: (roomId: string, seatId: string, hand: "rock" | "scissors" | "paper") =>
+    ipcRenderer.invoke(IPC.roomRps, { roomId, seatId, hand }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+  getRoomInvite: (roomId: string) =>
+    ipcRenderer.invoke(IPC.roomInvite, { roomId }) as Promise<{
+      ok: boolean;
+      host?: string;
+      hosts?: string[];
+      port?: number;
+      password?: string;
+      modChecksum?: string;
+      listening?: boolean;
+      secret?: string;
+      error?: string;
+    }>,
+  deleteRoom: (roomId: string) =>
+    ipcRenderer.invoke(IPC.roomDelete, { roomId }) as Promise<{
+      ok: boolean;
+      error?: string;
     }>,
 
   /** List installed skills (user + project scope). */

@@ -33,24 +33,39 @@ export class TerminalHost {
     private readonly emitExit: (e: TerminalExitEvent) => void,
   ) {}
 
-  create(cwd?: string): { id: string; cwd: string; shell: string } {
+  create(
+    cwd?: string,
+    opts?: {
+      file?: string;
+      args?: string[];
+      env?: Record<string, string>;
+      label?: string;
+    },
+  ): { id: string; cwd: string; shell: string } {
     const dir =
       cwd && fs.existsSync(cwd) && fs.statSync(cwd).isDirectory()
         ? cwd
         : process.cwd();
     const id = randomUUID();
     const isWin = process.platform === "win32";
-    const shellPath = isWin
-      ? process.env.WT_SHELL || "powershell.exe"
-      : process.env.SHELL || "/bin/bash";
-    const args = isWin ? ["-NoLogo"] : [];
+    const shellPath =
+      opts?.file ||
+      (isWin
+        ? process.env.WT_SHELL || "powershell.exe"
+        : process.env.SHELL || "/bin/bash");
+    const args = opts?.args ?? (isWin && !opts?.file ? ["-NoLogo"] : []);
 
     const term = pty.spawn(shellPath, args, {
       name: "xterm-256color",
       cols: 120,
       rows: 30,
       cwd: dir,
-      env: { ...process.env } as Record<string, string>,
+      env: {
+        ...process.env,
+        TERM: "xterm-256color",
+        COLORTERM: "truecolor",
+        ...(opts?.env ?? {}),
+      } as Record<string, string>,
     });
 
     term.onData((data) => {
@@ -64,7 +79,7 @@ export class TerminalHost {
     this.sessions.set(id, {
       pty: term,
       cwd: dir,
-      shellName: path.basename(shellPath),
+      shellName: opts?.label || path.basename(shellPath),
     });
 
     return { id, cwd: dir, shell: path.basename(shellPath) };

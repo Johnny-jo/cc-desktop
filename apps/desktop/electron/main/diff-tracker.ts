@@ -1,3 +1,6 @@
+import { execFile } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 import {
   buildEditHunk,
   buildWriteHunk,
@@ -13,6 +16,32 @@ export type DiffTrackerDeps = {
   readFile?: (path: string) => string;
   now?: () => number;
 };
+
+/** Directories never walked during Bash post-scan (deps / build / VCS). */
+const SCAN_IGNORED_DIRS = new Set([
+  "node_modules",
+  ".git",
+  "dist",
+  "build",
+  "out",
+  "release",
+  ".next",
+  ".cache",
+  "coverage",
+  "target",
+  ".venv",
+  "venv",
+  "__pycache__",
+  ".turbo",
+  ".idea",
+  ".vscode",
+  "vendor",
+]);
+
+/** Soft caps so huge repos stay snappy. */
+const MAX_SCAN_FILES = 8000;
+const MAX_GIT_PATHS = 200;
+const MAX_MTIME_PATHS = 120;
 
 /**
  * Detect shell redirects that create/overwrite a file, e.g.:
@@ -49,6 +78,17 @@ export class DiffTracker {
   private readonly readFile?: DiffTrackerDeps["readFile"];
   private readonly now: () => number;
   /**
+   * Per-session baseline for Bash post-scan: path → mtimeMs captured when
+   * Bash tool_use is seen, compared after tool_result when git is unavailable.
+   */
+  private readonly bashBaselines = new Map<
+    string,
+    { cwd: string; at: number; mtimes: Map<string, number>; gen: number }
+  >();
+  /** In-flight baseline walks, so refresh can wait without blocking the stream. */
+  private readonly bashBaselineTasks = new Map<string, Promise<void>>();
+  private readonly bashScanGen = new Map<string, number>();
+  /**
    * Called for EVERY tracked write operation BEFORE its change event is
    * recorded — the main process snapshots the file's current (pre-op)
    * content under the event id so the operation can be rolled back
@@ -77,14 +117,48 @@ export class DiffTracker {
     sessionId: string,
     toolName: string,
     input: Record<string, unknown>,
+    opts?: { cwd?: string },
   ): void {
     if (toolName === "Edit" || toolName === "Write") {
       this.onEditOrWrite(sessionId, toolName, input);
       return;
     }
     if (toolName === "Bash") {
-      this.onBashWrite(sessionId, input);
+      if (opts?.cwd) {
+        void this.captureBashBaseline(sessionId, opts.cwd);
+      }
+      this.onBashWrite(sessionId, input, opts?.cwd);
     }
+  }
+
+  /**
+   * Snapshot mtimes under cwd so post-Bash scan can find files touched by
+   * scripts (python writing yml, cp, etc.) when git is unavailable.
+   */
+  captureBashBaseline(sessionId: string, cwd: string): Promise<void> {
+    if (!cwd) return Promise.resolve();
+    const gen = (this.bashScanGen.get(sessionId) ?? 0) + 1;
+    this.bashScanGen.set(sessionId, gen);
+    const task = this.captureBashBaselineNow(sessionId, cwd, gen).catch(
+      () => undefined,
+    );
+    this.bashBaselineTasks.set(sessionId, task);
+    return task;
+  }
+
+  private async captureBashBaselineNow(
+    sessionId: string,
+    cwd: string,
+    gen: number,
+  ): Promise<void> {
+    const mtimes = await walkMtimes(cwd);
+    if ((this.bashScanGen.get(sessionId) ?? 0) !== gen) return;
+    this.bashBaselines.set(sessionId, {
+      cwd: path.resolve(cwd),
+      at: this.now(),
+      mtimes,
+      gen,
+    });
   }
 
   private onEditOrWrite(
@@ -107,7 +181,26 @@ export class DiffTracker {
     if (toolName === "Edit") {
       const oldString = String(input.old_string ?? "");
       const newString = String(input.new_string ?? "");
-      const hunk = buildEditHunk({ path, oldString, newString });
+      const replaceAll = Boolean(
+        input.replace_all ?? input.replaceAll ?? false,
+      );
+      // Read full file BEFORE the edit so line numbers are absolute file lines,
+      // not relative to the old_string snippet (which always looked like "from 1").
+      let previousContent: string | null = null;
+      if (this.readFile) {
+        try {
+          previousContent = this.readFile(path);
+        } catch {
+          previousContent = null;
+        }
+      }
+      const hunk = buildEditHunk({
+        path,
+        oldString,
+        newString,
+        previousContent,
+        replaceAll,
+      });
       this.sessions.set(
         sessionId,
         upsertFileChange(map, {
@@ -123,11 +216,12 @@ export class DiffTracker {
     }
 
     // Write
-    const nextContent = String(input.content ?? "");
+    // Cap content used for preview — full multi‑MB dumps freeze DiffView.
+    const nextContent = capText(String(input.content ?? ""));
     let previousContent: string | null = null;
     if (this.readFile) {
       try {
-        previousContent = this.readFile(path);
+        previousContent = capText(this.readFile(path));
       } catch {
         previousContent = null;
       }
@@ -147,7 +241,7 @@ export class DiffTracker {
     );
   }
 
-  /**
+/**
    * When the model writes via Bash (cat/tee heredoc, echo > file), still
    * surface a change entry. Prefer reading disk content after the tool runs;
    * at tool_use time we only know the path — use empty previous if unread.
@@ -155,14 +249,16 @@ export class DiffTracker {
   private onBashWrite(
     sessionId: string,
     input: Record<string, unknown>,
+    cwd?: string,
   ): void {
     const command = String(input.command ?? "");
-    const path = parseBashWriteTarget(command);
-    if (!path) return;
+    const rawPath = parseBashWriteTarget(command);
+    if (!rawPath) return;
+    const filePath = resolveUnderCwd(cwd, rawPath);
 
     const at = this.now();
     const eventId = newChangeEventId();
-    this.notifyBeforeWrite(sessionId, path, eventId);
+    this.notifyBeforeWrite(sessionId, filePath, eventId);
     let map = this.sessions.get(sessionId);
     if (!map) {
       map = new Map();
@@ -174,7 +270,7 @@ export class DiffTracker {
     if (this.readFile) {
       try {
         // At tool_use time file may still be old; best-effort snapshot.
-        previousContent = this.readFile(path);
+        previousContent = this.readFile(filePath);
       } catch {
         previousContent = null;
       }
@@ -191,7 +287,7 @@ export class DiffTracker {
 
     const status = previousContent == null ? "A" : "M";
     const hunk = buildWriteHunk({
-      path,
+      path: filePath,
       previousContent: status === "A" ? null : previousContent,
       nextContent:
         nextContent ||
@@ -205,7 +301,7 @@ export class DiffTracker {
       sessionId,
       upsertFileChange(map, {
         id: eventId,
-        path,
+        path: filePath,
         tool: "Bash",
         hunk: annotated,
         at,
@@ -215,44 +311,212 @@ export class DiffTracker {
   }
 
   /**
-   * After Bash completes, re-read disk for paths already tracked via Bash
-   * so hunks reflect real content. The refresh is itself a tracked write
-   * operation (snapshot first) so rollback stays step-accurate.
+   * After Bash completes:
+   * 1) re-read disk for paths already tracked via Bash
+   * 2) scan the workspace (git status, else mtime baseline) for files the
+   *    shell/scripts touched that Edit/Write never saw (e.g. python → yml)
    */
-  refreshBashWritesFromDisk(sessionId: string): void {
-    if (!this.readFile) return;
-    const map = this.sessions.get(sessionId);
-    if (!map) return;
-    let next = map;
-    for (const [path, change] of map) {
-      const fromBash = change.events.some((e) => e.tool === "Bash");
-      if (!fromBash) continue;
-      let content: string;
+  async refreshBashWritesFromDisk(
+    sessionId: string,
+    cwd?: string,
+  ): Promise<void> {
+    const pending = this.bashBaselineTasks.get(sessionId);
+    if (pending) {
       try {
-        content = this.readFile(path);
+        await pending;
       } catch {
-        continue;
+        // baseline optional
       }
-      const status = change.status;
-      const prevForHunk =
-        status === "A" ? null : change.events.length > 1 ? null : null;
-      const hunk = buildWriteHunk({
-        path,
-        previousContent: prevForHunk,
-        nextContent: content,
-      });
-      const eventId = newChangeEventId();
-      this.notifyBeforeWrite(sessionId, path, eventId);
-      next = upsertFileChange(next, {
+    }
+
+    if (this.readFile) {
+      const map = this.sessions.get(sessionId);
+      if (map) {
+        let next = map;
+        for (const [filePath, change] of map) {
+          const fromBash = change.events.some((e) => e.tool === "Bash");
+          if (!fromBash) continue;
+          let content: string;
+          try {
+            content = this.readFile(filePath);
+          } catch {
+            continue;
+          }
+          const status = change.status;
+          const prevForHunk =
+            status === "A" ? null : change.events.length > 1 ? null : null;
+          const hunk = buildWriteHunk({
+            path: filePath,
+            previousContent: prevForHunk,
+            nextContent: content,
+          });
+          const eventId = newChangeEventId();
+          this.notifyBeforeWrite(sessionId, filePath, eventId);
+          next = upsertFileChange(next, {
+            id: eventId,
+            path: filePath,
+            tool: "Bash",
+            hunk: `${hunk}\n# via Bash (disk)`,
+            at: this.now(),
+            status,
+          });
+        }
+        this.sessions.set(sessionId, next);
+      }
+    }
+
+    const scanCwd =
+      cwd || this.bashBaselines.get(sessionId)?.cwd || undefined;
+    if (scanCwd) {
+      await this.scanWorkspaceAfterBash(sessionId, scanCwd);
+    }
+    this.bashBaselines.delete(sessionId);
+    this.bashBaselineTasks.delete(sessionId);
+  }
+
+  /**
+   * Discover files changed by Bash-side tools that DiffTracker never saw
+   * at tool_use time (scripts, cp, PowerShell, etc.).
+   * Prefer `git status --porcelain`; fall back to mtime baseline.
+   * Skips paths already tracked via Edit/Write (those already have events).
+   */
+  async scanWorkspaceAfterBash(sessionId: string, cwd: string): Promise<number> {
+    const root = path.resolve(cwd);
+    if (!root || !fs.existsSync(root)) return 0;
+
+    const discovered = await this.discoverChangedPaths(sessionId, root);
+    if (!discovered.length) return 0;
+
+    let added = 0;
+    for (const item of discovered) {
+      if (this.recordScannedPath(sessionId, item.abs, item.status)) {
+        added += 1;
+      }
+    }
+    return added;
+  }
+
+  private async discoverChangedPaths(
+    sessionId: string,
+    root: string,
+  ): Promise<Array<{ abs: string; status: "A" | "M" }>> {
+    const baseline = this.bashBaselines.get(sessionId);
+    const fromGit = await listGitChangedPaths(root);
+
+    // Prefer git when available, but never dump the whole dirty worktree:
+    // - always include untracked (??) — typical for script-generated yml
+    // - include modified/added only if mtime advanced past our Bash baseline
+    //   (or baseline missing → skip tracked M to avoid noise)
+    if (fromGit) {
+      const out: Array<{ abs: string; status: "A" | "M" }> = [];
+      let nowMtimes: Map<string, number> | null = null;
+      if (baseline && baseline.cwd === root) {
+        try {
+          nowMtimes = await walkMtimes(root);
+        } catch {
+          nowMtimes = null;
+        }
+      }
+      for (const item of fromGit) {
+        if (item.status === "A") {
+          out.push(item);
+        } else if (nowMtimes && baseline) {
+          const m = nowMtimes.get(item.abs);
+          const prev = baseline.mtimes.get(item.abs);
+          if (m != null && (prev == null || m > prev)) {
+            out.push(item);
+          }
+        }
+        if (out.length >= MAX_GIT_PATHS) break;
+      }
+      return out;
+    }
+
+    if (!baseline || baseline.cwd !== root) {
+      // No baseline and no git — avoid marking the whole tree.
+      return [];
+    }
+    const nowMtimes = await walkMtimes(root);
+    const out: Array<{ abs: string; status: "A" | "M" }> = [];
+    for (const [abs, mtime] of nowMtimes) {
+      const prev = baseline.mtimes.get(abs);
+      if (prev == null) {
+        out.push({ abs, status: "A" });
+      } else if (mtime > prev) {
+        out.push({ abs, status: "M" });
+      }
+      if (out.length >= MAX_MTIME_PATHS) break;
+    }
+    return out;
+  }
+
+  /**
+   * Record a path found by post-Bash scan. Returns false when skipped
+   * (binary, already tracked by Edit/Write, unreadable).
+   */
+  private recordScannedPath(
+    sessionId: string,
+    absPath: string,
+    statusHint: "A" | "M",
+  ): boolean {
+    if (!this.readFile) return false;
+    if (looksBinaryPath(absPath)) return false;
+
+    const existing = this.sessions.get(sessionId)?.get(absPath);
+    if (existing) {
+      // Already tracked by Edit/Write — don't double-count as Bash scan.
+      const onlyBash = existing.events.every((e) => e.tool === "Bash");
+      if (!onlyBash) return false;
+    }
+
+    let content: string;
+    try {
+      content = this.readFile(absPath);
+    } catch {
+      return false;
+    }
+    // NUL → binary; skip
+    if (content.includes("\0")) return false;
+    content = capText(content);
+
+    const eventId = newChangeEventId();
+    // Snapshot current content before we "record" — for brand-new files
+    // onBeforeWrite will mark ABSENT so rollback deletes them.
+    this.notifyBeforeWrite(sessionId, absPath, eventId);
+
+    let map = this.sessions.get(sessionId);
+    if (!map) {
+      map = new Map();
+      this.sessions.set(sessionId, map);
+    }
+
+    // Prefer "A" when scan says untracked/new; otherwise M.
+    // If we already had a Bash entry for this path, keep its status unless
+    // the scan upgrades A→M (shouldn't) or confirms A.
+    let status: "A" | "M" = statusHint;
+    if (existing?.status === "M") status = "M";
+    if (existing?.status === "A" && statusHint === "A") status = "A";
+
+    // For scan-discovered files we don't have pre-bash content in memory;
+    // treat as full-file write for the hunk (A = new file, M = whole content).
+    const previousContent = status === "A" ? null : "";
+    const hunk = buildWriteHunk({
+      path: absPath,
+      previousContent,
+      nextContent: content,
+    });
+    this.sessions.set(
+      sessionId,
+      upsertFileChange(map, {
         id: eventId,
-        path,
+        path: absPath,
         tool: "Bash",
-        hunk: `${hunk}\n# via Bash (disk)`,
+        hunk: `${hunk}\n# via Bash (workspace scan)`,
         at: this.now(),
         status,
-      });
-    }
-    this.sessions.set(sessionId, next);
+      }),
+    );
+    return true;
   }
 
   list(sessionId: string): FileChange[] {
@@ -339,5 +603,146 @@ export class DiffTracker {
 
   clearSession(sessionId: string): void {
     this.sessions.delete(sessionId);
+    this.bashBaselines.delete(sessionId);
   }
+}
+
+function resolveUnderCwd(cwd: string | undefined, raw: string): string {
+  if (!cwd) return raw;
+  if (path.isAbsolute(raw)) return path.normalize(raw);
+  return path.resolve(cwd, raw);
+}
+
+function looksBinaryPath(p: string): boolean {
+  return /\.(png|jpe?g|gif|webp|ico|bmp|pdf|zip|7z|rar|gz|tar|exe|dll|so|dylib|wasm|mp4|mp3|woff2?|ttf|eot|bin|dat|lock)$/i.test(
+    p,
+  );
+}
+
+/** Cap text fed into hunk builders (~120KB / 800 lines). */
+function capText(text: string, maxChars = 120_000, maxLines = 800): string {
+  if (!text) return text;
+  if (text.length <= maxChars && text.length < maxLines * 40) {
+    // cheap path: small enough by char budget
+    const n = countNewlines(text);
+    if (n <= maxLines) return text;
+  }
+  const lines = text.split("\n");
+  let out =
+    lines.length > maxLines ? lines.slice(0, maxLines).join("\n") : text;
+  if (out.length > maxChars) out = out.slice(0, maxChars);
+  if (out.length < text.length) {
+    out += "\n# … truncated for change preview …\n";
+  }
+  return out;
+}
+
+function countNewlines(s: string): number {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) if (s.charCodeAt(i) === 10) n += 1;
+  return n;
+}
+
+/**
+ * `git status --porcelain` → absolute paths with A/M.
+ * Returns null when git is missing or cwd is not a repo.
+ */
+export function listGitChangedPaths(
+  cwd: string,
+): Promise<Array<{ abs: string; status: "A" | "M" }> | null> {
+  return new Promise((resolve) => {
+    execFile(
+      "git",
+      ["-C", cwd, "status", "--porcelain", "-uall", "--no-renames"],
+      {
+        encoding: "utf8",
+        timeout: 4000,
+        windowsHide: true,
+        maxBuffer: 2 * 1024 * 1024,
+      },
+      (err, stdout) => {
+        if (err) {
+          resolve(null);
+          return;
+        }
+        const lines = stdout.split(/\r?\n/).filter(Boolean);
+        const results: Array<{ abs: string; status: "A" | "M" }> = [];
+        for (const line of lines) {
+          if (line.length < 4) continue;
+          // XY<path>  or XY <path> — untracked is "?? path"
+          const code = line.slice(0, 2);
+          let filePart = line.slice(3).trim();
+          // renames disabled; still strip quotes git may add
+          if (
+            (filePart.startsWith('"') && filePart.endsWith('"')) ||
+            (filePart.startsWith("'") && filePart.endsWith("'"))
+          ) {
+            filePart = filePart.slice(1, -1);
+          }
+          if (!filePart || filePart.endsWith("/")) continue;
+          // Skip deletes for now (no content to show)
+          if (
+            code.includes("D") &&
+            !code.includes("A") &&
+            !code.includes("M") &&
+            code !== "??"
+          ) {
+            continue;
+          }
+          const status: "A" | "M" =
+            code === "??" || code.includes("A") ? "A" : "M";
+          const abs = path.resolve(cwd, filePart);
+          if (looksBinaryPath(abs)) continue;
+          results.push({ abs, status });
+          if (results.length >= MAX_GIT_PATHS) break;
+        }
+        resolve(results);
+      },
+    );
+  });
+}
+
+/** Walk of mtimes under cwd for Bash baseline comparison. Yields the event loop. */
+export async function walkMtimes(cwd: string): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  const root = path.resolve(cwd);
+  const stack: string[] = [root];
+  let count = 0;
+  let steps = 0;
+  while (stack.length && count < MAX_SCAN_FILES) {
+    const dir = stack.pop()!;
+    let entries: fs.Dirent[];
+    try {
+      entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      if (count >= MAX_SCAN_FILES) break;
+      const name = e.name;
+      if (name === "." || name === "..") continue;
+      if (e.isDirectory()) {
+        if (SCAN_IGNORED_DIRS.has(name)) continue;
+        if (name.startsWith(".") && name !== ".claude") continue;
+        stack.push(path.join(dir, name));
+        continue;
+      }
+      if (!e.isFile()) continue;
+      if (name.startsWith(".")) continue;
+      const abs = path.join(dir, name);
+      if (looksBinaryPath(abs)) continue;
+      try {
+        const st = await fs.promises.stat(abs);
+        out.set(abs, st.mtimeMs);
+        count += 1;
+      } catch {
+        // ignore
+      }
+    }
+    steps += 1;
+    if (steps % 24 === 0) {
+      await new Promise((r) => setImmediate(r));
+    }
+  }
+  return out;
 }

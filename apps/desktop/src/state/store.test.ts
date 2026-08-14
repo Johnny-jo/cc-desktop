@@ -7,6 +7,7 @@ import {
   enterCliMode,
   exitCliMode,
   getState,
+  selectSession,
   sendMessage,
 } from "./store";
 
@@ -158,6 +159,52 @@ describe("cli mode", () => {
       ok: true,
     });
     expect(getState().itemsBySession).toEqual({});
+  });
+
+  it("selectSession in cliMode loads changes but not transcript", async () => {
+    const select = vi.fn().mockResolvedValue({
+      sessionId: "s2",
+      cwd: "D:/b",
+      items: [{ kind: "text", id: "x", role: "user", text: "should-not-land" }],
+      total: 1,
+      hasMore: false,
+      changes: [
+        {
+          path: "a.ts",
+          status: "M",
+          hunks: "+x",
+          updatedAt: 1,
+          events: [],
+        },
+      ],
+    });
+    const g = globalThis as unknown as { window?: { desktop?: Record<string, unknown> } };
+    g.window = g.window ?? {};
+    g.window.desktop = {
+      ...(g.window.desktop as object),
+      selectSession: select,
+    };
+    __upsertSessionForTests({
+      id: "s1",
+      title: "one",
+      cwd: "D:/a",
+      updatedAt: Date.now(),
+      status: "idle",
+    });
+    __upsertSessionForTests({
+      id: "s2",
+      title: "two",
+      cwd: "D:/b",
+      updatedAt: Date.now(),
+      status: "idle",
+    });
+    enterCliMode();
+    await selectSession("s2");
+    expect(getState().activeSessionId).toBe("s2");
+    expect(getState().projectPath).toBe("D:/b");
+    expect(getState().itemsBySession).toEqual({});
+    expect(getState().changesBySession.s2).toHaveLength(1);
+    expect(select).toHaveBeenCalled();
   });
 
   it("sendMessage does not write items while cliMode is on", () => {

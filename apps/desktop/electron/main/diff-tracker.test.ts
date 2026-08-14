@@ -1,5 +1,12 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { DiffTracker, parseBashWriteTarget } from "./diff-tracker";
+import {
+  DiffTracker,
+  parseBashWriteTarget,
+  walkMtimes,
+} from "./diff-tracker";
 
 describe("DiffTracker", () => {
   it("records Edit as modified file change", () => {
@@ -142,5 +149,58 @@ describe("DiffTracker", () => {
     });
     tracker.clearSession("s1");
     expect(tracker.list("s1")).toEqual([]);
+  });
+
+  it("workspace scan records files created after Bash baseline (mtime fallback)", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "diff-scan-"));
+    try {
+      // No .git here → mtime baseline path.
+      const existing = path.join(root, "keep.py");
+      fs.writeFileSync(existing, "print(1)\n", "utf8");
+
+      const readFile = (p: string) => fs.readFileSync(p, "utf8");
+      const tracker = new DiffTracker({ readFile });
+
+      await tracker.captureBashBaseline("s1", root);
+      // Simulate a script writing a yml that Edit/Write never saw.
+      const yml = path.join(root, "config.generated.yml");
+      fs.writeFileSync(yml, "port: 8317\n", "utf8");
+      // Bump mtime slightly in case FS resolution is coarse.
+      const st = fs.statSync(yml);
+      fs.utimesSync(yml, st.atime, new Date(st.mtimeMs + 50));
+
+      await tracker.refreshBashWritesFromDisk("s1", root);
+      const changes = tracker.list("s1");
+      const hit = changes.find(
+        (c) => c.path === yml || c.path.endsWith("config.generated.yml"),
+      );
+      expect(hit).toBeTruthy();
+      expect(hit!.status).toBe("A");
+      expect(hit!.hunks).toMatch(/workspace scan|Bash/);
+      expect(hit!.hunks).toContain("port: 8317");
+      // Pre-existing file with unchanged mtime should not appear.
+      expect(
+        changes.some((c) => c.path === existing || c.path.endsWith("keep.py")),
+      ).toBe(false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("walkMtimes skips ignored dirs and binary extensions", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "diff-walk-"));
+    try {
+      fs.mkdirSync(path.join(root, "node_modules"), { recursive: true });
+      fs.writeFileSync(path.join(root, "node_modules", "x.js"), "1", "utf8");
+      fs.writeFileSync(path.join(root, "ok.ts"), "x", "utf8");
+      fs.writeFileSync(path.join(root, "pic.png"), "bin", "utf8");
+      const map = await walkMtimes(root);
+      const keys = [...map.keys()].map((k) => path.basename(k));
+      expect(keys).toContain("ok.ts");
+      expect(keys).not.toContain("x.js");
+      expect(keys).not.toContain("pic.png");
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });

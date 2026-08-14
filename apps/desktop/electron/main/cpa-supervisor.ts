@@ -1,11 +1,13 @@
+import fs from "node:fs";
 import net from "node:net";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import type { AppSettings, CpaStatus, ModelInfo } from "@claude-desktop/shared";
 import { parseModelContextLimit } from "@claude-desktop/shared";
 export type SpawnedProcess = {
   pid?: number;
   kill: (signal?: NodeJS.Signals | number) => boolean;
   on?: (event: string, listener: (...args: unknown[]) => void) => unknown;
+  stderr?: { on?: (event: string, listener: (...args: unknown[]) => void) => unknown } | null;
 };
 
 export type CpaSupervisorDeps = {
@@ -60,7 +62,7 @@ function defaultSpawnProcess(
     stdio: options?.stdio ?? "ignore",
     windowsHide: true,
     detached: false,
-  }) as SpawnedProcess;
+  }) as ChildProcess as SpawnedProcess;
 }
 
 export class CpaSupervisor {
@@ -231,23 +233,68 @@ export class CpaSupervisor {
       this.stopIfManaged();
     }
 
+    const exe = settings.cpaExePath;
+    if (!exe || !fs.existsSync(exe)) {
+      const status: CpaStatus = {
+        state: "error",
+        message:
+          `找不到 CPA 程序：${exe || "(空路径)"}\n` +
+          `请完全退出后重装，或确认安装目录 resources\\bin\\cpa\\cli-proxy-api.exe 存在。`,
+      };
+      this.setStatus(status);
+      return status;
+    }
+    if (settings.cpaConfigPath && !fs.existsSync(settings.cpaConfigPath)) {
+      const status: CpaStatus = {
+        state: "error",
+        message: `找不到 CPA 配置：${settings.cpaConfigPath}`,
+      };
+      this.setStatus(status);
+      return status;
+    }
+
     this.setStatus({ state: "starting" });
 
+    const stderrChunks: string[] = [];
     try {
       this.child = this.spawnProcess(
-        settings.cpaExePath,
+        exe,
         ["--config", settings.cpaConfigPath],
-        { stdio: "ignore" },
+        { stdio: "pipe" },
       );
       this.managedByApp = true;
 
+      this.child.stderr?.on?.("data", (buf: unknown) => {
+        const text = Buffer.isBuffer(buf) ? buf.toString("utf8") : String(buf);
+        if (text) {
+          stderrChunks.push(text);
+          if (stderrChunks.length > 20) stderrChunks.shift();
+        }
+      });
+
       if (this.child.on) {
-        this.child.on("exit", () => {
+        this.child.on("exit", (code: unknown, signal: unknown) => {
           if (this.managedByApp) {
             this.managedByApp = false;
             this.child = null;
-            if (this.status.state === "ready" || this.status.state === "starting") {
-              this.setStatus({ state: "stopped" });
+            const detail = stderrChunks.join("").trim().slice(0, 400);
+            const why = [
+              code != null ? `exit ${code}` : null,
+              signal ? `signal ${String(signal)}` : null,
+              detail || null,
+            ]
+              .filter(Boolean)
+              .join(" · ");
+            if (this.status.state === "starting") {
+              this.setStatus({
+                state: "error",
+                message: `CPA 启动后立即退出${why ? `（${why}）` : ""}。exe: ${exe}`,
+              });
+            } else if (this.status.state === "ready") {
+              this.setStatus({
+                state: "error",
+                message: `CPA 意外退出${why ? `（${why}）` : ""}`,
+              });
             }
           }
         });
@@ -270,6 +317,9 @@ export class CpaSupervisor {
 
     const deadline = Date.now() + this.readyTimeoutMs;
     while (Date.now() < deadline) {
+      if (this.status.state === "error") {
+        return this.status;
+      }
       const up = await this.probePort(port);
       if (up) {
         const status: CpaStatus = {

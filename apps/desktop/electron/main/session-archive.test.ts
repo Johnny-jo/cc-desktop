@@ -73,6 +73,45 @@ describe("SessionArchive", () => {
     expect(arch.loadItems("missing")).toEqual([]);
   });
 
+  it("pages the tail and older slices without dropping disk history", () => {
+    const arch = new SessionArchive(tmpDir());
+    const items: ChatItem[] = Array.from({ length: 5 }, (_, i) => ({
+      kind: "text",
+      id: `m${i}`,
+      role: i % 2 === 0 ? "user" : "assistant",
+      text: String(i),
+    }));
+    arch.saveItems("s1", items);
+
+    const tail = arch.loadItemsPage("s1", { limit: 2 });
+    expect(tail.items.map((i) => i.id)).toEqual(["m3", "m4"]);
+    expect(tail.total).toBe(5);
+    expect(tail.hasMore).toBe(true);
+
+    const older = arch.loadItemsPage("s1", { beforeId: "m3", limit: 2 });
+    expect(older.items.map((i) => i.id)).toEqual(["m1", "m2"]);
+    expect(older.hasMore).toBe(true);
+
+    const rest = arch.loadItemsPage("s1", { beforeId: "m1", limit: 2 });
+    expect(rest.items.map((i) => i.id)).toEqual(["m0"]);
+    expect(rest.hasMore).toBe(false);
+  });
+
+  it("mergeSaveItems updates the tail without wiping unread history", () => {
+    const arch = new SessionArchive(tmpDir());
+    arch.saveItems("s1", [
+      { kind: "text", id: "old", role: "user", text: "old" },
+      { kind: "text", id: "mid", role: "assistant", text: "mid" },
+    ]);
+    arch.mergeSaveItems("s1", [
+      { kind: "text", id: "mid", role: "assistant", text: "mid-upd" },
+      { kind: "text", id: "new", role: "user", text: "new" },
+    ]);
+    const loaded = arch.loadItems("s1");
+    expect(loaded.map((i) => i.id)).toEqual(["old", "mid", "new"]);
+    expect(loaded[1]).toMatchObject({ id: "mid", text: "mid-upd" });
+  });
+
   it("persists and reloads file changes", () => {
     const arch = new SessionArchive(tmpDir());
     const changes: FileChange[] = [

@@ -327,6 +327,12 @@ function subscribeDesktopEvents(): void {
   );
 
   unsubs.push(
+    desktop.on(IPC.settingsUpdated, (payload) => {
+      setState({ settings: payload as PublicSettings });
+    }),
+  );
+
+  unsubs.push(
     desktop.on(IPC.appError, (payload) => {
       const { message } = payload as { message: string; detail?: string };
       setState({ lastError: message, running: false });
@@ -504,6 +510,21 @@ export async function selectSession(sessionId: string): Promise<void> {
   const desktop = getDesktop();
   try {
     const res = await desktop.selectSession(sessionId, SELECT_PAGE);
+
+    if (state.cliMode) {
+      const cwd = res.cwd || state.sessions.find((s) => s.id === sessionId)?.cwd;
+      setState({
+        activeSessionId: sessionId,
+        projectPath: cwd || state.projectPath,
+        itemsBySession: {},
+        changesBySession: {
+          ...state.changesBySession,
+          [sessionId]: res.changes ?? [],
+        },
+        lastError: null,
+      });
+      return;
+    }
 
     // Live tail already in memory (this turn) wins over a disk page.
     const localItems = state.itemsBySession[sessionId] ?? [];

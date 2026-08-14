@@ -1063,6 +1063,21 @@ describe("SessionManager", () => {
     );
     fs.rmSync(dir, { recursive: true, force: true });
   });
+
+  it("releaseForCli tears down the desktop stream and returns resume info", async () => {
+    const ctx = makeDeps();
+    const sessionId = await ctx.manager.start(
+      { text: "hello", attachments: [] },
+      "D:/proj",
+    );
+    const snap = ctx.manager.releaseForCli(sessionId);
+    expect(snap.cwd).toBe("D:/proj");
+    expect(snap.sdkSessionId).toBe("sdk-session-1");
+    expect(snap.model).toBe("kimi-for-coding");
+    expect(snap.env.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:8317");
+    const summary = ctx.manager.getSummary(sessionId);
+    expect(summary?.status).not.toBe("running");
+  });
 });
 
 async function getSessionId(manager: SessionManager): Promise<string> {

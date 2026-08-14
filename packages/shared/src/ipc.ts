@@ -29,6 +29,7 @@ export const IPC = {
   sessionAbort: "session:abort",
   sessionList: "session:list",
   sessionSelect: "session:select",
+  sessionLoadOlder: "session:load-older",
   sessionSaveTranscript: "session:save-transcript",
   sessionCompress: "session:compress",
   permissionRespond: "permission:respond",
@@ -85,8 +86,12 @@ export const IPC = {
   projectListDir: "project:list-dir",
   /** Read a project file as text (editor panel) */
   fileReadText: "file:read-text",
+  /** Write a project file as text (editor panel save) */
+  fileWriteText: "file:write-text",
   /** Bottom terminal: create shell in project cwd */
   terminalCreate: "terminal:create",
+  /** CLI mode: release desktop SDK stream and spawn real `claude` TUI */
+  sessionAttachCli: "session:attach-cli",
   terminalWrite: "terminal:write",
   terminalKill: "terminal:kill",
   /** Renderer → Main: resize PTY to match xterm grid */
@@ -97,6 +102,7 @@ export const IPC = {
   userPromptRequest: "user-prompt:request",
   diffUpdated: "diff:updated",
   cpaStatusEvent: "cpa:status-event",
+  settingsUpdated: "settings:updated",
   sessionUpdated: "session:updated",
   sessionSlashCommandsEvent: "session:slash-commands-event",
   appError: "app:error",
@@ -104,6 +110,31 @@ export const IPC = {
   terminalExit: "terminal:exit",
   /** Shell-reported window title (OSC 0/2) */
   terminalTitle: "terminal:title",
+  /** Auto-update (electron-updater) */
+  appUpdateCheck: "app:update-check",
+  appUpdateDownload: "app:update-download",
+  appUpdateInstall: "app:update-install",
+  appUpdateGetStatus: "app:update-get-status",
+  /** Current packaged app version (electron-updater compares against this) */
+  appGetVersion: "app:get-version",
+  /** main → renderer status push */
+  appUpdateStatus: "app:update-status",
+  /** LAN Room (host / guest) */
+  roomCreate: "room:create",
+  roomJoin: "room:join",
+  roomLeave: "room:leave",
+  roomEnd: "room:end",
+  roomList: "room:list",
+  roomGet: "room:get",
+  roomAddSeat: "room:add-seat",
+  roomTakeover: "room:takeover",
+  roomReturnSeat: "room:return-seat",
+  roomSend: "room:send",
+  roomDice: "room:dice",
+  roomRps: "room:rps",
+  roomInvite: "room:invite",
+  roomDelete: "room:delete",
+  roomEvent: "room:event",
 } as const;
 
 export type IpcInvokeMap = {
@@ -137,20 +168,32 @@ export type IpcInvokeMap = {
   [IPC.sessionAbort]: { args: [{ sessionId: string }]; result: { ok: boolean } };
   [IPC.sessionList]: { args: []; result: SessionSummary[] };
   [IPC.sessionSelect]: {
-    args: [{ sessionId: string }];
+    args: [{ sessionId: string; limit?: number }];
     result: {
       sessionId: string;
       cwd: string;
       items: import("./models").ChatItem[];
+      total: number;
+      hasMore: boolean;
       changes: FileChange[];
     };
   };
+  [IPC.sessionLoadOlder]: {
+    args: [{ sessionId: string; beforeId: string; limit?: number }];
+    result: {
+      items: import("./models").ChatItem[];
+      total: number;
+      hasMore: boolean;
+    };
+  };
   /** Persist renderer transcript for a session (debounced by UI) */
-  sessionSaveTranscript: {
+  [IPC.sessionSaveTranscript]: {
     args: [
       {
         sessionId: string;
         items: import("./models").ChatItem[];
+        /** true = overwrite disk (compression). default merge so a tail window cannot wipe history. */
+        replace?: boolean;
       },
     ];
     result: { ok: boolean };
@@ -294,6 +337,17 @@ export type IpcInvokeMap = {
     args: [{ cwd?: string }?];
     result: { id: string; cwd: string; shell: string };
   };
+  [IPC.sessionAttachCli]: {
+    args: [{ sessionId?: string | null }?];
+    result: {
+      ok: boolean;
+      id?: string;
+      cwd?: string;
+      shell?: string;
+      sdkSessionId?: string;
+      error?: string;
+    };
+  };
   [IPC.terminalWrite]: {
     args: [{ id: string; data: string }];
     result: { ok: boolean };
@@ -338,16 +392,153 @@ export type IpcInvokeMap = {
     };
   };
   [IPC.fileReadText]: {
-    /** rel is project-relative; must stay inside cwd */
-    args: [{ cwd: string; rel: string; maxBytes?: number }];
+    /**
+     * rel is project-relative; must stay inside cwd.
+     * encoding: iconv label — utf-8 (default), gbk, gb2312, gb18030, big5, …
+     */
+    args: [{ cwd: string; rel: string; maxBytes?: number; encoding?: string }];
     result: {
       ok: boolean;
       content?: string;
       truncated?: boolean;
+      encoding?: string;
       error?: string;
     };
   };
+  [IPC.fileWriteText]: {
+    /**
+     * rel is project-relative; must stay inside cwd; full replace.
+     * encoding matches the open encoding so round-trips stay consistent.
+     */
+    args: [{ cwd: string; rel: string; content: string; encoding?: string }];
+    result: {
+      ok: boolean;
+      error?: string;
+    };
+  };
+  [IPC.appUpdateCheck]: {
+    args: [];
+    result: UpdateStatusDto;
+  };
+  [IPC.appUpdateDownload]: {
+    args: [];
+    result: UpdateStatusDto;
+  };
+  [IPC.appUpdateInstall]: {
+    args: [];
+    result: { ok: boolean };
+  };
+  [IPC.appUpdateGetStatus]: {
+    args: [];
+    result: UpdateStatusDto;
+  };
+  [IPC.appGetVersion]: {
+    args: [];
+    result: { version: string };
+  };
+  [IPC.roomCreate]: {
+    args: [
+      {
+        name: string;
+        password?: string;
+        port?: number;
+        requireMods?: boolean;
+        autoApprove?: boolean;
+      },
+    ];
+    result: { ok: boolean; room?: import("./room-protocol").RoomSnapshot; error?: string };
+  };
+  [IPC.roomJoin]: {
+    args: [
+      {
+        host: string;
+        port: number;
+        password?: string;
+        name?: string;
+        modChecksum?: string;
+        hosts?: string[];
+      },
+    ];
+    result: { ok: boolean; room?: import("./room-protocol").RoomSnapshot; error?: string };
+  };
+  [IPC.roomLeave]: {
+    args: [{ roomId: string }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.roomEnd]: {
+    args: [{ roomId: string }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.roomList]: {
+    args: [];
+    result: { rooms: import("./room-protocol").RoomListItem[] };
+  };
+  [IPC.roomGet]: {
+    args: [{ roomId: string }];
+    result: { room: import("./room-protocol").RoomSnapshot | null };
+  };
+  [IPC.roomAddSeat]: {
+    args: [
+      {
+        roomId: string;
+        kind: import("./room-protocol").RoomSeatKind;
+        name: string;
+        agentName?: string;
+      },
+    ];
+    result: { ok: boolean; room?: import("./room-protocol").RoomSnapshot; error?: string };
+  };
+  [IPC.roomTakeover]: {
+    args: [{ roomId: string; seatId: string }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.roomReturnSeat]: {
+    args: [{ roomId: string; seatId: string }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.roomSend]: {
+    args: [{ roomId: string; seatId: string; text: string }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.roomDice]: {
+    args: [{ roomId: string; seatId: string }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.roomRps]: {
+    args: [{ roomId: string; seatId: string; hand: "rock" | "scissors" | "paper" }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.roomInvite]: {
+    args: [{ roomId: string }];
+    result: {
+      ok: boolean;
+      host?: string;
+      hosts?: string[];
+      port?: number;
+      password?: string;
+      modChecksum?: string;
+      listening?: boolean;
+      /** Single-line secret key (CDR1.…); guest pastes this to join */
+      secret?: string;
+      error?: string;
+    };
+  };
+  [IPC.roomDelete]: {
+    args: [{ roomId: string }];
+    result: { ok: boolean; error?: string };
+  };
 };
+
+/** Mirrors main auto-updater status (kept in shared so renderer can type it). */
+export type UpdateStatusDto =
+  | { state: "idle" }
+  | { state: "checking" }
+  | { state: "available"; version: string; releaseNotes?: string | null }
+  | { state: "not-available"; version: string }
+  | { state: "downloading"; percent: number; transferred: number; total: number }
+  | { state: "downloaded"; version: string }
+  | { state: "error"; message: string }
+  | { state: "disabled"; message: string };
 
 export type IpcEventMap = {
   [IPC.sessionEvent]: SdkNormalizedEvent;
@@ -368,6 +559,21 @@ export type IpcEventMap = {
   };
   [IPC.terminalExit]: { id: string; code: number | null };
   [IPC.terminalTitle]: { id: string; title: string };
+  [IPC.appUpdateStatus]: UpdateStatusDto;
+  [IPC.roomEvent]: {
+    roomId: string;
+    room?: import("./room-protocol").RoomSnapshot;
+    /** host left / room deleted — guest should alert and remove */
+    closed?: boolean;
+    /** local-initiated close (host dismissed) — no alert */
+    silent?: boolean;
+    /** guest reconnecting */
+    reconnecting?: boolean;
+    reconnectAttempt?: number;
+    /** host rejected a guest action (send / takeover) */
+    error?: boolean;
+    message?: string;
+  };
   // also permission mode can piggyback via settings
   permissionMode?: PermissionMode;
 };

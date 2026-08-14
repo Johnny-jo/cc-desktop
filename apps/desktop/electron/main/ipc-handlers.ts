@@ -2,6 +2,7 @@ import fs from "node:fs";
 import { access } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { app, dialog, ipcMain, shell, type BrowserWindow } from "electron";
+import iconv from "iconv-lite";
 import { IPC, validateMcpServers } from "@claude-desktop/shared";
 import type {
   AppSettings,
@@ -46,6 +47,16 @@ export type IpcHandlerContext = {
   terminal: TerminalHost;
   /** Sync native window chrome when the UI theme flips */
   onThemeChanged?: (theme: "dark" | "light") => void;
+  /** Optional hot-update controller (packaged builds only) */
+  autoUpdater?: {
+    getStatus: () => unknown;
+    check: () => Promise<unknown>;
+    download: () => Promise<unknown>;
+    quitAndInstall: () => void;
+  };
+  rooms?: import("./room-service").RoomService;
+  /** Desktop UI changed defaultModel — persist into ~/.claude/settings.json */
+  onDesktopModelChanged?: (model: string) => void;
 };
 
 export function registerIpcHandlers(ctx: IpcHandlerContext): void {
@@ -198,30 +209,105 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
     },
   );
 
+  /** Normalize / whitelist encodings used by the editor status bar. */
+  function normalizeFileEncoding(raw?: string): string {
+    const e = (raw ?? "utf-8").trim().toLowerCase().replace(/_/g, "-");
+    const aliases: Record<string, string> = {
+      utf8: "utf-8",
+      "utf-8": "utf-8",
+      gbk: "gbk",
+      gb2312: "gb2312",
+      gb18030: "gb18030",
+      big5: "big5",
+      "utf-16le": "utf-16le",
+      "utf-16be": "utf-16be",
+      latin1: "latin1",
+      iso88591: "latin1",
+      "iso-8859-1": "latin1",
+    };
+    const id = aliases[e] ?? "utf-8";
+    if (!iconv.encodingExists(id)) return "utf-8";
+    return id;
+  }
+
   ipcMain.handle(
     IPC.fileReadText,
     async (
       _e,
-      { cwd, rel, maxBytes }: { cwd: string; rel: string; maxBytes?: number },
+      {
+        cwd,
+        rel,
+        maxBytes,
+        encoding,
+      }: { cwd: string; rel: string; maxBytes?: number; encoding?: string },
     ) => {
       if (!allowedProjectRoots().has(cwd)) {
         return { ok: false, error: "not an open project" };
       }
       const target = resolveInside(cwd, rel);
       if (!target) return { ok: false, error: "path escapes project" };
+      const enc = normalizeFileEncoding(encoding);
       try {
         const stat = await fs.promises.stat(target);
         if (!stat.isFile()) return { ok: false, error: "not a file" };
         const cap = Math.min(maxBytes ?? 512 * 1024, 2 * 1024 * 1024);
         const buf = await fs.promises.readFile(target);
-        if (buf.includes(0)) {
+        // UTF-16 intentionally has NULs; other encodings treat NUL as binary.
+        if (enc !== "utf-16le" && enc !== "utf-16be" && buf.includes(0)) {
           return { ok: false, error: "binary file" };
         }
         const truncated = buf.length > cap;
-        const content = buf
-          .subarray(0, truncated ? cap : buf.length)
-          .toString("utf8");
-        return { ok: true, content, truncated };
+        const slice = buf.subarray(0, truncated ? cap : buf.length);
+        let content: string;
+        if (enc === "utf-8") {
+          content = slice.toString("utf8");
+        } else {
+          content = iconv.decode(slice, enc);
+        }
+        return { ok: true, content, truncated, encoding: enc };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    },
+  );
+
+  ipcMain.handle(
+    IPC.fileWriteText,
+    async (
+      _e,
+      {
+        cwd,
+        rel,
+        content,
+        encoding,
+      }: { cwd: string; rel: string; content: string; encoding?: string },
+    ) => {
+      if (!allowedProjectRoots().has(cwd)) {
+        return { ok: false, error: "not an open project" };
+      }
+      if (typeof content !== "string") {
+        return { ok: false, error: "content must be string" };
+      }
+      // Soft cap ~4MB UTF-8 payload to avoid accidental huge writes from the UI
+      if (Buffer.byteLength(content, "utf8") > 4 * 1024 * 1024) {
+        return { ok: false, error: "content too large (>4MB)" };
+      }
+      const target = resolveInside(cwd, rel);
+      if (!target) return { ok: false, error: "path escapes project" };
+      const enc = normalizeFileEncoding(encoding);
+      try {
+        // Only overwrite existing text files (no create-via-editor yet)
+        const stat = await fs.promises.stat(target);
+        if (!stat.isFile()) return { ok: false, error: "not a file" };
+        const buf =
+          enc === "utf-8"
+            ? Buffer.from(content, "utf8")
+            : iconv.encode(content, enc);
+        await fs.promises.writeFile(target, buf);
+        return { ok: true };
       } catch (err) {
         return {
           ok: false,
@@ -263,7 +349,10 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
 
   ipcMain.handle(
     IPC.sessionSelect,
-    async (_e, { sessionId }: { sessionId: string }) => {
+    async (
+      _e,
+      { sessionId, limit }: { sessionId: string; limit?: number },
+    ) => {
       const summary = ctx.sessions.getSummary(sessionId);
       if (!summary) {
         throw new Error(`Unknown session: ${sessionId}`);
@@ -272,13 +361,29 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
       if (summary.cwd) {
         ctx.settings.update({ lastProjectPath: summary.cwd });
       }
-      const items = ctx.sessions.getTranscript(sessionId);
+      const page = ctx.sessions.getTranscriptPage(sessionId, { limit });
       return {
         sessionId,
         cwd: summary.cwd,
-        items,
+        items: page.items,
+        total: page.total,
+        hasMore: page.hasMore,
         changes: ctx.sessions.getChangesForSelect(sessionId),
       };
+    },
+  );
+
+  ipcMain.handle(
+    IPC.sessionLoadOlder,
+    async (
+      _e,
+      {
+        sessionId,
+        beforeId,
+        limit,
+      }: { sessionId: string; beforeId: string; limit?: number },
+    ) => {
+      return ctx.sessions.getTranscriptPage(sessionId, { beforeId, limit });
     },
   );
 
@@ -286,9 +391,13 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
     IPC.sessionSaveTranscript,
     async (
       _e,
-      { sessionId, items }: { sessionId: string; items: ChatItem[] },
+      {
+        sessionId,
+        items,
+        replace,
+      }: { sessionId: string; items: ChatItem[]; replace?: boolean },
     ) => {
-      ctx.sessions.saveTranscript(sessionId, items);
+      ctx.sessions.saveTranscript(sessionId, items, { replace });
       return { ok: true };
     },
   );
@@ -512,6 +621,9 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
     IPC.settingsSet,
     async (_e, patch: Partial<AppSettings> & { token?: string }) => {
       ctx.settings.update(patch);
+      if (typeof patch.defaultModel === "string" && patch.defaultModel.trim()) {
+        ctx.onDesktopModelChanged?.(patch.defaultModel.trim());
+      }
       return ctx.settings.getPublic();
     },
   );
@@ -603,6 +715,7 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
 
   ipcMain.handle(IPC.modelSet, async (_e, { model }: { model: string }) => {
     ctx.settings.update({ defaultModel: model });
+    if (model.trim()) ctx.onDesktopModelChanged?.(model.trim());
     return { model };
   });
 
@@ -614,6 +727,38 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
         ctx.settings.get().lastProjectPath ||
         undefined;
       return ctx.terminal.create(cwd);
+    },
+  );
+
+  ipcMain.handle(
+    IPC.sessionAttachCli,
+    async (_e, payload?: { sessionId?: string | null }) => {
+      try {
+        await ctx.cpa.ensureReady();
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+      const attach = ctx.sessions.releaseForCli(payload?.sessionId);
+      if (!attach.claudePath) {
+        return { ok: false, error: "找不到 claude 可执行文件" };
+      }
+      const args = attach.sdkSessionId
+        ? ["--resume", attach.sdkSessionId]
+        : [];
+      const created = ctx.terminal.create(attach.cwd, {
+        file: attach.claudePath,
+        args,
+        env: attach.env,
+        label: "claude",
+      });
+      return {
+        ok: true,
+        ...created,
+        ...(attach.sdkSessionId ? { sdkSessionId: attach.sdkSessionId } : {}),
+      };
     },
   );
 
@@ -646,6 +791,94 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
       return { ok: true };
     },
   );
+
+  ipcMain.handle(IPC.appUpdateGetStatus, async () => {
+    return (
+      ctx.autoUpdater?.getStatus() ?? {
+        state: "disabled",
+        message: "更新模块未启用",
+      }
+    );
+  });
+
+  ipcMain.handle(IPC.appUpdateCheck, async () => {
+    if (!ctx.autoUpdater) {
+      return { state: "disabled", message: "更新模块未启用" };
+    }
+    return ctx.autoUpdater.check();
+  });
+
+  ipcMain.handle(IPC.appUpdateDownload, async () => {
+    if (!ctx.autoUpdater) {
+      return { state: "disabled", message: "更新模块未启用" };
+    }
+    return ctx.autoUpdater.download();
+  });
+
+  ipcMain.handle(IPC.appUpdateInstall, async () => {
+    if (!ctx.autoUpdater) return { ok: false };
+    ctx.autoUpdater.quitAndInstall();
+    return { ok: true };
+  });
+
+  ipcMain.handle(IPC.appGetVersion, async () => {
+    return { version: app.getVersion() };
+  });
+
+  ipcMain.handle(IPC.roomCreate, async (_e, opts) => {
+    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    return ctx.rooms.create(opts);
+  });
+  ipcMain.handle(IPC.roomJoin, async (_e, opts) => {
+    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    return ctx.rooms.join(opts);
+  });
+  ipcMain.handle(IPC.roomLeave, async (_e, { roomId }) => {
+    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    return ctx.rooms.leave(roomId);
+  });
+  ipcMain.handle(IPC.roomEnd, async (_e, { roomId }) => {
+    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    return ctx.rooms.end(roomId);
+  });
+  ipcMain.handle(IPC.roomList, async () => {
+    return { rooms: ctx.rooms?.list() ?? [] };
+  });
+  ipcMain.handle(IPC.roomGet, async (_e, { roomId }) => {
+    return { room: ctx.rooms?.get(roomId) ?? null };
+  });
+  ipcMain.handle(IPC.roomAddSeat, async (_e, opts) => {
+    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    return ctx.rooms.addSeat(opts.roomId, opts.kind, opts.name, opts.agentName);
+  });
+  ipcMain.handle(IPC.roomTakeover, async (_e, { roomId, seatId }) => {
+    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    return ctx.rooms.takeover(roomId, seatId);
+  });
+  ipcMain.handle(IPC.roomReturnSeat, async (_e, { roomId, seatId }) => {
+    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    return ctx.rooms.returnSeat(roomId, seatId);
+  });
+  ipcMain.handle(IPC.roomSend, async (_e, { roomId, seatId, text }) => {
+    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    return ctx.rooms.send(roomId, seatId, text);
+  });
+  ipcMain.handle(IPC.roomDice, async (_e, { roomId, seatId }) => {
+    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    return ctx.rooms.rollDice(roomId, seatId);
+  });
+  ipcMain.handle(IPC.roomRps, async (_e, { roomId, seatId, hand }) => {
+    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    return ctx.rooms.playRps(roomId, seatId, hand);
+  });
+  ipcMain.handle(IPC.roomInvite, async (_e, { roomId }) => {
+    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    return ctx.rooms.invite(roomId);
+  });
+  ipcMain.handle(IPC.roomDelete, async (_e, { roomId }) => {
+    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    return ctx.rooms.deleteLocal(roomId);
+  });
 
   ipcMain.handle(IPC.skillsList, async () => {
     const cwd = ctx.settings.get().lastProjectPath ?? null;

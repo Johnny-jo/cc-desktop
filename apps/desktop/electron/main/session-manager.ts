@@ -381,6 +381,42 @@ export class SessionManager {
     return e ? { ...e.summary } : undefined;
   }
 
+  /**
+   * Snapshot for spawning a real `claude` TUI in a PTY.
+   * Tears down the desktop SDK stream so the CLI can resume the same session.
+   */
+  releaseForCli(sessionId: string | null | undefined): {
+    cwd: string;
+    sdkSessionId?: string;
+    model: string;
+    env: Record<string, string>;
+    claudePath: string | null;
+  } {
+    const settings = this.settings.get();
+    const entry = sessionId ? this.sessions.get(sessionId) : undefined;
+    if (entry) {
+      this.abort(sessionId!);
+    }
+    const cwd =
+      entry?.summary.cwd ||
+      settings.lastProjectPath ||
+      process.cwd();
+    const claudePath =
+      this.claudeExecutablePath ??
+      getClaudeExecutablePath({
+        isPackaged: this.isPackaged,
+        resourcesPath: process.resourcesPath,
+        userDataDir: "",
+      });
+    return {
+      cwd,
+      sdkSessionId: entry?.sdkSessionId,
+      model: settings.defaultModel,
+      env: this.cpa.buildProcessEnv(settings.defaultModel),
+      claudePath,
+    };
+  }
+
   /** Full transcript (compress / rewind). Prefer memory once hydrated. */
   getTranscript(sessionId: string) {
     const entry = this.sessions.get(sessionId);

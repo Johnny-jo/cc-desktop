@@ -100,6 +100,21 @@ describe("runtime-paths", () => {
     expect(repairCpaManagementConfig(cfg, { apiKey: "tok123" })).toBe(false);
   });
 
+  it("repairCpaManagementConfig never overwrites non-empty secret-key or api-keys", () => {
+    const root = tmp();
+    const cfg = path.join(root, "config.yaml");
+    const original =
+      'host: "127.0.0.1"\nport: 8317\nremote-management:\n  allow-remote: false\n  secret-key: "$2a$10$hashedUserSecret"\n  disable-control-panel: false\napi-keys:\n  - user-token-abc\nproviders:\n  - name: keep-me\n';
+    fs.writeFileSync(cfg, original, "utf8");
+    // Healthy config → repair is a pure no-op (no rewrite at all).
+    expect(
+      repairCpaManagementConfig(cfg, { apiKey: "other-token", port: 9999 }),
+    ).toBe(false);
+    const body = fs.readFileSync(cfg, "utf8");
+    expect(body).toBe(original);
+    expect(body).not.toContain("other-token");
+  });
+
   it("resolveEffectiveCpaPaths prefers bundled over legacy defaults", () => {
     const root = tmp();
     const vendorCpa = path.join(root, "vendor", "win-x64", "cpa");
@@ -145,6 +160,39 @@ describe("runtime-paths", () => {
     });
     expect(resolved.cpaExePath).toBe(customExe);
     expect(resolved.cpaConfigPath).toBe(customCfg);
+  });
+
+  it("packaged build prefers current resources over leftover install exe", () => {
+    const root = tmp();
+    const leftoverDir = path.join(
+      root,
+      "old-install",
+      "resources",
+      "bin",
+      "cpa",
+    );
+    fs.mkdirSync(leftoverDir, { recursive: true });
+    const leftover = path.join(leftoverDir, "cli-proxy-api.exe");
+    fs.writeFileSync(leftover, "old");
+
+    const resources = path.join(root, "current", "resources");
+    const bundledDir = path.join(resources, "bin", "cpa");
+    fs.mkdirSync(bundledDir, { recursive: true });
+    const bundled = path.join(bundledDir, "cli-proxy-api.exe");
+    fs.writeFileSync(bundled, "new");
+
+    const e = env({
+      isPackaged: true,
+      resourcesPath: resources,
+      userDataDir: path.join(root, "ud"),
+      projectRoot: root,
+    });
+    const resolved = resolveEffectiveCpaPaths(e, {
+      cpaExePath: leftover,
+      cpaConfigPath: path.join(root, "ud", "cpa", "config.yaml"),
+      cpaPort: 8317,
+    });
+    expect(resolved.cpaExePath).toBe(bundled);
   });
 
   it("writeCpaConfigWithApiKey overwrites api-keys", () => {
