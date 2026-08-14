@@ -31,6 +31,7 @@ import { createContextCompressor } from "./context-compressor";
 import { registerIpcHandlers } from "./ipc-handlers";
 import {
   getClaudeExecutablePath,
+  isPlaceholderCpaConfig,
   repairCpaManagementConfig,
   resolveEffectiveCpaPaths,
   writeCpaConfigWithApiKey,
@@ -38,6 +39,13 @@ import {
 } from "./runtime-paths";
 import { userSkillsDir } from "./skill-store";
 import { TerminalHost } from "./terminal-host";
+import { AppAutoUpdater } from "./auto-updater";
+import { RoomService } from "./room-service";
+import { RoomArchive } from "./room-archive";
+import {
+  watchClaudeCodeModel,
+  writeClaudeCodeModel,
+} from "./claude-settings-sync";
 
 /** Match the renderer charcoal theme (`--bg-app`). */
 const APP_BG = "#141414";
@@ -47,6 +55,8 @@ const TITLE_SYMBOL_DARK = "#e8e8e8";
 const TITLE_SYMBOL_LIGHT = "#1c1c1e";
 
 let mainWindow: BrowserWindow | null = null;
+/** False while the page is reloading / closed — blocks webContents.send storms. */
+let rendererReady = false;
 
 /** Sync frameless window chrome (titleBarOverlay) with the UI theme. */
 function applyWindowTheme(theme: "dark" | "light"): void {
@@ -68,10 +78,32 @@ function getMainWindow(): BrowserWindow | null {
   return mainWindow;
 }
 
+/**
+ * Safe IPC push to the renderer.
+ * During Vite HMR / reload / close the BrowserWindow may still exist while the
+ * render frame is already gone. Unconditional webContents.send then throws
+ * (sometimes async): "Render frame was disposed before WebFrameMain could be
+ * accessed" and floods the console while SessionManager is still streaming.
+ */
 function sendToRenderer(channel: string, payload: unknown): void {
+  if (!rendererReady) return;
   const win = getMainWindow();
   if (!win || win.isDestroyed()) return;
-  win.webContents.send(channel, payload);
+  const wc = win.webContents;
+  if (!wc || wc.isDestroyed()) return;
+  try {
+    // No live renderer process (crashed / not yet spawned).
+    if (typeof wc.getOSProcessId === "function" && wc.getOSProcessId() <= 0) {
+      return;
+    }
+  } catch {
+    return;
+  }
+  try {
+    wc.send(channel, payload);
+  } catch {
+    rendererReady = false;
+  }
 }
 
 /**
@@ -116,7 +148,7 @@ function createWindow() {
     backgroundColor: APP_BG,
     // No File/Edit/View menu bar — this is a desktop chat app, not an editor.
     autoHideMenuBar: true,
-    // Hide OS title (icon + "Claude Desktop"); keep only dark min/max/close.
+    // Hide OS title (icon + app name); keep only dark min/max/close.
     titleBarStyle: "hidden",
     titleBarOverlay: {
       color: APP_BG,
@@ -133,10 +165,28 @@ function createWindow() {
   // Fully remove the default application menu (File / Edit / View / …).
   Menu.setApplicationMenu(null);
 
+  // Gate IPC while the page is loading / reloading (HMR).
+  rendererReady = false;
+  mainWindow.webContents.on("did-start-loading", () => {
+    rendererReady = false;
+  });
+  mainWindow.webContents.on("did-finish-load", () => {
+    rendererReady = true;
+  });
+  mainWindow.webContents.on("dom-ready", () => {
+    rendererReady = true;
+  });
+  mainWindow.webContents.on("render-process-gone", () => {
+    rendererReady = false;
+  });
+  mainWindow.webContents.on("destroyed", () => {
+    rendererReady = false;
+  });
+
   if (process.env.ELECTRON_RENDERER_URL) {
-    mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
+    void mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
   } else {
-    mainWindow.loadFile(path.join(__dirname, "../renderer/index.html"));
+    void mainWindow.loadFile(path.join(__dirname, "../renderer/index.html"));
   }
 
   // DevTools access (menu bar is removed, so bind it explicitly):
@@ -162,6 +212,7 @@ function createWindow() {
   }
 
   mainWindow.on("closed", () => {
+    rendererReady = false;
     mainWindow = null;
   });
 }
@@ -198,19 +249,31 @@ function bootstrap() {
   }
   // Older installs used disable-control-panel: true and empty secret-key,
   // which makes /management.html fail with a network/404 error even though
-  // GET / still works. Repair in place when we control the userData config.
+  // GET / still works. Repair is panel-only: never rewrites non-empty keys.
   repairCpaManagementConfig(cpaPaths.cpaConfigPath, {
     apiKey: settings.getToken(),
     port: current.cpaPort,
   });
-  // Token exists but the wizard never ran (pre-onboarding install): do one
-  // full config rewrite so api-keys + secret-key + panel are guaranteed,
-  // then mark setup complete.
+  // Legacy: token exists but wizard flag missing. Mark complete WITHOUT
+  // rewriting CPA config if the user already customized it (providers,
+  // hashed secret-key, non-placeholder api-keys). Full rewrite only when
+  // config still looks like the virgin template.
   if (settings.getToken() && !settings.get().setupCompleted) {
-    writeCpaConfigWithApiKey(pathEnv, {
-      port: settings.get().cpaPort || 8317,
-      apiKey: settings.getToken()!,
-    });
+    try {
+      const cfgPath = cpaPaths.cpaConfigPath;
+      const body =
+        cfgPath && fs.existsSync(cfgPath)
+          ? fs.readFileSync(cfgPath, "utf8")
+          : "";
+      if (!body || isPlaceholderCpaConfig(body)) {
+        writeCpaConfigWithApiKey(pathEnv, {
+          port: settings.get().cpaPort || 8317,
+          apiKey: settings.getToken()!,
+        });
+      }
+    } catch {
+      // non-fatal — flag still gets set so we never loop rewrite attempts
+    }
     settings.update({ setupCompleted: true });
   }
 
@@ -297,7 +360,7 @@ function bootstrap() {
       const win = getMainWindow();
       if (win && !win.isDestroyed() && win.isFocused()) return;
       if (!Notification.isSupported()) return;
-      const title = n.title || "Claude Desktop";
+      const title = n.title || "CC Desktop";
       const body = n.message.length > 200 ? `${n.message.slice(0, 200)}…` : n.message;
       const notification = new Notification({ title, body });
       notification.on("click", () => {
@@ -316,6 +379,34 @@ function bootstrap() {
     (e) => sendToRenderer(IPC.terminalExit, e),
   );
 
+  const autoUpdater = new AppAutoUpdater({
+    getWindow: getMainWindow,
+    getFeedUrl: () =>
+      process.env.CLAUDE_DESKTOP_UPDATE_URL?.trim() ||
+      settings.get().updateFeedUrl ||
+      undefined,
+  });
+
+  const roomArchive = new RoomArchive(userDataDir);
+  const rooms = new RoomService({
+    getWindow: getMainWindow,
+    sessions,
+    settings,
+    archive: roomArchive,
+  });
+
+  const applyCliModelToDesktop = (model: string) => {
+    const cur = settings.get();
+    const models = cur.models.includes(model)
+      ? cur.models
+      : [...cur.models, model];
+    if (cur.defaultModel === model && models.length === cur.models.length) {
+      return;
+    }
+    settings.update({ defaultModel: model, models });
+    sendToRenderer(IPC.settingsUpdated, settings.getPublic());
+  };
+
   registerIpcHandlers({
     window: getMainWindow,
     sessions,
@@ -327,14 +418,29 @@ function bootstrap() {
     snapshots,
     terminal,
     onThemeChanged: applyWindowTheme,
+    autoUpdater,
+    rooms,
+    onDesktopModelChanged: (model) => {
+      try {
+        writeClaudeCodeModel(model);
+      } catch {
+        // ignore — desktop setting already persisted
+      }
+    },
   });
 
+  const stopClaudeSettingsWatch = watchClaudeCodeModel(applyCliModelToDesktop);
+
   createWindow();
+  // Hot updates replace app binaries only — never AppData / CPA config.
+  autoUpdater.start();
 
   app.on("before-quit", () => {
+    stopClaudeSettingsWatch();
     // stopIfManaged is a no-op unless this app spawned CPA.
     // Always call it so managed children are not orphaned on quit.
     cpa.stopIfManaged();
+    rooms.disposeAll();
     terminal.killAll();
     // Close streaming sessions so consumers finish cleanly.
     for (const s of sessions.list()) {

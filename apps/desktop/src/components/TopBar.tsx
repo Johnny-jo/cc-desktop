@@ -42,7 +42,7 @@ export function TopBar({
 
   return (
     <div className="topbar">
-      <span className="brand">Claude Desktop</span>
+      <span className="brand">CC Desktop</span>
 
       <button
         type="button"

@@ -1,22 +1,41 @@
-Claude Desktop
-==============
+CC Desktop
+==========
 
-By installing this software you acknowledge that:
+Unofficial desktop client for Claude Code, with a local CLIProxyAPI (CPA)
+gateway. Not affiliated with, endorsed by, or sponsored by Anthropic or
+OpenAI.
+
+License
+-------
+
+Source code: PolyForm Noncommercial License 1.0.0 — free to read, learn,
+and use for non-commercial purposes. Commercial use is NOT permitted.
+See LICENSE in the repository.
+
+Third-party components
+----------------------
+
+- Claude Code CLI (claude.exe, if bundled): proprietary to Anthropic.
+  Redistributing it is governed by Anthropic's terms, not this license.
+- CLIProxyAPI (cli-proxy-api.exe, if bundled): MIT License.
+- Electron, React, CodeMirror, xterm.js, node-pty and other npm
+  dependencies: see their own LICENSE files.
+
+By installing you acknowledge that:
 
 1. This package may include the Claude Code CLI binary and a local CPA
-   (CLIProxyAPI) gateway for model routing. They run on your machine only.
+   gateway. They run on your machine only.
 
-2. You are responsible for providing your own API credentials / upstream
-   model accounts. No third-party account credentials are bundled.
+2. You must provide your own API credentials / upstream model accounts.
+   No account credentials are bundled, and none should be shared.
 
-3. The gateway binds to 127.0.0.1 by default. Do not expose it to the network
-   without understanding the security implications.
+3. The gateway binds to 127.0.0.1 by default. Do not expose it to a
+   network without understanding the security implications.
 
-4. Application settings and chat data are stored under your user profile
-   (AppData). Uninstalling the application does not delete that data unless
-   you remove it manually.
+4. Settings and chat data live under your user profile (AppData).
+   Uninstalling does not delete that data unless you remove it manually.
 
-5. This software is provided as-is. Use at your own risk.
+5. This software is provided as-is, without warranty. Use at your own risk.
 
 Click "I Agree" to continue, then choose the install location. Installation
 starts only after you confirm the directory and proceed.

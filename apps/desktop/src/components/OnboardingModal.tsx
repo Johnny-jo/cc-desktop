@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from "react";
 import { completeOnboarding, useAppStore } from "../state/store";
+import { useI18n } from "../i18n/useI18n";
 
 type Step = "welcome" | "token" | "confirm" | "done";
 
@@ -14,6 +15,7 @@ function randomGatewayToken(): string {
  * Nothing is written until the user confirms on the last step.
  */
 export function OnboardingModal({ open }: { open: boolean }) {
+  const { t } = useI18n();
   const cpaStatus = useAppStore((s) => s.cpaStatus);
   const settings = useAppStore((s) => s.settings);
   const [step, setStep] = useState<Step>("welcome");
@@ -97,23 +99,22 @@ export function OnboardingModal({ open }: { open: boolean }) {
       >
         <div className="modal-header">
           <span className="modal-title" id="onboarding-title">
-            首次配置 · {stepIndex}/3
+            {t.onboarding.title} · {stepIndex}/3
           </span>
         </div>
 
         <div className="modal-body">
           <ol className="onboarding-steps" aria-hidden>
-            <li className={stepIndex >= 1 ? "active" : ""}>欢迎</li>
+            <li className={stepIndex >= 1 ? "active" : ""}>
+              {t.onboarding.title}
+            </li>
             <li className={stepIndex >= 2 ? "active" : ""}>网关 Token</li>
             <li className={stepIndex >= 3 ? "active" : ""}>确认并启动</li>
           </ol>
 
           {step === "welcome" ? (
             <>
-              <p className="onboarding-lead">
-                本应用已内置 <strong>Claude Code</strong> 与本地{" "}
-                <strong>CPA</strong> 网关，无需再单独安装 CLI 或 CPA。
-              </p>
+              <p className="onboarding-lead">{t.onboarding.welcomeLead}</p>
               <ul className="onboarding-list">
                 <li>
                   只需配置一个<strong>网关 Token</strong>（本机加密保存；同时用于

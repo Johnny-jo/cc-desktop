@@ -10,7 +10,7 @@
     </linearGradient>
   </defs>
   <rect width="512" height="512" rx="112" fill="url(#bg)"/>
-  <!-- four-point spark (Claude-like star), centered -->
+  <!-- four-point spark, centered -->
   <path
     fill="url(#spark)"
     d="M256 96c10 66 22 96 48 122s56 38 112 48c-56 10-86 22-112 48s-38 56-48 112c-10-56-22-86-48-112s-56-38-112-48c56-10 86-22 112-48s38-56 48-122z"

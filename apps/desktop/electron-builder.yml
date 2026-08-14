@@ -1,6 +1,6 @@
-appId: com.claude-desktop.app
-productName: Claude Desktop
-copyright: Copyright © Claude Desktop contributors
+appId: com.cc-desktop.app
+productName: CC Desktop
+copyright: Copyright © CC Desktop contributors
 
 directories:
   output: release
@@ -62,12 +62,13 @@ nsis:
   license: build/license.txt
   createDesktopShortcut: true
   createStartMenuShortcut: true
-  shortcutName: Claude Desktop
-  # Uninstall removes app userData (settings/sessions/CPA config) and stops
-  # the managed CPA process; shared ~/.cli-proxy-api credentials are kept.
-  deleteAppDataOnUninstall: true
+  shortcutName: CC Desktop
+  # Never wipe AppData on uninstall/upgrade. NSIS upgrades run the previous
+  # uninstaller first; deleting AppData there would wipe CPA + settings.
+  # uninstall.nsh only stops CPA — it does not RMDir AppData.
+  deleteAppDataOnUninstall: false
   include: build/uninstall.nsh
-  artifactName: Claude-Desktop-Setup-${version}-${arch}.${ext}
+  artifactName: CC-Desktop-Setup-${version}-${arch}.${ext}
   # Prefer Chinese UI when the OS is zh-CN (falls back to English).
   installerLanguages:
     - en_US
@@ -75,6 +76,11 @@ nsis:
   displayLanguageSelector: false
 
 forceCodeSigning: false
+
+# Publish target for electron-updater (generic HTTP feed).
+# Intentionally blank — pack-time override only:
+#   set CLAUDE_DESKTOP_UPDATE_URL=https://your-feed/
+# Do NOT hardcode a public feed here.
 
 # electron-vite outputs
 extraMetadata:
