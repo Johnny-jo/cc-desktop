@@ -835,6 +835,176 @@ describe("SessionManager", () => {
 
     fs.rmSync(dir, { recursive: true, force: true });
   });
+
+  it("continue appends the next user turn onto hydrated disk items", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sess-cont-"));
+    const archive = new SessionArchive(dir);
+    const ctx = makeDeps();
+    const manager = new SessionManager({
+      queryFn: async function* (args) {
+        await takeFirstUserText(args.prompt);
+        yield {
+          type: "stream_event",
+          event: {
+            type: "content_block_delta",
+            delta: { type: "text_delta", text: "Hi" },
+          },
+        };
+        yield { type: "result", subtype: "success", total_cost_usd: 0 };
+      },
+      permissionBroker: ctx.permissionBroker,
+      diffTracker: ctx.diffTracker,
+      cpa: ctx.cpa as never,
+      settings: ctx.settings,
+      archive,
+      emit: ctx.emit,
+      emitSession: ctx.emitSession,
+      emitDiff: ctx.emitDiff,
+    });
+    const sessionId = await manager.start(
+      { text: "first", attachments: [] },
+      "D:/p",
+    );
+    await manager.continue(sessionId, { text: "second", attachments: [] });
+    const texts = manager
+      .getTranscript(sessionId)
+      .filter((i) => i.kind === "text")
+      .map((i) => (i.kind === "text" ? i.text : ""));
+    expect(texts).toContain("first");
+    expect(texts).toContain("second");
+    expect(
+      archive
+        .loadItems(sessionId)
+        .some((i) => i.kind === "text" && i.text === "second"),
+    ).toBe(true);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("rewind truncates items at the user message", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sess-rw-"));
+    const archive = new SessionArchive(dir);
+    const rewindFiles = vi.fn().mockResolvedValue({
+      canRewind: true,
+      filesChanged: [],
+    });
+    const queryFn: QueryFn = (args) => {
+      const gen = (async function* () {
+        await takeFirstUserText(args.prompt);
+        yield {
+          type: "stream_event",
+          event: {
+            type: "content_block_delta",
+            delta: { type: "text_delta", text: "Hi" },
+          },
+        };
+        yield {
+          type: "result",
+          subtype: "success",
+          total_cost_usd: 0,
+          session_id: "sdk-1",
+        };
+        for await (const _ of args.prompt as AsyncIterable<unknown>) {
+          yield {
+            type: "result",
+            subtype: "success",
+            total_cost_usd: 0,
+            session_id: "sdk-1",
+          };
+        }
+      })();
+      return Object.assign(gen, { rewindFiles }) as never;
+    };
+    const ctx = makeDeps({ queryFn });
+    const manager = new SessionManager({
+      queryFn,
+      permissionBroker: ctx.permissionBroker,
+      diffTracker: ctx.diffTracker,
+      cpa: ctx.cpa as never,
+      settings: ctx.settings,
+      archive,
+      emit: ctx.emit,
+      emitSession: ctx.emitSession,
+      emitDiff: ctx.emitDiff,
+    });
+    const sessionId = await manager.start(
+      { text: "hello", attachments: [] },
+      "D:/p",
+    );
+    const stamped = manager.getTranscript(sessionId).map((i) =>
+      i.kind === "text" && i.role === "user"
+        ? { ...i, sdkMsgId: "uuid-hello" }
+        : i,
+    );
+    manager.saveTranscript(sessionId, stamped, { replace: true });
+
+    const res = await manager.rewindToUserMessage(sessionId, "uuid-hello");
+    expect(res.ok).toBe(true);
+    const after = manager.getTranscript(sessionId);
+    const last = after[after.length - 1];
+    expect(last?.kind === "text" && last.role === "user").toBe(true);
+    if (last && last.kind === "text") {
+      expect(last.sdkMsgId).toBe("uuid-hello");
+      expect(last.text).toBe("hello");
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("compressSession prefers in-memory items over a stale disk copy", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sess-cp-"));
+    const archive = new SessionArchive(dir);
+    const compressor = {
+      compress: vi.fn(async (items: import("@claude-desktop/shared").ChatItem[]) => ({
+        items: [
+          {
+            kind: "text" as const,
+            id: "sum",
+            role: "system" as const,
+            text: `n=${items.length}`,
+          },
+        ],
+        summaryText: "sum",
+        compressedCount: Math.max(0, items.length - 1),
+      })),
+    };
+    const ctx = makeDeps();
+    const manager = new SessionManager({
+      queryFn: ctx.queryFn,
+      permissionBroker: ctx.permissionBroker,
+      diffTracker: ctx.diffTracker,
+      cpa: ctx.cpa as never,
+      settings: ctx.settings,
+      archive,
+      compressor: compressor as never,
+      emit: ctx.emit,
+      emitSession: ctx.emitSession,
+      emitDiff: ctx.emitDiff,
+    });
+    const sessionId = await manager.start(
+      { text: "hello", attachments: [] },
+      "D:/p",
+    );
+    // Ensure enough history for compress (KEEP_RECENT_ITEMS = 6).
+    const padded = Array.from({ length: 10 }, (_, i) => ({
+      kind: "text" as const,
+      id: `pad-${i}`,
+      role: (i % 2 === 0 ? "user" : "assistant") as "user" | "assistant",
+      text: `msg-${i}`,
+    }));
+    manager.saveTranscript(sessionId, padded, { replace: true });
+    // Stale short disk snapshot should be ignored once memory is non-empty.
+    archive.saveItems(sessionId, [
+      { kind: "text", id: "stale", role: "user", text: "stale" },
+    ]);
+    const memLen = manager.getTranscript(sessionId).length;
+    expect(memLen).toBe(10);
+    const res = await manager.compressSession(sessionId);
+    expect(res.ok).toBe(true);
+    expect(compressor.compress).toHaveBeenCalled();
+    const passed = compressor.compress.mock.calls[0][0] as import("@claude-desktop/shared").ChatItem[];
+    expect(passed.length).toBe(memLen);
+    expect(manager.getTranscript(sessionId)[0]).toMatchObject({ id: "sum" });
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
 });
 
 async function getSessionId(manager: SessionManager): Promise<string> {

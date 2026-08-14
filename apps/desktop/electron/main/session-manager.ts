@@ -18,6 +18,7 @@ import type { SettingsStore } from "./settings-store";
 import type { UserPromptBroker } from "./user-prompt-broker";
 import {
   TRANSCRIPT_PAGE,
+  mergeTranscriptItems,
   type SessionArchive,
   type StoredSession,
   type TranscriptPage,
@@ -413,6 +414,15 @@ export class SessionManager {
     items: ChatItem[],
     opts?: { replace?: boolean },
   ): void {
+    const entry = this.sessions.get(sessionId);
+    if (entry) {
+      if (opts?.replace) entry.items = items.slice();
+      else {
+        this.hydrateItems(entry);
+        entry.items = mergeTranscriptItems(entry.items, items);
+      }
+      entry.itemsHydrated = true;
+    }
     if (!this.archive) return;
     if (opts?.replace) this.archive.saveItems(sessionId, items);
     else this.archive.mergeSaveItems(sessionId, items);
@@ -890,6 +900,20 @@ export class SessionManager {
       if (idx >= 0) {
         entry.sdkUserMsgIds = entry.sdkUserMsgIds!.slice(0, idx + 1);
       }
+      // Truncate in-memory transcript at the rewound user bubble (inclusive).
+      this.hydrateItems(entry);
+      const itemIdx = entry.items.findIndex(
+        (i) =>
+          i.kind === "text" &&
+          i.role === "user" &&
+          i.sdkMsgId === userMessageId,
+      );
+      if (itemIdx >= 0) {
+        this.replaceTranscript(entry, entry.items.slice(0, itemIdx + 1), {
+          persist: true,
+          replace: true,
+        });
+      }
       return {
         ok: true,
         canRewind: true,
@@ -973,8 +997,8 @@ export class SessionManager {
 
   /**
    * Compress a session's transcript (user /compact or renderer auto-compress).
-   * Prefer `items` from the renderer — the disk archive can lag the live UI
-   * transcript, and compressing stale disk data would wipe newer messages.
+   * Prefer in-memory items once hydrated; fall back to renderer items / disk
+   * only when memory is empty.
    *
    * When `autoContinue` is true (auto-compact path), immediately starts a fresh
    * SDK turn with the summary + "continue last task" instruction — matching
@@ -1005,16 +1029,13 @@ export class SessionManager {
       return { ok: false, message: "Compression cooldown — try again shortly" };
     }
 
-    const fromRenderer = Array.isArray(items) ? items : null;
-    const fromDisk = this.archive.loadItems(sessionId);
-    // Prefer the longer transcript so we never compress a stale short snapshot
-    // over a fuller one (disk lag vs. concurrent save).
+    this.hydrateItems(entry);
     const current =
-      fromRenderer && fromRenderer.length >= fromDisk.length
-        ? fromRenderer
-        : fromDisk.length > 0
-          ? fromDisk
-          : (fromRenderer ?? []);
+      entry.items.length > 0
+        ? entry.items
+        : Array.isArray(items)
+          ? items
+          : this.archive.loadItems(sessionId);
 
     if (current.length <= KEEP_RECENT_ITEMS) {
       return { ok: false, message: "Not enough history to compress" };
@@ -1025,7 +1046,10 @@ export class SessionManager {
       if (result.compressedCount === 0) {
         return { ok: false, message: "Nothing to compress" };
       }
-      this.archive.saveItems(sessionId, result.items);
+      this.replaceTranscript(entry, result.items, {
+        persist: true,
+        replace: true,
+      });
       entry.compressed = true;
       entry.lastCompressedAt = now;
       // Close the live stream so the next turn starts a fresh SDK session
@@ -1054,7 +1078,10 @@ export class SessionManager {
           text: "Context compacted — continuing previous task…",
         };
         const withNote = [...result.items, continueNote];
-        this.archive.saveItems(sessionId, withNote);
+        this.replaceTranscript(entry, withNote, {
+          persist: true,
+          replace: true,
+        });
         this.emit({
           type: "items_replaced",
           sessionId,
@@ -1173,6 +1200,14 @@ export class SessionManager {
         error: errors.join("; "),
       });
     }
+
+    this.hydrateItems(entry);
+    const next = appendUserItem(
+      { items: entry.items, optimisticUserTexts: [] },
+      displayPrompt(prompt),
+      { nextId: entry.nextId },
+    );
+    this.replaceTranscript(entry, next.items, { persist: true });
 
     entry.summary = {
       ...entry.summary,
