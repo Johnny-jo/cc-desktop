@@ -66,6 +66,7 @@ pnpm package:win       # 构建 + NSIS
 1. 首次启动弹出三步向导：欢迎 → 网关 Token → 确认并启动
 2. 网关 Token 是本地 CPA 的 api-key / 管理页密码，**只存主进程**
 3. 默认端口 `8317`；已有 CPA 登录态（`~/.cli-proxy-api`）可直接复用
+4. cli模式 需要额外执行"pnpm prepare:vendor" 命令
 
 ### 必须做的事
 
