@@ -28,7 +28,7 @@ This repository only claims rights in **original client source written for this 
 
 ## 2. 本仓库直接依赖（npm，安装时按各包 LICENSE 生效）
 
-下列均为常见开源许可下的独立作品。`pnpm install` 会把它们的原文 LICENSE 装到 `node_modules`。**本项目的「禁止商用」条款不能覆盖、缩小或替换这些依赖自己的许可。**
+下列均为常见开源许可下的独立作品。`pnpm install` 会把它们的原文 LICENSE 装到 `node_modules`。**本项目源码的 Apache-2.0 许可不能覆盖、缩小或替换这些依赖自己的许可。**
 
 | 包 | 用途 | 常见许可（以包内 LICENSE 为准） |
 |---|---|---|

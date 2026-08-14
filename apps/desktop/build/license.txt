@@ -8,9 +8,9 @@ OpenAI.
 License
 -------
 
-Source code: PolyForm Noncommercial License 1.0.0 — free to read, learn,
-and use for non-commercial purposes. Commercial use is NOT permitted.
-See LICENSE in the repository.
+Source code: Apache License 2.0 — free to use, modify, and distribute,
+including for commercial purposes, with copyright and license notices
+preserved. See LICENSE in the repository.
 
 Third-party components
 ----------------------
