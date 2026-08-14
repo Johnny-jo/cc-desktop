@@ -136,7 +136,61 @@ export function TitlebarToggles({
   );
 }
 
+export function CliModeToggle({
+  active,
+  onClick,
+}: {
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={active ? "titlebar-btn active" : "titlebar-btn"}
+      title={active ? "返回桌面模式" : "切换到 CLI 模式"}
+      aria-label="CLI 模式"
+      aria-pressed={active}
+      onClick={onClick}
+    >
+      <svg width="17" height="17" viewBox="0 0 17 17" fill="none" aria-hidden>
+        <rect x="2.5" y="3.5" width="12" height="10" rx="1.6" stroke="currentColor" strokeWidth="1.3" />
+        <path d="M5 8.5 l2 2 -2 2M9.5 12.2 H12" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    </button>
+  );
+}
+
 /** Sun (currently light → click for dark) / moon (currently dark → light). */
+export function ChangelogToggle({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      className="titlebar-btn titlebar-changelog"
+      title="更新日志"
+      aria-label="更新日志"
+      onClick={onClick}
+    >
+      <svg width="17" height="17" viewBox="0 0 17 17" fill="none" aria-hidden>
+        <rect
+          x="3.5"
+          y="2.5"
+          width="10"
+          height="12"
+          rx="1.6"
+          stroke="currentColor"
+          strokeWidth="1.3"
+        />
+        <path
+          d="M6 6h5M6 8.5h5M6 11h3.2"
+          stroke="currentColor"
+          strokeWidth="1.3"
+          strokeLinecap="round"
+        />
+      </svg>
+    </button>
+  );
+}
+
 export function ThemeToggle({
   isLight,
   onToggle,

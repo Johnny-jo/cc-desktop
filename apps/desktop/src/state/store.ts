@@ -39,6 +39,8 @@ export type AppState = {
   lastError: string | null;
   /** Disk still has older bubbles not yet in itemsBySession. */
   hasMoreBySession: Record<string, boolean>;
+  /** Lightweight CLI page; drops renderer transcript cache while active. */
+  cliMode: boolean;
 };
 
 type Listener = () => void;
@@ -58,6 +60,7 @@ let state: AppState = {
   queuedPrompts: [],
   lastError: null,
   hasMoreBySession: {},
+  cliMode: false,
 };
 
 const listeners = new Set<Listener>();
@@ -159,6 +162,25 @@ function appendUserMessage(
 
 function applySessionEvent(event: SdkNormalizedEvent): void {
   const { sessionId } = event;
+
+  // CLI mode: keep running/queue state alive, but do not accumulate chat items.
+  if (state.cliMode) {
+    if (event.type === "result") {
+      setState({
+        running: state.sessions.some(
+          (s) => s.id !== sessionId && s.status === "running",
+        ),
+        lastError: event.ok ? state.lastError : (event.error ?? "Turn failed"),
+      });
+      if (!state.running && state.queuedPrompts.length > 0) {
+        const summary = state.sessions.find((s) => s.id === sessionId);
+        const ratio = summary?.contextUsage?.ratio ?? 0;
+        if (ratio < AUTO_COMPRESS_RATIO) setTimeout(flushQueuedPrompt, 0);
+      }
+    }
+    return;
+  }
+
   const prev = transcriptUi(sessionId);
   if (event.type === "user_msg_ids") {
     sdkUserMsgIds.set(sessionId, event.uuids);
@@ -372,6 +394,19 @@ export function useAppStore<T>(selector: (s: AppState) => T): T {
 }
 
 // --- actions ---
+
+export function enterCliMode(): void {
+  setState({ cliMode: true, itemsBySession: {}, hasMoreBySession: {} });
+}
+
+export function exitCliMode(): void {
+  setState({ cliMode: false });
+}
+
+export function toggleCliMode(): void {
+  if (state.cliMode) exitCliMode();
+  else enterCliMode();
+}
 
 /** Open project by path, or show native folder dialog when path omitted. */
 export async function openProject(path?: string): Promise<void> {
@@ -879,6 +914,7 @@ export function __resetStoreForTests(): void {
     queuedPrompts: [],
     lastError: null,
     hasMoreBySession: {},
+    cliMode: false,
   };
   pendingStartPrompt = null;
   autoCompressedAt.clear();

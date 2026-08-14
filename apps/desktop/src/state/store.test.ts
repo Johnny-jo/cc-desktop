@@ -4,6 +4,8 @@ import {
   __resetStoreForTests,
   __upsertSessionForTests,
   dequeuePrompt,
+  enterCliMode,
+  exitCliMode,
   getState,
   sendMessage,
 } from "./store";
@@ -112,5 +114,26 @@ describe("transcript persistence", () => {
     });
     expect(getState().itemsBySession.s1.some((i) => i.kind === "text")).toBe(true);
     expect(save).not.toHaveBeenCalled();
+  });
+});
+
+describe("cli mode", () => {
+  beforeEach(() => {
+    __resetStoreForTests();
+  });
+
+  it("enterCliMode drops cached transcripts and sets cliMode", () => {
+    runningSession("s1");
+    __applySessionEventForTests({
+      type: "text_delta",
+      sessionId: "s1",
+      text: "Hi",
+    });
+    expect(getState().itemsBySession.s1.length).toBeGreaterThan(0);
+    enterCliMode();
+    expect(getState().cliMode).toBe(true);
+    expect(getState().itemsBySession).toEqual({});
+    exitCliMode();
+    expect(getState().cliMode).toBe(false);
   });
 });
