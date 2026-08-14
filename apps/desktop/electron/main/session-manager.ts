@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type {
+  ChatItem,
   FileChange,
   McpServersMap,
   McpSetServersResultDto,
@@ -15,9 +16,20 @@ import type { DiffTracker } from "./diff-tracker";
 import type { CpaSupervisor } from "./cpa-supervisor";
 import type { SettingsStore } from "./settings-store";
 import type { UserPromptBroker } from "./user-prompt-broker";
-import type { SessionArchive, StoredSession } from "./session-archive";
 import {
+  TRANSCRIPT_PAGE,
+  type SessionArchive,
+  type StoredSession,
+  type TranscriptPage,
+} from "./session-archive";
+import {
+  applySdkEvent,
+  appendUserItem,
+  bindSdkUserMsgIds,
   computeContextUsage,
+  createIdFactory,
+  shouldPersistTranscript,
+  type TranscriptState,
   type UserPrompt,
   type UserContentBlock,
 } from "@claude-desktop/shared";
@@ -153,6 +165,11 @@ type SessionEntry = {
   slashCommands: SlashCommandItem[];
   /** True while waiting for a result after push */
   turnActive: boolean;
+  /**
+   * Bumped whenever the live stream is replaced or aborted. consumeQuery
+   * captures the value at start and ignores late events from a dead stream.
+   */
+  streamGen: number;
   /** True if context has already been auto-compressed this session */
   compressed: boolean;
   /** SDK uuids of real user turns (persisted user messages, in order) */
@@ -167,6 +184,10 @@ type SessionEntry = {
    * prepends this summary so the model retains continuity without full history.
    */
   pendingSummaryPrefix?: string;
+  /** In-memory transcript authority (hydrated from disk on demand). */
+  items: ChatItem[];
+  itemsHydrated: boolean;
+  nextId: (prefix: string) => string;
 };
 
 /**
@@ -189,6 +210,35 @@ function titleFromPrompt(prompt: UserPrompt): string {
     return names ? `Files: ${names.slice(0, 40)}` : "New session";
   }
   return t.length > 48 ? `${t.slice(0, 48)}…` : t;
+}
+
+/** Display text for a user prompt (matches renderer bubble formatting). */
+function displayPrompt(prompt: UserPrompt): string {
+  const t = prompt.text.trim();
+  if (prompt.attachments.length === 0) return t;
+  return `${t}\n\n[Attached: ${prompt.attachments.map((a) => a.name).join(", ")}]`;
+}
+
+/** Page slice matching SessionArchive.loadItemsPage (no disk I/O). */
+function pageChatItems(
+  all: ChatItem[],
+  opts?: { beforeId?: string; limit?: number },
+): TranscriptPage {
+  const limit = opts?.limit && opts.limit > 0 ? opts.limit : TRANSCRIPT_PAGE;
+  let end = all.length;
+  if (opts?.beforeId) {
+    const idx = all.findIndex((i) => i.id === opts.beforeId);
+    if (idx < 0) {
+      return { items: [], total: all.length, hasMore: all.length > 0 };
+    }
+    end = idx;
+  }
+  const start = Math.max(0, end - limit);
+  return {
+    items: all.slice(start, end),
+    total: all.length,
+    hasMore: start > 0,
+  };
 }
 
 function extractSdkSessionId(msg: unknown): string | undefined {
@@ -304,7 +354,11 @@ export class SessionManager {
           sdkSessionId: stored.sdkSessionId,
           slashCommands: [],
           turnActive: false,
+          streamGen: 0,
           compressed: false,
+          items: [],
+          itemsHydrated: false,
+          nextId: createIdFactory(),
         });
         const changes = this.archive.loadChanges(stored.id);
         if (changes.length) {
@@ -325,16 +379,83 @@ export class SessionManager {
     return e ? { ...e.summary } : undefined;
   }
 
-  /** Transcript for UI restore (from disk archive). */
+  /** Full transcript (compress / rewind). Prefer memory once hydrated. */
   getTranscript(sessionId: string) {
+    const entry = this.sessions.get(sessionId);
+    if (entry) {
+      this.hydrateItems(entry);
+      return entry.items.map((i) => ({ ...i }));
+    }
     return this.archive?.loadItems(sessionId) ?? [];
+  }
+
+  /** Incremental UI restore — tail or the page ending before `beforeId`. */
+  getTranscriptPage(
+    sessionId: string,
+    opts?: { beforeId?: string; limit?: number },
+  ) {
+    const entry = this.sessions.get(sessionId);
+    if (entry) {
+      this.hydrateItems(entry);
+      return pageChatItems(entry.items, opts);
+    }
+    return (
+      this.archive?.loadItemsPage(sessionId, opts) ?? {
+        items: [],
+        total: 0,
+        hasMore: false,
+      }
+    );
   }
 
   saveTranscript(
     sessionId: string,
-    items: import("@claude-desktop/shared").ChatItem[],
+    items: ChatItem[],
+    opts?: { replace?: boolean },
   ): void {
-    this.archive?.saveItems(sessionId, items);
+    if (!this.archive) return;
+    if (opts?.replace) this.archive.saveItems(sessionId, items);
+    else this.archive.mergeSaveItems(sessionId, items);
+  }
+
+  private transcriptOf(entry: SessionEntry): TranscriptState {
+    return { items: entry.items, optimisticUserTexts: [] };
+  }
+
+  private hydrateItems(entry: SessionEntry): void {
+    if (entry.itemsHydrated) return;
+    entry.items = this.archive?.loadItems(entry.summary.id) ?? [];
+    entry.itemsHydrated = true;
+  }
+
+  private replaceTranscript(
+    entry: SessionEntry,
+    items: ChatItem[],
+    opts: { persist: boolean; replace?: boolean },
+  ): void {
+    entry.items = items;
+    entry.itemsHydrated = true;
+    if (!opts.persist || !this.archive) return;
+    if (opts.replace) this.archive.saveItems(entry.summary.id, items);
+    else this.archive.mergeSaveItems(entry.summary.id, items);
+  }
+
+  private applyAndMaybePersist(
+    entry: SessionEntry,
+    event: SdkNormalizedEvent,
+  ): void {
+    this.hydrateItems(entry);
+    const next = applySdkEvent(this.transcriptOf(entry), event, {
+      nextId: entry.nextId,
+    });
+    if (event.type === "user_msg_ids") {
+      entry.items = bindSdkUserMsgIds(next.items, event.uuids);
+      return;
+    }
+    this.replaceTranscript(entry, next.items, {
+      persist: shouldPersistTranscript(event),
+      replace: event.type === "items_replaced",
+    });
   }
 
   private persistSummary(entry: SessionEntry): void {
@@ -784,6 +905,28 @@ export class SessionManager {
   abort(sessionId: string): void {
     const entry = this.sessions.get(sessionId);
     if (!entry) return;
+
+    // Mark the turn done immediately so waitForTurnIdle / UI unlock.
+    // Without this, a hung interrupt leaves turnActive=true forever and
+    // every subsequent continue() pushes into a dead stream then waits.
+    entry.turnActive = false;
+    if (entry.summary.status === "running") {
+      entry.summary = {
+        ...entry.summary,
+        status: "idle",
+        updatedAt: Date.now(),
+      };
+      this.emitSession({ ...entry.summary });
+      this.persistSummary(entry);
+    }
+
+    // Tell the renderer the turn ended (clears optimistic running / stop btn).
+    this.emit({
+      type: "result",
+      sessionId,
+      ok: true,
+    });
+
     try {
       void entry.query?.interrupt?.();
     } catch {
@@ -795,7 +938,25 @@ export class SessionManager {
       } catch {
         // ignore
       }
+      entry.abortController = null;
     }
+
+    // Tear down the streaming session so the next continue() opens a fresh
+    // resumed query instead of pushing into a closed/orphaned MessageStream.
+    entry.streamGen += 1;
+    try {
+      entry.input?.end();
+    } catch {
+      // ignore
+    }
+    try {
+      entry.query?.close?.();
+    } catch {
+      // ignore
+    }
+    entry.input = undefined;
+    entry.query = undefined;
+    entry.consumer = undefined;
   }
 
   /** Close streaming input for a session (e.g. window quit). */
@@ -972,11 +1133,24 @@ export class SessionManager {
       abortController: null,
       slashCommands: [],
       turnActive: true,
+      streamGen: 0,
       compressed: false,
+      items: [],
+      itemsHydrated: true,
+      nextId: createIdFactory(),
     };
     this.sessions.set(sessionId, entry);
     this.emitSession({ ...summary });
     this.persistSummary(entry);
+    this.replaceTranscript(
+      entry,
+      appendUserItem(
+        { items: entry.items, optimisticUserTexts: [] },
+        displayPrompt(prompt),
+        { nextId: entry.nextId },
+      ).items,
+      { persist: true },
+    );
 
     await this.openStreamingSession(sessionId, content, { resume: false });
     return sessionId;
@@ -1012,8 +1186,24 @@ export class SessionManager {
     // Live streaming session: just push the next user message.
     // Skipped when a rewind anchor is pending — the conversation must be
     // re-opened truncated at the anchor, so force the resume path below.
-    if (entry.input && !entry.input.isClosed && entry.consumer && !entry.resumeAtAnchor) {
-      entry.input.push(content, entry.sdkSessionId);
+    // Also skip if the stream was torn down by abort() (input closed / cleared).
+    if (
+      entry.input &&
+      !entry.input.isClosed &&
+      entry.consumer &&
+      !entry.resumeAtAnchor
+    ) {
+      try {
+        entry.input.push(content, entry.sdkSessionId);
+      } catch {
+        // Stream closed between the check and push (e.g. concurrent abort) —
+        // fall through to open a fresh resumed query.
+        entry.input = undefined;
+        entry.query = undefined;
+        entry.consumer = undefined;
+        await this.openStreamingSession(sessionId, content, { resume: true });
+        return;
+      }
       // Wait until this turn's result (or error) so IPC still "awaits the turn".
       await this.waitForTurnIdle(sessionId);
       return;
@@ -1218,7 +1408,8 @@ export class SessionManager {
     const entry = this.sessions.get(sessionId);
     if (!entry) return;
 
-    // Tear down any previous stream
+    // Tear down any previous stream and invalidate its consumer via streamGen.
+    entry.streamGen += 1;
     try {
       entry.input?.end();
       entry.query?.close?.();
@@ -1229,6 +1420,7 @@ export class SessionManager {
     const abortController = new AbortController();
     entry.abortController = abortController;
     entry.turnActive = true;
+    const myGen = entry.streamGen;
 
     const input = new MessageStream();
     entry.input = input;
@@ -1293,9 +1485,12 @@ export class SessionManager {
   ): Promise<void> {
     const entry = this.sessions.get(sessionId);
     if (!entry) return;
+    // Capture generation so a later abort/reopen can make us stop mutating state.
+    const myGen = entry.streamGen;
 
     try {
       for await (const msg of stream) {
+        if (entry.streamGen !== myGen) break;
         if (entry.abortController?.signal.aborted) break;
 
         const sdkId = extractSdkSessionId(msg);
@@ -1304,17 +1499,18 @@ export class SessionManager {
         }
 
         // Track SDK-persisted user message uuids (real user turns only) for
-        // message-level rewind. Emitted to the renderer which binds them to
-        // user ChatItems by ordinal.
+        // message-level rewind. Apply + emit so main-process items stay bound.
         if (isSdkPersistedUserTurn(msg)) {
           const uuid = (msg as { uuid?: unknown }).uuid;
           if (typeof uuid === "string" && uuid) {
             entry.sdkUserMsgIds = [...(entry.sdkUserMsgIds ?? []), uuid];
-            this.emit({
+            const idsEvent: SdkNormalizedEvent = {
               type: "user_msg_ids",
               sessionId,
               uuids: [...entry.sdkUserMsgIds],
-            });
+            };
+            this.applyAndMaybePersist(entry, idsEvent);
+            this.emit(idsEvent);
           }
         }
 
@@ -1322,6 +1518,7 @@ export class SessionManager {
 
         const events = normalizeSdkEvent(msg, sessionId);
         for (const event of events) {
+          this.applyAndMaybePersist(entry, event);
           this.emit(event);
           if (event.type === "result") {
             const settings = this.settings.get();
@@ -1371,18 +1568,22 @@ export class SessionManager {
         }
       }
 
-      // Stream ended (input closed or process exit)
-      if (entry.summary.status === "running") {
-        entry.summary = {
-          ...entry.summary,
-          status: "idle",
-          updatedAt: Date.now(),
-        };
-        this.emitSession({ ...entry.summary });
-        this.persistSummary(entry);
+      // Stream ended (input closed or process exit). Only touch state if we still
+      // own this stream generation — abort() may already have opened a new one.
+      if (entry.streamGen === myGen) {
+        if (entry.summary.status === "running") {
+          entry.summary = {
+            ...entry.summary,
+            status: "idle",
+            updatedAt: Date.now(),
+          };
+          this.emitSession({ ...entry.summary });
+          this.persistSummary(entry);
+        }
+        entry.turnActive = false;
       }
-      entry.turnActive = false;
     } catch (err) {
+      if (entry.streamGen !== myGen) return;
       if (entry.abortController?.signal.aborted) {
         entry.turnActive = false;
         entry.summary = {
@@ -1409,7 +1610,8 @@ export class SessionManager {
       entry.turnActive = false;
       this.emitSession({ ...entry.summary });
     } finally {
-      if (entry.abortController) {
+      // Only clear abortController if this consumer still owns the stream.
+      if (entry.streamGen === myGen && entry.abortController) {
         entry.abortController = null;
       }
     }
@@ -1461,24 +1663,34 @@ export class SessionManager {
   private handleToolUseForDiff(sessionId: string, msg: unknown): void {
     if (typeof msg !== "object" || msg === null) return;
     const rec = msg as Record<string, unknown>;
+    const cwd = this.sessions.get(sessionId)?.summary.cwd;
 
-    // tool_result for Bash: refresh disk content for bash-written paths
+    // tool_result: after Bash (or any tool), refresh known Bash paths + scan
+    // the workspace for files scripts created that Edit/Write never saw.
+    // Run off the consumeQuery loop so sync/async IO cannot stall tokens.
     if (rec.type === "user") {
       const message = rec.message as Record<string, unknown> | undefined;
       const content = message && Array.isArray(message.content) ? message.content : [];
-      let refreshed = false;
+      let hasToolResult = false;
       for (const block of content) {
         if (typeof block !== "object" || block === null) continue;
         const b = block as Record<string, unknown>;
         if (b.type !== "tool_result") continue;
-        // After any tool result, try to refresh bash-tracked files from disk
-        // (cheap no-op if none tracked as Bash).
-        refreshed = true;
+        hasToolResult = true;
       }
-      if (refreshed) {
-        this.diffTracker.refreshBashWritesFromDisk(sessionId);
-        const list = this.diffTracker.list(sessionId);
-        if (list.length) this.emitDiffAndPersist(sessionId);
+      if (hasToolResult) {
+        const entry = this.sessions.get(sessionId);
+        const gen = entry?.streamGen;
+        void this.diffTracker
+          .refreshBashWritesFromDisk(sessionId, cwd)
+          .then(() => {
+            const cur = this.sessions.get(sessionId);
+            if (!cur || (gen != null && cur.streamGen !== gen)) return;
+            if (this.diffTracker.list(sessionId).length > 0) {
+              this.emitDiffAndPersist(sessionId);
+            }
+          })
+          .catch(() => undefined);
       }
       return;
     }
@@ -1501,7 +1713,7 @@ export class SessionManager {
         typeof block.input === "object" && block.input !== null
           ? (block.input as Record<string, unknown>)
           : {};
-      this.diffTracker.onToolUse(sessionId, block.name, input);
+      this.diffTracker.onToolUse(sessionId, block.name, input, { cwd });
       this.emitDiffAndPersist(sessionId);
     }
   }

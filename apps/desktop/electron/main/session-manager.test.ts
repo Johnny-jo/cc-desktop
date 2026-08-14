@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import type { AppSettings, FileChange, SdkNormalizedEvent, SessionSummary } from "@claude-desktop/shared";
 import type { QueryFn } from "./session-manager";
@@ -6,6 +9,7 @@ import type { PermissionBroker } from "./permission-broker";
 import type { DiffTracker } from "./diff-tracker";
 import type { CpaSupervisor } from "./cpa-supervisor";
 import type { SettingsStore } from "./settings-store";
+import { SessionArchive } from "./session-archive";
 
 const baseSettings: AppSettings = {
   cpaExePath: "cpa.exe",
@@ -94,6 +98,8 @@ function makeDeps(overrides: {
     has: vi.fn().mockReturnValue(false),
     findByEvent: vi.fn().mockReturnValue(null),
     truncateAt: vi.fn(),
+    refreshBashWritesFromDisk: vi.fn().mockResolvedValue(undefined),
+    captureBashBaseline: vi.fn().mockResolvedValue(undefined),
   } as unknown as DiffTracker;
 
   const ensureReady =
@@ -146,6 +152,7 @@ function makeDeps(overrides: {
     queryFn,
     permissionBroker,
     diffTracker,
+    cpa,
     onToolUse,
     listDiffs,
     ensureReady,
@@ -286,6 +293,7 @@ describe("SessionManager", () => {
       sessionId,
       "Edit",
       expect.objectContaining({ file_path: "src/a.ts" }),
+      expect.objectContaining({ cwd: "D:/p" }),
     );
     expect(ctx.emitDiff).toHaveBeenCalledWith(sessionId, changes);
   });
@@ -787,6 +795,45 @@ describe("SessionManager", () => {
     expect(ctx.diffTracker.remove).toHaveBeenCalledWith(sessionId, "a.ts");
     expect(ctx.diffTracker.remove).toHaveBeenCalledWith(sessionId, "b.ts");
     expect(ctx.emitDiff).toHaveBeenCalled();
+  });
+
+  it("accumulates transcript in memory and persists without renderer save", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sess-main-"));
+    const archive = new SessionArchive(dir);
+    const emitted: SdkNormalizedEvent[] = [];
+    const ctx = makeDeps();
+    // Rebuild manager with archive — copy makeDeps fields.
+    const manager = new SessionManager({
+      queryFn: ctx.queryFn,
+      permissionBroker: ctx.permissionBroker,
+      diffTracker: ctx.diffTracker,
+      cpa: ctx.cpa as never,
+      settings: ctx.settings,
+      archive,
+      emit: (e) => {
+        emitted.push(e);
+        ctx.emit(e);
+      },
+      emitSession: ctx.emitSession,
+      emitDiff: ctx.emitDiff,
+    });
+
+    const sessionId = await manager.start(
+      { text: "hello", attachments: [] },
+      "D:/proj",
+    );
+    const items = manager.getTranscript(sessionId);
+    expect(items.some((i) => i.kind === "text" && i.role === "user" && i.text === "hello")).toBe(true);
+    expect(items.some((i) => i.kind === "text" && i.role === "assistant" && String((i as { text: string }).text).includes("Hi"))).toBe(true);
+    expect(items.some((i) => i.kind === "tool")).toBe(true);
+
+    const disk = archive.loadItems(sessionId);
+    expect(disk.some((i) => i.kind === "text" && i.role === "user")).toBe(true);
+    expect(disk.some((i) => i.kind === "text" && i.role === "assistant")).toBe(true);
+    // streaming flags stripped on disk
+    expect(disk.filter((i) => i.kind === "text").every((i) => i.kind === "text" && !i.streaming)).toBe(true);
+
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 });
 
