@@ -1,6 +1,10 @@
 import { useSyncExternalStore } from "react";
 import {
   IPC,
+  appendUserItem,
+  applySdkEvent,
+  bindSdkUserMsgIds as bindIds,
+  createIdFactory,
   type Attachment,
   type ChatItem,
   type CpaStatus,
@@ -11,7 +15,7 @@ import {
   type SdkNormalizedEvent,
   type SessionSummary,
   type SlashCommandItem,
-  type ToolCardState,
+  type TranscriptState,
   type UserPrompt,
   type UserPromptRequest,
 } from "@claude-desktop/shared";
@@ -33,6 +37,8 @@ export type AppState = {
   /** Messages queued while a turn is running (sent when it finishes) */
   queuedPrompts: Array<{ text: string; displayText: string; attachments: Attachment[] }>;
   lastError: string | null;
+  /** Disk still has older bubbles not yet in itemsBySession. */
+  hasMoreBySession: Record<string, boolean>;
 };
 
 type Listener = () => void;
@@ -51,6 +57,7 @@ let state: AppState = {
   running: false,
   queuedPrompts: [],
   lastError: null,
+  hasMoreBySession: {},
 };
 
 const listeners = new Set<Listener>();
@@ -70,12 +77,7 @@ const optimisticUserTexts = new Map<string, string[]>();
  * ordinal for message-level rewind.
  */
 const sdkUserMsgIds = new Map<string, string[]>();
-let idCounter = 0;
-
-function nextId(prefix: string): string {
-  idCounter += 1;
-  return `${prefix}-${Date.now()}-${idCounter}`;
-}
+const nextId = createIdFactory();
 
 function emit(): void {
   for (const l of listeners) l();
@@ -91,82 +93,36 @@ function getItems(sessionId: string): ChatItem[] {
   return state.itemsBySession[sessionId] ?? [];
 }
 
-const transcriptSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
-
-function saveTranscriptNow(sessionId: string, items?: ChatItem[]): void {
-  try {
-    const desktop = getDesktop();
-    const payload = items ?? state.itemsBySession[sessionId] ?? [];
-    void desktop.saveSessionTranscript?.(sessionId, payload);
-  } catch {
-    // not in electron / API missing
-  }
-}
-
-function scheduleSaveTranscript(sessionId: string, items: ChatItem[]): void {
-  const prev = transcriptSaveTimers.get(sessionId);
-  if (prev) clearTimeout(prev);
-  const t = setTimeout(() => {
-    transcriptSaveTimers.delete(sessionId);
-    saveTranscriptNow(sessionId, items);
-  }, 200);
-  transcriptSaveTimers.set(sessionId, t);
-}
-
 /** Flush all debounced transcript writes (call on quit). */
 export function flushAllTranscripts(): void {
-  for (const [sessionId, timer] of transcriptSaveTimers) {
-    clearTimeout(timer);
-    transcriptSaveTimers.delete(sessionId);
-    saveTranscriptNow(sessionId);
-  }
-  // Also persist every known session once more
-  for (const sessionId of Object.keys(state.itemsBySession)) {
-    saveTranscriptNow(sessionId);
-  }
+  // Transcript persistence moved to SessionManager.
 }
 
 function setItems(sessionId: string, items: ChatItem[]): void {
   setState({
     itemsBySession: { ...state.itemsBySession, [sessionId]: items },
   });
-  scheduleSaveTranscript(sessionId, items);
 }
 
 /** Bind known SDK user message uuids to user ChatItems by ordinal. */
 function bindSdkUserMsgIds(sessionId: string, items: ChatItem[]): ChatItem[] {
-  const uuids = sdkUserMsgIds.get(sessionId) ?? [];
-  if (!uuids.length) return items;
-  let i = 0;
-  let changed = false;
-  const next = items.map((item) => {
-    if (item.kind === "text" && item.role === "user") {
-      const uuid = uuids[i++];
-      if (uuid && item.sdkMsgId !== uuid) {
-        changed = true;
-        return { ...item, sdkMsgId: uuid };
-      }
-    }
-    return item;
-  });
-  return changed ? next : items;
+  return bindIds(items, sdkUserMsgIds.get(sessionId) ?? []);
 }
 
-function pushOptimisticUser(sessionId: string, text: string): void {
-  const q = optimisticUserTexts.get(sessionId) ?? [];
-  q.push(text);
-  optimisticUserTexts.set(sessionId, q);
+function transcriptUi(sessionId: string): TranscriptState {
+  return {
+    items: getItems(sessionId),
+    optimisticUserTexts: optimisticUserTexts.get(sessionId) ?? [],
+  };
 }
 
-function consumeOptimisticUser(sessionId: string, text: string): boolean {
-  const q = optimisticUserTexts.get(sessionId);
-  if (!q?.length) return false;
-  const idx = q.indexOf(text);
-  if (idx < 0) return false;
-  q.splice(idx, 1);
-  if (!q.length) optimisticUserTexts.delete(sessionId);
-  else optimisticUserTexts.set(sessionId, q);
-  return true;
+function writeTranscriptUi(sessionId: string, t: TranscriptState): void {
+  if (t.optimisticUserTexts.length) {
+    optimisticUserTexts.set(sessionId, t.optimisticUserTexts);
+  } else {
+    optimisticUserTexts.delete(sessionId);
+  }
+  setItems(sessionId, t.items);
 }
 
 function upsertSession(summary: SessionSummary): void {
@@ -194,234 +150,54 @@ function appendUserMessage(
   text: string,
   opts?: { optimistic?: boolean },
 ): void {
-  const items = getItems(sessionId);
-  const last = items[items.length - 1];
-  if (last?.kind === "text" && last.role === "user" && last.text === text) {
-    if (opts?.optimistic) pushOptimisticUser(sessionId, text);
-    return;
-  }
-  setItems(sessionId, [
-    ...items,
-    { kind: "text", id: nextId("user"), role: "user", text },
-  ]);
-  if (opts?.optimistic) pushOptimisticUser(sessionId, text);
+  const next = appendUserItem(transcriptUi(sessionId), text, {
+    nextId,
+    optimistic: opts?.optimistic,
+  });
+  writeTranscriptUi(sessionId, next);
 }
 
 function applySessionEvent(event: SdkNormalizedEvent): void {
   const { sessionId } = event;
-  const items = [...getItems(sessionId)];
+  const prev = transcriptUi(sessionId);
+  if (event.type === "user_msg_ids") {
+    sdkUserMsgIds.set(sessionId, event.uuids);
+    const bound = bindIds(getItems(sessionId), event.uuids);
+    if (bound !== getItems(sessionId)) setItems(sessionId, bound);
+    return;
+  }
+  const next = applySdkEvent(prev, event, { nextId });
+  writeTranscriptUi(sessionId, next);
 
-  switch (event.type) {
-    case "user_message": {
-      // Drop SDK echo of a message we already showed optimistically.
-      if (consumeOptimisticUser(sessionId, event.text)) {
-        return;
+  if (event.type === "result") {
+    setState({
+      running: state.sessions.some(
+        (s) => s.id !== sessionId && s.status === "running",
+      ),
+      lastError: event.ok ? state.lastError : (event.error ?? "Turn failed"),
+    });
+    // Auto-compress is scheduled from session:updated (has fresh contextUsage).
+    // Send the next queued message (Claude Code-style type-ahead) once the
+    // turn is fully done — but not when auto-compress is about to run, since
+    // compression replaces the transcript first.
+    if (!state.running && state.queuedPrompts.length > 0) {
+      const summary = state.sessions.find((s) => s.id === sessionId);
+      const ratio = summary?.contextUsage?.ratio ?? 0;
+      if (ratio < AUTO_COMPRESS_RATIO) {
+        setTimeout(flushQueuedPrompt, 0);
       }
-      // Internal post-compact resume prompt — already represented by the system
-      // "Context compacted — continuing…" note; don't dump the full summary again.
-      if (
-        event.text.startsWith(
-          "This session is being continued from a previous conversation",
-        ) ||
-        event.text.startsWith("Earlier conversation summary:")
-      ) {
-        return;
-      }
-      // SDK often re-emits the user prompt after the agent finishes (appears
-      // as a duplicate bubble under the assistant reply). If we already have
-      // this exact user text in the transcript, ignore the echo.
-      if (
-        items.some(
-          (i) =>
-            i.kind === "text" && i.role === "user" && i.text === event.text,
-        )
-      ) {
-        return;
-      }
-      appendUserMessage(sessionId, event.text);
-      return;
     }
-    case "text_delta": {
-      const last = items[items.length - 1];
-      if (last?.kind === "text" && last.role === "assistant" && last.streaming) {
-        items[items.length - 1] = {
-          ...last,
-          text: last.text + event.text,
-        };
-      } else {
-        items.push({
-          kind: "text",
-          id: nextId("asst"),
-          role: "assistant",
-          text: event.text,
-          streaming: true,
-        });
-      }
-      setItems(sessionId, items);
-      return;
-    }
-    case "text_done": {
-      const last = items[items.length - 1];
-      if (last?.kind === "text" && last.role === "assistant" && last.streaming) {
-        // Prefer streamed text if longer; otherwise use done payload.
-        const text =
-          last.text.length >= event.text.length ? last.text : event.text;
-        items[items.length - 1] = {
-          ...last,
-          text,
-          streaming: false,
-        };
-      } else if (
-        last?.kind === "text" &&
-        last.role === "assistant" &&
-        !last.streaming &&
-        last.text === event.text
-      ) {
-        // duplicate full message — ignore
-      } else {
-        items.push({
-          kind: "text",
-          id: nextId("asst"),
-          role: "assistant",
-          text: event.text,
-          streaming: false,
-        });
-      }
-      setItems(sessionId, items);
-      return;
-    }
-    case "tool_start": {
-      const tool = event.tool;
-      const existing = items.findIndex(
-        (i) => i.kind === "tool" && i.tool.id === tool.id,
-      );
-      if (existing >= 0) {
-        const cur = items[existing];
-        if (cur.kind === "tool") {
-          items[existing] = { kind: "tool", id: cur.id, tool: { ...tool } };
-        }
-      } else {
-        items.push({ kind: "tool", id: tool.id || nextId("tool"), tool: { ...tool } });
-      }
-      setItems(sessionId, items);
-      return;
-    }
-    case "tool_end": {
-      const tool = event.tool;
-      const existing = items.findIndex(
-        (i) => i.kind === "tool" && i.tool.id === tool.id,
-      );
-      if (existing >= 0) {
-        const cur = items[existing];
-        if (cur.kind === "tool") {
-          const merged: ToolCardState = {
-            ...cur.tool,
-            ...tool,
-            // keep original name/summary if end event omits them
-            name: tool.name && tool.name !== "tool" ? tool.name : cur.tool.name,
-            summary: tool.summary || cur.tool.summary,
-            // tool_end usually omits todos/isSubagent — preserve from tool_start
-            todos: tool.todos ?? cur.tool.todos,
-            isSubagent: tool.isSubagent ?? cur.tool.isSubagent,
-          };
-          items[existing] = { kind: "tool", id: cur.id, tool: merged };
-        }
-      } else {
-        items.push({
-          kind: "tool",
-          id: tool.id || nextId("tool"),
-          tool: { ...tool },
-        });
-      }
-      setItems(sessionId, items);
-      return;
-    }
-    case "tool_progress": {
-      const existing = items.findIndex(
-        (i) => i.kind === "tool" && i.tool.id === event.toolUseId,
-      );
-      if (existing >= 0) {
-        const cur = items[existing];
-        if (cur.kind === "tool") {
-          items[existing] = {
-            kind: "tool",
-            id: cur.id,
-            tool: {
-              ...cur.tool,
-              status: "running",
-              elapsedSeconds: event.elapsedSeconds,
-              name:
-                event.toolName && event.toolName !== "tool"
-                  ? event.toolName
-                  : cur.tool.name,
-            },
-          };
-          setItems(sessionId, items);
-        }
-      }
-      return;
-    }
-    case "result": {
-      // Finalize any streaming assistant bubble.
-      const last = items[items.length - 1];
-      if (last?.kind === "text" && last.role === "assistant" && last.streaming) {
-        items[items.length - 1] = { ...last, streaming: false };
-      }
-      if (!event.ok && event.error) {
-        items.push({
-          kind: "text",
-          id: nextId("sys"),
-          role: "system",
-          text: event.error,
-        });
-      }
-      // Per-turn usage footer (tokens / duration / cost)
-      if (event.usage) {
-        items.push({
-          kind: "usage",
-          id: nextId("usage"),
-          usage: event.usage,
-        });
-      }
-      setItems(sessionId, items);
-      // Turn finished — flush transcript immediately so quit cannot lose it.
-      saveTranscriptNow(sessionId, items);
-      setState({
-        running: state.sessions.some(
-          (s) => s.id !== sessionId && s.status === "running",
-        ),
-        lastError: event.ok ? state.lastError : (event.error ?? "Turn failed"),
-      });
-      // Auto-compress is scheduled from session:updated (has fresh contextUsage).
-      // Send the next queued message (Claude Code-style type-ahead) once the
-      // turn is fully done — but not when auto-compress is about to run, since
-      // compression replaces the transcript first.
-      if (!state.running && state.queuedPrompts.length > 0) {
-        const summary = state.sessions.find((s) => s.id === sessionId);
-        const ratio = summary?.contextUsage?.ratio ?? 0;
-        if (ratio < AUTO_COMPRESS_RATIO) {
-          setTimeout(flushQueuedPrompt, 0);
-        }
-      }
-      return;
-    }
-    case "items_replaced": {
-      // Main finished compression — replace UI transcript with summary + recent.
-      // A fresh SDK session starts afterwards, so rewind uuid bindings reset.
-      sdkUserMsgIds.delete(sessionId);
-      setItems(sessionId, event.items);
-      saveTranscriptNow(sessionId, event.items);
-      return;
-    }
-    case "user_msg_ids": {
-      sdkUserMsgIds.set(sessionId, event.uuids);
-      const bound = bindSdkUserMsgIds(sessionId, getItems(sessionId));
-      if (bound !== getItems(sessionId)) setItems(sessionId, bound);
-      return;
-    }
-
-    default:
-      return;
+  }
+  if (event.type === "items_replaced") {
+    // Main finished compression — replace UI transcript with summary + recent.
+    // A fresh SDK session starts afterwards, so rewind uuid bindings reset.
+    sdkUserMsgIds.delete(sessionId);
+    setState({
+      hasMoreBySession: {
+        ...state.hasMoreBySession,
+        [sessionId]: false,
+      },
+    });
   }
 }
 
@@ -673,25 +449,30 @@ export function clearLastError(): void {
   setState({ lastError: null });
 }
 
+export function clearActiveSession(): void {
+  setState({ activeSessionId: null });
+}
+
 export function newChat(): void {
   setState({ activeSessionId: null });
 }
+
+const SELECT_PAGE = 40;
 
 export async function selectSession(sessionId: string): Promise<void> {
   setState({ activeSessionId: sessionId });
   const desktop = getDesktop();
   try {
-    const res = (await desktop.selectSession(sessionId)) as {
-      sessionId: string;
-      cwd?: string;
-      items?: ChatItem[];
-      changes: FileChange[];
-    };
+    const res = await desktop.selectSession(sessionId, SELECT_PAGE);
 
-    // Prefer disk transcript if local memory is empty (app restart / other window).
+    // Live tail already in memory (this turn) wins over a disk page.
     const localItems = state.itemsBySession[sessionId] ?? [];
-    const restoredItems =
-      localItems.length > 0 ? localItems : (res.items ?? []);
+    const localHasStream = localItems.some(
+      (i) => i.kind === "text" && i.streaming,
+    );
+    const restoredItems = localHasStream
+      ? localItems
+      : bindSdkUserMsgIds(sessionId, res.items ?? []);
 
     // Switch project path to this session's workspace folder.
     const cwd = res.cwd || state.sessions.find((s) => s.id === sessionId)?.cwd;
@@ -701,11 +482,17 @@ export async function selectSession(sessionId: string): Promise<void> {
       projectPath: cwd || state.projectPath,
       itemsBySession: {
         ...state.itemsBySession,
-        [sessionId]: bindSdkUserMsgIds(sessionId, restoredItems),
+        [sessionId]: restoredItems,
       },
       changesBySession: {
         ...state.changesBySession,
         [sessionId]: res.changes ?? [],
+      },
+      hasMoreBySession: {
+        ...state.hasMoreBySession,
+        [sessionId]: localHasStream
+          ? (state.hasMoreBySession[sessionId] ?? false)
+          : Boolean(res.hasMore),
       },
       lastError: null,
     });
@@ -720,6 +507,50 @@ export async function selectSession(sessionId: string): Promise<void> {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     setState({ lastError: message });
+  }
+}
+
+/** Prepend the next older disk page. Does not rewrite the on-disk transcript. */
+export async function loadOlderMessages(
+  sessionId: string,
+): Promise<{ ok: boolean }> {
+  const items = getItems(sessionId);
+  const beforeId = items[0]?.id;
+  if (!beforeId || !hasDesktopApiSafe("loadOlderMessages")) {
+    return { ok: false };
+  }
+  try {
+    const page = await getDesktop().loadOlderMessages(sessionId, beforeId);
+    if (!page.items.length) {
+      setState({
+        hasMoreBySession: { ...state.hasMoreBySession, [sessionId]: false },
+      });
+      return { ok: true };
+    }
+    const seen = new Set(items.map((i) => i.id));
+    const older = page.items.filter((i) => !seen.has(i.id));
+    setState({
+      itemsBySession: {
+        ...state.itemsBySession,
+        [sessionId]: bindSdkUserMsgIds(sessionId, [...older, ...items]),
+      },
+      hasMoreBySession: {
+        ...state.hasMoreBySession,
+        [sessionId]: Boolean(page.hasMore),
+      },
+    });
+    return { ok: true };
+  } catch {
+    return { ok: false };
+  }
+}
+
+function hasDesktopApiSafe(name: string): boolean {
+  try {
+    const d = getDesktop() as unknown as Record<string, unknown>;
+    return typeof d[name] === "function";
+  } catch {
+    return false;
   }
 }
 
@@ -814,7 +645,18 @@ export function abortActiveSession(): void {
   const id = state.activeSessionId;
   if (!id) return;
   // Stop means stop: drop queued messages too (Claude Code Esc semantics).
-  setState({ queuedPrompts: [] });
+  // Optimistically clear running so the stop button flips back immediately;
+  // main will also emit session:updated + result after tearing down the stream.
+  const sessions = state.sessions.map((s) =>
+    s.id === id && s.status === "running"
+      ? { ...s, status: "idle" as const, updatedAt: Date.now() }
+      : s,
+  );
+  setState({
+    queuedPrompts: [],
+    running: sessions.some((s) => s.status === "running"),
+    sessions,
+  });
   try {
     const desktop = getDesktop();
     void desktop.abortSession(id);
@@ -861,7 +703,6 @@ export async function rewindToMessage(
   if (idx >= 0) {
     const truncated = items.slice(0, idx + 1);
     setItems(sessionId, truncated);
-    saveTranscriptNow(sessionId, truncated);
   }
   const uuids = sdkUserMsgIds.get(sessionId);
   if (uuids) {
@@ -880,8 +721,7 @@ const autoCompressedAt = new Map<string, number>();
 const AUTO_COMPRESS_COOLDOWN_MS = 5 * 60 * 1000;
 
 /**
- * Compress the active session using the live renderer transcript (not disk).
- * Disk archive can lag; main must receive current items to avoid wiping history.
+ * Compress the active session. Main process holds the authoritative transcript.
  * Manual /compact does NOT auto-continue — user sends the next message.
  */
 export async function compressActiveSession(): Promise<{ ok: boolean; message?: string }> {
@@ -891,15 +731,7 @@ export async function compressActiveSession(): Promise<{ ok: boolean; message?: 
     return { ok: false, message: "Wait for the current turn to finish before /compact" };
   }
   const desktop = getDesktop();
-  // Flush any pending debounced save first, then pass live items.
-  const prev = transcriptSaveTimers.get(id);
-  if (prev) {
-    clearTimeout(prev);
-    transcriptSaveTimers.delete(id);
-  }
-  const items = getItems(id);
-  saveTranscriptNow(id, items);
-  const res = await desktop.compressSession(id, items, { autoContinue: false });
+  const res = await desktop.compressSession(id, undefined, { autoContinue: false });
   if (res.ok) autoCompressedAt.set(id, Date.now());
   return res;
 }
@@ -932,13 +764,6 @@ function maybeAutoCompressAfterResult(sessionId: string): void {
         autoCompressedAt.delete(sessionId);
         return;
       }
-      // Drop any pending debounced save so a stale full transcript cannot
-      // overwrite the compressed snapshot after main finishes.
-      const pending = transcriptSaveTimers.get(sessionId);
-      if (pending) {
-        clearTimeout(pending);
-        transcriptSaveTimers.delete(sessionId);
-      }
       const items = getItems(sessionId);
       // Need more than KEEP_RECENT_ITEMS (6) bubbles or compression is a no-op.
       if (items.length <= 6) {
@@ -946,10 +771,8 @@ function maybeAutoCompressAfterResult(sessionId: string): void {
         return;
       }
       const desktop = getDesktop();
-      // Ensure disk has the same snapshot we're about to compress.
-      saveTranscriptNow(sessionId, items);
       setState({ running: true });
-      const res = await desktop.compressSession(sessionId, items, {
+      const res = await desktop.compressSession(sessionId, undefined, {
         autoContinue: true,
       });
       if (!res.ok) {
@@ -1055,11 +878,10 @@ export function __resetStoreForTests(): void {
     running: false,
     queuedPrompts: [],
     lastError: null,
+    hasMoreBySession: {},
   };
   pendingStartPrompt = null;
   autoCompressedAt.clear();
-  for (const timer of transcriptSaveTimers.values()) clearTimeout(timer);
-  transcriptSaveTimers.clear();
   bootstrapped = false;
   for (const u of unsubs) u();
   unsubs.length = 0;

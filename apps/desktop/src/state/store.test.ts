@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   __applySessionEventForTests,
   __resetStoreForTests,
@@ -80,5 +80,37 @@ describe("prompt queue", () => {
     // flushQueuedPrompt runs on a macrotask
     await new Promise((r) => setTimeout(r, 5));
     expect(getState().queuedPrompts).toHaveLength(0);
+  });
+});
+
+describe("transcript persistence", () => {
+  beforeEach(() => {
+    __resetStoreForTests();
+  });
+
+  it("does not call saveSessionTranscript on stream events", () => {
+    const save = vi.fn();
+    const g = globalThis as unknown as { window?: { desktop?: Record<string, unknown> } };
+    g.window = g.window ?? {};
+    g.window.desktop = {
+      ...(g.window.desktop ?? {}),
+      saveSessionTranscript: save,
+      continueSession: async () => ({ sessionId: "s1" }),
+      startSession: async () => ({ sessionId: "s1" }),
+    };
+    runningSession("s1");
+    __applySessionEventForTests({
+      type: "text_delta",
+      sessionId: "s1",
+      text: "Hi",
+    });
+    __applySessionEventForTests({
+      type: "result",
+      sessionId: "s1",
+      ok: true,
+      usage: { outputTokens: 1 },
+    });
+    expect(getState().itemsBySession.s1.some((i) => i.kind === "text")).toBe(true);
+    expect(save).not.toHaveBeenCalled();
   });
 });
