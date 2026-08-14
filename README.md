@@ -39,7 +39,7 @@ CLI 模式进的是**真正的 Claude Code 终端界面**（PTY + xterm），斜
 
 ## 安装
 
-### 从源码跑（开发）
+### 源码启动（开发）
 
 环境：Windows 10/11、Node.js 20+、pnpm 9.15。
 
