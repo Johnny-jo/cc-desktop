@@ -1,21 +1,15 @@
-; Claude Desktop — uninstall cleanup
+; Claude Desktop — uninstall / upgrade cleanup
 ; Included via electron-builder nsis.include.
-; Stops the managed CPA process and removes the app's user data
-; (settings, sessions, snapshots, CPA config). Shared user content
-; (~/.cli-proxy-api) is preserved on purpose.
+;
+; NSIS upgrades always run the previous uninstaller first. ${isUpdated} is
+; not reliably defined in this include, so we NEVER delete AppData here.
+; Upgrade and even a manual uninstall leave:
+;   %APPDATA%\Claude Desktop   (settings, sessions, CPA config.yaml)
+;   %USERPROFILE%\.cli-proxy-api
+;   %USERPROFILE%\.claude
+; Users who want a clean wipe can delete those folders themselves.
 
 !macro customUnInstall
-  ; Stop a running CPA spawned by the app (best effort).
+  ; Stop a running CPA spawned by the app (best effort). Do not delete data.
   nsExec::ExecToLog 'taskkill /F /IM cli-proxy-api.exe'
-
-  ; App userData root (productName "Claude Desktop" under %APPDATA%).
-  RMDir /r "$APPDATA\Claude Desktop"
-
-  ; Fallback paths from earlier packaging attempts.
-  RMDir /r "$APPDATA\claude-desktop"
-  RMDir /r "$APPDATA\@claude-desktop\desktop"
-
-  ; NOTE: we deliberately do NOT touch:
-  ;   - %USERPROFILE%\.cli-proxy-api  (shared CPA credentials, may predate us)
-  ;   - the user's project directories
 !macroend
