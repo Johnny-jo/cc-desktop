@@ -67,14 +67,10 @@ const DEFAULTS: AppSettings = {
   cpaPort: 8317,
   /** True once the first-run wizard finished — old installs get one repair pass */
   setupCompleted: false,
-  defaultModel: "kimi-for-coding",
-  models: [
-    "kimi-for-coding",
-    "k3",
-    "grok-4.5",
-    "deepseek-v4-flash",
-    "deepseek-v4-pro",
-  ],
+  // New installs must not inherit the maintainer's private model list.
+  // CPA /v1/models sync or Settings fills this after first launch.
+  defaultModel: "",
+  models: [],
   permissionMode: "default",
   shutdownCpaOnQuit: false,
   defaultContextLimit: 200_000,
@@ -84,6 +80,9 @@ const DEFAULTS: AppSettings = {
   permissionDeny: [],
   agents: [],
   pluginPaths: [],
+  uiFontSize: 13,
+  editorFontSize: 12.5,
+  updateFeedUrl: "",
 };
 
 type StoredFile = Partial<AppSettings> & {
@@ -183,6 +182,17 @@ export class SettingsStore {
     ) {
       delete publicPatch.theme;
     }
+    if (publicPatch.uiFontSize !== undefined) {
+      const n = Number(publicPatch.uiFontSize);
+      if (!Number.isFinite(n)) delete publicPatch.uiFontSize;
+      else publicPatch.uiFontSize = Math.min(20, Math.max(11, Math.round(n * 2) / 2));
+    }
+    if (publicPatch.editorFontSize !== undefined) {
+      const n = Number(publicPatch.editorFontSize);
+      if (!Number.isFinite(n)) delete publicPatch.editorFontSize;
+      else
+        publicPatch.editorFontSize = Math.min(24, Math.max(10, Math.round(n * 2) / 2));
+    }
     if (publicPatch.permissionMode !== undefined) {
       publicPatch.permissionMode = publicPatch.permissionMode as PermissionMode;
     }
@@ -245,6 +255,12 @@ export class SettingsStore {
           ? rest.theme
           : undefined;
 
+      const clampFont = (v: unknown, min: number, max: number, fallback: number) => {
+        const n = Number(v);
+        if (!Number.isFinite(n)) return fallback;
+        return Math.min(max, Math.max(min, Math.round(n * 2) / 2));
+      };
+
       this.settings = {
         ...DEFAULTS,
         ...rest,
@@ -256,6 +272,13 @@ export class SettingsStore {
         permissionDeny: sanitizePermissionRules(rest.permissionDeny) ?? [],
         agents: sanitizeAgents(rest.agents) ?? [],
         pluginPaths: sanitizePluginPaths(rest.pluginPaths) ?? [],
+        uiFontSize: clampFont(rest.uiFontSize, 11, 20, DEFAULTS.uiFontSize ?? 13),
+        editorFontSize: clampFont(
+          rest.editorFontSize,
+          10,
+          24,
+          DEFAULTS.editorFontSize ?? 12.5,
+        ),
         ...(rest.effort === "low" ||
         rest.effort === "medium" ||
         rest.effort === "high"

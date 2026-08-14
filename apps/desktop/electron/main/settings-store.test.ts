@@ -25,6 +25,17 @@ describe("SettingsStore", () => {
     expect(store.getToken()).toBe("secret-token");
   });
 
+  it("fresh installs do not ship the maintainer's private model list", () => {
+    const store = new SettingsStore({
+      userDataDir: dir,
+      encrypt: (s) => Buffer.from(s, "utf8").toString("base64"),
+      decrypt: (s) => Buffer.from(s, "base64").toString("utf8"),
+    });
+    expect(store.get().models).toEqual([]);
+    expect(store.get().defaultModel).toBe("");
+    expect(store.getPublic().models).toEqual([]);
+  });
+
   it("defaults context limit to 200k and persists overrides", () => {
     const store = new SettingsStore({
       userDataDir: dir,
