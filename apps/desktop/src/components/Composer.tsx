@@ -20,6 +20,7 @@ import {
   syncCpaModels,
   useAppStore,
 } from "../state/store";
+import { useI18n } from "../i18n/useI18n";
 import {
   APP_SLASH_COMMANDS,
   filterSlashCommands,
@@ -127,6 +128,7 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
   const [atMatches, setAtMatches] = useState<string[]>([]);
   const [atTruncated, setAtTruncated] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const { t } = useI18n();
 
   const running = useAppStore((s) => s.running);
   const projectPath = useAppStore((s) => s.projectPath);
@@ -603,9 +605,9 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
           placeholder={
             projectPath
               ? activeSessionId
-                ? "Reply…  (type / for commands, drop files)"
-                : "Message Claude…  (type / for commands, drop files)"
-              : "Open a project first, then type a message…"
+                ? t.chat.composerPlaceholder
+                : t.chat.composerPlaceholderNew
+              : t.chat.composerNoProject
           }
           value={text}
           onChange={(e) => {

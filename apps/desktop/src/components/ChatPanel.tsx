@@ -4,6 +4,7 @@ import { MessageList } from "./MessageList";
 import { Composer } from "./Composer";
 import { ThemedSelect } from "./Select";
 import { setPermissionMode, useAppStore } from "../state/store";
+import { useI18n } from "../i18n/useI18n";
 import {
   contextLevel,
   contextMeterTitle,
@@ -24,8 +25,10 @@ export type ChatPanelProps = {
 };
 
 export function ChatPanel({ onOpenSettings }: ChatPanelProps) {
+  const { t } = useI18n();
   const activeSessionId = useAppStore((s) => s.activeSessionId);
   const itemsBySession = useAppStore((s) => s.itemsBySession);
+  const hasMoreBySession = useAppStore((s) => s.hasMoreBySession);
   const sessions = useAppStore((s) => s.sessions);
   const running = useAppStore((s) => s.running);
   const settings = useAppStore((s) => s.settings);
@@ -93,9 +96,9 @@ export function ChatPanel({ onOpenSettings }: ChatPanelProps) {
               role="status"
             >
               <div className="context-banner-text">
-                上下文已用 <strong>{formatContextPercent(ctx.ratio)}</strong>
-                （{formatTokens(ctx.usedTokens)} /{" "}
-                {formatTokens(ctx.limitTokens)}）。 接近窗口上限，建议新开对话或压缩历史。
+                {t.common.ok === "OK"
+                  ? `Context used ${formatContextPercent(ctx.ratio)} (${formatTokens(ctx.usedTokens)} / ${formatTokens(ctx.limitTokens)}). Near the window limit — start a new chat or compact history.`
+                  : `上下文已用 ${formatContextPercent(ctx.ratio)}（${formatTokens(ctx.usedTokens)} / ${formatTokens(ctx.limitTokens)}）。 接近窗口上限，建议新开对话或压缩历史。`}
               </div>
               <button
                 type="button"
@@ -108,11 +111,18 @@ export function ChatPanel({ onOpenSettings }: ChatPanelProps) {
                   }));
                 }}
               >
-                知道了
+                {t.common.ok}
               </button>
             </div>
           ) : null}
-          <MessageList items={items} />
+          <MessageList
+            items={items}
+            sessionId={activeSessionId}
+            hasMore={
+              Boolean(activeSessionId) &&
+              Boolean(hasMoreBySession[activeSessionId!])
+            }
+          />
         </div>
       </div>
 

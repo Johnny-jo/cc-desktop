@@ -180,6 +180,17 @@ export function App() {
     );
   }, [settings?.uiFontSize]);
 
+  // UI language → data-locale on <html> (CSS / tests / future locale-aware bits)
+  useEffect(() => {
+    const locale =
+      settings?.locale === "zh" || settings?.locale === "en"
+        ? settings.locale
+        : navigator.language?.toLowerCase().startsWith("zh")
+          ? "zh"
+          : "en";
+    document.documentElement.dataset.locale = locale;
+  }, [settings?.locale]);
+
   // Ctrl+Shift+F — project file search palette
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -286,15 +297,12 @@ export function App() {
 
       <div
         className={
-          layout.terminalOpen && !cliMode
+          layout.terminalOpen
             ? "workspace workspace-terminal-open"
             : "workspace"
         }
         style={workspaceStyle}
       >
-        {cliMode ? (
-          <CliModePage />
-        ) : (
         <div className="main-row">
           {layout.sidebarOpen ? (
             <>
@@ -333,6 +341,9 @@ export function App() {
           ) : null}
 
           <main className="panel panel-chat">
+            {cliMode ? (
+              <CliModePage />
+            ) : (
             <div className="chat-editor-row">
               {editorOpen && activeEditor ? (
                 <>
@@ -586,6 +597,7 @@ export function App() {
                 </div>
               )}
             </div>
+            )}
           </main>
 
           {layout.changesOpen ? (
@@ -609,9 +621,8 @@ export function App() {
             </>
           ) : null}
         </div>
-        )}
 
-        {!cliMode && layout.terminalOpen ? (
+        {layout.terminalOpen ? (
           <>
             {settingsOpen ? null : (
               <ResizeHandle
@@ -622,9 +633,9 @@ export function App() {
             )}
             <TerminalPanel open height={layout.terminalHeight} />
           </>
-        ) : !cliMode ? (
+        ) : (
           <TerminalPanel open={false} height={0} />
-        ) : null}
+        )}
       </div>
 
       <PermissionModal />

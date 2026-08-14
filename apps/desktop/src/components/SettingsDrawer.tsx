@@ -5,6 +5,7 @@ import type {
   ModelInfo,
   PublicSettings,
   SessionMcpServerStatus,
+  UpdateStatusDto,
 } from "@claude-desktop/shared";
 import {
   CONTEXT_LIMIT_MAX,
@@ -79,6 +80,14 @@ type FormState = {
   agents: AgentDraft[];
   /** local plugin dirs, one per line */
   pluginPathsText: string;
+  /** global UI font size px */
+  uiFontSize: string;
+  /** code editor font size px */
+  editorFontSize: string;
+  /** generic update feed URL */
+  updateFeedUrl: string;
+  /** UI language: zh / en / follow system */
+  locale: string;
 };
 
 let mcpDraftSeq = 0;
@@ -196,6 +205,10 @@ function fromSettings(s: PublicSettings | null): FormState {
       prompt: a.prompt,
     })),
     pluginPathsText: (s?.pluginPaths ?? []).join("\n"),
+    uiFontSize: String(s?.uiFontSize ?? 13),
+    editorFontSize: String(s?.editorFontSize ?? 12.5),
+    updateFeedUrl: s?.updateFeedUrl ?? "",
+    locale: s?.locale ?? "system",
   };
 }
 
@@ -283,6 +296,9 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
     skills: Array<{ name: string; scope: "user" | "project"; path: string }>;
   } | null>(null);
   const [skillsNote, setSkillsNote] = useState<string | null>(null);
+  const [appVersion, setAppVersion] = useState<string>("");
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatusDto | null>(null);
+  const [updateBusy, setUpdateBusy] = useState(false);
 
   async function refreshSkills() {
     try {
@@ -375,7 +391,16 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   }
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      // Restore live-preview font if user closed without saving
+      if (settings) {
+        document.documentElement.style.setProperty(
+          "--ui-font-size",
+          `${settings.uiFontSize ?? 13}px`,
+        );
+      }
+      return;
+    }
     setForm(fromSettings(settings));
     setLocalError(null);
     setSavedNote(null);
@@ -384,6 +409,18 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
     void refreshCatalog();
     void refreshMcpLive();
     void refreshSkills();
+    if (hasDesktopApi("getAppVersion")) {
+      void getDesktop()
+        .getAppVersion()
+        .then((r) => setAppVersion(r.version))
+        .catch(() => undefined);
+    }
+    if (hasDesktopApi("getUpdateStatus")) {
+      void getDesktop()
+        .getUpdateStatus()
+        .then((s) => setUpdateStatus(s))
+        .catch(() => undefined);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, settings]);
 
@@ -1102,6 +1139,21 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
       .map((p) => p.trim())
       .filter(Boolean);
 
+    const uiFontSize = Number(form.uiFontSize);
+    if (!Number.isFinite(uiFontSize) || uiFontSize < 11 || uiFontSize > 20) {
+      setLocalError("全局字体大小需在 11–20 之间");
+      return;
+    }
+    const editorFontSize = Number(form.editorFontSize);
+    if (
+      !Number.isFinite(editorFontSize) ||
+      editorFontSize < 10 ||
+      editorFontSize > 24
+    ) {
+      setLocalError("编辑器字体大小需在 10–24 之间");
+      return;
+    }
+
     // `effort: null` clears the override (main-side SettingsStore handles it);
     // the field sits outside AppSettings' own type on purpose.
     const patch: Omit<Partial<AppSettings>, "effort"> & {
@@ -1121,6 +1173,11 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
       permissionDeny: denyRules.rules,
       agents: agentsPatch.agents,
       pluginPaths,
+      uiFontSize: Math.round(uiFontSize * 2) / 2,
+      editorFontSize: Math.round(editorFontSize * 2) / 2,
+      updateFeedUrl: form.updateFeedUrl.trim() || undefined,
+      locale:
+        form.locale === "zh" || form.locale === "en" ? form.locale : "system",
       // null clears the override back to model default
       effort:
         form.effort === "low" ||
@@ -1268,6 +1325,219 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
               onChange={(e) => setField("token", e.target.value)}
             />
           </label>
+
+          <div className="settings-font-row">
+            <label className="settings-field">
+              语言 / Language
+              <select
+                className="select"
+                value={form.locale}
+                onChange={(e) => setField("locale", e.target.value)}
+              >
+                <option value="system">跟随系统 / Follow system</option>
+                <option value="zh">中文</option>
+                <option value="en">English</option>
+              </select>
+              <p className="settings-hint">界面语言（保存后生效）</p>
+            </label>
+            <label className="settings-field">
+              全局字体大小
+              <div className="settings-font-control">
+                <input
+                  type="range"
+                  min={11}
+                  max={20}
+                  step={0.5}
+                  value={form.uiFontSize}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setField("uiFontSize", v);
+                    // Live preview: rem root scales the whole UI immediately
+                    document.documentElement.style.setProperty(
+                      "--ui-font-size",
+                      `${v}px`,
+                    );
+                  }}
+                />
+                <span className="settings-font-value">{form.uiFontSize}px</span>
+              </div>
+              <p className="settings-hint">
+                侧边栏、会话、设置等界面文字（拖动即时预览，点保存写入配置）
+              </p>
+            </label>
+            <label className="settings-field">
+              编辑页字体大小
+              <div className="settings-font-control">
+                <input
+                  type="range"
+                  min={10}
+                  max={24}
+                  step={0.5}
+                  value={form.editorFontSize}
+                  onChange={(e) => setField("editorFontSize", e.target.value)}
+                />
+                <span className="settings-font-value">
+                  {form.editorFontSize}px
+                </span>
+              </div>
+              <p className="settings-hint">仅代码编辑器内代码字号（保存后生效）</p>
+            </label>
+          </div>
+
+          <div className="settings-update">
+            <div className="settings-context-limits-title">检查更新</div>
+            <p className="settings-hint">
+              热更新只替换程序文件，不会覆盖 CPA / 设置 / 会话。
+            </p>
+
+            {/* Status card */}
+            <div className="update-card">
+              <div className="update-card-icon" aria-hidden>
+                {updateStatus?.state === "available" ||
+                updateStatus?.state === "downloaded"
+                  ? "⬆"
+                  : updateStatus?.state === "error"
+                    ? "!"
+                    : "✓"}
+              </div>
+              <div className="update-card-body">
+                <div className="update-card-line">
+                  <span className="update-card-label">当前版本</span>
+                  <span className="update-card-value mono">
+                    {appVersion ? `v${appVersion}` : "开发模式"}
+                  </span>
+                </div>
+                <div className="update-card-line">
+                  <span className="update-card-label">状态</span>
+                  <span
+                    className={`update-card-value${
+                      updateStatus?.state === "available"
+                        ? " accent"
+                        : updateStatus?.state === "downloaded"
+                          ? " ok"
+                          : updateStatus?.state === "error"
+                            ? " danger"
+                            : ""
+                    }`}
+                  >
+                    {updateStatus?.state === "available"
+                      ? `发现新版本 v${updateStatus.version}`
+                      : updateStatus?.state === "downloaded"
+                        ? `v${updateStatus.version} 已就绪`
+                        : updateStatus?.state === "downloading"
+                          ? `下载中 ${Math.round(updateStatus.percent)}%`
+                          : updateStatus?.state === "checking"
+                            ? "正在检查…"
+                            : updateStatus?.state === "not-available"
+                              ? `已是最新（v${updateStatus.version}）`
+                              : updateStatus?.state === "error"
+                                ? updateStatus.message
+                                : updateStatus?.state === "disabled"
+                                  ? updateStatus.message
+                                  : "尚未检查"}
+                  </span>
+                </div>
+                {updateStatus?.state === "downloading" ? (
+                  <div className="update-progress">
+                    <div
+                      className="update-progress-fill"
+                      style={{ width: `${Math.round(updateStatus.percent)}%` }}
+                    />
+                  </div>
+                ) : null}
+              </div>
+            </div>
+
+            <label className="settings-field">
+              更新源
+              <input
+                value={form.updateFeedUrl}
+                onChange={(e) => setField("updateFeedUrl", e.target.value)}
+                spellCheck={false}
+                placeholder="https://your-feed.example.com/（留空 = 不检查更新）"
+              />
+            </label>
+            <div className="settings-inline-actions">
+              <button
+                type="button"
+                className="btn btn-sm"
+                disabled={updateBusy}
+                onClick={() => {
+                  void (async () => {
+                    if (!hasDesktopApi("checkForUpdate")) {
+                      setLocalError("请完全重启应用后再检查更新");
+                      return;
+                    }
+                    setLocalError(null);
+                    setSavedNote(null);
+                    setUpdateBusy(true);
+                    try {
+                      const s = await getDesktop().checkForUpdate();
+                      setUpdateStatus(s);
+                      if (s.state === "available") {
+                        setSavedNote(`发现新版本 v${s.version}，可下载`);
+                      } else if (s.state === "not-available") {
+                        setSavedNote(`已是最新（v${s.version}）`);
+                      } else if (s.state === "downloaded") {
+                        setSavedNote(`v${s.version} 已下载，可重启安装`);
+                      } else if (s.state === "disabled") {
+                        setSavedNote(s.message);
+                      } else if (s.state === "error") {
+                        setLocalError(s.message);
+                      }
+                    } catch (err) {
+                      setLocalError(
+                        err instanceof Error ? err.message : String(err),
+                      );
+                    } finally {
+                      setUpdateBusy(false);
+                    }
+                  })();
+                }}
+              >
+                {updateBusy && updateStatus?.state !== "downloading"
+                  ? "检查中…"
+                  : "检查更新"}
+              </button>
+              {updateStatus?.state === "available" ? (
+                <button
+                  type="button"
+                  className="btn btn-sm update-btn-primary"
+                  disabled={updateBusy}
+                  onClick={() => {
+                    void (async () => {
+                      setUpdateBusy(true);
+                      try {
+                        const s = await getDesktop().downloadUpdate();
+                        setUpdateStatus(s);
+                        if (s.state === "downloaded") {
+                          setSavedNote(`v${s.version} 已下载`);
+                        } else if (s.state === "error") {
+                          setLocalError(s.message);
+                        }
+                      } finally {
+                        setUpdateBusy(false);
+                      }
+                    })();
+                  }}
+                >
+                  下载 v{updateStatus.version}
+                </button>
+              ) : null}
+              {updateStatus?.state === "downloaded" ? (
+                <button
+                  type="button"
+                  className="btn btn-sm update-btn-primary"
+                  disabled={updateBusy}
+                  onClick={() => {
+                    void getDesktop().installUpdate();
+                  }}
+                >
+                  重启并安装
+                </button>
+              ) : null}
+            </div>
+          </div>
 
           {/* ===== 高级：CPA 路径与上下文 ===== */}
           {sectionHeader("advanced-cpa", "高级 · CPA 与上下文", "exe / config / 端口 / 窗口")}

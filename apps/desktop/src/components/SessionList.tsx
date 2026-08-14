@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import {
   newChat,
   openProject,
@@ -6,8 +6,13 @@ import {
   startCpa,
   useAppStore,
 } from "../state/store";
+import { selectRoom } from "../state/room-store";
+import { useI18n } from "../i18n/useI18n";
 import { StatusDot } from "./StatusDot";
 import { FileTree } from "./FileTree";
+import { RoomSidebar } from "./RoomSidebar";
+
+const SESSION_PAGE = 30;
 
 function formatTime(ts: number): string {
   try {
@@ -44,10 +49,14 @@ export function SessionList({
   editorOpen,
   onToggleEditor,
 }: SessionListProps) {
+  const { t } = useI18n();
   const sessions = useAppStore((s) => s.sessions);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
   const projectPath = useAppStore((s) => s.projectPath);
   const cpaStatus = useAppStore((s) => s.cpaStatus);
+  const [sessionLimit, setSessionLimit] = useState(SESSION_PAGE);
+  const visibleSessions = sessions.slice(0, sessionLimit);
+  const hiddenSessions = Math.max(0, sessions.length - sessionLimit);
 
   const onBrowse = async () => {
     try {
@@ -77,26 +86,32 @@ export function SessionList({
             fill="currentColor"
           />
         </svg>
-        <span className="brand-mark">Claude</span>
+        <span className="brand-mark">CC</span>
         <span className="brand-sub">Desktop</span>
       </div>
 
       <button
         type="button"
         className="sidebar-new"
-        onClick={() => newChat()}
+        onClick={() => {
+          selectRoom(null);
+          newChat();
+        }}
       >
         <span className="sidebar-new-icon">+</span>
-        New chat
+        {t.sidebar.newChat}
       </button>
 
-      <div className="sidebar-section-label">Recent</div>
+      <RoomSidebar />
+
+      <div className="sidebar-section-label">{t.sidebar.recent}</div>
 
       <ul className="session-list-ul">
         {sessions.length === 0 ? (
-          <li className="session-empty">No sessions yet</li>
+          <li className="session-empty">{t.sidebar.noSessions}</li>
         ) : (
-          sessions.map((s) => {
+          <>
+          {visibleSessions.map((s) => {
             const folder =
               s.cwd?.replace(/\\/g, "/").split("/").filter(Boolean).pop() ??
               "";
@@ -109,7 +124,10 @@ export function SessionList({
                     ? "session-item active"
                     : "session-item"
                 }
-                onClick={() => void selectSession(s.id)}
+                onClick={() => {
+                  selectRoom(null);
+                  void selectSession(s.id);
+                }}
                 title={`${s.title}${s.cwd ? `\n${s.cwd}` : ""}`}
               >
                 <span className="session-title">{s.title}</span>
@@ -126,48 +144,79 @@ export function SessionList({
               </button>
             </li>
             );
-          })
+          })}
+          {hiddenSessions > 0 ? (
+            <li>
+              <button
+                type="button"
+                className="session-more"
+                onClick={() => setSessionLimit((n) => n + SESSION_PAGE)}
+              >
+                {t.sidebar.showMore}（还有 {hiddenSessions}）
+              </button>
+            </li>
+          ) : null}
+          </>
         )}
       </ul>
 
-      <div className="sidebar-footer">
-        {/* Pull-up file tree above the project folder row (VSCode style) */}
-        <div className={`sidebar-files${fileTreeOpen ? " open" : ""}`}>
-          <div className="sidebar-files-head">
+      {/* 文件栏：head 固定贴在文件夹上一格；body 在 head 上方生长，避免切换条跳动 */}
+      <div className={`sidebar-files${fileTreeOpen ? " open" : ""}`}>
+        {fileTreeOpen ? (
+          <div className="sidebar-files-body">
+            <FileTree
+              selected={selectedFile}
+              onSelectFile={onSelectFile}
+              onOpenFile={onOpenFile}
+            />
+          </div>
+        ) : null}
+        <div className="sidebar-files-head">
+          <button
+            type="button"
+            className="sidebar-files-toggle"
+            onClick={onToggleFileTree}
+            aria-expanded={fileTreeOpen}
+            title={fileTreeOpen ? "收起文件结构" : "展开文件结构"}
+          >
+            <span
+              className={`sidebar-files-chevron${fileTreeOpen ? " open" : ""}`}
+              aria-hidden
+            >
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                <path
+                  d="M4 10l4-4 4 4"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </span>
+            <span className="sidebar-files-label">文件</span>
+          </button>
+          {fileTreeOpen && selectedFile && !editorOpen ? (
             <button
               type="button"
-              className="sidebar-files-toggle"
-              onClick={onToggleFileTree}
-              aria-expanded={fileTreeOpen}
-              title={fileTreeOpen ? "收起文件结构" : "展开文件结构"}
+              className="pane-side-btn"
+              title="在编辑栏打开"
+              onClick={onToggleEditor}
             >
-              <span className={`sidebar-files-chevron${fileTreeOpen ? " open" : ""}`}>
-                ▴
-              </span>
-              <span className="sidebar-files-label">文件</span>
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
+                <path
+                  d="M6 3l5 5-5 5"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
             </button>
-            {fileTreeOpen && selectedFile && !editorOpen ? (
-              <button
-                type="button"
-                className="sidebar-files-sidebtn"
-                title="在编辑栏打开"
-                onClick={onToggleEditor}
-              >
-                ⇥
-              </button>
-            ) : null}
-          </div>
-          {fileTreeOpen ? (
-            <div className="sidebar-files-body">
-              <FileTree
-                selected={selectedFile}
-                onSelectFile={onSelectFile}
-                onOpenFile={onOpenFile}
-              />
-            </div>
           ) : null}
         </div>
+      </div>
 
+      <div className="sidebar-footer">
         <button
           type="button"
           className="sidebar-footer-row"
@@ -181,7 +230,11 @@ export function SessionList({
           type="button"
           className="sidebar-footer-row"
           onClick={() => void startCpa()}
-          title="Start / ensure CPA"
+          title={
+            cpaStatus.state === "error"
+              ? `CPA error: ${cpaStatus.message}`
+              : "Start / ensure CPA"
+          }
         >
           <StatusDot status={cpaStatus} compact />
         </button>

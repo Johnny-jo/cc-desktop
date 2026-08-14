@@ -1,0 +1,72 @@
+import type { Messages } from "./en";
+
+export const zh: Messages = {
+  common: {
+    ok: "确定",
+    cancel: "取消",
+    save: "保存",
+    close: "关闭",
+    delete: "删除",
+    confirm: "确认",
+    loading: "加载中…",
+    error: "错误",
+    copy: "复制",
+    copied: "已复制",
+  },
+  settings: {
+    title: "设置",
+    language: "语言",
+    languageSystem: "跟随系统",
+    theme: "主题",
+    themeDark: "深色",
+    themeLight: "浅色",
+    themeSystem: "跟随系统",
+    save: "保存",
+    saving: "保存中…",
+    saved: "已保存",
+    basic: "基础",
+    advanced: "高级",
+  },
+  sidebar: {
+    newChat: "新会话",
+    recent: "最近",
+    noSessions: "还没有会话",
+    openFolder: "打开文件夹",
+    files: "文件",
+    showMore: "显示更多",
+  },
+  chat: {
+    composerPlaceholder: "发消息…  （/ 命令，可拖文件）",
+    composerPlaceholderNew: "开始新会话…  （/ 命令，可拖文件）",
+    composerNoProject: "先打开一个项目再发消息…",
+    stop: "停止",
+    send: "发送",
+    queue: "排队",
+    empty: "选一个会话或新建一个",
+    loadOlder: "加载更早的消息",
+  },
+  changes: {
+    title: "变更",
+    empty: "还没有文件变更",
+    restoreAll: "全部回滚",
+    showMore: "显示更多",
+  },
+  cli: {
+    backToDesktop: "返回桌面",
+    resumed: "Claude Code · 已接上桌面会话",
+    newSession: "Claude Code",
+    startError: "无法启动 Claude Code TUI",
+  },
+  room: {
+    title: "房间",
+    create: "创建房间",
+    join: "加入房间",
+    leave: "退出",
+    invite: "邀请",
+  },
+  onboarding: {
+    title: "欢迎",
+    welcomeLead:
+      "本应用是非官方桌面壳，通过公开 SDK 驱动 Claude Code，并内置本地 CPA 网关。",
+  },
+};

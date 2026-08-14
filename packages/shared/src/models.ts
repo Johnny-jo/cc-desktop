@@ -244,6 +244,24 @@ export type AppSettings = {
   effort?: "low" | "medium" | "high";
   /** UI theme: dark / light / follow system (omit = system). */
   theme?: "dark" | "light" | "system";
+  /** UI language: zh / en / follow system (omit = system). */
+  locale?: "zh" | "en" | "system";
+  /**
+   * Global UI font size in px (chat, sidebar, settings…). Omit = 13.
+   * Applied as root --ui-font-size.
+   */
+  uiFontSize?: number;
+  /**
+   * Code editor (CodeMirror) font size in px. Omit = 12.5.
+   * Independent of uiFontSize so you can keep UI small and code large.
+   */
+  editorFontSize?: number;
+  /**
+   * Optional generic update feed base URL (must end with / or we append one).
+   * Used by electron-updater when set; env CLAUDE_DESKTOP_UPDATE_URL wins.
+   * Example: https://releases.example.com/claude-desktop/
+   */
+  updateFeedUrl?: string;
   /**
    * True once the first-run onboarding finished. Old installs (pre-onboarding)
    * have a token but no flag — main uses this to run a one-time CPA config

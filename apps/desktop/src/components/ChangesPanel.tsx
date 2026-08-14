@@ -1,7 +1,9 @@
 import React, { useEffect, useMemo, useState } from "react";
 import type { FileChangeEvent } from "@claude-desktop/shared";
+import { extractLineRangeSummary } from "@claude-desktop/shared";
 import { getDesktop } from "../lib/desktop-api";
 import { useAppStore } from "../state/store";
+import { useI18n } from "../i18n/useI18n";
 import { DiffView } from "./DiffView";
 
 /** Join possibly-relative change path against the project root. */
@@ -16,12 +18,23 @@ function normPath(p: string): string {
   return p.replace(/\\/g, "/").replace(/^\.\//, "");
 }
 
-/** One row in the panel: a single write operation on a file. */
+function fileName(p: string): string {
+  const n = p.replace(/\\/g, "/").split("/").pop();
+  return n || p;
+}
+
+/** One write operation on a file. */
 type OpRow = {
   eventId: string;
   path: string;
   status: "A" | "M";
   event: FileChangeEvent;
+};
+
+type FileGroup = {
+  path: string;
+  status: "A" | "M";
+  ops: OpRow[];
 };
 
 function formatTime(at: number): string {
@@ -32,7 +45,18 @@ function formatTime(at: number): string {
   return `${hh}:${mm}:${ss}`;
 }
 
+function opLabel(event: FileChangeEvent): string {
+  const range = extractLineRangeSummary(event.hunk);
+  return range
+    ? `${event.tool} · ${range} · ${formatTime(event.at)}`
+    : `${event.tool} · ${formatTime(event.at)}`;
+}
+
+const FILE_PAGE = 20;
+const OP_PAGE = 12;
+
 export function ChangesPanel() {
+  const { t } = useI18n();
   const activeSessionId = useAppStore((s) => s.activeSessionId);
   const changesBySession = useAppStore((s) => s.changesBySession);
   const projectPath = useAppStore((s) => s.projectPath);
@@ -48,6 +72,16 @@ export function ChangesPanel() {
     branch?: string;
     changed?: string[];
   } | null>(null);
+  const [fileLimit, setFileLimit] = useState(FILE_PAGE);
+  const [opLimit, setOpLimit] = useState<Record<string, number>>({});
+  const [openFiles, setOpenFiles] = useState<Set<string>>(() => new Set());
+
+  useEffect(() => {
+    setFileLimit(FILE_PAGE);
+    setOpLimit({});
+    setOpenFiles(new Set());
+    setSelectedEventId(null);
+  }, [activeSessionId]);
 
   // Git overlay: branch + whether each changed file is also dirty in git.
   useEffect(() => {
@@ -56,37 +90,67 @@ export function ChangesPanel() {
       return;
     }
     let cancelled = false;
-    getDesktop()
-      .gitStatus(projectPath)
-      .then((res) => {
-        if (!cancelled) setGit(res);
-      })
-      .catch(() => {
-        if (!cancelled) setGit(null);
-      });
+    const timer = window.setTimeout(() => {
+      getDesktop()
+        .gitStatus(projectPath)
+        .then((res) => {
+          if (!cancelled) setGit(res);
+        })
+        .catch(() => {
+          if (!cancelled) setGit(null);
+        });
+    }, 400);
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
     };
-  }, [projectPath, changes]);
+  }, [projectPath, activeSessionId]);
 
   const gitDirty = useMemo(
     () => new Set((git?.changed ?? []).map(normPath)),
     [git],
   );
 
-  // Flatten per-file changes into per-operation rows, newest first.
-  const rows = useMemo<OpRow[]>(() => {
-    const out: OpRow[] = [];
+  const groups = useMemo<FileGroup[]>(() => {
+    const byPath = new Map<string, FileGroup>();
     for (const c of changes) {
-      for (const e of c.events) {
-        out.push({ eventId: e.id, path: c.path, status: c.status, event: e });
-      }
+      const ops: OpRow[] = c.events
+        .map((e) => ({
+          eventId: e.id,
+          path: c.path,
+          status: c.status,
+          event: e,
+        }))
+        .sort((a, b) => b.event.at - a.event.at);
+      byPath.set(c.path, { path: c.path, status: c.status, ops });
     }
-    return out.sort((a, b) => b.event.at - a.event.at);
+    return [...byPath.values()].sort((a, b) => {
+      const atA = a.ops[0]?.event.at ?? 0;
+      const atB = b.ops[0]?.event.at ?? 0;
+      return atB - atA;
+    });
   }, [changes]);
 
-  const selected = rows.find((r) => r.eventId === selectedEventId) ?? rows[0];
-  const restorable = rows.filter((r) => r.event.canRestore);
+  const visibleGroups = groups.slice(0, fileLimit);
+  const hiddenFiles = Math.max(0, groups.length - fileLimit);
+
+  const allOps = useMemo(
+    () => groups.flatMap((g) => g.ops),
+    [groups],
+  );
+  const selected =
+    allOps.find((r) => r.eventId === selectedEventId) ??
+    visibleGroups[0]?.ops[0];
+  const restorable = allOps.filter((r) => r.event.canRestore);
+
+  const toggleFile = (path: string) => {
+    setOpenFiles((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  };
 
   async function restoreOp(row: OpRow) {
     if (!activeSessionId) return;
@@ -134,7 +198,7 @@ export function ChangesPanel() {
     <div className="changes-panel">
       <div className="panel-title changes-panel-title">
         <span>
-          变更
+          {t.changes.title}
           {git?.isRepo && git.branch ? (
             <span className="changes-git-branch" title="git branch">
               {" "}
@@ -150,68 +214,131 @@ export function ChangesPanel() {
             title="Restore every changed file to its content before this session"
             onClick={() => void restoreAll()}
           >
-            {busy === "*" ? "Restoring…" : "Restore all"}
+            {busy === "*" ? "Restoring…" : t.changes.restoreAll}
           </button>
         ) : null}
       </div>
       {note ? <p className="muted changes-note">{note}</p> : null}
-      {rows.length === 0 ? (
+      {groups.length === 0 ? (
         <p className="muted">No file changes yet.</p>
       ) : (
         <>
           <ul className="changes-list">
-            {rows.map((r) => (
-              <li key={r.eventId} className="change-item-row">
-                <button
-                  type="button"
-                  className={
-                    selected?.eventId === r.eventId
-                      ? "change-item active"
-                      : "change-item"
-                  }
-                  onClick={() => setSelectedEventId(r.eventId)}
-                >
-                  <span className={`change-status status-${r.status}`}>
-                    {r.status}
-                  </span>
-                  <span className="change-path" title={r.path}>
-                    {r.path}
-                  </span>
-                  {gitDirty.has(normPath(r.path)) ? (
-                    <span className="change-git-dot" title="Dirty in git working tree" />
+            {visibleGroups.map((g) => {
+              const open = openFiles.has(g.path);
+              const shown = opLimit[g.path] ?? OP_PAGE;
+              const ops = g.ops.slice(0, shown);
+              const moreOps = Math.max(0, g.ops.length - shown);
+              return (
+                <li key={g.path} className="change-file">
+                  <div className="change-file-row">
+                    <button
+                      type="button"
+                      className={`change-file-toggle${open ? " open" : ""}`}
+                      onClick={() => toggleFile(g.path)}
+                      aria-expanded={open}
+                      title={g.path}
+                    >
+                      <span className="change-file-chevron" aria-hidden>
+                        {open ? "▾" : "▸"}
+                      </span>
+                      <span className={`change-status status-${g.status}`}>
+                        {g.status}
+                      </span>
+                      <span className="change-file-name">
+                        {fileName(g.path)}
+                      </span>
+                      {gitDirty.has(normPath(g.path)) ? (
+                        <span
+                          className="change-git-dot"
+                          title="Dirty in git working tree"
+                        />
+                      ) : null}
+                      <span className="change-file-count">
+                        {g.ops.length} {t.changes.showMore === "Show more" ? "ops" : "次"}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-sm change-open"
+                      title="Open in editor"
+                      onClick={() =>
+                        void getDesktop()
+                          .openInEditor(resolvePath(projectPath, g.path))
+                          .then((res) => {
+                            if (!res.ok) setNote(res.error ?? "Open failed");
+                          })
+                          .catch(() => undefined)
+                      }
+                    >
+                      ↗
+                    </button>
+                  </div>
+                  {open ? (
+                    <ul className="change-ops">
+                      {ops.map((r) => (
+                        <li key={r.eventId} className="change-item-row">
+                          <button
+                            type="button"
+                            className={
+                              selected?.eventId === r.eventId
+                                ? "change-item active"
+                                : "change-item"
+                            }
+                            onClick={() => setSelectedEventId(r.eventId)}
+                            title={opLabel(r.event)}
+                          >
+                            <span className="change-op-meta">
+                              {opLabel(r.event)}
+                            </span>
+                          </button>
+                          {r.event.canRestore ? (
+                            <button
+                              type="button"
+                              className="btn btn-ghost btn-sm change-restore"
+                              disabled={busy !== null}
+                              title="Roll back to before this edit (also undoes later edits of this file)"
+                              onClick={() => void restoreOp(r)}
+                            >
+                              {busy === r.eventId ? "…" : "↩"}
+                            </button>
+                          ) : null}
+                        </li>
+                      ))}
+                      {moreOps > 0 ? (
+                        <li>
+                          <button
+                            type="button"
+                            className="changes-more"
+                            onClick={() =>
+                              setOpLimit((prev) => ({
+                                ...prev,
+                                [g.path]: shown + OP_PAGE,
+                              }))
+                            }
+                          >
+                            {t.changes.showMore} {Math.min(OP_PAGE, moreOps)}{" "}
+                            {t.changes.showMore === "Show more" ? "earlier" : "次（还有"} {moreOps}
+                            {t.changes.showMore === "Show more" ? "" : "）"}
+                          </button>
+                        </li>
+                      ) : null}
+                    </ul>
                   ) : null}
-                  <span className="change-op-meta">
-                    {r.event.tool} · {formatTime(r.event.at)}
-                  </span>
-                </button>
+                </li>
+              );
+            })}
+            {hiddenFiles > 0 ? (
+              <li>
                 <button
                   type="button"
-                  className="btn btn-ghost btn-sm change-open"
-                  title="Open in editor"
-                  onClick={() =>
-                    void getDesktop()
-                      .openInEditor(resolvePath(projectPath, r.path))
-                      .then((res) => {
-                        if (!res.ok) setNote(res.error ?? "Open failed");
-                      })
-                      .catch(() => undefined)
-                  }
+                  className="changes-more"
+                  onClick={() => setFileLimit((n) => n + FILE_PAGE)}
                 >
-                  ↗
+                  {t.changes.showMore}{t.changes.showMore === "Show more" ? " files" : "文件"}（还有 {hiddenFiles}）
                 </button>
-                {r.event.canRestore ? (
-                  <button
-                    type="button"
-                    className="btn btn-ghost btn-sm change-restore"
-                    disabled={busy !== null}
-                    title="Roll back to before this edit (also undoes later edits of this file)"
-                    onClick={() => void restoreOp(r)}
-                  >
-                    {busy === r.eventId ? "…" : "↩"}
-                  </button>
-                ) : null}
               </li>
-            ))}
+            ) : null}
           </ul>
           {selected ? (
             <DiffView
