@@ -8,6 +8,6 @@
     "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck",
     "prepare:vendor": "node scripts/prepare-vendor.mjs",
-    "package:win": "pnpm prepare:vendor && pnpm --filter @claude-desktop/desktop build && pnpm --filter @claude-desktop/desktop dist:win"
+    "package:win": "pnpm prepare:vendor && pnpm --filter @claude-desktop/desktop package:win"
   }
 }

@@ -24,14 +24,15 @@ export function StatusDot({
         ? `CPA error: ${status.message}`
         : `CPA ${status.state}`;
 
+  const label =
+    status.state === "error"
+      ? "CPA error"
+      : `CPA ${status.state}`;
+
   return (
     <span className="status-dot-wrap" title={title}>
       <span className="status-dot" style={{ background: color }} />
-      {compact ? (
-        <span className="status-dot-label">CPA {status.state}</span>
-      ) : (
-        <span className="status-dot-label">CPA {status.state}</span>
-      )}
+      <span className="status-dot-label">{label}</span>
     </span>
   );
 }

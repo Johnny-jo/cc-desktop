@@ -1,0 +1,55 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Prepare vendor binaries
+        run: pnpm prepare:vendor
+        env:
+          # Point at a prepared CPA dist on the runner, or pre-populate vendor/ in the repo/artifact.
+          CLAUDE_DESKTOP_CPA_DIST: ${{ vars.CPA_DIST_DIR }}
+          SKIP_CLAUDE: ${{ vars.SKIP_CLAUDE }}
+          SKIP_CPA: ${{ vars.SKIP_CPA }}
+
+      - name: Build desktop
+        run: pnpm --filter @claude-desktop/desktop build
+
+      - name: Package Windows installer
+        run: pnpm --filter @claude-desktop/desktop dist:win
+
+      - name: Write latest.yml
+        run: pnpm --filter @claude-desktop/desktop latest-yml
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            apps/desktop/release/CC-Desktop-Setup-*-x64.exe
+            apps/desktop/release/latest.yml
+            apps/desktop/release/win-unpacked/**
+          draft: true
+          generate_release_notes: true

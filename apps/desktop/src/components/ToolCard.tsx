@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { memo, useState } from "react";
 import type { ToolCardState, TodoItem } from "@claude-desktop/shared";
 
 function formatElapsed(sec?: number): string {
@@ -22,7 +22,11 @@ function TodoList({ todos }: { todos: TodoItem[] }) {
   );
 }
 
-export function ToolCard({ tool }: { tool: ToolCardState }) {
+export const ToolCard = memo(function ToolCard({
+  tool,
+}: {
+  tool: ToolCardState;
+}) {
   // Collapsed by default — user expands to inspect details.
   const [open, setOpen] = useState(false);
   const isTodo =
@@ -91,4 +95,4 @@ export function ToolCard({ tool }: { tool: ToolCardState }) {
       ) : null}
     </div>
   );
-}
+});

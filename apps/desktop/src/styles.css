@@ -5289,30 +5289,16 @@ body.is-resizing-row * {
 }
 .cli-title { font-weight: 600; }
 .cli-meta { color: var(--text-muted); font-size: 12px; }
-.cli-stream {
+.cli-xterm {
   flex: 1;
-  margin: 0;
-  padding: 12px 14px;
-  overflow: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 13px;
-  line-height: 1.45;
+  min-height: 0;
+  position: relative;
+}
+.cli-xterm .xterm {
+  height: 100%;
+  padding: 4px 8px 0;
 }
 .cli-err { color: var(--danger); padding: 0 14px; font-size: 12px; }
-.cli-input-row {
-  display: flex;
-  border-top: 1px solid var(--border);
-  padding: 8px 12px;
-}
-.cli-input {
-  flex: 1;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 8px 10px;
-}
 
 @media (prefers-reduced-motion: reduce) {
   *,

@@ -12,9 +12,10 @@ export const CHANGELOG: ChangelogEntry[] = [
     date: "2026-08-14",
     title: "CLI 模式 · 会话落盘下沉 @Johnny",
     items: [
+      "应用品牌统一为 CC Desktop（非官方），避免与 Claude 官方混淆。",
       "会话记录改由主进程累积落盘，渲染崩溃或切到 CLI 模式也不会丢对话。",
-      "标题栏可切换 CLI 模式：卸掉聊天/编辑器/变更栏，只留轻量终端页；Ctrl+Shift+L 往返。",
-      "切回桌面模式按分页重载最近消息，编辑 tab 与 git 变更仍在。",
+      "标题栏可切换 CLI 模式：左侧会话栏仍可点选；中间是真正的 Claude Code TUI（claude --resume），不是仿的输入框。",
+      "进 CLI 会放开桌面 SDK 流，避免和 TUI 抢同一条会话；Ctrl+Shift+L 返回桌面后按分页重载。",
     ],
   },
   {

@@ -1,5 +1,5 @@
 /**
- * Copy Claude Code CLI + CPA binaries into vendor/win-x64 for electron-builder
+ * Copy Claude Code CLI + CPA binaries (third-party executables, not shipped in this repo) into vendor/win-x64 for electron-builder
  * extraResources. Run before packaging:
  *   node scripts/prepare-vendor.mjs
  *
@@ -161,7 +161,7 @@ function main() {
       );
       process.exit(1);
     }
-    console.log("Claude CLI:");
+    console.log("Claude CLI (third-party, not part of this repo):");
     copyFile(claudeSrc, path.join(vendorRoot, "claude", "claude.exe"));
   } else {
     console.log("SKIP_CLAUDE=1 — skipping claude.exe");
