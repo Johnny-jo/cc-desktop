@@ -153,6 +153,8 @@ function appendUserMessage(
   text: string,
   opts?: { optimistic?: boolean },
 ): void {
+  // CLI page owns its own `> text` echo; keep itemsBySession empty while frozen.
+  if (state.cliMode) return;
   const next = appendUserItem(transcriptUi(sessionId), text, {
     nextId,
     optimistic: opts?.optimistic,
@@ -246,19 +248,22 @@ function subscribeDesktopEvents(): void {
       // First turn: append the user bubble as soon as the session becomes
       // running (early), not when startSession() resolves after the full turn
       // (that put the question under the assistant reply).
-      if (
-        pendingStartPrompt &&
-        summary.status === "running" &&
-        !getItems(summary.id).some(
-          (i) =>
-            i.kind === "text" &&
-            i.role === "user" &&
-            i.text === pendingStartPrompt,
-        )
-      ) {
-        const text = pendingStartPrompt;
-        pendingStartPrompt = null;
-        appendUserMessage(summary.id, text, { optimistic: true });
+      // CLI mode: clear pending only — do not rewrite the frozen items cache.
+      if (pendingStartPrompt && summary.status === "running") {
+        if (state.cliMode) {
+          pendingStartPrompt = null;
+        } else if (
+          !getItems(summary.id).some(
+            (i) =>
+              i.kind === "text" &&
+              i.role === "user" &&
+              i.text === pendingStartPrompt,
+          )
+        ) {
+          const text = pendingStartPrompt;
+          pendingStartPrompt = null;
+          appendUserMessage(summary.id, text, { optimistic: true });
+        }
       }
 
       // After a turn finishes, main attaches fresh contextUsage here.
@@ -799,11 +804,14 @@ function maybeAutoCompressAfterResult(sessionId: string): void {
         autoCompressedAt.delete(sessionId);
         return;
       }
-      const items = getItems(sessionId);
-      // Need more than KEEP_RECENT_ITEMS (6) bubbles or compression is a no-op.
-      if (items.length <= 6) {
-        autoCompressedAt.delete(sessionId);
-        return;
+      // GUI mode: local length gate (KEEP_RECENT_ITEMS = 6). CLI freezes
+      // itemsBySession empty, so skip the gate and let main decide from entry.items.
+      if (!state.cliMode) {
+        const items = getItems(sessionId);
+        if (items.length <= 6) {
+          autoCompressedAt.delete(sessionId);
+          return;
+        }
       }
       const desktop = getDesktop();
       setState({ running: true });

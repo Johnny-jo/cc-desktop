@@ -120,6 +120,12 @@ describe("transcript persistence", () => {
 describe("cli mode", () => {
   beforeEach(() => {
     __resetStoreForTests();
+    const g = globalThis as unknown as { window?: { desktop?: unknown } };
+    g.window = g.window ?? {};
+    g.window.desktop = {
+      continueSession: async () => ({ sessionId: "s1" }),
+      startSession: async () => ({ sessionId: "s1" }),
+    };
   });
 
   it("enterCliMode drops cached transcripts and sets cliMode", () => {
@@ -135,5 +141,37 @@ describe("cli mode", () => {
     expect(getState().itemsBySession).toEqual({});
     exitCliMode();
     expect(getState().cliMode).toBe(false);
+  });
+
+  it("does not accumulate items from stream events while cliMode is on", () => {
+    runningSession("s1");
+    enterCliMode();
+    expect(getState().itemsBySession).toEqual({});
+    __applySessionEventForTests({
+      type: "text_delta",
+      sessionId: "s1",
+      text: "partial",
+    });
+    __applySessionEventForTests({
+      type: "result",
+      sessionId: "s1",
+      ok: true,
+    });
+    expect(getState().itemsBySession).toEqual({});
+  });
+
+  it("sendMessage does not write items while cliMode is on", () => {
+    // Idle session so sendMessage continues instead of queueing.
+    __upsertSessionForTests({
+      id: "s1",
+      title: "t",
+      cwd: "D:/p",
+      updatedAt: Date.now(),
+      status: "idle",
+    });
+    enterCliMode();
+    expect(getState().itemsBySession).toEqual({});
+    sendMessage("hello from cli");
+    expect(getState().itemsBySession).toEqual({});
   });
 });

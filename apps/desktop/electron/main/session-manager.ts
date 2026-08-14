@@ -235,8 +235,9 @@ function pageChatItems(
     end = idx;
   }
   const start = Math.max(0, end - limit);
+  // Shallow-copy items (same as getTranscript) so callers cannot mutate entry.items.
   return {
-    items: all.slice(start, end),
+    items: all.slice(start, end).map((i) => ({ ...i })),
     total: all.length,
     hasMore: start > 0,
   };
@@ -459,7 +460,10 @@ export class SessionManager {
       nextId: entry.nextId,
     });
     if (event.type === "user_msg_ids") {
-      entry.items = bindSdkUserMsgIds(next.items, event.uuids);
+      const bound = bindSdkUserMsgIds(next.items, event.uuids);
+      if (bound !== next.items) {
+        this.replaceTranscript(entry, bound, { persist: true });
+      }
       return;
     }
     this.replaceTranscript(entry, next.items, {

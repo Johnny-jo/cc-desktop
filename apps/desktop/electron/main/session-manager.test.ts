@@ -1005,6 +1005,64 @@ describe("SessionManager", () => {
     expect(manager.getTranscript(sessionId)[0]).toMatchObject({ id: "sum" });
     fs.rmSync(dir, { recursive: true, force: true });
   });
+
+  it("getTranscriptPage returns shallow-copied items", async () => {
+    const ctx = makeDeps();
+    const sessionId = await ctx.manager.start(
+      { text: "hello", attachments: [] },
+      "D:/p",
+    );
+    const page = ctx.manager.getTranscriptPage(sessionId, { limit: 50 });
+    expect(page.items.length).toBeGreaterThan(0);
+    const original = ctx.manager.getTranscript(sessionId);
+    expect(page.items[0]).not.toBe(original[0]);
+    // Mutating the page must not pollute the authority array.
+    const first = page.items[0];
+    if (first.kind === "text") {
+      (first as { text: string }).text = "mutated-by-caller";
+    }
+    const after = ctx.manager.getTranscript(sessionId);
+    expect(after.some((i) => i.kind === "text" && i.text === "mutated-by-caller")).toBe(
+      false,
+    );
+  });
+
+  it("persists sdkMsgId when user_msg_ids binds user turns", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sess-uuid-"));
+    const archive = new SessionArchive(dir);
+    const queryFn: QueryFn = async function* (args) {
+      await takeFirstUserText(args.prompt);
+      yield {
+        type: "user",
+        uuid: "u-bind-1",
+        session_id: "sdk-1",
+        message: { role: "user", content: "hello" },
+      };
+      yield { type: "result", subtype: "success", total_cost_usd: 0 };
+    };
+    const ctx = makeDeps({ queryFn });
+    const manager = new SessionManager({
+      queryFn,
+      permissionBroker: ctx.permissionBroker,
+      diffTracker: ctx.diffTracker,
+      cpa: ctx.cpa as never,
+      settings: ctx.settings,
+      archive,
+      emit: ctx.emit,
+      emitSession: ctx.emitSession,
+      emitDiff: ctx.emitDiff,
+    });
+    const sessionId = await manager.start(
+      { text: "hello", attachments: [] },
+      "D:/p",
+    );
+    const disk = archive.loadItems(sessionId);
+    const user = disk.find((i) => i.kind === "text" && i.role === "user");
+    expect(user && user.kind === "text" ? user.sdkMsgId : undefined).toBe(
+      "u-bind-1",
+    );
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
 });
 
 async function getSessionId(manager: SessionManager): Promise<string> {
