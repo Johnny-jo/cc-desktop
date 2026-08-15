@@ -1,7 +1,11 @@
 /** Room protocol v1 — transport-agnostic JSON frames. */
 
+import { createHash } from "node:crypto";
+
 export const ROOM_PROTOCOL_VERSION = 1;
 export const ROOM_DEFAULT_PORT = 18765;
+export const MOD_HOST_API = 1;
+export const MOD_BUNDLE_MAX_BYTES = 512 * 1024;
 
 export type RoomRole = "host" | "member";
 export type RoomSeatKind = "human" | "agent";
@@ -26,7 +30,14 @@ export type RoomFrameType =
   | "state.snapshot"
   | "room.closed"
   | "perm.ask"
-  | "perm.decide";
+  | "perm.decide"
+  | "mod.offer"
+  | "mod.fetch"
+  | "mod.bundle"
+  | "mod.intent"
+  | "mod.patch"
+  | "mod.priv"
+  | "mod.fail";
 
 export type RoomFrame<T = unknown> = {
   v: typeof ROOM_PROTOCOL_VERSION;
@@ -34,6 +45,52 @@ export type RoomFrame<T = unknown> = {
   seq: number;
   type: RoomFrameType;
   payload: T;
+};
+
+export type ModOfferPayload = {
+  id: string;
+  name: string;
+  version: string;
+  checksum: string;
+  size: number;
+};
+
+export type ModFetchPayload = {
+  checksum: string;
+};
+
+export type ModBundlePayload = {
+  checksum: string;
+  offset: number;
+  chunk: string;
+};
+
+export type ModIntentPayload = {
+  seatId: string;
+  name: string;
+  payload: unknown;
+};
+
+export type ModPatchPayload = {
+  seq: number;
+  publicView: unknown;
+};
+
+export type ModPrivPayload = {
+  seq: number;
+  seatId: string;
+  seatView: unknown;
+};
+
+export type ModFailPayload = {
+  message: string;
+};
+
+export type ModView = {
+  title: string;
+  phase: string;
+  lines: string[];
+  badges?: { label: string; tone: string }[];
 };
 
 export type RoomMember = {
@@ -129,6 +186,14 @@ export function shortChecksum(parts: string[]): string {
     h = Math.imul(h, 16777619);
   }
   return (h >>> 0).toString(16).padStart(8, "0").slice(0, 8);
+}
+
+/** SHA-256 of UTF-8 manifest.json then host.js (M3). */
+export function hashModFiles(manifestSource: string, hostJsSource: string): string {
+  return createHash("sha256")
+    .update(manifestSource, "utf8")
+    .update(hostJsSource, "utf8")
+    .digest("hex");
 }
 
 // ---------------------------------------------------------------------------
