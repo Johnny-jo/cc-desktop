@@ -38,8 +38,10 @@ function payloadOf(intent) {
     : {};
 }
 
-function seatName(state, seatId) {
-  return state.names[seatId] || seatId;
+function seatLabel(state, seatId) {
+  const name = state.names[seatId];
+  if (name && name !== seatId) return `${name} (${seatId})`;
+  return String(seatId);
 }
 
 function isLiving(state, seatId) {
@@ -52,6 +54,18 @@ function roleOf(state, seatId) {
 
 function livingOf(state, role) {
   return state.living.filter((id) => state.roles[id] === role);
+}
+
+function isAgent(state, seatId) {
+  return state.kinds[seatId] === "agent";
+}
+
+function firstLivingAgent(state) {
+  const living = state.living || [];
+  for (let i = 0; i < living.length; i++) {
+    if (isAgent(state, living[i])) return living[i];
+  }
+  return null;
 }
 
 function pushLine(state, line) {
@@ -69,9 +83,20 @@ function shuffle(ids, rng) {
   return out;
 }
 
+function tokensOf(value) {
+  return String(value || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
 function hintIsJudge(seat) {
-  const hint = `${seat.id} ${seat.name || ""}`;
-  return /judge|法官/i.test(hint);
+  const tokens = tokensOf(seat.id).concat(tokensOf(seat.name));
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (/^judge$/i.test(token) || token === "法官") return true;
+  }
+  return false;
 }
 
 function pickJudgeId(seats) {
@@ -103,7 +128,7 @@ function killSeat(state, seatId, reason) {
   if (!seatId || !isLiving(state, seatId)) return false;
   state.living = state.living.filter((id) => id !== seatId);
   state.dead = state.dead.concat([seatId]);
-  pushLine(state, `${seatName(state, seatId)} ${reason}`);
+  pushLine(state, `${seatLabel(state, seatId)} ${reason}`);
   return true;
 }
 
@@ -153,6 +178,13 @@ function enterNightWolf(state) {
   state.phase = "night_wolf";
   state.votes = {};
   pushLine(state, "Night falls. Wolves choose a victim.");
+}
+
+function enterNightSeer(state) {
+  // Always the same public night step so a dead seer looks like a silent one.
+  state.phase = "night_seer";
+  state.seerDone = false;
+  state.votes = {};
 }
 
 function applyNightAndContinue(state) {
@@ -230,7 +262,7 @@ function onDayTalk(state, actor, payload) {
   const say = typeof payload.say === "string" ? payload.say.trim() : "";
   if (!say) return state;
   const next = clone(state);
-  pushLine(next, `${seatName(next, actor)}: ${say}`);
+  pushLine(next, `${seatLabel(next, actor)}: ${say}`);
   return next;
 }
 
@@ -241,6 +273,11 @@ function onNext(state, actor) {
     next.phase = "day_vote";
     next.votes = {};
     pushLine(next, "Voting begins.");
+    return next;
+  }
+  if (state.phase === "night_seer") {
+    const next = clone(state);
+    applyNightAndContinue(next);
     return next;
   }
   if (state.phase === "resolve") {
@@ -281,14 +318,7 @@ function onNightWolf(state, actor, payload) {
   if (!everyoneVoted(wolves, next.votes)) return next;
   next.pendingKill = majorityTarget(next.votes, next.living);
   next.votes = {};
-  const seers = livingOf(next, "seer");
-  if (seers.length === 0) {
-    applyNightAndContinue(next);
-    return next;
-  }
-  next.phase = "night_seer";
-  next.seerDone = false;
-  pushLine(next, "The seer may inspect someone.");
+  enterNightSeer(next);
   return next;
 }
 
@@ -297,7 +327,7 @@ function onNightSeer(state, actor, payload) {
   if (roleOf(state, actor) !== "seer" || !isLiving(state, actor)) return state;
   if (state.seerDone) return state;
   const target = typeof payload.targetSeatId === "string" ? payload.targetSeatId : "";
-  if (!target || !state.roles[target] || target === actor) return state;
+  if (!isLiving(state, target) || target === actor) return state;
   const next = clone(state);
   next.seerInspect = { targetSeatId: target, role: next.roles[target] };
   next.seerDone = true;
@@ -306,11 +336,11 @@ function onNightSeer(state, actor, payload) {
 }
 
 function livingNames(state) {
-  return state.living.map((id) => seatName(state, id)).join(", ") || "(none)";
+  return state.living.map((id) => seatLabel(state, id)).join(", ") || "(none)";
 }
 
 function deadNames(state) {
-  return state.dead.map((id) => seatName(state, id)).join(", ") || "(none)";
+  return state.dead.map((id) => seatLabel(state, id)).join(", ") || "(none)";
 }
 
 function viewOf(title, phase, lines, badges) {
@@ -348,22 +378,36 @@ function getSeatView(state, seatId) {
       (id) => state.roles[id] === "wolf" && id !== seatId,
     );
     if (fellows.length) {
-      lines.push(`Fellow wolves: ${fellows.join(", ")}`);
+      lines.push(
+        `Fellow wolves: ${fellows.map((id) => seatLabel(state, id)).join(", ")}`,
+      );
     } else {
       lines.push("You are the only wolf.");
     }
   }
-  if (role === "seer" && state.seerInspect) {
-    const seen = state.seerInspect;
-    lines.push(
-      `Last inspect: ${seatName(state, seen.targetSeatId)} is ${seen.role}.`,
-    );
+  if (role === "seer") {
+    if (state.phase === "night_seer" && isLiving(state, seatId) && !state.seerDone) {
+      lines.push("You may inspect someone.");
+    }
+    if (state.seerInspect) {
+      const seen = state.seerInspect;
+      lines.push(
+        `Last inspect: ${seatLabel(state, seen.targetSeatId)} is ${seen.role}.`,
+      );
+    }
+  }
+  if (role === "judge") {
+    lines.push("You are the judge (no hidden night action).");
   }
   return viewOf("狼人杀", state.phase, lines, badges);
 }
 
 function targetEnum(state, excludeId) {
   return state.living.filter((id) => id !== excludeId);
+}
+
+function labelList(state, ids) {
+  return ids.map((id) => seatLabel(state, id)).join(", ");
 }
 
 function actionSchema(properties, required, hint) {
@@ -395,7 +439,7 @@ function getActions(state, seatId) {
       day_vote: actionSchema(
         { targetSeatId: { type: "string", enum: targets } },
         ["targetSeatId"],
-        "Vote to exile someone",
+        `Vote to exile someone: ${labelList(state, targets)}`,
       ),
     };
   }
@@ -409,19 +453,22 @@ function getActions(state, seatId) {
       night_wolf: actionSchema(
         { targetSeatId: { type: "string", enum: targets } },
         ["targetSeatId"],
-        "Choose a victim",
+        `Choose a victim: ${labelList(state, targets)}`,
       ),
     };
   }
-  if (state.phase === "night_seer" && role === "seer" && !state.seerDone) {
-    const targets = targetEnum(state, seatId);
-    return {
-      night_seer: actionSchema(
+  if (state.phase === "night_seer") {
+    const actions = {};
+    if (role === "seer" && !state.seerDone) {
+      const targets = targetEnum(state, seatId);
+      actions.night_seer = actionSchema(
         { targetSeatId: { type: "string", enum: targets } },
         ["targetSeatId"],
-        "Inspect a player",
-      ),
-    };
+        `Inspect a living player: ${labelList(state, targets)}`,
+      );
+    }
+    actions.next = actionSchema({}, [], "End the night (silent / no inspect)");
+    return actions;
   }
   if (state.phase === "resolve") {
     return {
@@ -439,14 +486,20 @@ function getPrompt(state, seatId) {
   }
   if (!isLiving(state, seatId)) return "You are dead. Watch the village.";
   if (state.phase === "day_talk") {
-    return `You are the ${role}. Day talk is open. You may speak, then someone continues to the vote.`;
+    if (seatId === firstLivingAgent(state)) {
+      return `You are the ${role}. Advance the table to the day vote when talk is done.`;
+    }
+    return `You are the ${role}. Day talk is open. You may speak.`;
   }
   if (state.phase === "day_vote") return "Vote for someone to exile.";
   if (state.phase === "night_wolf" && role === "wolf") {
     return "You are a wolf. Choose a living player to kill.";
   }
-  if (state.phase === "night_seer" && role === "seer") {
-    return "You are the seer. Inspect one player.";
+  if (state.phase === "night_seer") {
+    if (role === "seer") return "You are the seer. Inspect one living player, or stay silent.";
+    if (seatId === firstLivingAgent(state)) {
+      return "Night continues. Advance when the silent night is done.";
+    }
   }
   if (state.phase === "resolve") return "Night is resolved. Continue to the next day.";
   return `You are the ${role}. Wait for your turn.`;
@@ -454,14 +507,18 @@ function getPrompt(state, seatId) {
 
 function shouldPromptAgent(state, seatId) {
   if (!state || !state.started || state.phase === "ended") return false;
-  if (!isLiving(state, seatId)) return false;
+  if (!isLiving(state, seatId) || !isAgent(state, seatId)) return false;
   const role = roleOf(state, seatId);
   if (state.phase === "day_vote") return !state.votes[seatId];
   if (state.phase === "night_wolf") {
     return role === "wolf" && !state.votes[seatId];
   }
   if (state.phase === "night_seer") {
-    return role === "seer" && !state.seerDone;
+    if (role === "seer" && !state.seerDone) return true;
+    return seatId === firstLivingAgent(state);
+  }
+  if (state.phase === "day_talk" || state.phase === "resolve") {
+    return seatId === firstLivingAgent(state);
   }
   return false;
 }

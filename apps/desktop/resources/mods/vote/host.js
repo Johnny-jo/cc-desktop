@@ -35,8 +35,18 @@ function payloadOf(intent) {
     : {};
 }
 
-function seatName(state, seatId) {
-  return state.names[seatId] || seatId;
+function seatLabel(state, seatId) {
+  const name = state.names[seatId];
+  if (name && name !== seatId) return `${name} (${seatId})`;
+  return String(seatId);
+}
+
+function firstAgentId(state) {
+  const ids = state.seatIds || [];
+  for (let i = 0; i < ids.length; i++) {
+    if (state.kinds[ids[i]] === "agent") return ids[i];
+  }
+  return null;
 }
 
 function pushLine(state, line) {
@@ -119,7 +129,7 @@ function onPropose(state, actor, payload) {
   next.yes = 0;
   next.no = 0;
   next.phase = "vote";
-  pushLine(next, `${seatName(next, actor)} proposed: ${text}`);
+  pushLine(next, `${seatLabel(next, actor)} proposed: ${text}`);
   return next;
 }
 
@@ -160,17 +170,7 @@ function viewOf(title, phase, lines, badges) {
 }
 
 function publicLines(state) {
-  const lines = (state.lines || []).slice();
-  if (state.proposal) {
-    lines.unshift(`Proposal: ${state.proposal}`);
-  } else if (state.started && state.phase === "propose") {
-    lines.unshift("No proposal yet.");
-  }
-  if (state.phase === "result") {
-    lines.push(`Yes: ${state.yes}`);
-    lines.push(`No: ${state.no}`);
-  }
-  return lines;
+  return (state.lines || []).slice();
 }
 
 function getPublicView(state) {
@@ -251,8 +251,12 @@ function getPrompt(state, seatId) {
 }
 
 function shouldPromptAgent(state, seatId) {
-  if (!state || !state.started || state.phase !== "vote") return false;
-  if (!knownSeat(state, seatId)) return false;
-  if (state.votes[seatId]) return false;
-  return state.kinds[seatId] === "agent";
+  if (!state || !state.started || !knownSeat(state, seatId)) return false;
+  if (state.phase === "vote") {
+    return !state.votes[seatId] && state.kinds[seatId] === "agent";
+  }
+  if (state.phase === "propose" || state.phase === "result") {
+    return seatId === firstAgentId(state);
+  }
+  return false;
 }
