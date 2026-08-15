@@ -2,7 +2,7 @@
 
 **日期：** 2026-08-14（2026-08-15 审查修订）
 **状态：** 审查修订稿，待用户审查
-**范围：** 统一 mod 运行时（行为类 + 界面类）、房间状态同步模型、Agent 参与接口、与现有房间协议的接合。公开市场、细权限白名单、可视化脚手架为后续阶段。
+**范围：** 房间玩法运行时（`host.js` 权威逻辑）、入房前缺包下载、状态同步、Agent 参与接口。v1 **不做** mod 自定义 UI。公开市场、细权限、脚手架为后续阶段。
 
 ---
 
@@ -12,13 +12,13 @@
 
 | 问题 | 原写法 | 修订 |
 |---|---|---|
-| 权威逻辑位置自相矛盾 | 4.2 写「房主侧 Worker」又写「沙盒只在渲染进程」 | 权威逻辑在**主进程 UtilityProcess**；iframe 只负责 UI |
+| 权威逻辑位置自相矛盾 | 4.2 写「房主侧 Worker」又写「沙盒只在渲染进程」 | 权威逻辑在**主进程 UtilityProcess**；v1 无 iframe，人类只用宿主通用壳 |
 | 无视已有握手 | 当从零设计 | 接上现成的 `requireMods` / `modChecksum` / 邀请码字段；注释里的「M3 用真实文件哈希」就是本期 |
-| 「成员零配置」与现握手冲突 | 校验码不一致直接踢人 | 先入房，再由房主推送 bundle，校验在装载时做 |
+| 「成员零配置」与现握手冲突 | 先入房再推包 / 校验码直接踢人且无下载 | **入房前**告知缺包并提示下载；未装上不可加入。服务端仍用校验码拒绝未对齐的 join |
 | 信息隐藏只写了 Agent | 人类仍收全量 `state.snapshot` | 人类与 Agent 都走「公开视图 + 本席位私有视图」 |
-| 「只有 ui.js 也合法」 | 与权威模型打架 | **房间共享玩法必须有 host.js**；无 host 的包只能做本机只读面板，不进同步 |
+| 「只有 ui.js 也合法」 | 与权威模型打架 | **房间共享玩法必须有 host.js**；v1 带 `ui.js` 直接拒绝启用 |
 | Plugin 当「行为段」 | 变相两套 mod 格式 | 分层：房间 Mod 是本规格；官方 Plugin 是包内可选 sidecar，只喂给 Agent 席位 |
-| 结对编程要改变更栏 | 与「不做宿主 UI 定制」矛盾 | v1 mod 只能画在房间预留视口，不能改 Changes / Editor |
+| 结对编程 / 自定义面板 | 原稿含 ui.js + iframe | **v1 不做 mod UI**：无 `ui.js`、无 iframe、不改 Changes / Editor。人类只靠宿主通用壳看视图、点 `getActions` |
 | Agent 每步都灌视图 | 会炸 context | 只在 `shouldPromptAgent` 为真时注入 |
 | 操作日志 replay 未约束随机数 | 现成骰子用 `Math.random()` | host API 提供种子 RNG，host.js 禁止自带随机源 |
 | 崩溃隔离「实现期再定」 | 占位 | 权威进程崩溃 ≠ 房间解散；标记玩法失效，可从快照恢复 |
@@ -54,17 +54,18 @@ Claude Code Plugin（打包 Slash Commands / Subagents / Skills / Hooks / MCP）
 
 ## 2. 设计目标
 
-1. **机制唯一**：只有一种房间 Mod——`manifest.json` + `host.js` + 可选 `ui.js`。加载、权限、同步、打包只有一套。
-2. **写法分层**：声明式不是第二种 mod，而是 SDK 糖。简单包调预制组件，复杂包写 `reduce`，升级不换格式。
+1. **机制唯一**：只有一种房间 Mod——`manifest.json` + `host.js`（v1 无 `ui.js`）。加载、权限、同步、打包只有一套。
+2. **写法分层**：声明式不是第二种 mod，而是 SDK 糖。简单包调状态机糖，复杂包写 `reduce`，升级不换格式。
 3. **房间原生**：同步、席位、Agent 参与是一等公民。
 4. **Agent 是原生玩家**：三接口 + 回合门闩；规则面前人机平等。
-5. **房主可控、成员免安装**：成员入房后由房主推送 bundle，无需事先装市场包。
+5. **缺包不可入房**：加入启用了 mod 的房间前，先告知缺包并提示下载；未装上（或校验和对不上）不能加入。
 6. **接上现有房间，不另起炉灶**：通用 `mod.*` 帧扩展协议 v1；内置骰子/猜拳暂时保留，不阻塞。
 
 ## 3. 非目标（本期不做）
 
-- 公开市场 / 在线浏览与评分（先本地目录 + 房间推送）
-- 宿主 UI 任意定制（主题系统已有；Changes / Editor / SessionList 不对 mod 开放）
+- 公开市场 / 在线浏览与评分（先本地目录 + 入房前按校验和拉包）
+- **mod 自定义 UI**（无 `ui.js`、无 iframe、不改 Changes / Editor / 主题）
+- 宿主 UI 任意定制（主题系统已有）
 - mod 访问任意文件系统 / 任意网络
 - 细粒度版本兼容矩阵（只做 `hostApi` 整数 + semver）
 - 帧同步 / 客户端确定性模拟
@@ -82,7 +83,7 @@ Claude Code Plugin（打包 Slash Commands / Subagents / Skills / Hooks / MCP）
 | 真·混合（两套引擎） | **否决**。生态分裂 |
 | **统一运行时 + 分层 SDK（采纳）** | 机制唯一；糖只是编译到同一 `createGame` 接口 |
 
-### 4.2 进程与沙盒：权威在主进程，UI 在渲染进程
+### 4.2 进程：权威在主进程 UtilityProcess；v1 无自定义 UI
 
 这是审查后最重要的更正。
 
@@ -96,7 +97,8 @@ Claude Code Plugin（打包 Slash Commands / Subagents / Skills / Hooks / MCP）
         │ 公开补丁 + 按席位私有视图
 ┌───────▼─────────────────────────────────────────────┐
 │  各端渲染进程                                        │
-│  RoomStage 预留视口 → iframe（sandbox + CSP）跑 ui.js│
+│  宿主通用壳：阶段/公开视图 + 本席位私有视图          │
+│  + 由 getActions 生成的按钮/表单（无 iframe）        │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -106,15 +108,15 @@ Claude Code Plugin（打包 Slash Commands / Subagents / Skills / Hooks / MCP）
 - 渲染崩溃 / 刷新不应丢当局状态（与 transcript 主进程权威同一理由）。
 - Node Worker 默认能 `require('fs')`，不是沙盒。权威侧用 **Electron UtilityProcess**：只通过 MessagePort 暴露白名单 API，崩溃隔离，房间通信层不受影响。
 
-**UI iframe**
+**v1 人类界面 = 宿主通用壳，不是 mod 画的**
 
-- `sandbox="allow-scripts"`，无 `allow-same-origin`。
-- CSP：禁网络、禁 `eval` 以外的远程脚本（bundle 由宿主注入）。
-- 只与预载脚本提供的 `postMessage` 桥通信。
-- 懒加载：房间视口可见才挂 iframe；后台挂起。
-- 每房间最多 **1 个**活跃玩法 mod（v1）。多个本地只读面板可后续再开。
+- 渲染 `getPublicView`（JSON：阶段、计分、存活名单等）+ 本席位 `getSeatView`。
+- 操作来自 `getActions`：宿主按 JSON Schema 生成按钮/简单表单，提交即 `mod.intent`。
+- **不**加载 `ui.js`，**不**开 iframe，**不**改 Changes / Editor。
+- 每房间最多 **1 个**活跃玩法 mod。
+- 画板级自定义绘制推到「mod UI」后续阶段；v1 不承诺高频本地预测。
 
-性能：真正贵的是同步粒度，不是 iframe。画板类必须本地预测 + ≥100ms 合批 intent。v1 不承诺画板级高频；API 预留合批，但不做第一方画板。
+性能：真正贵的是同步粒度。v1 只有低频率意图（投票、刀人、提交答案），合批 API 不做。
 
 ### 4.3 同步模型：权威房主 + 意图日志 + 双视图
 
@@ -128,7 +130,7 @@ Claude Code Plugin（打包 Slash Commands / Subagents / Skills / Hooks / MCP）
 日常数据流：
 
 ```
-成员 ui.js ── Intent ──> 房主 RoomService
+成员通用壳 ── Intent（getActions 点选）──> 房主 RoomService
                             │ 鉴权（谁、哪个席位、是否轮到）
                             ▼
                          ModHost.reduce(state, intent, ctx)
@@ -139,11 +141,9 @@ Claude Code Plugin（打包 Slash Commands / Subagents / Skills / Hooks / MCP）
               若 shouldPromptAgent(seat)：注入该 Agent 会话
 ```
 
-**日常不同步全量 state，也不默认重放全日志。** 日志在房主落盘，用于崩溃恢复、日后回放、可选 rewind。成员入房/重连只收：当前公开视图 + 自己的私有视图 + `seq`。
+**日常不同步全量 state，也不默认重放全日志。** 日志在房主落盘，用于崩溃恢复、日后回放。成员入房/重连只收：当前公开视图 + 自己的私有视图 + `seq`。
 
 并发：RoomService 对同一房间的 intent **单队列串行**喂给 ModHost。`room-protocol` 已有 `seq`，补丁带 `seq`，旧补丁丢弃。
-
-高频：ui.js 可本地预测；被权威拒绝则以 `mod.patch` 为准回滚。v1 SDK 提供 `client.submitThrottled(ms)`。
 
 ### 4.4 随机数与确定性
 
@@ -222,10 +222,11 @@ reduce 之后
 ```
 my-mod/
 ├── manifest.json
-├── host.js          # 必须（房间共享玩法）
-├── ui.js            # 可选；无 UI 则只用系统时间线提示阶段变化
+├── host.js          # 必须
 └── plugin/          # 可选；官方 Claude Code plugin（Agent sidecar）
 ```
+
+v1 **禁止**带 `ui.js`：有则拒绝启用（避免半成品自定义 UI 混进当局）。
 
 `manifest.json`（字段钉死，避免实现期再猜）：
 
@@ -249,51 +250,63 @@ my-mod/
 - `hostApi` 整数：宿主只跑 `=== 当前支持版本` 的包；不理解则拒绝启用。
 - `permissions` v1 只允许空数组。非空 = 拒绝加载。为以后 `net` / `fs` 留位，避免静默提权。
 - `seats.roles` 是**玩法角色**，不是 `RoomSeat.kind`。开局由 `reduce` 的第一条系统 intent（`mod.start`）分配，写在 state 里，经 `getSeatView` 透露。
-- 校验和：对 `manifest.json` + `host.js` + `ui.js` 做真实文件哈希（实现 `shortChecksum` 注释里的 M3），写入房间 `modChecksum` 与邀请码。
+- 校验和：对 `manifest.json` + `host.js` 做真实文件哈希（实现 `shortChecksum` 注释里的 M3），写入房间 `modChecksum` 与邀请码。可选 `plugin/` 不进房间校验和（它只影响房主侧 Agent 席位）。
 
 **非法组合**
 
 | 包内容 | 待遇 |
 |---|---|
 | 有 host.js | 房间玩法 mod |
-| 只有 ui.js | **不是**房间玩法。v1 拒绝作为房间启用项（避免「看起来同步、其实各玩各的」） |
+| 带 `ui.js` | v1 **拒绝启用** |
 | 只有 plugin/ | 走设置里的普通 plugin 安装，不走房间 Mod |
 
 ## 8. 与现有房间的接合
 
 ### 8.1 协议
 
-`ROOM_PROTOCOL_VERSION` 仍为 **1**（旧客户端不认识的 `type` 会被 `parseRoomFrame` 收下——它只校验 `v` / `roomId` / `type` 存在）。新增 type，不升 `v`，避免旧客户端在 `join` 时被「协议版本不兼容」误伤。旧客户端忽略 `mod.*` 帧；若房间 `requireMods` 且对方无 ModHost，welcome 后由房主踢或降为纯聊天。
+`ROOM_PROTOCOL_VERSION` 仍为 **1**（旧客户端不认识的 `type` 会被 `parseRoomFrame` 收下——它只校验 `v` / `roomId` / `type` 存在）。新增 type，不升 `v`，避免旧客户端在 `join` 时被「协议版本不兼容」误伤。
 
-新增帧：
+已有 `hello` 帧改为**入房前窥探**：连上 WS 先 `hello`，未 `join` 不算进房、不占席位、不进成员列表。
+
+新增 / 明确用途的帧：
 
 | type | 方向 | 作用 |
 |---|---|---|
-| `mod.offer` | 房主 → 成员 | `{ id, version, checksum, size }` |
-| `mod.bundle` | 房主 → 成员 | 分片：`{ checksum, offset, chunk }`（单包上限 512KB，超出拒绝启用） |
-| `mod.ready` | 成员 → 房主 | 校验通过，UI 已挂 |
+| `hello` | 客人 → 房主 | 窥探，不加入 |
+| `mod.offer` | 房主 → 该连接 | `{ id, name, version, checksum, size }`（hello 的回复；无 mod 则 checksum 空） |
+| `mod.fetch` | 客人 → 房主 | `{ checksum }` 请求包（仍未 join） |
+| `mod.bundle` | 房主 → 该连接 | 分片：`{ checksum, offset, chunk }`（单包上限 512KB） |
+| `join` | 客人 → 房主 | 现有；**房间有 mod 时必须带匹配的 `modChecksum`** |
 | `mod.intent` | 成员 → 房主 | `{ seatId, name, payload }` |
 | `mod.patch` | 房主 → 全员 | `{ seq, publicView }` |
 | `mod.priv` | 房主 → 单人 | `{ seq, seatId, seatView }` |
 | `mod.fail` | 房主 → 全员 | 玩法进程崩溃/校验失败，房间仍在 |
 
-不把每个玩法做成新的 `game.xxx` 帧。骰子/猜拳维持原样，直到有人愿意迁。
+不把每个玩法做成新的 `game.xxx` 帧。骰子/猜拳维持原样。
 
-### 8.2 入房与校验（替换现「先比校验再进门」）
+### 8.2 入房：先告知缺包并下载，未装上不可加入
 
-现行：`requireMods && p.modChecksum !== r.modChecksum → 关闭连接`。这与「成员零配置」相反——成员入房前不可能已有包。
+拍板：**缺省包先提示下载；未下载不能加入。** 保留现有服务端校验（房间有 `modChecksum` 时，`join.modChecksum` 对不上 → 拒绝并关连接），补上客户端下载路径，避免「被踢了却不知道要下什么」。
 
-新握手：
+客户端流程：
 
-1. `join` **不再**因校验码拒绝（密码、协议版本仍检）。
-2. `welcome` 带现有 snapshot；若房间启用了 mod，紧跟 `mod.offer`。
-3. 房主按分片发 `mod.bundle`；成员哈希校验后挂 iframe，回 `mod.ready`。
-4. 房主再单播当前 `mod.patch` + 该成员 `mod.priv`。
-5. `requireMods === true`：超时未 `mod.ready` → 踢出或只许看聊天（创建房间时二选一，默认踢出）。
-6. `requireMods === false`：未就绪的人继续聊天/骰子，看不到玩法视口。
-7. 邀请码仍带 `modChecksum`，仅作展示「这个房间有玩法」，不再当入场券。
+1. 粘贴邀请码。邀请码已有 `modChecksum`；解码后若带该字段，加入对话框立刻写「此房间需要模组（校验 `xxxxxxxx`）」。
+2. 先连 WS，发 `hello`（不 `join`）。房主回 `mod.offer`（id / 显示名 / version / checksum / size）。无 mod 则空 offer，直接走普通 join。
+3. 客人在 `userData/mod-cache/<checksum>/` 查本地包。
+   - **已有且哈希一致**：对话框变为「将使用本地模组「狼人杀」v1.0.0」，可点加入。
+   - **没有或哈希不对**：对话框变为「缺少模组「狼人杀」v1.0.0（约 n KB）。未下载无法加入。」主按钮是「下载」，加入按钮禁用。
+4. 点下载 → `mod.fetch` → 收分片 → 本地验哈希 → 写入 cache。失败则报错，仍不可加入。
+5. 下载成功后加入按钮可用。点加入才发 `join`（带 checksum + 密码）。
+6. 关闭对话框或拒绝下载 → 断开 WS，**不曾进房**。
 
-房主本地启用 mod 时立刻计算真实哈希写入 `r.modChecksum`（今天创建房间时该字段是空串）。
+服务端规则（相对今天的收紧，不是放宽）：
+
+- 房间 **启用了 mod**（`r.modChecksum` 非空）⇒ 视为必须持包。`join` 缺校验码或对不上 → 现成错误「模组校验码不一致」，关连接。不再提供「先加进来再旁观」的口子。
+- 房间 **未启用 mod** ⇒ 不检校验码，与现在一致。
+- `requireMods` 字段保留：有 mod 时由宿主强制为 `true`；无 mod 时为 `false`。创建房间 UI 不再单独暴露该开关，避免和「未下载不可加入」打架。
+- 旧客户端不会 `hello` / 不会下载：它们若带着过期或空 checksum `join`，会被现逻辑拒绝——这是期望行为。
+
+房主本地启用 mod 时立刻算真实哈希写入 `r.modChecksum`（今天创建房间时该字段是空串），并写入邀请码。
 
 ### 8.3 数据面
 
@@ -303,7 +316,7 @@ my-mod/
 | 玩法 `state` + `log` | 仅房主 ModHost | `userData/rooms/<id>.mod.json`：快照 + 其后 intent；**不**进 `state.snapshot` |
 | 席位 / 成员 | RoomService | 现有 |
 
-客人重连：走现成 reconnect，再走 8.2 的 offer/bundle/ready（bundle 可按 checksum 缓存到客人 `userData/mod-cache/`）。
+客人重连：本地 cache 命中则直接 `join`（带 checksum）；cache 丢失则必须再走 hello → 提示下载，下载完才能重连进房。
 
 房主进程重启：现逻辑会把 open 房间标成 ended。v1 **不**做「重启后续摊」——与当前房间行为一致。当局 log 仍落盘，供以后做恢复时用。
 
@@ -312,12 +325,12 @@ my-mod/
 - **启用**：仅房主，且当局未 `mod.start` 过（或上一局已 `mod.end`）。热换包 = 先结束当局。
 - **开局**：房主点「开始」→ 系统 intent `mod.start`（携带当时席位列表）。人数不满足 `seats.min/max` 则拒绝。
 - **加人**：当局进行中新人只收当前视图；是否允许中途入局由 host.js 决定（默认新席位不进已开局 state）。
-- **结束**：`mod.end` 或房主停用 → 广播最后 publicView，卸 iframe，清 `modChecksum`。
+- **结束**：`mod.end` 或房主停用 → 广播最后 publicView，卸通用壳上的玩法区，清 `modChecksum`。此后新加入不再索包。
 - **崩溃**：UtilityProcess exit → `mod.fail`，房间 WebSocket 不动。房主可「从快照重启玩法」或停用。
 
 ### 8.5 CLI 模式
 
-权威在主进程，进 CLI 不影响 reduce / Agent 注入。客人进 CLI 只是看不见 iframe；回来再收最新 patch。与轻冻结「不渲染 RoomStage」兼容。
+权威在主进程，进 CLI 不影响 reduce / Agent 注入。客人进 CLI 只是看不见通用玩法壳；回来再收最新 patch。与轻冻结「不渲染 RoomStage」兼容。
 
 ### 8.6 Rewind
 
@@ -349,48 +362,51 @@ export function createGame() {
 
 `ctx`：`{ rng, now, seats, actor }`。`seats` 是 RoomSeat 的只读投影（id / kind / name / occupant / takenOverBy），**不含** `sessionId` 以外的主进程秘密。
 
-ui.js 入口：
+**人类操作**：宿主读 `getActions` 的 JSON Schema，生成按钮或简单字段（enum / string / number / boolean）。点选即 `mod.intent`。v1 不提供 `ui.js` / `mount` / `submitThrottled`。
 
-```javascript
-export function mount(root, client) {
-  client.onView((publicView, seatView) => { /* render */ });
-  client.submit(name, payload);
-  client.submitThrottled(name, payload, ms);
-}
-```
-
-分层糖（同一入口，只是 npm 式辅助模块，打包进 host.js）：
+分层糖（打包进 host.js，不是第二种格式）：
 
 ```javascript
 import { defineMachine } from "cc-mod-sdk";
 export default defineMachine({ phases, onAction });
 ```
 
-v1 不实现可视化生成器；给一份狼人杀/投票两个示例包当模板。
+v1 不实现可视化生成器；给狼人杀、投票两个示例包当模板。
+
+`publicView` / `seatView` 建议形状（宿主通用壳按这些键渲染，缺了就降级为 JSON 折叠）：
+
+```javascript
+{
+  title: string,          // 「夜晚 · 第 2 轮」
+  phase: string,
+  lines: string[],        // 名单、计分、公告
+  badges?: { label, tone }[]
+}
+```
 
 ## 10. 安全与信任（v1 够用即可）
 
-- 信任房主：成员跑房主发来的 ui.js；不防恶意房主。UI 必须展示「本房间玩法：id@version + checksum 前 8 位」。
-- host.js 只在房主机器跑；客人的 UtilityProcess **不**跑 host.js。
-- iframe 无网络、无文件系统、无同源。
+- 信任房主：客人下载并缓存房主发来的 `host.js`（自己机器 v1 **不执行** host.js，只为进房验哈希与日后再开 UI 阶段留档）。不防恶意房主。加入对话框与房间顶栏必须展示「模组：id@version · checksum 前 8 位」。
+- host.js **只在房主** UtilityProcess 里跑。客人即使缓存了包，v1 也不 spawn ModHost。
+- 无 iframe、无客人侧脚本执行，v1 攻击面只剩：恶意 JSON 视图撑爆渲染、恶意超大 bundle。因此 bundle ≤ 512KB，view / intent JSON 建议上限 64KB、深度 8。
 - `permissions` 非空即拒。
-- bundle ≤ 512KB，防止房间通道被当文件传输。
-- intent / view JSON 深度与体积设上限（实现期钉数字，建议 64KB / 深度 8）。
+- 下载发生在 `join` 之前，未进成员列表；滥用 fetch 只耗房主上行，可按连接限速（实现期：同一连接同时只允许一个 fetch）。
 
 ## 11. 后续阶段（本文不展开）
 
 1. 本地「我的包」目录管理 UI、导出 zip。
-2. `permissions` 开放 `net` / 只读项目目录。
-3. 示例包迁入内置骰子/猜拳。
-4. 房主重启后续摊。
-5. 公开工坊。
-6. 玩法时间轴 UI（按 intent 步进）。
+2. **mod 自定义 UI**（`ui.js` + iframe + 房间预留视口）。
+3. `permissions` 开放 `net` / 只读项目目录。
+4. 示例包迁入内置骰子/猜拳。
+5. 房主重启后续摊。
+6. 公开工坊。
+7. 玩法时间轴 UI（按 intent 步进）。
 
 ## 12. 已明确排除
 
 - 帧同步 / 客户端全量重放作为日常同步
 - 防恶意房主
-- mod 改 Changes / Editor / 主题
+- **v1 mod 自定义 UI**（`ui.js` / iframe / 改 Changes / Editor / 主题）
+- 未下载仍可进房旁观
 - 公开市场
 - 多玩法 mod 同时当局
-- 只有 ui.js 的「同步面板」
