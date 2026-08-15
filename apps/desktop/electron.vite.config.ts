@@ -6,8 +6,11 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin({ exclude: ["@claude-desktop/shared"] })],
     build: {
       outDir: "out/main",
-      lib: {
-        entry: resolve("electron/main/index.ts"),
+      rollupOptions: {
+        input: {
+          index: resolve("electron/main/index.ts"),
+          "mod-host-worker": resolve("electron/main/mod-host-worker.ts"),
+        },
       },
     },
   },

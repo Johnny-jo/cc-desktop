@@ -167,6 +167,18 @@ export function getCpaUserConfigPath(env: RuntimePathEnv): string {
   return path.join(env.userDataDir, "cpa", "config.yaml");
 }
 
+export function getModCacheDir(env: RuntimePathEnv): string {
+  return path.join(env.userDataDir, "mod-cache");
+}
+
+export function getModCachePath(env: RuntimePathEnv, checksum: string): string {
+  return path.join(getModCacheDir(env), checksum);
+}
+
+export function getModPersistPath(env: RuntimePathEnv, roomId: string): string {
+  return path.join(env.userDataDir, "rooms", `${roomId}.mod.json`);
+}
+
 function readCpaConfigTemplate(env: RuntimePathEnv): string {
   const template = getCpaConfigTemplatePath(env);
   if (template && fs.existsSync(template)) {

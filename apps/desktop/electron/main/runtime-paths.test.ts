@@ -6,6 +6,9 @@ import {
   applyCpaConfigDefaults,
   getClaudeExecutablePath,
   getCpaUserConfigPath,
+  getModCacheDir,
+  getModCachePath,
+  getModPersistPath,
   materializeCpaConfig,
   repairCpaManagementConfig,
   writeCpaConfigWithApiKey,
@@ -211,6 +214,18 @@ describe("runtime-paths", () => {
     writeCpaConfigWithApiKey(e, { apiKey: "new-key-2" });
     expect(fs.readFileSync(dest, "utf8")).toContain("new-key-2");
     expect(fs.readFileSync(dest, "utf8")).not.toContain("new-key-1");
+  });
+
+  it("places mod cache and persist files under userData", () => {
+    const userDataDir = path.join(tmp(), "ud");
+    const e = env({ userDataDir });
+    expect(getModCacheDir(e)).toBe(path.join(userDataDir, "mod-cache"));
+    expect(getModCachePath(e, "abc123")).toBe(
+      path.join(userDataDir, "mod-cache", "abc123"),
+    );
+    expect(getModPersistPath(e, "room-1")).toBe(
+      path.join(userDataDir, "rooms", "room-1.mod.json"),
+    );
   });
 
   it("packaged claude path under resources/bin/claude", () => {
