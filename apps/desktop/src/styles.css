@@ -4751,6 +4751,16 @@ body.is-resizing-row * {
   border-color: color-mix(in srgb, var(--warn) 40%, transparent);
 }
 
+.room-mod-chip.tone-info {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent, #6ea8fe) 40%, transparent);
+}
+
+.room-mod-chip.tone-danger {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+}
+
 .room-mod-actions {
   display: flex;
   flex-direction: column;

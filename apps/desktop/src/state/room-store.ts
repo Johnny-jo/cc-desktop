@@ -223,13 +223,13 @@ export function bindRoomEvents(): () => void {
     const stillMine =
       state.selectedSeatId &&
       ev.room.seats.some((s) => s.id === state.selectedSeatId);
-    if (
+    if (!ev.room.modChecksum) {
+      modsByRoom.delete(ev.roomId);
+    } else if (
       ev.mod &&
       (ev.mod.offer?.checksum || ev.mod.fail || ev.mod.publicView !== undefined)
     ) {
       modsByRoom.set(ev.roomId, ev.mod);
-    } else if (!ev.room.modChecksum) {
-      modsByRoom.delete(ev.roomId);
     }
     set({
       rooms,

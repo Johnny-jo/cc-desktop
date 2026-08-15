@@ -2383,6 +2383,14 @@ export class RoomService {
     r.modChecksum = snap.modChecksum;
     r.requireMods = snap.requireMods;
     if (r.joinInfo) r.joinInfo.modChecksum = snap.modChecksum;
+    if (!snap.modChecksum) {
+      r.modPublicView = undefined;
+      r.modSeatViews = undefined;
+      r.modActionsBySeat = undefined;
+      r.modFail = undefined;
+      r.modSeq = 0;
+      r.modOffer = undefined;
+    }
   }
 
   private onModFail(r: RoomRecord, message: string): void {

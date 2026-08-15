@@ -5,8 +5,10 @@ import {
   asModView,
   formatModBadge,
   normalizeActions,
+  preferredPlaySeatId,
   type ActionField,
 } from "../lib/room-mod-ui";
+import { useI18n } from "../i18n/useI18n";
 import {
   endRoomMod,
   recoverRoomMod,
@@ -81,11 +83,13 @@ function ActionForm({
   name,
   schema,
   disabled,
+  submitLabel,
   onSubmit,
 }: {
   name: string;
   schema: { params?: unknown; hint?: string };
   disabled: boolean;
+  submitLabel: string;
   onSubmit: (name: string, payload: Record<string, unknown>) => void;
 }) {
   const fields = useMemo(() => actionFields(schema.params), [schema.params]);
@@ -179,7 +183,7 @@ function ActionForm({
         className="btn btn-sm"
         disabled={disabled || missing}
       >
-        {fields.length ? "提交" : name}
+        {fields.length ? submitLabel : name}
       </button>
     </form>
   );
@@ -188,31 +192,32 @@ function ActionForm({
 export function ModPlayPanel({
   role,
   seats,
+  localUserId,
 }: {
   role: RoomRole;
   seats: RoomSeat[];
+  localUserId?: string;
 }) {
+  const { t } = useI18n();
   const mod = useRoomStore((s) => s.mod);
-  const selectedSeatId = useRoomStore((s) => s.selectedSeatId);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [confirmEnd, setConfirmEnd] = useState(false);
 
   if (!mod) return null;
 
   const offer = mod.offer;
-  const badge = formatModBadge(offer);
+  const badge = formatModBadge(offer, t.room.modBadge);
   const publicView = asModView(mod.publicView);
   const phase = publicView?.phase ?? "";
   const started = Boolean(phase) && phase !== "lobby" && phase !== "idle";
   const canHost = role === "host";
   const seatViews = mod.seatViews ?? {};
   const localIds = Object.keys(seatViews);
-  const playSeatId =
-    (selectedSeatId && localIds.includes(selectedSeatId)
-      ? selectedSeatId
-      : localIds[0]) ?? null;
+  const playSeatId = preferredPlaySeatId(seats, seatViews, localUserId);
   const actions = normalizeActions(mod.actions);
   const actionNames = Object.keys(actions);
+  const showEnd = started || Boolean(mod.fail);
 
   const runHost = async (
     fn: () => Promise<{ ok: boolean; error?: string }>,
@@ -249,33 +254,53 @@ export function ModPlayPanel({
                 disabled={busy}
                 onClick={() => void runHost(startRoomMod)}
               >
-                开始
+                {t.room.startPlay}
               </button>
             ) : null}
-            <button
-              type="button"
-              className="btn btn-ghost btn-sm"
-              disabled={busy}
-              onClick={() => void runHost(endRoomMod)}
-            >
-              结束当局
-            </button>
-            <button
-              type="button"
-              className="btn btn-ghost btn-sm"
-              disabled={busy}
-              onClick={() => void runHost(resetRoomMod)}
-            >
-              重置当局
-            </button>
-            <button
-              type="button"
-              className="btn btn-ghost btn-sm"
-              disabled={busy}
-              onClick={() => void runHost(recoverRoomMod)}
-            >
-              从快照恢复
-            </button>
+            {showEnd ? (
+              confirmEnd ? (
+                <span className="room-leave-confirm">
+                  {t.room.endPlayConfirm}
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    disabled={busy}
+                    onClick={() => {
+                      setConfirmEnd(false);
+                      void runHost(endRoomMod);
+                    }}
+                  >
+                    {t.room.endPlayYes}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => setConfirmEnd(false)}
+                  >
+                    {t.common.cancel}
+                  </button>
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  disabled={busy}
+                  onClick={() => setConfirmEnd(true)}
+                >
+                  {t.room.endPlay}
+                </button>
+              )
+            ) : null}
+            {started && !mod.fail ? (
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                disabled={busy}
+                onClick={() => void runHost(resetRoomMod)}
+              >
+                {t.room.resetPlay}
+              </button>
+            ) : null}
           </div>
         ) : null}
       </div>
@@ -291,15 +316,15 @@ export function ModPlayPanel({
                 disabled={busy}
                 onClick={() => void runHost(recoverRoomMod)}
               >
-                从快照恢复
+                {t.room.recoverPlay}
               </button>
               <button
                 type="button"
                 className="btn btn-sm"
                 disabled={busy}
-                onClick={() => void runHost(endRoomMod)}
+                onClick={() => setConfirmEnd(true)}
               >
-                结束当局
+                {t.room.endPlay}
               </button>
             </div>
           ) : null}
@@ -307,7 +332,7 @@ export function ModPlayPanel({
       ) : null}
 
       {mod.publicView !== undefined ? (
-        <ViewBlock heading="公开" value={mod.publicView} />
+        <ViewBlock heading={t.room.publicView} value={mod.publicView} />
       ) : null}
 
       {localIds.map((id) => {
@@ -315,7 +340,11 @@ export function ModPlayPanel({
         return (
           <ViewBlock
             key={id}
-            heading={seat ? `席位 · ${seat.name}` : `席位 · ${id.slice(0, 8)}`}
+            heading={
+              seat
+                ? `${t.room.seatView} · ${seat.name}`
+                : `${t.room.seatView} · ${id.slice(0, 8)}`
+            }
             value={seatViews[id]}
           />
         );
@@ -329,6 +358,7 @@ export function ModPlayPanel({
               name={name}
               schema={actions[name] ?? {}}
               disabled={busy}
+              submitLabel={t.room.submitAction}
               onSubmit={onIntent}
             />
           ))}

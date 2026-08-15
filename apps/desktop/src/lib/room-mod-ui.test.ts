@@ -2,11 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   actionFields,
   asModView,
+  fillTemplate,
   formatModBadge,
   formatModSize,
   joinPrimaryAction,
   normalizeActions,
   offerHasMod,
+  preferredPlaySeatId,
 } from "./room-mod-ui";
 
 describe("joinPrimaryAction", () => {
@@ -52,6 +54,23 @@ describe("joinPrimaryAction", () => {
     expect(
       joinPrimaryAction({
         inviteChecksum: "abc12345deadbeef",
+        cacheHit: true,
+      }),
+    ).toBe("join");
+  });
+
+  it("ignores a stale offer that does not match the current invite", () => {
+    expect(
+      joinPrimaryAction({
+        inviteChecksum: "bbbbbbbb",
+        offer: { checksum: "aaaaaaaa" },
+        cacheHit: false,
+      }),
+    ).toBe("sync-join");
+    expect(
+      joinPrimaryAction({
+        inviteChecksum: "bbbbbbbb",
+        offer: { checksum: "aaaaaaaa" },
         cacheHit: true,
       }),
     ).toBe("join");
@@ -146,5 +165,27 @@ describe("asModView / actions helpers", () => {
   it("detects a real offer checksum", () => {
     expect(offerHasMod({ checksum: "ab" })).toBe(true);
     expect(offerHasMod({ checksum: "" })).toBe(false);
+  });
+
+  it("pins play seat to the taken-over local seat", () => {
+    expect(
+      preferredPlaySeatId(
+        [
+          { id: "human", takenOverBy: null },
+          { id: "agent", takenOverBy: "me" },
+        ],
+        { human: {}, agent: {} },
+        "me",
+      ),
+    ).toBe("agent");
+    expect(
+      preferredPlaySeatId([{ id: "human" }], { human: {} }, "me"),
+    ).toBe("human");
+  });
+
+  it("fills {placeholders}", () => {
+    expect(fillTemplate("a {name} v{version}", { name: "X", version: "1" })).toBe(
+      "a X v1",
+    );
   });
 });

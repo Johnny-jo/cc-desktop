@@ -8,28 +8,48 @@ export type JoinPrimaryInput = {
   cacheHit?: boolean;
 };
 
+export function fillTemplate(
+  template: string,
+  vars: Record<string, string>,
+): string {
+  return template.replace(/\{(\w+)\}/g, (_, key: string) => vars[key] ?? "");
+}
+
 export function joinPrimaryAction(input: JoinPrimaryInput): JoinPrimaryAction {
+  const invite = input.inviteChecksum?.trim() ?? "";
   const offerChecksum = input.offer?.checksum?.trim() ?? "";
-  if (offerChecksum) {
+  const offerMatchesInvite = !invite || !offerChecksum || invite === offerChecksum;
+  if (offerMatchesInvite && offerChecksum) {
     return input.cacheHit === true ? "join" : "sync-join";
   }
-  if (!input.offer && input.inviteChecksum && input.cacheHit === false) {
-    return "sync-join";
-  }
+  if (invite && input.cacheHit === false) return "sync-join";
   return "join";
 }
 
 export function formatModBadge(
   offer?: Pick<ModOfferPayload, "id" | "version" | "checksum"> | null,
+  template = "模组：{id}@{version} · {checksum}",
 ): string {
   if (!offer) return "";
   const id = offer.id?.trim() || "?";
   const version = offer.version?.trim() || "?";
   const short = (offer.checksum ?? "").trim().slice(0, 8);
   if (id === "?" && version === "?" && !short) return "";
-  return short
-    ? `模组：${id}@${version} · ${short}`
-    : `模组：${id}@${version}`;
+  return fillTemplate(template, { id, version, checksum: short });
+}
+
+export function preferredPlaySeatId(
+  seats: { id: string; takenOverBy?: string | null }[],
+  seatViews: Record<string, unknown>,
+  localUserId?: string | null,
+): string | null {
+  if (localUserId) {
+    const taken = seats.find(
+      (s) => s.takenOverBy === localUserId && seatViews[s.id] !== undefined,
+    );
+    if (taken) return taken.id;
+  }
+  return Object.keys(seatViews)[0] ?? null;
 }
 
 export function formatModSize(bytes?: number): string {

@@ -12,7 +12,8 @@ import {
   useRoomStore,
 } from "../state/room-store";
 import { getDesktop, hasDesktopApi } from "../lib/desktop-api";
-import { formatModBadge, offerHasMod } from "../lib/room-mod-ui";
+import { formatModBadge } from "../lib/room-mod-ui";
+import { useI18n } from "../i18n/useI18n";
 import { ModPlayPanel } from "./ModPlayPanel";
 
 function SeatAvatar({ kind }: { kind: "human" | "agent" }) {
@@ -35,6 +36,7 @@ function SeatAvatar({ kind }: { kind: "human" | "agent" }) {
 }
 
 export function RoomStage() {
+  const { t } = useI18n();
   const room = useRoomStore((s) => s.activeRoom);
   const selectedSeatId = useRoomStore((s) => s.selectedSeatId);
   const rooms = useRoomStore((s) => s.rooms);
@@ -77,17 +79,14 @@ export function RoomStage() {
   const myRole = rooms.find((r) => r.roomId === room.roomId)?.role ?? "member";
   const canHost = myRole === "host";
   const myUserId = room.localUserId;
-  const modActive = Boolean(
-    room.modChecksum ||
-      offerHasMod(mod?.offer) ||
-      mod?.publicView !== undefined ||
-      mod?.fail,
-  );
+  const modActive = Boolean(room.modChecksum);
   const stageBadge = formatModBadge(
-    mod?.offer ??
-      (room.modChecksum
+    mod?.offer?.checksum === room.modChecksum
+      ? mod.offer
+      : room.modChecksum
         ? { id: "", version: "", checksum: room.modChecksum }
-        : null),
+        : null,
+    t.room.modBadge,
   );
 
   const onSend = async () => {
@@ -200,7 +199,13 @@ export function RoomStage() {
 
       {reconnectNote ? <div className="room-reconnect-banner">{reconnectNote}</div> : null}
 
-      {modActive ? <ModPlayPanel role={myRole} seats={room.seats} /> : null}
+      {modActive ? (
+        <ModPlayPanel
+          role={myRole}
+          seats={room.seats}
+          localUserId={myUserId}
+        />
+      ) : null}
 
       {inviteOpen ? (
         <div className="room-invite-bar">

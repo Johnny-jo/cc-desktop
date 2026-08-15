@@ -7,11 +7,13 @@ import {
   type ModOfferPayload,
 } from "@claude-desktop/shared";
 import {
+  fillTemplate,
   formatModBadge,
   formatModSize,
   joinPrimaryAction,
   offerHasMod,
 } from "../lib/room-mod-ui";
+import { useI18n } from "../i18n/useI18n";
 import {
   closeRoomDialog,
   createRoom,
@@ -29,6 +31,7 @@ import {
 } from "../state/room-store";
 
 export function RoomSidebar() {
+  const { t } = useI18n();
   const rooms = useRoomStore((s) => s.rooms);
   const activeRoomId = useRoomStore((s) => s.activeRoomId);
   const lastError = useRoomStore((s) => s.lastError);
@@ -94,6 +97,9 @@ export function RoomSidebar() {
 
   useEffect(() => {
     if (dialog !== "join") return;
+    const gen = ++peekGen.current;
+    setOffer(null);
+    setCacheHit(undefined);
     let h = host.trim();
     let p = Number(joinPort) || ROOM_DEFAULT_PORT;
     let extras = inviteHosts;
@@ -105,6 +111,7 @@ export function RoomSidebar() {
         p = inv.port;
         extras = inv.hosts ?? [];
       } catch {
+        setPeeking(false);
         return;
       }
     } else if (h.includes(":") && !h.includes("::")) {
@@ -115,13 +122,10 @@ export function RoomSidebar() {
       }
     }
     if (!h) {
-      setOffer(null);
-      setCacheHit(undefined);
       setPeeking(false);
       return;
     }
     const candidates = [h, ...extras.filter((x) => x && x !== h)];
-    const gen = ++peekGen.current;
     setPeeking(true);
     const timer = window.setTimeout(() => {
       void (async () => {
@@ -193,7 +197,8 @@ export function RoomSidebar() {
       if (gen !== joinGen.current) return;
       if (!enabled.ok) {
         setBusy(false);
-        setErr(enabled.error ?? "启用模组失败");
+        resetForms();
+        closeRoomDialog();
         return;
       }
     }
@@ -212,7 +217,7 @@ export function RoomSidebar() {
     let h = host.trim();
     let p = Number(joinPort) || ROOM_DEFAULT_PORT;
     let pwd = joinPassword || undefined;
-    let checksum = offer?.checksum || inviteChecksum || undefined;
+    let checksum: string | undefined;
     let hosts = inviteHosts;
 
     const secretRaw = secret.trim() || host.trim();
@@ -222,7 +227,7 @@ export function RoomSidebar() {
         h = inv.host;
         p = inv.port;
         pwd = inv.password || pwd;
-        checksum = inv.modChecksum || checksum;
+        checksum = inv.modChecksum || undefined;
         hosts = inv.hosts ?? [];
         setHost(inv.host);
         setJoinPort(String(inv.port));
@@ -240,6 +245,7 @@ export function RoomSidebar() {
     }
 
     if (!h) return { error: "请粘贴邀请码，或填写房主 IP" };
+    if (!checksum) checksum = offer?.checksum || undefined;
     const candidates = [h, ...hosts.filter((x) => x && x !== h)];
     return { host: h, port: p, password: pwd, checksum, candidates };
   };
@@ -263,7 +269,7 @@ export function RoomSidebar() {
       cacheHit,
     });
     const needSync = primary === "sync-join";
-    const checksum = target.checksum || offer?.checksum;
+    const checksum = target.checksum;
 
     let lastError = "";
     for (const candidate of target.candidates) {
@@ -273,7 +279,7 @@ export function RoomSidebar() {
           lastError = "缺少模组校验码";
           break;
         }
-        setProgress("同步中…");
+        setProgress(t.room.syncing);
         const fetched = await fetchRoomMod({
           host: candidate,
           port: target.port,
@@ -286,7 +292,7 @@ export function RoomSidebar() {
         }
       }
       if (gen !== joinGen.current) return;
-      setProgress(needSync ? "加入中…" : null);
+      setProgress(needSync ? t.room.joining : null);
       const res = await joinRoom({
         host: candidate,
         port: target.port,
@@ -475,17 +481,17 @@ export function RoomSidebar() {
                   />
                 </label>
                 <label className="settings-field">
-                  玩法模组（可选）
+                  {t.room.packOptional}
                   <select
                     className="select"
                     value={packDir}
                     onChange={(e) => setPackDir(e.target.value)}
                   >
-                    <option value="">不使用模组</option>
+                    <option value="">{t.room.packNone}</option>
                     {packs.map((pack) => (
                       <option key={`${pack.source}:${pack.packDir}`} value={pack.packDir}>
                         {pack.name} ({pack.id}@{pack.version}
-                        {pack.source === "cache" ? " · 缓存" : ""})
+                        {pack.source === "cache" ? ` · ${t.room.packCached}` : ""})
                       </option>
                     ))}
                   </select>
@@ -515,11 +521,8 @@ export function RoomSidebar() {
                           if (inv.password) setJoinPassword(inv.password);
                           setInviteHosts(inv.hosts ?? []);
                           setInviteChecksum(inv.modChecksum ?? "");
-                          if (inv.modChecksum) {
-                            void hasRoomMod(inv.modChecksum).then(setCacheHit);
-                          } else {
-                            setCacheHit(undefined);
-                          }
+                          setOffer(null);
+                          setCacheHit(undefined);
                           setErr(null);
                         } catch {
                           // incomplete
@@ -559,26 +562,35 @@ export function RoomSidebar() {
                 </details>
                 {inviteChecksum ? (
                   <p className="room-join-hint">
-                    此房间需要模组（校验 {inviteChecksum.slice(0, 8)}）
+                    {fillTemplate(t.room.needMod, {
+                      checksum: inviteChecksum.slice(0, 8),
+                    })}
                   </p>
                 ) : null}
                 {offerHasMod(offer) ? (
                   <>
-                    <p className="room-join-meta">{formatModBadge(offer)}</p>
+                    <p className="room-join-meta">
+                      {formatModBadge(offer, t.room.modBadge)}
+                    </p>
                     {cacheHit ? (
                       <p className="room-join-hint">
-                        将使用本地模组「{offer?.name}」v{offer?.version}
+                        {fillTemplate(t.room.useLocalMod, {
+                          name: offer?.name ?? "",
+                          version: offer?.version ?? "",
+                        })}
                       </p>
                     ) : (
                       <p className="room-join-hint">
-                        缺少模组「{offer?.name}」v{offer?.version}（约{" "}
-                        {formatModSize(offer?.size)}
-                        ）。将从房主同步后再加入。
+                        {fillTemplate(t.room.missingMod, {
+                          name: offer?.name ?? "",
+                          version: offer?.version ?? "",
+                          size: formatModSize(offer?.size),
+                        })}
                       </p>
                     )}
                   </>
                 ) : peeking ? (
-                  <p className="room-join-hint">正在查询房间模组…</p>
+                  <p className="room-join-hint">{t.room.peeking}</p>
                 ) : null}
               </div>
             )}
@@ -602,7 +614,8 @@ export function RoomSidebar() {
                 className="btn btn-sm"
                 disabled={
                   busy ||
-                  (dialog === "join" && !secret.trim() && !host.trim())
+                  (dialog === "join" && !secret.trim() && !host.trim()) ||
+                  (dialog === "join" && peeking && Boolean(inviteChecksum))
                 }
                 onClick={() =>
                   void (dialog === "create" ? onCreate() : onJoin())
@@ -610,18 +623,18 @@ export function RoomSidebar() {
               >
                 {dialog === "create"
                   ? busy
-                    ? "创建中…"
-                    : "创建并开口"
+                    ? t.room.creating
+                    : t.room.createBtn
                   : busy
                     ? progress ||
                       (joinPrimaryAction({ inviteChecksum, offer, cacheHit }) ===
                       "sync-join"
-                        ? "同步中…"
-                        : "加入中…")
+                        ? t.room.syncing
+                        : t.room.joining)
                     : joinPrimaryAction({ inviteChecksum, offer, cacheHit }) ===
                         "sync-join"
-                      ? "同步下载并加入"
-                      : "加入"}
+                      ? t.room.syncAndJoin
+                      : t.room.joinBtn}
               </button>
             </footer>
           </div>
