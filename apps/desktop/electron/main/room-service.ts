@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import os from "node:os";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import type { BrowserWindow } from "electron";
-import { IPC } from "@claude-desktop/shared";
+import { IPC, MOD_BUNDLE_MAX_BYTES } from "@claude-desktop/shared";
 import type {
   ModOfferPayload,
   RoomListItem,
@@ -20,7 +20,7 @@ import {
   makeRoomFrame,
   parseRoomFrame,
 } from "@claude-desktop/shared";
-import type { SessionManager } from "./session-manager";
+import type { SessionManager, SessionRunOpts } from "./session-manager";
 import type { SettingsStore } from "./settings-store";
 import type { RoomArchive, StoredRoom } from "./room-archive";
 import { ModHost, type ModSeat } from "./mod-host";
@@ -40,11 +40,12 @@ import {
   formatRoomModPrompt,
   illegalActionMessage,
   parseRoomModAct,
+  ROOM_MOD_PREFIX,
   tryCreateRoomModMcp,
 } from "./room-mod-agent";
 
 const MOD_CHECKSUM_RE = /^[0-9a-f]{64}$/;
-const BUNDLE_CHUNK = 48 * 1024;
+export const ROOM_MOD_BUNDLE_CHUNK = 48 * 1024;
 
 type GuestWs = WebSocket & { userId?: string; fetching?: boolean };
 
@@ -380,41 +381,13 @@ export class RoomService {
       if (offer.checksum !== checksum) {
         return { ok: false, error: "模组校验码不一致", offer };
       }
-      const chunks = new Map<number, Buffer>();
-      let got = 0;
-      const deadline = Date.now() + 30_000;
-      const first = waitFrame(ws, "mod.bundle", deadline - Date.now());
+      const collecting = collectBundles(ws, checksum, offer.size, 30_000);
       this.sendRaw(ws, "pending", 2, "mod.fetch", { checksum });
-      let frame = await first;
-      while (got < offer.size && Date.now() < deadline) {
-        if (!frame) break;
-        if (frame.type === "error") {
-          return {
-            ok: false,
-            error: (frame.payload as { message?: string })?.message ?? "下载失败",
-            offer,
-          };
-        }
-        const p = frame.payload as {
-          checksum?: string;
-          offset?: number;
-          chunk?: string;
-        };
-        if (p.checksum !== checksum || typeof p.chunk !== "string") {
-          frame = await waitFrame(ws, "mod.bundle", deadline - Date.now());
-          continue;
-        }
-        const buf = Buffer.from(p.chunk, "base64");
-        const offset = typeof p.offset === "number" ? p.offset : 0;
-        chunks.set(offset, buf);
-        got = assembledSize(chunks);
-        if (got >= offer.size) break;
-        frame = await waitFrame(ws, "mod.bundle", deadline - Date.now());
+      const collected = await collecting;
+      if (!collected.ok) {
+        return { ok: false, error: collected.error, offer };
       }
-      if (got < offer.size) {
-        return { ok: false, error: "模组下载不完整", offer };
-      }
-      const bytes = assembleChunks(chunks);
+      const bytes = collected.bytes;
       try {
         const loaded = writeModBytes(this.pathEnv(), bytes);
         if (loaded.checksum !== checksum) {
@@ -451,10 +424,17 @@ export class RoomService {
     let loaded: LoadedMod;
     try {
       loaded = loadModDir(packDir);
+      readModBytes(loaded);
     } catch (err) {
-      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/exceeds/.test(msg)) {
+        return {
+          ok: false,
+          error: `模组超过 ${MOD_BUNDLE_MAX_BYTES} 字节上限`,
+        };
+      }
+      return { ok: false, error: msg };
     }
-    this.disposeModHost(r);
     let host: ModHost;
     try {
       host = await ModHost.start({
@@ -465,6 +445,15 @@ export class RoomService {
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
+    const prev = r.modHost;
+    r.modHost = host;
+    if (prev) {
+      try {
+        prev.dispose();
+      } catch {
+        // ignore
+      }
+    }
     host.onFail((msg) => this.onModFail(r, msg));
     try {
       writeModCache(this.pathEnv(), loaded);
@@ -472,7 +461,6 @@ export class RoomService {
       // cache is optional
     }
     r.modLoaded = loaded;
-    r.modHost = host;
     r.modStarted = false;
     r.modEnded = false;
     r.modFail = undefined;
@@ -482,8 +470,7 @@ export class RoomService {
     r.modChecksum = loaded.checksum;
     r.requireMods = true;
     r.modOffer = this.buildOffer(r);
-    this.persist(r);
-    this.emit(r);
+    this.pushState(r);
     return { ok: true, room: this.snapshot(r), offer: r.modOffer };
   }
 
@@ -535,8 +522,7 @@ export class RoomService {
       );
     }
     this.clearMod(rec);
-    this.persist(rec);
-    this.emit(rec);
+    this.pushState(rec);
     return { ok: true };
   }
 
@@ -813,6 +799,7 @@ export class RoomService {
 
     const userId = randomUUID();
     const name = (opts.name ?? displayName()).trim() || displayName();
+    const checksum = (opts.modChecksum ?? "").trim();
 
     return new Promise((resolve) => {
       let settled = false;
@@ -866,7 +853,7 @@ export class RoomService {
           name,
           password: opts.password ?? "",
           protocol: ROOM_PROTOCOL_VERSION,
-          modChecksum: opts.modChecksum ?? "",
+          modChecksum: checksum,
         });
         try {
           ws.send(JSON.stringify(frame));
@@ -933,7 +920,7 @@ export class RoomService {
                 ],
                 port,
                 password: opts.password,
-                modChecksum: opts.modChecksum,
+                modChecksum: checksum,
               },
             };
             this.rooms.set(snap.roomId, rec);
@@ -1080,7 +1067,7 @@ export class RoomService {
           name: displayName(),
           password: password ?? "",
           protocol: ROOM_PROTOCOL_VERSION,
-          modChecksum: modChecksum ?? "",
+          modChecksum: (modChecksum ?? "").trim(),
         });
         try {
           ws.send(JSON.stringify(frame));
@@ -1124,11 +1111,8 @@ export class RoomService {
           clearTimeout(timer);
           const snap = frame.payload as RoomSnapshot;
           r.client = ws;
-          r.status = "open";
-          r.members = snap.members;
-          r.seats = snap.seats;
-          r.items = snap.items;
           r.seq = frame.seq;
+          this.applyGuestSnapshot(r, snap);
           this.bindGuestSocket(r, ws);
           done(true);
         }
@@ -1199,13 +1183,8 @@ export class RoomService {
       if (frame.type === "state.snapshot") {
         if (r.status !== "open") return;
         const snap = frame.payload as RoomSnapshot;
-        r.members = snap.members;
-        r.seats = snap.seats;
-        r.items = snap.items;
-        r.status = snap.status;
-        r.modChecksum = snap.modChecksum;
-        r.requireMods = snap.requireMods;
         r.seq = frame.seq;
+        this.applyGuestSnapshot(r, snap);
         this.persist(r);
         this.emit(r);
         return;
@@ -1570,6 +1549,7 @@ export class RoomService {
 
   disposeAll(): void {
     for (const r of this.rooms.values()) {
+      this.cancelGuestReconnect(r);
       this.disposeModHost(r);
       try {
         r.client?.close();
@@ -1602,12 +1582,13 @@ export class RoomService {
           : text,
       attachments: [],
     };
+    const extras = this.roomModSessionOpts(r, seat);
     try {
       if (!seat.sessionId) {
-        const id = await this.sessions.start(prompt, cwd);
+        const id = await this.sessions.start(prompt, cwd, extras);
         seat.sessionId = id;
       } else {
-        await this.sessions.continue(seat.sessionId, prompt);
+        await this.sessions.continue(seat.sessionId, prompt, extras);
       }
       const items = this.sessions.getTranscript(seat.sessionId);
       const last = [...items]
@@ -2009,6 +1990,7 @@ export class RoomService {
         offer?: ModOfferPayload;
         publicView?: unknown;
         seatView?: unknown;
+        seatViews?: Record<string, unknown>;
         seq?: number;
         fail?: string;
       };
@@ -2022,10 +2004,12 @@ export class RoomService {
       r.modPublicView !== undefined ||
       r.modFail
     ) {
+      const seatViews = this.localSeatViews(r);
       payload.mod = {
         offer: r.modOffer ?? this.buildOffer(r),
         publicView: r.modPublicView,
-        seatView: this.localSeatView(r),
+        seatView: this.preferredSeatView(r, seatViews),
+        seatViews,
         seq: r.modSeq,
         ...(r.modFail ? { fail: r.modFail } : {}),
       };
@@ -2086,19 +2070,9 @@ export class RoomService {
           return r.modOffer ?? this.buildOffer(r);
         }
       }
-      if (r.localRole === "member" && r.joinInfo?.port === port) {
+      if (r.localRole === "member" && r.modOffer && r.joinInfo?.port === port) {
         const hosts = [r.joinInfo.host, ...(r.joinInfo.hosts ?? [])];
-        if (hosts.includes(host)) {
-          return (
-            r.modOffer ?? {
-              id: "",
-              name: "",
-              version: "",
-              checksum: r.modChecksum,
-              size: 0,
-            }
-          );
-        }
+        if (hosts.includes(host)) return r.modOffer;
       }
     }
     return null;
@@ -2184,9 +2158,9 @@ export class RoomService {
     ws.fetching = true;
     try {
       const bytes = readModBytes(r.modLoaded);
-      for (let offset = 0; offset < bytes.length; offset += BUNDLE_CHUNK) {
+      for (let offset = 0; offset < bytes.length; offset += ROOM_MOD_BUNDLE_CHUNK) {
         if (ws.readyState !== WebSocket.OPEN) break;
-        const slice = bytes.subarray(offset, offset + BUNDLE_CHUNK);
+        const slice = bytes.subarray(offset, offset + ROOM_MOD_BUNDLE_CHUNK);
         this.reply(ws, r, "mod.bundle", {
           checksum,
           offset,
@@ -2322,17 +2296,38 @@ export class RoomService {
     }
   }
 
-  private localSeatView(r: RoomRecord): unknown {
-    if (!r.modSeatViews) return undefined;
+  private localSeatViews(r: RoomRecord): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    if (!r.modSeatViews) return out;
     for (const seat of r.seats) {
       const owns =
         seat.occupantUserId === r.localUserId ||
         seat.takenOverBy === r.localUserId;
       if (owns && r.modSeatViews[seat.id] !== undefined) {
-        return r.modSeatViews[seat.id];
+        out[seat.id] = r.modSeatViews[seat.id];
       }
     }
-    return undefined;
+    return out;
+  }
+
+  private preferredSeatView(
+    r: RoomRecord,
+    views: Record<string, unknown>,
+  ): unknown {
+    const taken = r.seats.find((s) => s.takenOverBy === r.localUserId);
+    if (taken && views[taken.id] !== undefined) return views[taken.id];
+    const ids = Object.keys(views);
+    return ids.length ? views[ids[0]!] : undefined;
+  }
+
+  private applyGuestSnapshot(r: RoomRecord, snap: RoomSnapshot): void {
+    r.members = snap.members;
+    r.seats = snap.seats;
+    r.items = snap.items;
+    r.status = snap.status;
+    r.modChecksum = snap.modChecksum;
+    r.requireMods = snap.requireMods;
+    if (r.joinInfo) r.joinInfo.modChecksum = snap.modChecksum;
   }
 
   private onModFail(r: RoomRecord, message: string): void {
@@ -2374,8 +2369,51 @@ export class RoomService {
         continue;
       }
       if (!turn) continue;
+      if (seat.takenOverBy) continue;
       await this.injectAgentTurn(r, seat, turn);
     }
+  }
+
+  private roomModSessionOpts(
+    r: RoomRecord,
+    seat: RoomSeat,
+    fallbackActions?: unknown,
+  ): SessionRunOpts {
+    const handler = (act: { action: string; payload: unknown }) =>
+      this.dispatchAgentAct(r, seat, act, fallbackActions);
+    const mcp =
+      r.modHost && r.modStarted && !r.modEnded
+        ? tryCreateRoomModMcp(handler)
+        : null;
+    return {
+      hiddenFromList: true,
+      title: `${ROOM_MOD_PREFIX} ${seat.name}`,
+      persistText: `${ROOM_MOD_PREFIX} ${r.roomId} ${seat.id}`,
+      ...(mcp?.opts ?? {}),
+    };
+  }
+
+  private async dispatchAgentAct(
+    r: RoomRecord,
+    seat: RoomSeat,
+    act: { action: string; payload: unknown },
+    fallbackActions?: unknown,
+  ): Promise<string> {
+    if (seat.takenOverBy) return "席位已被接管";
+    const names =
+      (await r.modHost?.actions(seat.id).catch(() => fallbackActions)) ??
+      fallbackActions;
+    const legal = new Set(actionNames(names));
+    if (!legal.has(act.action)) return illegalActionMessage(names);
+    const result = await this.enqueueIntent(r, () =>
+      this.dispatchMod(r, {
+        seatId: seat.id,
+        name: act.action,
+        payload: act.payload,
+        actorUserId: seat.occupantUserId || "agent",
+      }),
+    );
+    return result.ok ? "ok" : result.error || "操作失败";
   }
 
   private async injectAgentTurn(
@@ -2383,37 +2421,24 @@ export class RoomService {
     seat: RoomSeat,
     turn: { should: boolean; view: unknown; prompt: string; actions: unknown },
   ): Promise<void> {
+    if (seat.takenOverBy) return;
     const cwd = this.settings.get().lastProjectPath;
     if (!cwd) return;
     const text = formatRoomModPrompt(turn);
-    const mcp = tryCreateRoomModMcp(async (act) => {
-      const names = (
-        await r.modHost?.actions(seat.id).catch(() => turn.actions)
-      ) ?? turn.actions;
-      const legal = new Set(actionNames(names));
-      if (!legal.has(act.action)) {
-        return illegalActionMessage(names);
-      }
-      const result = await this.enqueueIntent(r, () =>
-        this.dispatchMod(r, {
-          seatId: seat.id,
-          name: act.action,
-          payload: act.payload,
-          actorUserId: seat.occupantUserId || "agent",
-        }),
-      );
-      return result.ok ? "ok" : result.error || "操作失败";
-    });
+    const extras = this.roomModSessionOpts(r, seat, turn.actions);
+    const mcpAttached = Boolean(extras.extraMcpServers);
     seat.running = true;
     try {
+      if (seat.takenOverBy) return;
       const prompt = { text, attachments: [] as never[] };
       if (!seat.sessionId) {
-        const id = await this.sessions.start(prompt, cwd, mcp?.opts);
+        const id = await this.sessions.start(prompt, cwd, extras);
         seat.sessionId = id;
       } else {
-        await this.sessions.continue(seat.sessionId, prompt, mcp?.opts);
+        await this.sessions.continue(seat.sessionId, prompt, extras);
       }
-      if (!mcp?.attached && seat.sessionId) {
+      if (seat.takenOverBy) return;
+      if (!mcpAttached && seat.sessionId) {
         const items = this.sessions.getTranscript(seat.sessionId);
         const last = [...items]
           .reverse()
@@ -2421,18 +2446,8 @@ export class RoomService {
         const reply = last && last.kind === "text" ? last.text : "";
         const act = parseRoomModAct(reply);
         if (act) {
-          const names = turn.actions;
-          const legal = new Set(actionNames(names));
-          if (legal.has(act.action) || legal.size === 0) {
-            void this.enqueueIntent(r, () =>
-              this.dispatchMod(r, {
-                seatId: seat.id,
-                name: act.action,
-                payload: act.payload,
-                actorUserId: seat.occupantUserId || "agent",
-              }),
-            );
-          }
+          if (seat.takenOverBy) return;
+          await this.dispatchAgentAct(r, seat, act, turn.actions);
         }
       }
     } catch {
@@ -2463,6 +2478,60 @@ function assembledSize(chunks: Map<number, Buffer>): number {
 function assembleChunks(chunks: Map<number, Buffer>): Buffer {
   const ordered = [...chunks.entries()].sort((a, b) => a[0] - b[0]);
   return Buffer.concat(ordered.map(([, b]) => b));
+}
+
+function collectBundles(
+  ws: WebSocket,
+  checksum: string,
+  size: number,
+  timeoutMs: number,
+): Promise<{ ok: true; bytes: Buffer } | { ok: false; error: string }> {
+  return new Promise((resolve) => {
+    const chunks = new Map<number, Buffer>();
+    let settled = false;
+    const finish = (
+      result: { ok: true; bytes: Buffer } | { ok: false; error: string },
+    ) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      ws.off("message", onMsg);
+      ws.off("close", onClose);
+      resolve(result);
+    };
+    const onMsg = (data: RawData) => {
+      const frame = parseRoomFrame(String(data));
+      if (!frame) return;
+      if (frame.type === "error") {
+        finish({
+          ok: false,
+          error: (frame.payload as { message?: string })?.message ?? "下载失败",
+        });
+        return;
+      }
+      if (frame.type !== "mod.bundle") return;
+      const p = frame.payload as {
+        checksum?: string;
+        offset?: number;
+        chunk?: string;
+      };
+      if (p.checksum !== checksum || typeof p.chunk !== "string") return;
+      chunks.set(
+        typeof p.offset === "number" ? p.offset : 0,
+        Buffer.from(p.chunk, "base64"),
+      );
+      if (assembledSize(chunks) >= size) {
+        finish({ ok: true, bytes: assembleChunks(chunks) });
+      }
+    };
+    const onClose = () => finish({ ok: false, error: "模组下载不完整" });
+    const timer = setTimeout(
+      () => finish({ ok: false, error: "模组下载不完整" }),
+      timeoutMs,
+    );
+    ws.on("message", onMsg);
+    ws.on("close", onClose);
+  });
 }
 
 function waitOpen(ws: WebSocket, timeoutMs: number): Promise<void> {

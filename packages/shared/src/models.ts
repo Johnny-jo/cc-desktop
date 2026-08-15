@@ -199,6 +199,8 @@ export type SessionSummary = {
   usage?: SessionUsage;
   /** Latest context-window occupancy (not billing totals) */
   contextUsage?: ContextUsage;
+  /** Room-mod / seat sessions — omitted from the main session list */
+  hiddenFromList?: boolean;
 };
 
 export type PermissionRequest = {

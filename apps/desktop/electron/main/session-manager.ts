@@ -59,6 +59,11 @@ export type QueryFn = (args: {
 export type SessionRunOpts = {
   extraMcpServers?: Record<string, unknown>;
   extraAllowedTools?: string[];
+  /** Omit from SessionManager.list / session sidebar */
+  hiddenFromList?: boolean;
+  title?: string;
+  /** Persist this instead of the raw prompt (avoid dumping private views). */
+  persistText?: string;
 };
 
 export type SessionManagerDeps = {
@@ -359,6 +364,7 @@ export class SessionManager {
             ...(stored.contextUsage
               ? { contextUsage: stored.contextUsage }
               : {}),
+            ...(stored.hiddenFromList ? { hiddenFromList: true } : {}),
           },
           abortController: null,
           sdkSessionId: stored.sdkSessionId,
@@ -380,6 +386,7 @@ export class SessionManager {
 
   list(): SessionSummary[] {
     return [...this.sessions.values()]
+      .filter((e) => !e.summary.hiddenFromList)
       .map((e) => ({ ...e.summary }))
       .sort((a, b) => b.updatedAt - a.updatedAt);
   }
@@ -1202,10 +1209,11 @@ export class SessionManager {
     const now = Date.now();
     const summary: SessionSummary = {
       id: sessionId,
-      title: titleFromPrompt(prompt),
+      title: opts?.title ?? titleFromPrompt(prompt),
       cwd,
       updatedAt: now,
       status: "running",
+      ...(opts?.hiddenFromList ? { hiddenFromList: true } : {}),
     };
     const entry: SessionEntry = {
       summary,
@@ -1221,13 +1229,13 @@ export class SessionManager {
       extraAllowedTools: opts?.extraAllowedTools,
     };
     this.sessions.set(sessionId, entry);
-    this.emitSession({ ...summary });
+    if (!summary.hiddenFromList) this.emitSession({ ...summary });
     this.persistSummary(entry);
     this.replaceTranscript(
       entry,
       appendUserItem(
         { items: entry.items, optimisticUserTexts: [] },
-        displayPrompt(prompt),
+        opts?.persistText ?? displayPrompt(prompt),
         { nextId: entry.nextId },
       ).items,
       { persist: true },
@@ -1246,7 +1254,10 @@ export class SessionManager {
     if (!entry) {
       throw new Error(`Unknown session: ${sessionId}`);
     }
+    let reopenForExtras = false;
     if (opts?.extraMcpServers) {
+      const incoming = Object.keys(opts.extraMcpServers);
+      reopenForExtras = incoming.some((k) => !entry.extraMcpServers?.[k]);
       entry.extraMcpServers = {
         ...(entry.extraMcpServers ?? {}),
         ...opts.extraMcpServers,
@@ -1254,9 +1265,14 @@ export class SessionManager {
     }
     if (opts?.extraAllowedTools?.length) {
       const have = new Set(entry.extraAllowedTools ?? []);
-      for (const t of opts.extraAllowedTools) have.add(t);
+      for (const t of opts.extraAllowedTools) {
+        if (!have.has(t)) reopenForExtras = true;
+        have.add(t);
+      }
       entry.extraAllowedTools = [...have];
     }
+    if (opts?.hiddenFromList) entry.summary.hiddenFromList = true;
+    if (opts?.title) entry.summary.title = opts.title;
 
     await this.ensureCpaOrThrow(sessionId);
 
@@ -1273,7 +1289,7 @@ export class SessionManager {
     this.hydrateItems(entry);
     const next = appendUserItem(
       { items: entry.items, optimisticUserTexts: [] },
-      displayPrompt(prompt),
+      opts?.persistText ?? displayPrompt(prompt),
       { nextId: entry.nextId },
     );
     this.replaceTranscript(entry, next.items, { persist: true });
@@ -1284,18 +1300,20 @@ export class SessionManager {
       updatedAt: Date.now(),
     };
     entry.turnActive = true;
-    this.emitSession({ ...entry.summary });
+    if (!entry.summary.hiddenFromList) this.emitSession({ ...entry.summary });
     this.persistSummary(entry);
 
     // Live streaming session: just push the next user message.
     // Skipped when a rewind anchor is pending — the conversation must be
     // re-opened truncated at the anchor, so force the resume path below.
     // Also skip if the stream was torn down by abort() (input closed / cleared).
+    // Reopen when extra MCP/tools just changed so they attach to the query.
     if (
       entry.input &&
       !entry.input.isClosed &&
       entry.consumer &&
-      !entry.resumeAtAnchor
+      !entry.resumeAtAnchor &&
+      !reopenForExtras
     ) {
       try {
         entry.input.push(content, entry.sdkSessionId);

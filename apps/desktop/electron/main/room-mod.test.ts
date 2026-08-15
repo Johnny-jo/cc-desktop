@@ -11,8 +11,9 @@ import {
   type ModOfferPayload,
   type RoomSnapshot,
 } from "@claude-desktop/shared";
-import { RoomService } from "./room-service";
+import { RoomService, ROOM_MOD_BUNDLE_CHUNK } from "./room-service";
 import { loadModCache } from "./mod-package";
+import { RoomArchive } from "./room-archive";
 import type { SessionManager } from "./session-manager";
 import type { SettingsStore } from "./settings-store";
 import type { RuntimePathEnv } from "./runtime-paths";
@@ -21,7 +22,7 @@ const dirs: string[] = [];
 const services: RoomService[] = [];
 
 afterEach(() => {
-  for (const s of services) {
+  for (const s of [...services].reverse()) {
     try {
       s.disposeAll();
     } catch {
@@ -114,6 +115,7 @@ type RoomEvent = {
     offer?: ModOfferPayload;
     publicView?: unknown;
     seatView?: unknown;
+    seatViews?: Record<string, unknown>;
     seq?: number;
     fail?: string;
   };
@@ -156,6 +158,7 @@ function makeRooms(opts?: {
   events?: RoomEvent[];
   sessions?: SessionManager;
   userDataDir?: string;
+  archive?: RoomArchive | null;
 }): { rooms: RoomService; sessions: ReturnType<typeof mockSessions>; userDataDir: string } {
   const userDataDir = opts?.userDataDir ?? tmp();
   const sessions = (opts?.sessions ?? mockSessions()) as ReturnType<typeof mockSessions>;
@@ -164,6 +167,7 @@ function makeRooms(opts?: {
     sessions,
     settings: mockSettings(userDataDir),
     userDataDir,
+    archive: opts?.archive ?? null,
   });
   services.push(rooms);
   return { rooms, sessions, userDataDir };
@@ -303,6 +307,66 @@ describe("room mod handshake + play loop", () => {
     expect(rooms.get(room.roomId)!.members.length).toBe(1);
   });
 
+  it("guest fetch accumulates every bundle chunk when envelope > BUNDLE_CHUNK", async () => {
+    const { rooms } = makeRooms();
+    const pad = `\n/* ${"x".repeat(ROOM_MOD_BUNDLE_CHUNK)} */\n`;
+    const pack = writeFixture(path.join(tmp(), "pack-big"), FIXTURE_HOST + pad);
+    expect(Buffer.byteLength(JSON.stringify({
+      manifest: pack.manifestSource,
+      hostJs: pack.hostJs,
+    }), "utf8")).toBeGreaterThan(ROOM_MOD_BUNDLE_CHUNK);
+
+    const { room, port } = await createHost(rooms);
+    const en = await rooms.enableMod(room.roomId, pack.dir);
+    expect(en.ok).toBe(true);
+    expect(en.offer!.size).toBeGreaterThan(ROOM_MOD_BUNDLE_CHUNK);
+
+    const guestDir = tmp();
+    const guest = makeRooms({ userDataDir: guestDir });
+    const fetched = await guest.rooms.fetchMod({
+      host: "127.0.0.1",
+      port,
+      checksum: pack.checksum,
+    });
+    expect(fetched.ok).toBe(true);
+    expect(fetched.checksum).toBe(pack.checksum);
+    const cached = loadModCache(envFor(guestDir), pack.checksum);
+    expect(cached.checksum).toBe(hashModFiles(pack.manifestSource, pack.hostJs));
+  });
+
+  it("enableMod after join pushStates checksum so guest persist/reconnect uses it", async () => {
+    const { rooms } = makeRooms();
+    const { room, port } = await createHost(rooms);
+    const guestDir = tmp();
+    const archive = new RoomArchive(guestDir);
+    const guest = makeRooms({ userDataDir: guestDir, archive });
+    const joined = await guest.rooms.join({ host: "127.0.0.1", port });
+    expect(joined.ok).toBe(true);
+    expect(joined.room?.modChecksum).toBe("");
+
+    const pack = writeFixture(path.join(tmp(), "pack"));
+    const en = await rooms.enableMod(room.roomId, pack.dir);
+    expect(en.ok).toBe(true);
+
+    await vi.waitFor(() => {
+      expect(guest.rooms.get(room.roomId)?.modChecksum).toBe(pack.checksum);
+    });
+    const stored = archive.loadRoom(room.roomId);
+    expect(stored?.join?.modChecksum).toBe(pack.checksum);
+    expect(stored?.requireMods).toBe(true);
+  });
+
+  it("enableMod rejects a pack whose envelope exceeds 512KB", async () => {
+    const { rooms } = makeRooms();
+    const { room } = await createHost(rooms);
+    const huge = FIXTURE_HOST + `\n/* ${"y".repeat(520 * 1024)} */\n`;
+    const pack = writeFixture(path.join(tmp(), "pack-huge"), huge);
+    const en = await rooms.enableMod(room.roomId, pack.dir);
+    expect(en.ok).toBe(false);
+    expect(en.error).toMatch(/超过|exceeds/);
+    expect(rooms.get(room.roomId)!.modChecksum).toBe("");
+  });
+
   it("start rejects if seat count outside min/max", async () => {
     const { rooms } = makeRooms();
     const pack = writeFixture(path.join(tmp(), "pack"));
@@ -365,16 +429,20 @@ describe("room mod handshake + play loop", () => {
       expect((h?.mod?.publicView as { n?: number })?.n).toBe(1);
     });
 
-    const guestView = [...guestEvents].reverse().find((e) => e.mod?.seatView)
-      ?.mod?.seatView as { secret?: string; seatId?: string };
-    const hostView = [...hostEvents].reverse().find((e) => e.mod?.seatView)
-      ?.mod?.seatView as { secret?: string; seatId?: string };
+    const guestMod = [...guestEvents].reverse().find((e) => e.mod?.seatViews)?.mod;
+    const hostMod = [...hostEvents].reverse().find((e) => e.mod?.seatViews)?.mod;
+    const guestView = (guestMod?.seatViews?.[guestSeat!.id] ??
+      guestMod?.seatView) as { secret?: string; seatId?: string };
+    const hostView = (hostMod?.seatViews?.[hostSeat!.id] ??
+      hostMod?.seatView) as { secret?: string; seatId?: string };
 
     expect(guestView?.seatId).toBe(guestSeat!.id);
     expect(guestView?.secret).toBe(`priv-${guestSeat!.id}`);
     expect(hostView?.seatId).toBe(hostSeat!.id);
     expect(hostView?.secret).toBe(`priv-${hostSeat!.id}`);
     expect(hostView?.secret).not.toBe(guestView?.secret);
+    expect(hostMod?.seatViews?.[guestSeat!.id]).toBeUndefined();
+    expect(guestMod?.seatViews?.[hostSeat!.id]).toBeUndefined();
 
     const snap = rooms.get(room.roomId)!;
     expect(snap).not.toHaveProperty("state");

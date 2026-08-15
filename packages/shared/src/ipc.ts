@@ -627,11 +627,14 @@ export type IpcEventMap = {
     /** host rejected a guest action (send / takeover) */
     error?: boolean;
     message?: string;
-    /** Play-loop views for PR5 UI. Never includes full play state. */
+    /** Play-loop views. Never includes full play state. */
     mod?: {
       offer?: import("./room-protocol").ModOfferPayload;
       publicView?: unknown;
+      /** @deprecated prefer seatViews — first local occupied/taken-over seat */
       seatView?: unknown;
+      /** Views for seats this client occupies or has taken over */
+      seatViews?: Record<string, unknown>;
       seq?: number;
       fail?: string;
     };
