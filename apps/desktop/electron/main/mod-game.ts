@@ -64,6 +64,7 @@ const REQUIRED_METHODS = [
 const FORBIDDEN: { re: RegExp; message: string }[] = [
   { re: /Math\.random\b/, message: "Math.random is forbidden" },
   { re: /Date\.now\b/, message: "Date.now is forbidden" },
+  { re: /\bnew\s+Date\b/, message: "Date is forbidden" },
   { re: /\bfetch\s*\(/, message: "fetch is forbidden" },
   { re: /\bWebSocket\b/, message: "WebSocket is forbidden" },
   { re: /\brequire\s*\(/, message: "require is forbidden" },
@@ -73,21 +74,36 @@ const FORBIDDEN: { re: RegExp; message: string }[] = [
   },
 ];
 
-export function jsonDepth(value: unknown): number {
+export function jsonDepth(value: unknown, seen?: Set<object>): number {
   if (value === null || typeof value !== "object") return 0;
+  const trail = seen ?? new Set<object>();
+  if (trail.has(value)) {
+    throw new Error("value is not JSON-serializable");
+  }
+  trail.add(value);
   const children = Array.isArray(value) ? value : Object.values(value);
-  if (children.length === 0) return 1;
+  if (children.length === 0) {
+    trail.delete(value);
+    return 1;
+  }
   let max = 0;
   for (const child of children) {
-    const d = jsonDepth(child);
+    const d = jsonDepth(child, trail);
     if (d > max) max = d;
   }
+  trail.delete(value);
   return 1 + max;
 }
 
 export function assertJsonLimit(value: unknown, label: string): void {
-  if (jsonDepth(value) > MOD_JSON_MAX_DEPTH) {
-    throw new Error(`${label} exceeds depth ${MOD_JSON_MAX_DEPTH}`);
+  try {
+    if (jsonDepth(value) > MOD_JSON_MAX_DEPTH) {
+      throw new Error(`${label} exceeds depth ${MOD_JSON_MAX_DEPTH}`);
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("exceeds depth")) throw err;
+    throw new Error(`${label} is not JSON-serializable`);
   }
   let bytes: number;
   try {
@@ -97,6 +113,14 @@ export function assertJsonLimit(value: unknown, label: string): void {
   }
   if (bytes > MOD_JSON_MAX_BYTES) {
     throw new Error(`${label} exceeds ${MOD_JSON_MAX_BYTES} bytes`);
+  }
+}
+
+export function cloneJson<T>(value: T, label: string): T {
+  try {
+    return structuredClone(value);
+  } catch {
+    throw new Error(`${label} is not JSON-serializable`);
   }
 }
 
@@ -121,21 +145,44 @@ function transformHostJs(source: string): string {
   return code;
 }
 
-function makeSafeDate(): DateConstructor {
-  const Orig = Date;
-  function SafeDate(this: unknown, ...args: unknown[]) {
-    if (new.target) {
-      return new (Orig as unknown as new (...a: unknown[]) => Date)(...args);
+function isolatedMath(): Record<string, unknown> {
+  const math = Object.create(null) as Record<string, unknown>;
+  for (const key of Object.getOwnPropertyNames(Math)) {
+    if (key === "random") continue;
+    const desc = Object.getOwnPropertyDescriptor(Math, key);
+    if (!desc) continue;
+    if (typeof desc.value === "function") {
+      math[key] = (desc.value as (...args: unknown[]) => unknown).bind(Math);
+    } else {
+      Object.defineProperty(math, key, {
+        enumerable: Boolean(desc.enumerable),
+        configurable: false,
+        writable: false,
+        value: desc.value,
+      });
     }
-    return (Orig as unknown as (...a: unknown[]) => string)(...args);
   }
-  SafeDate.now = (): number => {
+  math.random = () => {
+    throw new Error("Math.random is forbidden");
+  };
+  return Object.freeze(math);
+}
+
+function isolatedDate(): DateConstructor {
+  function ForbiddenDate(): never {
+    throw new Error("Date is forbidden");
+  }
+  ForbiddenDate.now = (): never => {
     throw new Error("Date.now is forbidden");
   };
-  SafeDate.parse = Orig.parse;
-  SafeDate.UTC = Orig.UTC;
-  SafeDate.prototype = Orig.prototype;
-  return SafeDate as unknown as DateConstructor;
+  ForbiddenDate.parse = (): never => {
+    throw new Error("Date.parse is forbidden");
+  };
+  ForbiddenDate.UTC = (): never => {
+    throw new Error("Date.UTC is forbidden");
+  };
+  Object.setPrototypeOf(ForbiddenDate, null);
+  return ForbiddenDate as unknown as DateConstructor;
 }
 
 export function loadGameFromSource(hostJsSource: string): GameApi {
@@ -153,12 +200,8 @@ export function loadGameFromSource(hostJsSource: string): GameApi {
     TypeError,
     RangeError,
     JSON,
-    Math: Object.assign(Object.create(Math), {
-      random() {
-        throw new Error("Math.random is forbidden");
-      },
-    }),
-    Date: makeSafeDate(),
+    Math: isolatedMath(),
+    Date: isolatedDate(),
     parseInt,
     parseFloat,
     isNaN,
@@ -372,25 +415,33 @@ export function createModRuntime(
   const game = loadGameFromSource(hostJsSource);
   const rng = createMulberry32(seed);
   let snapshotRngState = rng.getState();
-  let snapshot: unknown = game.initialState();
-  let state: unknown = snapshot;
+  let snapshot: unknown = cloneJson(game.initialState(), "initialState");
+  assertJsonLimit(snapshot, "initialState");
+  let state: unknown = cloneJson(snapshot, "initialState");
   let log: PersistLogEntry[] = [];
   let seq = 0;
 
   const applyIntent = (intent: ModIntent, ctx: ReduceCtxIn): void => {
-    assertJsonLimit(intent.payload, "intent payload");
+    const recorded = cloneJson(intent.payload, "intent payload");
+    assertJsonLimit(recorded, "intent payload");
+    const forGame = cloneJson(recorded, "intent payload");
     const seats = projectSeats(ctx.seats);
-    const next = game.reduce(state, intent, {
-      rng: () => rng.next(),
-      now: ctx.now,
-      seats,
-      actor: Object.freeze({ ...ctx.actor }),
-    });
+    const next = game.reduce(
+      state,
+      { seatId: intent.seatId, name: intent.name, payload: forGame },
+      {
+        rng: () => rng.next(),
+        now: ctx.now,
+        seats,
+        actor: Object.freeze({ ...ctx.actor }),
+      },
+    );
+    assertJsonLimit(next, "reduce result");
     state = next;
     log.push({
       seatId: intent.seatId,
       name: intent.name,
-      payload: intent.payload,
+      payload: recorded,
       now: ctx.now,
       seats: ctx.seats.map((s) => ({ ...s })),
       actor: { ...ctx.actor },
@@ -412,8 +463,9 @@ export function createModRuntime(
   if (init?.rngState !== undefined) rng.setState(init.rngState);
   snapshotRngState = rng.getState();
   if (init?.snapshot !== undefined) {
-    snapshot = init.snapshot;
-    state = init.snapshot;
+    snapshot = cloneJson(init.snapshot, "snapshot");
+    assertJsonLimit(snapshot, "snapshot");
+    state = cloneJson(snapshot, "snapshot");
   }
   if (init?.log?.length) replay(init.log);
   if (typeof init?.seq === "number") seq = init.seq;
@@ -455,20 +507,31 @@ export function createModRuntime(
       };
     },
     persistState() {
-      return {
-        snapshot,
-        log: log.map((e) => ({ ...e, seats: e.seats.map((s) => ({ ...s })) })),
+      const out = {
+        snapshot: cloneJson(snapshot, "snapshot"),
+        log: cloneJson(log, "log"),
         seq,
         rngState: snapshotRngState,
       };
+      assertJsonLimit(out.snapshot, "snapshot");
+      try {
+        JSON.stringify(out.log);
+      } catch {
+        throw new Error("persist log is not JSON-serializable");
+      }
+      return out;
     },
     restore(opts) {
       rng.setState(
         opts.rngState !== undefined ? opts.rngState : seedToUint32(seed),
       );
       snapshotRngState = rng.getState();
-      snapshot = opts.snapshot !== undefined ? opts.snapshot : game.initialState();
-      state = snapshot;
+      snapshot =
+        opts.snapshot !== undefined
+          ? cloneJson(opts.snapshot, "snapshot")
+          : cloneJson(game.initialState(), "initialState");
+      assertJsonLimit(snapshot, "snapshot");
+      state = cloneJson(snapshot, "snapshot");
       log = [];
       seq = 0;
       if (opts.log?.length) replay(opts.log);
@@ -477,20 +540,21 @@ export function createModRuntime(
     reset() {
       rng.setState(seedToUint32(seed));
       snapshotRngState = rng.getState();
-      snapshot = game.initialState();
-      state = snapshot;
+      snapshot = cloneJson(game.initialState(), "initialState");
+      assertJsonLimit(snapshot, "initialState");
+      state = cloneJson(snapshot, "initialState");
       log = [];
       seq = 0;
     },
     compact() {
-      snapshot = state;
+      snapshot = cloneJson(state, "snapshot");
       snapshotRngState = rng.getState();
       log = [];
     },
     adopt(opts) {
-      state = opts.snapshot;
+      state = cloneJson(opts.snapshot, "snapshot");
       seq = opts.seq;
-      if (opts.log) log = opts.log.map((e) => ({ ...e }));
+      if (opts.log) log = cloneJson(opts.log, "log");
       if (opts.rngState !== undefined) rng.setState(opts.rngState);
     },
     getSnapshot() {

@@ -219,13 +219,24 @@ describe("runtime-paths", () => {
   it("places mod cache and persist files under userData", () => {
     const userDataDir = path.join(tmp(), "ud");
     const e = env({ userDataDir });
+    const checksum = "ab".repeat(32);
     expect(getModCacheDir(e)).toBe(path.join(userDataDir, "mod-cache"));
-    expect(getModCachePath(e, "abc123")).toBe(
-      path.join(userDataDir, "mod-cache", "abc123"),
+    expect(getModCachePath(e, checksum)).toBe(
+      path.join(userDataDir, "mod-cache", checksum),
     );
     expect(getModPersistPath(e, "room-1")).toBe(
       path.join(userDataDir, "rooms", "room-1.mod.json"),
     );
+  });
+
+  it("rejects path-traversal checksums and unsafe room ids", () => {
+    const e = env({ userDataDir: path.join(tmp(), "ud") });
+    expect(() => getModCachePath(e, "../etc/passwd")).toThrow(/checksum/);
+    expect(() => getModCachePath(e, "abc123")).toThrow(/checksum/);
+    expect(() => getModCachePath(e, "AB".repeat(32))).toThrow(/checksum/);
+    expect(() => getModPersistPath(e, "../x")).toThrow(/room id/);
+    expect(() => getModPersistPath(e, "a/b")).toThrow(/room id/);
+    expect(() => getModPersistPath(e, "a\\b")).toThrow(/room id/);
   });
 
   it("packaged claude path under resources/bin/claude", () => {

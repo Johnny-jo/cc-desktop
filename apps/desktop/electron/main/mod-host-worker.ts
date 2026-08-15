@@ -38,7 +38,10 @@ export type WorkerRequest =
       method: "actions" | "agentTurn" | "public" | "seat";
       seatId?: string;
       seats?: ModSeat[];
-    };
+    }
+  | { id?: number; type: "persist" }
+  | { id?: number; type: "compact" }
+  | { id?: number; type: "reset" };
 
 export type WorkerReply = {
   id?: number;
@@ -50,6 +53,7 @@ export type WorkerReply = {
   publicView?: unknown;
   seatViews?: Record<string, unknown>;
   result?: unknown;
+  log?: PersistLogEntry[];
 };
 
 export function createWorkerState(): WorkerState {
@@ -96,6 +100,25 @@ export function handleWorkerMessage(
         publicView: views.publicView,
         seatViews: views.seatViews,
       };
+    }
+    if (req.type === "persist") {
+      const persisted = runtime.persistState();
+      return {
+        id,
+        ok: true,
+        seq: persisted.seq,
+        snapshot: persisted.snapshot,
+        rngState: persisted.rngState,
+        log: persisted.log,
+      };
+    }
+    if (req.type === "compact") {
+      runtime.compact();
+      return { id, ok: true, seq: runtime.seq() };
+    }
+    if (req.type === "reset") {
+      runtime.reset();
+      return { id, ok: true, seq: runtime.seq() };
     }
     if (req.type === "query") {
       if (req.method === "actions") {

@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { hashModFiles } from "@claude-desktop/shared/mod-hash";
-import { loadGameFromSource } from "./mod-game";
+import { jsonDepth, loadGameFromSource } from "./mod-game";
 import { ModHost, type ModSeat } from "./mod-host";
 import {
   createWorkerState,
@@ -167,8 +167,10 @@ describe("ModHost", () => {
     expect(await b.host.dispatch(intent, ctx(1))).toEqual({ ok: true, seq: 1 });
     expect(await a.host.dispatch(intent, ctx(2))).toEqual({ ok: true, seq: 2 });
     expect(await b.host.dispatch(intent, ctx(2))).toEqual({ ok: true, seq: 2 });
-    expect(a.host.views(SEATS)).toEqual(b.host.views(SEATS));
-    expect((a.host.views(SEATS).publicView as { last: number }).last).toBeGreaterThanOrEqual(0);
+    expect(await a.host.views(SEATS)).toEqual(await b.host.views(SEATS));
+    expect(
+      ((await a.host.views(SEATS)).publicView as { last: number }).last,
+    ).toBeGreaterThanOrEqual(0);
     a.host.dispose();
     b.host.dispose();
   });
@@ -176,7 +178,7 @@ describe("ModHost", () => {
   it("keeps public vs seat private fields split", async () => {
     const { host } = await startHost();
     await host.dispatch({ seatId: "p1", name: "inc", payload: {} }, ctx());
-    const views = host.views(SEATS);
+    const views = await host.views(SEATS);
     expect(views.publicView).toMatchObject({ n: 1 });
     expect(views.publicView).not.toHaveProperty("seatId");
     expect(views.publicView).not.toHaveProperty("secret");
@@ -187,12 +189,12 @@ describe("ModHost", () => {
 
   it("shouldPromptAgent defaults to false; agentTurn returns null vs payload", async () => {
     const def = await startHost();
-    expect(def.host.agentTurn("p1")).toBeNull();
+    expect(await def.host.agentTurn("p1")).toBeNull();
     def.host.dispose();
 
     const { host } = await startHost(AGENT_HOST);
-    expect(host.agentTurn("p1")).toBeNull();
-    const turn = host.agentTurn("agent-1");
+    expect(await host.agentTurn("p1")).toBeNull();
+    const turn = await host.agentTurn("agent-1");
     expect(turn).toMatchObject({
       should: true,
       prompt: "act",
@@ -224,11 +226,11 @@ describe("ModHost", () => {
     const { host, persistPath } = await startHost(COUNTER_HOST, "restore-seed");
     await host.dispatch({ seatId: "p1", name: "inc", payload: {} }, ctx(10));
     await host.dispatch({ seatId: "p1", name: "inc", payload: {} }, ctx(20));
-    host.persist();
-    const mid = host.views(SEATS);
+    await host.persist();
+    const mid = await host.views(SEATS);
     await host.dispatch({ seatId: "p1", name: "inc", payload: {} }, ctx(30));
-    host.persist();
-    const after = host.views(SEATS);
+    await host.persist();
+    const after = await host.views(SEATS);
     expect((after.publicView as { n: number }).n).toBe(3);
     host.dispose();
 
@@ -241,8 +243,8 @@ describe("ModHost", () => {
     });
     await host2.restoreFromDisk();
     expect(host2.seed).toBe("restore-seed");
-    expect(host2.views(SEATS)).toEqual(after);
-    expect(host2.views(SEATS).seq).toBe(3);
+    expect(await host2.views(SEATS)).toEqual(after);
+    expect((await host2.views(SEATS)).seq).toBe(3);
     expect((mid.publicView as { n: number }).n).toBe(2);
     host2.dispose();
   });
@@ -250,7 +252,7 @@ describe("ModHost", () => {
   it("reduce throw marks failed=true and persist file still readable", async () => {
     const { host, persistPath } = await startHost();
     await host.dispatch({ seatId: "p1", name: "inc", payload: {} }, ctx());
-    host.persist();
+    await host.persist();
     const result = await host.dispatch(
       { seatId: "p1", name: "boom", payload: {} },
       ctx(),
@@ -261,7 +263,7 @@ describe("ModHost", () => {
     const parsed = JSON.parse(raw) as { checksum: string; seq: number; log: unknown[] };
     expect(parsed.checksum).toMatch(/^[0-9a-f]{64}$/);
     expect(parsed.seq).toBe(1);
-    expect(host.views(SEATS).publicView).toMatchObject({ n: 1 });
+    expect((await host.views(SEATS)).publicView).toMatchObject({ n: 1 });
     host.dispose();
   });
 
@@ -284,8 +286,227 @@ describe("ModHost", () => {
     expect(bigRes.ok).toBe(false);
     expect(bigRes).toMatchObject({ error: expect.stringMatching(/bytes|exceeds/i) });
     expect(host.failed).toBe(false);
-    expect(host.views(SEATS).seq).toBe(0);
+    expect((await host.views(SEATS)).seq).toBe(0);
     host.dispose();
+  });
+
+  it("persist+restore survives in-place state mutation", async () => {
+    const hostJs = `
+      export function createGame() {
+        return {
+          initialState() { return { n: 0 }; },
+          reduce(state) { state.n += 1; return state; },
+          getPublicView(state) { return { n: state.n }; },
+          getSeatView(state, seatId) { return { n: state.n, seatId }; },
+          getActions() { return []; },
+          getPrompt() { return ""; },
+        };
+      }
+    `;
+    const { host, persistPath } = await startHost(hostJs, "alias-seed");
+    await host.dispatch({ seatId: "p1", name: "inc", payload: {} }, ctx(1));
+    await host.dispatch({ seatId: "p1", name: "inc", payload: {} }, ctx(2));
+    await host.persist();
+    const aliasFile = JSON.parse(fs.readFileSync(persistPath, "utf8")) as {
+      snapshot: { n: number };
+      log: unknown[];
+    };
+    expect(aliasFile.snapshot).toEqual({ n: 0 });
+    expect(aliasFile.log).toHaveLength(2);
+    host.dispose();
+    const host2 = await ModHost.start({
+      roomId: "r1",
+      loaded: loadedFrom(hostJs),
+      persistPath,
+      seed: "ignored",
+      inProcess: true,
+    });
+    await host2.restoreFromDisk();
+    expect((await host2.views(SEATS)).publicView).toEqual({ n: 2 });
+    host2.dispose();
+  });
+
+  it("persist+restore uses the pre-reduce payload clone", async () => {
+    const hostJs = `
+      export function createGame() {
+        return {
+          initialState() { return { n: 0 }; },
+          reduce(state, intent) {
+            const add = intent.payload?.add ?? 0;
+            if (intent.payload && typeof intent.payload === "object") {
+              intent.payload.add = 99;
+            }
+            return { n: state.n + add };
+          },
+          getPublicView(state) { return { n: state.n }; },
+          getSeatView(state, seatId) { return { n: state.n, seatId }; },
+          getActions() { return []; },
+          getPrompt() { return ""; },
+        };
+      }
+    `;
+    const { host, persistPath } = await startHost(hostJs, "payload-seed");
+    const payload = { add: 1 };
+    await host.dispatch({ seatId: "p1", name: "inc", payload }, ctx(1));
+    payload.add = 5;
+    await host.persist();
+    const payloadFile = JSON.parse(fs.readFileSync(persistPath, "utf8")) as {
+      log: { payload: { add: number } }[];
+    };
+    expect(payloadFile.log[0]?.payload).toEqual({ add: 1 });
+    host.dispose();
+    const host2 = await ModHost.start({
+      roomId: "r1",
+      loaded: loadedFrom(hostJs),
+      persistPath,
+      seed: "ignored",
+      inProcess: true,
+    });
+    await host2.restoreFromDisk();
+    expect((await host2.views(SEATS)).publicView).toEqual({ n: 1 });
+    host2.dispose();
+  });
+
+  it("dispose does not mark failed", async () => {
+    const { host } = await startHost();
+    const seen: string[] = [];
+    host.onFail((e) => seen.push(e));
+    host.dispose();
+    expect(host.failed).toBe(false);
+    expect(seen).toEqual([]);
+
+    const persistPath = path.join(tmp(), "rooms", "r2.mod.json");
+    const workerHost = await ModHost.start({
+      roomId: "r2",
+      loaded: loadedFrom(COUNTER_HOST),
+      persistPath,
+      seed: "loop",
+      inProcess: false,
+    });
+    const workerSeen: string[] = [];
+    workerHost.onFail((e) => workerSeen.push(e));
+    workerHost.dispose();
+    expect(workerHost.failed).toBe(false);
+    expect(workerSeen).toEqual([]);
+  });
+
+  it("restoreFromDisk and resetToStart clear failed", async () => {
+    const { host } = await startHost();
+    await host.dispatch({ seatId: "p1", name: "inc", payload: {} }, ctx());
+    await host.persist();
+    const boom = await host.dispatch(
+      { seatId: "p1", name: "boom", payload: {} },
+      ctx(),
+    );
+    expect(boom.ok).toBe(false);
+    expect(host.failed).toBe(true);
+    await host.restoreFromDisk();
+    expect(host.failed).toBe(false);
+    expect(await host.dispatch({ seatId: "p1", name: "inc", payload: {} }, ctx())).toEqual({
+      ok: true,
+      seq: 2,
+    });
+
+    const boom2 = await host.dispatch(
+      { seatId: "p1", name: "boom", payload: {} },
+      ctx(),
+    );
+    expect(boom2.ok).toBe(false);
+    expect(host.failed).toBe(true);
+    await host.resetToStart(SEATS);
+    expect(host.failed).toBe(false);
+    expect((await host.views(SEATS)).seq).toBe(0);
+    expect(await host.dispatch({ seatId: "p1", name: "inc", payload: {} }, ctx())).toEqual({
+      ok: true,
+      seq: 1,
+    });
+    host.dispose();
+  });
+
+  it("inProcess:false uses the worker protocol as the only runtime", async () => {
+    const persistPath = path.join(tmp(), "rooms", "r-w.mod.json");
+    const host = await ModHost.start({
+      roomId: "r-w",
+      loaded: loadedFrom(COUNTER_HOST),
+      persistPath,
+      seed: "worker-seed",
+      inProcess: false,
+    });
+    expect(await host.dispatch({ seatId: "p1", name: "inc", payload: {} }, ctx(3))).toEqual({
+      ok: true,
+      seq: 1,
+    });
+    const views = await host.views(SEATS);
+    expect(views.publicView).toMatchObject({ n: 1 });
+    expect(views.seatViews.p1).toMatchObject({ seatId: "p1" });
+    await host.persist();
+    host.dispose();
+
+    const host2 = await ModHost.start({
+      roomId: "r-w",
+      loaded: loadedFrom(COUNTER_HOST),
+      persistPath,
+      seed: "ignored",
+      inProcess: false,
+    });
+    await host2.restoreFromDisk();
+    expect((await host2.views(SEATS)).publicView).toMatchObject({ n: 1 });
+    host2.dispose();
+  });
+});
+
+describe("sandbox and json limits", () => {
+  it("does not leak host Math.random or Date via prototypes", () => {
+    const game = loadGameFromSource(`
+      export function createGame() {
+        return {
+          initialState() { return { leaked: false }; },
+          reduce(state) {
+            let leaked = false;
+            try {
+              const proto = Object.getPrototypeOf(Math);
+              if (proto && typeof proto.random === "function") {
+                const n = proto.random();
+                if (typeof n === "number") leaked = true;
+              }
+            } catch {}
+            return { leaked };
+          },
+          getPublicView(state) { return state; },
+          getSeatView(state) { return state; },
+          getActions() { return []; },
+          getPrompt() { return ""; },
+        };
+      }
+    `);
+    const next = game.reduce({ leaked: false }, { seatId: "p1", name: "x", payload: {} }, {
+      rng: () => 0,
+      now: 1,
+      seats: [],
+      actor: { userId: "u", seatId: "p1" },
+    });
+    expect(next).toEqual({ leaked: false });
+    expect(() =>
+      loadGameFromSource(`
+        export function createGame() {
+          const _ = new Date();
+          return {
+            initialState() { return {}; },
+            reduce(s) { return s; },
+            getPublicView(s) { return s; },
+            getSeatView(s) { return s; },
+            getActions() { return []; },
+            getPrompt() { return ""; },
+          };
+        }
+      `),
+    ).toThrow(/Date/);
+  });
+
+  it("jsonDepth treats cycles as non-serializable", () => {
+    const cyclic: { self?: unknown } = {};
+    cyclic.self = cyclic;
+    expect(() => jsonDepth(cyclic)).toThrow(/JSON-serializable/);
   });
 });
 

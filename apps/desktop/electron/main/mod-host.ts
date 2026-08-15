@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { fork, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
@@ -12,6 +13,12 @@ import {
   type ReduceCtxIn,
 } from "./mod-game";
 import type { LoadedMod } from "./mod-package";
+import {
+  createWorkerState,
+  handleWorkerMessage,
+  type WorkerReply,
+  type WorkerRequest,
+} from "./mod-host-worker";
 
 export type { ModIntent, ModSeat };
 
@@ -35,11 +42,50 @@ export type ModHostStartOpts = {
 
 type FailCb = (err: string) => void;
 
-type UtilityChild = {
-  on: (event: "message" | "exit", cb: (...args: unknown[]) => void) => void;
+type PersistSlice = {
+  snapshot: unknown;
+  log: PersistLogEntry[];
+  seq: number;
+  rngState: number;
+};
+
+type HostBackend = {
+  views: (seats: ModSeat[]) => Promise<{
+    seq: number;
+    publicView: unknown;
+    seatViews: Record<string, unknown>;
+  }>;
+  actions: (seatId: string) => Promise<unknown>;
+  agentTurn: (seatId: string) => Promise<AgentTurn | null>;
+  reduce: (
+    intent: ModIntent,
+    ctx: ReduceCtxIn,
+  ) => Promise<{ seq: number }>;
+  persistState: () => Promise<PersistSlice>;
+  compact: () => Promise<void>;
+  restore: (opts: {
+    seed: string;
+    snapshot?: unknown;
+    log?: PersistLogEntry[];
+    rngState?: number;
+    seq?: number;
+  }) => Promise<void>;
+  reset: () => Promise<void>;
+  dispose: () => void;
+};
+
+type WorkerTransport = {
   postMessage: (msg: unknown) => void;
+  onMessage: (cb: (msg: unknown) => void) => void;
+  onExit: (cb: () => void) => void;
   kill: () => void;
 };
+
+const LIMIT_RE = /exceeds|JSON|depth|bytes|serializ/i;
+
+function isLimitError(error: string): boolean {
+  return LIMIT_RE.test(error);
+}
 
 function defaultInProcess(explicit?: boolean): boolean {
   if (explicit !== undefined) return explicit;
@@ -59,6 +105,12 @@ function tryUtilityProcess(): { fork: (script: string) => UtilityChild } | null 
     return null;
   }
 }
+
+type UtilityChild = {
+  on: (event: "message" | "exit", cb: (...args: unknown[]) => void) => void;
+  postMessage: (msg: unknown) => void;
+  kill: () => void;
+};
 
 function defaultWorkerScript(): string {
   return path.join(
@@ -94,6 +146,303 @@ function readPersist(filePath: string): ModPersistFile {
   return data as ModPersistFile;
 }
 
+function unwrapIpc(raw: unknown): unknown {
+  if (
+    raw &&
+    typeof raw === "object" &&
+    "data" in raw &&
+    !("ok" in raw) &&
+    !("type" in raw)
+  ) {
+    return (raw as { data: unknown }).data;
+  }
+  return raw;
+}
+
+function utilityTransport(child: UtilityChild): WorkerTransport {
+  return {
+    postMessage: (msg) => child.postMessage(msg),
+    onMessage: (cb) => {
+      child.on("message", (raw) => cb(unwrapIpc(raw)));
+    },
+    onExit: (cb) => {
+      child.on("exit", () => cb());
+    },
+    kill: () => child.kill(),
+  };
+}
+
+function childProcessTransport(child: ChildProcess): WorkerTransport {
+  return {
+    postMessage: (msg) => {
+      child.send(msg as object);
+    },
+    onMessage: (cb) => {
+      child.on("message", (raw) => cb(unwrapIpc(raw)));
+    },
+    onExit: (cb) => {
+      child.on("exit", () => cb());
+    },
+    kill: () => {
+      child.kill();
+    },
+  };
+}
+
+export function createLoopbackTransport(): WorkerTransport {
+  const state = createWorkerState();
+  let messageCb: ((msg: unknown) => void) | null = null;
+  let exitCb: (() => void) | null = null;
+  let dead = false;
+  return {
+    postMessage(msg) {
+      if (dead) return;
+      const reply = handleWorkerMessage(state, msg);
+      messageCb?.(reply);
+    },
+    onMessage(cb) {
+      messageCb = cb;
+    },
+    onExit(cb) {
+      exitCb = cb;
+    },
+    kill() {
+      dead = true;
+      exitCb?.();
+    },
+  };
+}
+
+class InProcessBackend implements HostBackend {
+  private runtime: ModRuntime;
+  private readonly hostJsSource: string;
+
+  constructor(hostJsSource: string, seed: string) {
+    this.hostJsSource = hostJsSource;
+    this.runtime = createModRuntime(hostJsSource, seed);
+  }
+
+  async views(seats: ModSeat[]) {
+    return this.runtime.views(seats);
+  }
+
+  async actions(seatId: string) {
+    return this.runtime.actions(seatId);
+  }
+
+  async agentTurn(seatId: string) {
+    return this.runtime.agentTurn(seatId);
+  }
+
+  async reduce(intent: ModIntent, ctx: ReduceCtxIn) {
+    return this.runtime.reduce(intent, ctx);
+  }
+
+  async persistState() {
+    return this.runtime.persistState();
+  }
+
+  async compact() {
+    this.runtime.compact();
+  }
+
+  async restore(opts: {
+    seed: string;
+    snapshot?: unknown;
+    log?: PersistLogEntry[];
+    rngState?: number;
+    seq?: number;
+  }) {
+    this.runtime = createModRuntime(this.hostJsSource, opts.seed, {
+      snapshot: opts.snapshot,
+      log: opts.log,
+      rngState: opts.rngState,
+      seq: opts.seq,
+    });
+  }
+
+  async reset() {
+    this.runtime.reset();
+  }
+
+  dispose() {}
+}
+
+class WorkerBackend implements HostBackend {
+  private readonly transport: WorkerTransport;
+  private readonly hostJsSource: string;
+  private seed: string;
+  private nextId = 1;
+  private readonly pending = new Map<
+    number,
+    {
+      resolve: (v: WorkerReply) => void;
+      reject: (e: Error) => void;
+    }
+  >();
+  private dead = false;
+
+  constructor(transport: WorkerTransport, hostJsSource: string, seed: string) {
+    this.transport = transport;
+    this.hostJsSource = hostJsSource;
+    this.seed = seed;
+    this.transport.onMessage((raw) => this.onReply(raw));
+  }
+
+  onExit(cb: () => void): void {
+    this.transport.onExit(() => {
+      this.dead = true;
+      for (const [, p] of this.pending) {
+        p.reject(new Error("mod worker exited"));
+      }
+      this.pending.clear();
+      cb();
+    });
+  }
+
+  async init(opts?: {
+    snapshot?: unknown;
+    log?: unknown[];
+    rngState?: number;
+    seq?: number;
+  }): Promise<void> {
+    const reply = await this.rpc({
+      type: "init",
+      hostJsSource: this.hostJsSource,
+      seed: this.seed,
+      snapshot: opts?.snapshot,
+      log: opts?.log,
+      rngState: opts?.rngState,
+      seq: opts?.seq,
+    });
+    if (!reply.ok) throw new Error(reply.error || "mod worker init failed");
+  }
+
+  async views(seats: ModSeat[]) {
+    const reply = await this.rpc({ type: "views", seats });
+    if (!reply.ok) throw new Error(reply.error || "views failed");
+    return {
+      seq: reply.seq ?? 0,
+      publicView: reply.publicView,
+      seatViews: reply.seatViews ?? {},
+    };
+  }
+
+  async actions(seatId: string) {
+    const reply = await this.rpc({
+      type: "query",
+      method: "actions",
+      seatId,
+    });
+    if (!reply.ok) throw new Error(reply.error || "actions failed");
+    return reply.result;
+  }
+
+  async agentTurn(seatId: string) {
+    const reply = await this.rpc({
+      type: "query",
+      method: "agentTurn",
+      seatId,
+    });
+    if (!reply.ok) throw new Error(reply.error || "agentTurn failed");
+    return (reply.result as AgentTurn | null) ?? null;
+  }
+
+  async reduce(intent: ModIntent, ctx: ReduceCtxIn) {
+    const reply = await this.rpc({ type: "reduce", intent, ctx });
+    if (!reply.ok) throw new Error(reply.error || "reduce failed");
+    return { seq: reply.seq ?? 0 };
+  }
+
+  async persistState(): Promise<PersistSlice> {
+    const reply = await this.rpc({ type: "persist" });
+    if (!reply.ok) throw new Error(reply.error || "persist failed");
+    return {
+      snapshot: reply.snapshot,
+      log: reply.log ?? [],
+      seq: reply.seq ?? 0,
+      rngState: reply.rngState ?? 0,
+    };
+  }
+
+  async compact() {
+    const reply = await this.rpc({ type: "compact" });
+    if (!reply.ok) throw new Error(reply.error || "compact failed");
+  }
+
+  async restore(opts: {
+    seed: string;
+    snapshot?: unknown;
+    log?: PersistLogEntry[];
+    rngState?: number;
+    seq?: number;
+  }) {
+    this.seed = opts.seed;
+    await this.init({
+      snapshot: opts.snapshot,
+      log: opts.log,
+      rngState: opts.rngState,
+      seq: opts.seq,
+    });
+  }
+
+  async reset() {
+    const reply = await this.rpc({ type: "reset" });
+    if (!reply.ok) throw new Error(reply.error || "reset failed");
+  }
+
+  dispose() {
+    this.dead = true;
+    for (const [, p] of this.pending) {
+      p.reject(new Error("disposed"));
+    }
+    this.pending.clear();
+    this.transport.kill();
+  }
+
+  private onReply(raw: unknown): void {
+    if (!raw || typeof raw !== "object") return;
+    const reply = raw as WorkerReply;
+    if (typeof reply.id !== "number") return;
+    const pending = this.pending.get(reply.id);
+    if (!pending) return;
+    this.pending.delete(reply.id);
+    pending.resolve(reply);
+  }
+
+  private rpc(msg: WorkerRequest): Promise<WorkerReply> {
+    if (this.dead) return Promise.reject(new Error("mod worker exited"));
+    const id = this.nextId++;
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+      try {
+        this.transport.postMessage({ ...msg, id });
+      } catch (err) {
+        this.pending.delete(id);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+  }
+}
+
+function openWorkerTransport(opts: {
+  workerScript?: string;
+}): WorkerTransport {
+  const script = opts.workerScript ?? defaultWorkerScript();
+  const utility = tryUtilityProcess();
+  if (utility) {
+    return utilityTransport(utility.fork(script));
+  }
+  if (opts.workerScript) {
+    const child = fork(opts.workerScript, [], { serialization: "json" });
+    return childProcessTransport(child);
+  }
+  if (process.env.VITEST) {
+    return createLoopbackTransport();
+  }
+  throw new Error("mod worker unavailable");
+}
+
 export class ModHost {
   readonly checksum: string;
   readonly roomId: string;
@@ -102,31 +451,21 @@ export class ModHost {
   private failReason = "";
   private disposed = false;
   private readonly persistPath: string;
-  private readonly hostJsSource: string;
-  private runtime: ModRuntime;
+  private readonly backend: HostBackend;
   private readonly failCbs: FailCb[] = [];
-  private child: UtilityChild | null = null;
 
   private constructor(opts: {
     roomId: string;
     loaded: LoadedMod;
     persistPath: string;
     seed: string;
-    runtime: ModRuntime;
-    child: UtilityChild | null;
+    backend: HostBackend;
   }) {
     this.roomId = opts.roomId;
     this.checksum = opts.loaded.checksum;
     this.persistPath = opts.persistPath;
-    this.hostJsSource = opts.loaded.hostJsSource;
     this._seed = opts.seed;
-    this.runtime = opts.runtime;
-    this.child = opts.child;
-    if (this.child) {
-      this.child.on("exit", () => {
-        this.markFailed("mod worker exited");
-      });
-    }
+    this.backend = opts.backend;
   }
 
   get seed(): string {
@@ -139,59 +478,55 @@ export class ModHost {
 
   static async start(opts: ModHostStartOpts): Promise<ModHost> {
     const seed = opts.seed ?? randomUUID();
-    const runtime = createModRuntime(opts.loaded.hostJsSource, seed);
-    let child: UtilityChild | null = null;
     const inProcess = defaultInProcess(opts.inProcess);
-    if (!inProcess) {
-      const utility = tryUtilityProcess();
-      const script = opts.workerScript ?? defaultWorkerScript();
-      if (utility && fs.existsSync(script)) {
-        try {
-          child = utility.fork(script);
-        } catch {
-          child = null;
-        }
-      }
+    if (inProcess) {
+      return new ModHost({
+        roomId: opts.roomId,
+        loaded: opts.loaded,
+        persistPath: opts.persistPath,
+        seed,
+        backend: new InProcessBackend(opts.loaded.hostJsSource, seed),
+      });
     }
+    const worker = new WorkerBackend(
+      openWorkerTransport({ workerScript: opts.workerScript }),
+      opts.loaded.hostJsSource,
+      seed,
+    );
     const host = new ModHost({
       roomId: opts.roomId,
       loaded: opts.loaded,
       persistPath: opts.persistPath,
       seed,
-      runtime,
-      child,
+      backend: worker,
     });
-    if (child) {
-      try {
-        child.postMessage({
-          type: "init",
-          hostJsSource: opts.loaded.hostJsSource,
-          seed,
-        });
-      } catch {
-        host.markFailed("mod worker init failed");
-      }
+    worker.onExit(() => host.handleWorkerExit());
+    try {
+      await worker.init();
+    } catch (err) {
+      host.dispose();
+      throw err instanceof Error ? err : new Error(String(err));
     }
     return host;
   }
 
-  views(seats: ModSeat[]): {
+  async views(seats: ModSeat[]): Promise<{
     seq: number;
     publicView: unknown;
     seatViews: Record<string, unknown>;
-  } {
+  }> {
     this.assertOpen();
-    return this.runtime.views(seats);
+    return this.backend.views(seats);
   }
 
-  actions(seatId: string): unknown {
+  async actions(seatId: string): Promise<unknown> {
     this.assertOpen();
-    return this.runtime.actions(seatId);
+    return this.backend.actions(seatId);
   }
 
-  agentTurn(seatId: string): AgentTurn | null {
+  async agentTurn(seatId: string): Promise<AgentTurn | null> {
     this.assertOpen();
-    return this.runtime.agentTurn(seatId);
+    return this.backend.agentTurn(seatId);
   }
 
   async dispatch(
@@ -201,11 +536,11 @@ export class ModHost {
     if (this.disposed) return { ok: false, error: "disposed" };
     if (this._failed) return { ok: false, error: this.failReason || "mod host failed" };
     try {
-      const result = this.runtime.reduce(intent, ctx);
+      const result = await this.backend.reduce(intent, ctx);
       return { ok: true, seq: result.seq };
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
-      if (/exceeds|JSON|depth|bytes/i.test(error)) {
+      if (isLimitError(error)) {
         return { ok: false, error };
       }
       this.markFailed(error);
@@ -213,8 +548,8 @@ export class ModHost {
     }
   }
 
-  persist(): void {
-    const state = this.runtime.persistState();
+  async persist(): Promise<void> {
+    const state = await this.backend.persistState();
     const data: ModPersistFile = {
       checksum: this.checksum,
       seed: this._seed,
@@ -224,7 +559,7 @@ export class ModHost {
       rngState: state.rngState,
     };
     writeJsonAtomic(this.persistPath, data);
-    this.runtime.compact();
+    await this.backend.compact();
   }
 
   async restoreFromDisk(): Promise<void> {
@@ -233,54 +568,31 @@ export class ModHost {
     if (data.checksum !== this.checksum) {
       throw new Error("persist checksum mismatch");
     }
-    this._seed = data.seed;
-    this.runtime = createModRuntime(this.hostJsSource, data.seed, {
+    await this.backend.restore({
+      seed: data.seed,
       snapshot: data.snapshot,
       log: data.log,
       rngState: data.rngState,
       seq: data.seq,
     });
-    if (this.child) {
-      try {
-        this.child.postMessage({
-          type: "init",
-          hostJsSource: this.hostJsSource,
-          seed: data.seed,
-          snapshot: data.snapshot,
-          log: data.log,
-          rngState: data.rngState,
-          seq: data.seq,
-        });
-      } catch {
-        this.markFailed("mod worker restore failed");
-      }
-    }
+    this._seed = data.seed;
+    this.clearFailed();
   }
 
   async resetToStart(_seats: ModSeat[]): Promise<void> {
     this.assertOpen();
-    this.runtime = createModRuntime(this.hostJsSource, this._seed);
-    if (this.child) {
-      try {
-        this.child.postMessage({
-          type: "init",
-          hostJsSource: this.hostJsSource,
-          seed: this._seed,
-        });
-      } catch {
-        this.markFailed("mod worker reset failed");
-      }
-    }
+    await this.backend.reset();
+    this.clearFailed();
   }
 
   dispose(): void {
+    if (this.disposed) return;
     this.disposed = true;
     try {
-      this.child?.kill();
+      this.backend.dispose();
     } catch {
       // ignore
     }
-    this.child = null;
   }
 
   onFail(cb: FailCb): void {
@@ -288,8 +600,18 @@ export class ModHost {
     if (this._failed) cb(this.failReason);
   }
 
+  private handleWorkerExit(): void {
+    if (this.disposed) return;
+    this.markFailed("mod worker exited");
+  }
+
   private assertOpen(): void {
     if (this.disposed) throw new Error("mod host disposed");
+  }
+
+  private clearFailed(): void {
+    this._failed = false;
+    this.failReason = "";
   }
 
   private markFailed(err: string): void {
