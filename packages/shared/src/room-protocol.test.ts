@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { hashModFiles } from "./mod-hash";
 import {
   decodeRoomInvite,
   encodeRoomInvite,
-  hashModFiles,
   looksLikeRoomInvite,
   makeRoomFrame,
   parseRoomFrame,

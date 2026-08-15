@@ -1,7 +1,5 @@
 /** Room protocol v1 — transport-agnostic JSON frames. */
 
-import { createHash } from "node:crypto";
-
 export const ROOM_PROTOCOL_VERSION = 1;
 export const ROOM_DEFAULT_PORT = 18765;
 export const MOD_HOST_API = 1;
@@ -186,14 +184,6 @@ export function shortChecksum(parts: string[]): string {
     h = Math.imul(h, 16777619);
   }
   return (h >>> 0).toString(16).padStart(8, "0").slice(0, 8);
-}
-
-/** SHA-256 of UTF-8 manifest.json then host.js (M3). */
-export function hashModFiles(manifestSource: string, hostJsSource: string): string {
-  return createHash("sha256")
-    .update(manifestSource, "utf8")
-    .update(hostJsSource, "utf8")
-    .digest("hex");
 }
 
 // ---------------------------------------------------------------------------
