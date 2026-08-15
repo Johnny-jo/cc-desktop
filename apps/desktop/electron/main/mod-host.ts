@@ -72,6 +72,8 @@ type HostBackend = {
   }) => Promise<void>;
   reset: () => Promise<void>;
   dispose: () => void;
+  isDead: () => boolean;
+  simulateCrash: () => void;
 };
 
 type WorkerTransport = {
@@ -207,6 +209,7 @@ export function createLoopbackTransport(): WorkerTransport {
       exitCb = cb;
     },
     kill() {
+      if (dead) return;
       dead = true;
       exitCb?.();
     },
@@ -266,12 +269,19 @@ class InProcessBackend implements HostBackend {
   }
 
   dispose() {}
+
+  isDead() {
+    return false;
+  }
+
+  simulateCrash() {}
 }
 
 class WorkerBackend implements HostBackend {
   private readonly transport: WorkerTransport;
   private readonly hostJsSource: string;
   private seed: string;
+  private initialized = false;
   private nextId = 1;
   private readonly pending = new Map<
     number,
@@ -316,6 +326,7 @@ class WorkerBackend implements HostBackend {
       seq: opts?.seq,
     });
     if (!reply.ok) throw new Error(reply.error || "mod worker init failed");
+    this.initialized = true;
   }
 
   async views(seats: ModSeat[]) {
@@ -387,8 +398,20 @@ class WorkerBackend implements HostBackend {
   }
 
   async reset() {
+    if (!this.initialized) {
+      await this.init();
+      return;
+    }
     const reply = await this.rpc({ type: "reset" });
     if (!reply.ok) throw new Error(reply.error || "reset failed");
+  }
+
+  isDead() {
+    return this.dead;
+  }
+
+  simulateCrash() {
+    this.transport.kill();
   }
 
   dispose() {
@@ -451,7 +474,10 @@ export class ModHost {
   private failReason = "";
   private disposed = false;
   private readonly persistPath: string;
-  private readonly backend: HostBackend;
+  private readonly hostJsSource: string;
+  private readonly workerScript?: string;
+  private readonly useWorker: boolean;
+  private backend: HostBackend;
   private readonly failCbs: FailCb[] = [];
 
   private constructor(opts: {
@@ -460,12 +486,18 @@ export class ModHost {
     persistPath: string;
     seed: string;
     backend: HostBackend;
+    hostJsSource: string;
+    workerScript?: string;
+    useWorker: boolean;
   }) {
     this.roomId = opts.roomId;
     this.checksum = opts.loaded.checksum;
     this.persistPath = opts.persistPath;
     this._seed = opts.seed;
     this.backend = opts.backend;
+    this.hostJsSource = opts.hostJsSource;
+    this.workerScript = opts.workerScript;
+    this.useWorker = opts.useWorker;
   }
 
   get seed(): string {
@@ -486,6 +518,9 @@ export class ModHost {
         persistPath: opts.persistPath,
         seed,
         backend: new InProcessBackend(opts.loaded.hostJsSource, seed),
+        hostJsSource: opts.loaded.hostJsSource,
+        workerScript: opts.workerScript,
+        useWorker: false,
       });
     }
     const worker = new WorkerBackend(
@@ -499,6 +534,9 @@ export class ModHost {
       persistPath: opts.persistPath,
       seed,
       backend: worker,
+      hostJsSource: opts.loaded.hostJsSource,
+      workerScript: opts.workerScript,
+      useWorker: true,
     });
     worker.onExit(() => host.handleWorkerExit());
     try {
@@ -537,9 +575,12 @@ export class ModHost {
     if (this._failed) return { ok: false, error: this.failReason || "mod host failed" };
     try {
       const result = await this.backend.reduce(intent, ctx);
+      if (this.disposed) return { ok: false, error: "disposed" };
       return { ok: true, seq: result.seq };
     } catch (err) {
+      if (this.disposed) return { ok: false, error: "disposed" };
       const error = err instanceof Error ? err.message : String(err);
+      if (error === "disposed") return { ok: false, error: "disposed" };
       if (isLimitError(error)) {
         return { ok: false, error };
       }
@@ -568,6 +609,7 @@ export class ModHost {
     if (data.checksum !== this.checksum) {
       throw new Error("persist checksum mismatch");
     }
+    this.replaceDeadWorker();
     await this.backend.restore({
       seed: data.seed,
       snapshot: data.snapshot,
@@ -581,6 +623,7 @@ export class ModHost {
 
   async resetToStart(_seats: ModSeat[]): Promise<void> {
     this.assertOpen();
+    this.replaceDeadWorker();
     await this.backend.reset();
     this.clearFailed();
   }
@@ -600,6 +643,30 @@ export class ModHost {
     if (this._failed) cb(this.failReason);
   }
 
+  simulateWorkerCrash(): void {
+    this.backend.simulateCrash();
+  }
+
+  private spawnWorker(): WorkerBackend {
+    const worker = new WorkerBackend(
+      openWorkerTransport({ workerScript: this.workerScript }),
+      this.hostJsSource,
+      this._seed,
+    );
+    worker.onExit(() => this.handleWorkerExit());
+    return worker;
+  }
+
+  private replaceDeadWorker(): void {
+    if (!this.useWorker || !this.backend.isDead()) return;
+    try {
+      this.backend.dispose();
+    } catch {
+      // ignore
+    }
+    this.backend = this.spawnWorker();
+  }
+
   private handleWorkerExit(): void {
     if (this.disposed) return;
     this.markFailed("mod worker exited");
@@ -615,7 +682,7 @@ export class ModHost {
   }
 
   private markFailed(err: string): void {
-    if (this._failed) return;
+    if (this.disposed || this._failed) return;
     this._failed = true;
     this.failReason = err;
     for (const cb of this.failCbs) {
@@ -627,3 +694,9 @@ export class ModHost {
     }
   }
 }
+
+export const __testing = {
+  simulateWorkerCrash(host: ModHost): void {
+    host.simulateWorkerCrash();
+  },
+};

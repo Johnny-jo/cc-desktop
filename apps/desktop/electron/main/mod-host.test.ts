@@ -4,7 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { hashModFiles } from "@claude-desktop/shared/mod-hash";
 import { jsonDepth, loadGameFromSource } from "./mod-game";
-import { ModHost, type ModSeat } from "./mod-host";
+import { ModHost, __testing, type ModSeat } from "./mod-host";
 import {
   createWorkerState,
   handleWorkerMessage,
@@ -452,6 +452,64 @@ describe("ModHost", () => {
     await host2.restoreFromDisk();
     expect((await host2.views(SEATS)).publicView).toMatchObject({ n: 1 });
     host2.dispose();
+  });
+
+  it("respawns the worker on restoreFromDisk after crash", async () => {
+    const persistPath = path.join(tmp(), "rooms", "r-crash.mod.json");
+    const host = await ModHost.start({
+      roomId: "r-crash",
+      loaded: loadedFrom(COUNTER_HOST),
+      persistPath,
+      seed: "crash-seed",
+      inProcess: false,
+    });
+    await host.dispatch({ seatId: "p1", name: "inc", payload: {} }, ctx(1));
+    await host.persist();
+    const seen: string[] = [];
+    host.onFail((e) => seen.push(e));
+    __testing.simulateWorkerCrash(host);
+    expect(host.failed).toBe(true);
+    expect(seen.some((e) => /exited/.test(e))).toBe(true);
+    expect(
+      await host.dispatch({ seatId: "p1", name: "inc", payload: {} }, ctx(2)),
+    ).toMatchObject({ ok: false });
+    await host.restoreFromDisk();
+    expect(host.failed).toBe(false);
+    expect((await host.views(SEATS)).publicView).toMatchObject({ n: 1 });
+    expect(
+      await host.dispatch({ seatId: "p1", name: "inc", payload: {} }, ctx(3)),
+    ).toEqual({ ok: true, seq: 2 });
+    host.dispose();
+  });
+
+  it("dispose racing dispatch does not mark failed", async () => {
+    const { host } = await startHost();
+    const seen: string[] = [];
+    host.onFail((e) => seen.push(e));
+    const pending = host.dispatch({ seatId: "p1", name: "inc", payload: {} }, ctx());
+    host.dispose();
+    expect(await pending).toEqual({ ok: false, error: "disposed" });
+    expect(host.failed).toBe(false);
+    expect(seen).toEqual([]);
+
+    const persistPath = path.join(tmp(), "rooms", "r-race.mod.json");
+    const workerHost = await ModHost.start({
+      roomId: "r-race",
+      loaded: loadedFrom(COUNTER_HOST),
+      persistPath,
+      seed: "race",
+      inProcess: false,
+    });
+    const workerSeen: string[] = [];
+    workerHost.onFail((e) => workerSeen.push(e));
+    const workerPending = workerHost.dispatch(
+      { seatId: "p1", name: "inc", payload: {} },
+      ctx(),
+    );
+    workerHost.dispose();
+    expect(await workerPending).toEqual({ ok: false, error: "disposed" });
+    expect(workerHost.failed).toBe(false);
+    expect(workerSeen).toEqual([]);
   });
 });
 
