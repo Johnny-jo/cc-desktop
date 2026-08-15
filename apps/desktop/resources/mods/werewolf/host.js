@@ -68,6 +68,12 @@ function firstLivingAgent(state) {
   return null;
 }
 
+function pendingSeerId(state) {
+  if (state.seerDone) return null;
+  const seers = livingOf(state, "seer");
+  return seers.length ? seers[0] : null;
+}
+
 function pushLine(state, line) {
   state.lines = state.lines.concat([line]).slice(-24);
 }
@@ -276,6 +282,8 @@ function onNext(state, actor) {
     return next;
   }
   if (state.phase === "night_seer") {
+    const pending = pendingSeerId(state);
+    if (pending && actor !== pending) return state;
     const next = clone(state);
     applyNightAndContinue(next);
     return next;
@@ -459,15 +467,18 @@ function getActions(state, seatId) {
   }
   if (state.phase === "night_seer") {
     const actions = {};
-    if (role === "seer" && !state.seerDone) {
+    const pending = pendingSeerId(state);
+    if (pending === seatId) {
       const targets = targetEnum(state, seatId);
       actions.night_seer = actionSchema(
         { targetSeatId: { type: "string", enum: targets } },
         ["targetSeatId"],
         `Inspect a living player: ${labelList(state, targets)}`,
       );
+      actions.next = actionSchema({}, [], "End the night (silent / no inspect)");
+    } else if (!pending) {
+      actions.next = actionSchema({}, [], "End the night (silent / no inspect)");
     }
-    actions.next = actionSchema({}, [], "End the night (silent / no inspect)");
     return actions;
   }
   if (state.phase === "resolve") {
@@ -496,8 +507,10 @@ function getPrompt(state, seatId) {
     return "You are a wolf. Choose a living player to kill.";
   }
   if (state.phase === "night_seer") {
-    if (role === "seer") return "You are the seer. Inspect one living player, or stay silent.";
-    if (seatId === firstLivingAgent(state)) {
+    if (pendingSeerId(state) === seatId) {
+      return "You are the seer. Inspect one living player, or stay silent.";
+    }
+    if (!pendingSeerId(state) && seatId === firstLivingAgent(state)) {
       return "Night continues. Advance when the silent night is done.";
     }
   }
@@ -514,7 +527,8 @@ function shouldPromptAgent(state, seatId) {
     return role === "wolf" && !state.votes[seatId];
   }
   if (state.phase === "night_seer") {
-    if (role === "seer" && !state.seerDone) return true;
+    const pending = pendingSeerId(state);
+    if (pending) return seatId === pending;
     return seatId === firstLivingAgent(state);
   }
   if (state.phase === "day_talk" || state.phase === "resolve") {

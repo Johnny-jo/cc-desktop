@@ -447,16 +447,54 @@ describe("official werewolf pack", () => {
     );
     expect(snapOf(runtime).phase).toBe("night_seer");
     expect(runtime.agentTurn(seerId)?.should).toBe(true);
-    const speaker = firstLivingAgentFrom(snapOf(runtime), seats);
     for (const seat of seats) {
-      if (seat.id === seerId) continue;
-      if (seat.id === speaker) {
-        expect(runtime.agentTurn(seat.id)?.should).toBe(true);
-      } else {
-        expect(runtime.agentTurn(seat.id)).toBeNull();
-      }
+      if (seat.id !== seerId) expect(runtime.agentTurn(seat.id)).toBeNull();
     }
     host.dispose();
+  });
+
+  it("does not latch communal next while a living seer still acts", () => {
+    const seats = WEREWOLF_AGENTS;
+    let found: { seed: string; seerId: string; villagerId: string } | null =
+      null;
+    for (let i = 0; i < 40 && !found; i++) {
+      const seed = `seer-vs-speaker-${i}`;
+      const peek = startWerewolfRuntime(seats, seed);
+      const roles = roleMap(peek);
+      const seerId = Object.keys(roles).find((id) => roles[id] === "seer");
+      const villagerId = Object.keys(roles).find(
+        (id) => roles[id] === "villager" && id !== seats[0]!.id,
+      );
+      if (seerId && villagerId && seerId !== seats[0]!.id) {
+        found = { seed, seerId, villagerId };
+      }
+    }
+    expect(found).toBeTruthy();
+    const { seed, seerId, villagerId } = found!;
+
+    const live = playToAfterWolfNight(seats, seed, villagerId);
+    expect(live.reachedNight).toBe(true);
+    const speaker = firstLivingAgentFrom(snapOf(live.runtime), seats);
+    expect(speaker).toBeTruthy();
+    expect(speaker).not.toBe(seerId);
+    expect(live.runtime.agentTurn(seerId)?.should).toBe(true);
+    expect(live.runtime.agentTurn(speaker!)).toBeNull();
+    live.runtime.reduce(
+      { seatId: speaker!, name: "next", payload: {} },
+      ctxFor(seats, speaker!, 80),
+    );
+    expect(snapOf(live.runtime).phase).toBe("night_seer");
+
+    const dead = playToAfterWolfNight(seats, seed, seerId);
+    expect(dead.reachedNight).toBe(true);
+    const deadSpeaker = firstLivingAgentFrom(snapOf(dead.runtime), seats);
+    expect(deadSpeaker).toBeTruthy();
+    expect(dead.runtime.agentTurn(deadSpeaker!)?.should).toBe(true);
+    for (const seat of seats) {
+      if (seat.id !== deadSpeaker) {
+        expect(dead.runtime.agentTurn(seat.id)).toBeNull();
+      }
+    }
   });
 
   it("exiling the last wolf ends the game without publishing roles", () => {
