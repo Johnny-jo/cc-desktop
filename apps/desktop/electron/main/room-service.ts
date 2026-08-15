@@ -25,11 +25,14 @@ import type { SettingsStore } from "./settings-store";
 import type { RoomArchive, StoredRoom } from "./room-archive";
 import { ModHost, type ModSeat } from "./mod-host";
 import {
+  hasModCache,
+  listModPacks,
   loadModDir,
   readModBytes,
   writeModBytes,
   writeModCache,
   type LoadedMod,
+  type ModPackInfo,
 } from "./mod-package";
 import {
   getModPersistPath,
@@ -41,7 +44,9 @@ import {
   illegalActionMessage,
   parseRoomModAct,
   ROOM_MOD_PREFIX,
+  toModActionMap,
   tryCreateRoomModMcp,
+  type ModActionSchema,
 } from "./room-mod-agent";
 
 const MOD_CHECKSUM_RE = /^[0-9a-f]{64}$/;
@@ -92,6 +97,7 @@ type RoomRecord = {
   modSeatViews?: Record<string, unknown>;
   modSeq?: number;
   modFail?: string;
+  modActionsBySeat?: Record<string, Record<string, ModActionSchema>>;
   intentChain?: Promise<unknown>;
 };
 
@@ -180,6 +186,8 @@ export class RoomService {
   private readonly settings: SettingsStore;
   private readonly archive: RoomArchive | null;
   private readonly userDataDir: string;
+  private readonly isPackaged: boolean;
+  private readonly resourcesPath?: string;
 
   constructor(opts: {
     getWindow: () => BrowserWindow | null;
@@ -187,17 +195,33 @@ export class RoomService {
     settings: SettingsStore;
     archive?: RoomArchive | null;
     userDataDir?: string;
+    isPackaged?: boolean;
+    resourcesPath?: string;
   }) {
     this.getWindow = opts.getWindow;
     this.sessions = opts.sessions;
     this.settings = opts.settings;
     this.archive = opts.archive ?? null;
     this.userDataDir = opts.userDataDir ?? os.tmpdir();
+    this.isPackaged = opts.isPackaged ?? false;
+    this.resourcesPath = opts.resourcesPath;
     this.hydrateFromArchive();
   }
 
   private pathEnv(): RuntimePathEnv {
-    return { isPackaged: false, userDataDir: this.userDataDir };
+    return {
+      isPackaged: this.isPackaged,
+      userDataDir: this.userDataDir,
+      ...(this.resourcesPath ? { resourcesPath: this.resourcesPath } : {}),
+    };
+  }
+
+  listMods(): { mods: ModPackInfo[] } {
+    return { mods: listModPacks(this.pathEnv()) };
+  }
+
+  hasMod(checksum: string): { ok: true; has: boolean } {
+    return { ok: true, has: hasModCache(this.pathEnv(), checksum) };
   }
 
   private hydrateFromArchive(): void {
@@ -1201,10 +1225,17 @@ export class RoomService {
           seq?: number;
           seatId?: string;
           seatView?: unknown;
+          actions?: unknown;
         };
         r.modSeq = p.seq ?? r.modSeq;
         if (p.seatId) {
           r.modSeatViews = { ...(r.modSeatViews ?? {}), [p.seatId]: p.seatView };
+          if (p.actions !== undefined) {
+            r.modActionsBySeat = {
+              ...(r.modActionsBySeat ?? {}),
+              [p.seatId]: toModActionMap(p.actions),
+            };
+          }
         }
         this.emit(r);
         return;
@@ -1691,6 +1722,9 @@ export class RoomService {
       this.reply(ws, r, "welcome", this.snapshot(r));
       this.sendModViewsTo(r, ws, userId);
       this.pushState(r);
+      if (r.modHost && r.modStarted && !r.modEnded) {
+        void this.publishViews(r);
+      }
       return;
     }
 
@@ -1993,25 +2027,31 @@ export class RoomService {
         seatViews?: Record<string, unknown>;
         seq?: number;
         fail?: string;
+        actions?: Record<string, ModActionSchema>;
       };
     } = {
       roomId: r.roomId,
       room: this.snapshot(r),
     };
+    const offer = r.modOffer ?? this.buildOffer(r);
     if (
       r.modChecksum ||
-      r.modOffer ||
+      offer.checksum ||
       r.modPublicView !== undefined ||
       r.modFail
     ) {
       const seatViews = this.localSeatViews(r);
+      const preferredId = this.preferredSeatId(r, seatViews);
       payload.mod = {
-        offer: r.modOffer ?? this.buildOffer(r),
+        offer,
         publicView: r.modPublicView,
-        seatView: this.preferredSeatView(r, seatViews),
+        seatView: preferredId ? seatViews[preferredId] : undefined,
         seatViews,
         seq: r.modSeq,
         ...(r.modFail ? { fail: r.modFail } : {}),
+        ...(preferredId && r.modActionsBySeat?.[preferredId]
+          ? { actions: r.modActionsBySeat[preferredId] }
+          : {}),
       };
     }
     this.safeSend(IPC.roomEvent, payload);
@@ -2245,6 +2285,17 @@ export class RoomService {
     r.modSeq = views.seq;
     r.modPublicView = views.publicView;
     r.modSeatViews = views.seatViews;
+    const actionsBySeat: Record<string, Record<string, ModActionSchema>> = {};
+    for (const seat of r.seats) {
+      const target = seat.takenOverBy || seat.occupantUserId;
+      if (!target) continue;
+      try {
+        actionsBySeat[seat.id] = toModActionMap(await r.modHost.actions(seat.id));
+      } catch {
+        // skip
+      }
+    }
+    r.modActionsBySeat = actionsBySeat;
     this.broadcast(r, "mod.patch", {
       seq: views.seq,
       publicView: views.publicView,
@@ -2258,6 +2309,7 @@ export class RoomService {
         seq: views.seq,
         seatId: seat.id,
         seatView,
+        ...(actionsBySeat[seat.id] ? { actions: actionsBySeat[seat.id] } : {}),
       });
     }
     this.emit(r);
@@ -2278,6 +2330,9 @@ export class RoomService {
         seq: r.modSeq ?? 0,
         seatId: seat.id,
         seatView,
+        ...(r.modActionsBySeat?.[seat.id]
+          ? { actions: r.modActionsBySeat[seat.id] }
+          : {}),
       });
     }
   }
@@ -2310,14 +2365,14 @@ export class RoomService {
     return out;
   }
 
-  private preferredSeatView(
+  private preferredSeatId(
     r: RoomRecord,
     views: Record<string, unknown>,
-  ): unknown {
+  ): string | undefined {
     const taken = r.seats.find((s) => s.takenOverBy === r.localUserId);
-    if (taken && views[taken.id] !== undefined) return views[taken.id];
+    if (taken && views[taken.id] !== undefined) return taken.id;
     const ids = Object.keys(views);
-    return ids.length ? views[ids[0]!] : undefined;
+    return ids[0];
   }
 
   private applyGuestSnapshot(r: RoomRecord, snap: RoomSnapshot): void {
@@ -2345,6 +2400,10 @@ export class RoomService {
     r.modChecksum = "";
     r.requireMods = false;
     r.modFail = undefined;
+    r.modPublicView = undefined;
+    r.modSeatViews = undefined;
+    r.modActionsBySeat = undefined;
+    r.modSeq = 0;
     r.modOffer = this.buildOffer(r);
   }
 

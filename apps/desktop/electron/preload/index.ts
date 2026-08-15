@@ -494,6 +494,22 @@ const desktop = {
       ok: boolean;
       error?: string;
     }>,
+  listRoomMods: () =>
+    ipcRenderer.invoke(IPC.roomListMods) as Promise<{
+      mods: Array<{
+        id: string;
+        name: string;
+        version: string;
+        checksum: string;
+        packDir: string;
+        source: "bundled" | "cache";
+      }>;
+    }>,
+  hasRoomMod: (checksum: string) =>
+    ipcRenderer.invoke(IPC.roomHasMod, { checksum }) as Promise<{
+      ok: boolean;
+      has: boolean;
+    }>,
 
   /** List installed skills (user + project scope). */
   listSkills: () =>

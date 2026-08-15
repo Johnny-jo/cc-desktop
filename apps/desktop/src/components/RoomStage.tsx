@@ -12,6 +12,8 @@ import {
   useRoomStore,
 } from "../state/room-store";
 import { getDesktop, hasDesktopApi } from "../lib/desktop-api";
+import { formatModBadge, offerHasMod } from "../lib/room-mod-ui";
+import { ModPlayPanel } from "./ModPlayPanel";
 
 function SeatAvatar({ kind }: { kind: "human" | "agent" }) {
   if (kind === "agent") {
@@ -38,6 +40,7 @@ export function RoomStage() {
   const rooms = useRoomStore((s) => s.rooms);
   const reconnectNote = useRoomStore((s) => s.reconnectNote);
   const lastError = useRoomStore((s) => s.lastError);
+  const mod = useRoomStore((s) => s.mod);
   const settings = useAppStore((s) => s.settings);
   const [draft, setDraft] = useState("");
   const [inviteOpen, setInviteOpen] = useState(false);
@@ -74,6 +77,18 @@ export function RoomStage() {
   const myRole = rooms.find((r) => r.roomId === room.roomId)?.role ?? "member";
   const canHost = myRole === "host";
   const myUserId = room.localUserId;
+  const modActive = Boolean(
+    room.modChecksum ||
+      offerHasMod(mod?.offer) ||
+      mod?.publicView !== undefined ||
+      mod?.fail,
+  );
+  const stageBadge = formatModBadge(
+    mod?.offer ??
+      (room.modChecksum
+        ? { id: "", version: "", checksum: room.modChecksum }
+        : null),
+  );
 
   const onSend = async () => {
     const t = draft.trim();
@@ -138,6 +153,11 @@ export function RoomStage() {
           <span className="room-meta">
             {room.memberCount} 人 · {room.status === "open" ? "开着" : "已结束"}
           </span>
+          {stageBadge ? (
+            <span className="room-mod-badge" title={stageBadge}>
+              {stageBadge}
+            </span>
+          ) : null}
         </div>
         <div className="room-stage-actions">
           {canHost && room.status === "open" ? (
@@ -179,6 +199,8 @@ export function RoomStage() {
       </header>
 
       {reconnectNote ? <div className="room-reconnect-banner">{reconnectNote}</div> : null}
+
+      {modActive ? <ModPlayPanel role={myRole} seats={room.seats} /> : null}
 
       {inviteOpen ? (
         <div className="room-invite-bar">

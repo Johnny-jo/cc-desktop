@@ -394,6 +394,8 @@ function bootstrap() {
     settings,
     archive: roomArchive,
     userDataDir,
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
   });
 
   const applyCliModelToDesktop = (model: string) => {

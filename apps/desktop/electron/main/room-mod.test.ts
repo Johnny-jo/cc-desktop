@@ -118,6 +118,7 @@ type RoomEvent = {
     seatViews?: Record<string, unknown>;
     seq?: number;
     fail?: string;
+    actions?: Record<string, { params?: unknown; hint?: string }>;
   };
 };
 
@@ -443,6 +444,8 @@ describe("room mod handshake + play loop", () => {
     expect(hostView?.secret).not.toBe(guestView?.secret);
     expect(hostMod?.seatViews?.[guestSeat!.id]).toBeUndefined();
     expect(guestMod?.seatViews?.[hostSeat!.id]).toBeUndefined();
+    expect(hostMod?.actions).toHaveProperty("inc");
+    expect(guestMod?.actions).toHaveProperty("inc");
 
     const snap = rooms.get(room.roomId)!;
     expect(snap).not.toHaveProperty("state");

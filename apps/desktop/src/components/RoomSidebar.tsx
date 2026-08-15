@@ -1,18 +1,31 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   ROOM_DEFAULT_PORT,
   decodeRoomInvite,
   looksLikeRoomInvite,
+  type ModOfferPayload,
 } from "@claude-desktop/shared";
+import {
+  formatModBadge,
+  formatModSize,
+  joinPrimaryAction,
+  offerHasMod,
+} from "../lib/room-mod-ui";
 import {
   closeRoomDialog,
   createRoom,
+  enableRoomMod,
+  fetchRoomMod,
+  hasRoomMod,
   joinRoom,
   leaveActiveRoom,
+  listRoomMods,
   openRoomDialog,
+  peekRoom,
   selectRoom,
   useRoomStore,
+  type RoomModPack,
 } from "../state/room-store";
 
 export function RoomSidebar() {
@@ -32,20 +45,116 @@ export function RoomSidebar() {
   const [host, setHost] = useState("");
   const [joinPassword, setJoinPassword] = useState("");
   const [joinPort, setJoinPort] = useState(String(ROOM_DEFAULT_PORT));
+  const [inviteHosts, setInviteHosts] = useState<string[]>([]);
+  const [inviteChecksum, setInviteChecksum] = useState("");
+  const [offer, setOffer] = useState<ModOfferPayload | null>(null);
+  const [cacheHit, setCacheHit] = useState<boolean | undefined>(undefined);
+  const [peeking, setPeeking] = useState(false);
+  const [progress, setProgress] = useState<string | null>(null);
+  const [packs, setPacks] = useState<RoomModPack[]>([]);
+  const [packDir, setPackDir] = useState("");
 
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const peekGen = useRef(0);
+  const joinGen = useRef(0);
+
+  const abortOps = () => {
+    peekGen.current += 1;
+    joinGen.current += 1;
+    setBusy(false);
+    setPeeking(false);
+    setProgress(null);
+  };
+
+  const dismissDialog = () => {
+    abortOps();
+    closeRoomDialog();
+  };
 
   useEffect(() => {
     if (!dialog) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !busy) closeRoomDialog();
+      if (e.key === "Escape") dismissDialog();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [dialog, busy]);
+  }, [dialog]);
+
+  useEffect(() => {
+    if (dialog !== "create") return;
+    let cancelled = false;
+    void listRoomMods().then((list) => {
+      if (!cancelled) setPacks(list);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [dialog]);
+
+  useEffect(() => {
+    if (dialog !== "join") return;
+    let h = host.trim();
+    let p = Number(joinPort) || ROOM_DEFAULT_PORT;
+    let extras = inviteHosts;
+    const secretRaw = secret.trim();
+    if (looksLikeRoomInvite(secretRaw)) {
+      try {
+        const inv = decodeRoomInvite(secretRaw);
+        h = inv.host;
+        p = inv.port;
+        extras = inv.hosts ?? [];
+      } catch {
+        return;
+      }
+    } else if (h.includes(":") && !h.includes("::")) {
+      const [hh, pp] = h.split(":");
+      if (hh && pp && /^\d+$/.test(pp)) {
+        h = hh;
+        p = Number(pp);
+      }
+    }
+    if (!h) {
+      setOffer(null);
+      setCacheHit(undefined);
+      setPeeking(false);
+      return;
+    }
+    const candidates = [h, ...extras.filter((x) => x && x !== h)];
+    const gen = ++peekGen.current;
+    setPeeking(true);
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        let found: ModOfferPayload | null = null;
+        for (const candidate of candidates) {
+          if (gen !== peekGen.current) return;
+          const res = await peekRoom({ host: candidate, port: p });
+          if (gen !== peekGen.current) return;
+          if (res.ok) {
+            found = res.offer ?? null;
+            break;
+          }
+        }
+        if (gen !== peekGen.current) return;
+        setOffer(found);
+        const checksum = found?.checksum || inviteChecksum;
+        if (checksum) {
+          const has = await hasRoomMod(checksum);
+          if (gen !== peekGen.current) return;
+          setCacheHit(has);
+        } else {
+          setCacheHit(undefined);
+        }
+        setPeeking(false);
+      })();
+    }, 200);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [dialog, host, joinPort, secret, inviteHosts, inviteChecksum]);
 
   const resetForms = () => {
+    abortOps();
     setName("");
     setPassword("");
     setPort(String(ROOM_DEFAULT_PORT));
@@ -53,10 +162,17 @@ export function RoomSidebar() {
     setHost("");
     setJoinPassword("");
     setJoinPort(String(ROOM_DEFAULT_PORT));
+    setInviteHosts([]);
+    setInviteChecksum("");
+    setOffer(null);
+    setCacheHit(undefined);
+    setPacks([]);
+    setPackDir("");
     setErr(null);
   };
 
   const onCreate = async () => {
+    const gen = ++joinGen.current;
     setBusy(true);
     setErr(null);
     const p = Number(port) || ROOM_DEFAULT_PORT;
@@ -66,24 +182,38 @@ export function RoomSidebar() {
       password: password || undefined,
       port: p,
     });
-    setBusy(false);
+    if (gen !== joinGen.current) return;
     if (!res.ok) {
+      setBusy(false);
       setErr(res.error ?? "创建失败");
       return;
     }
+    if (packDir && res.roomId) {
+      const enabled = await enableRoomMod(res.roomId, packDir);
+      if (gen !== joinGen.current) return;
+      if (!enabled.ok) {
+        setBusy(false);
+        setErr(enabled.error ?? "启用模组失败");
+        return;
+      }
+    }
+    setBusy(false);
     resetForms();
     closeRoomDialog();
   };
 
-  const onJoin = async () => {
-    setBusy(true);
-    setErr(null);
-
+  const resolveJoinTarget = (): {
+    host: string;
+    port: number;
+    password?: string;
+    checksum?: string;
+    candidates: string[];
+  } | { error: string } => {
     let h = host.trim();
     let p = Number(joinPort) || ROOM_DEFAULT_PORT;
     let pwd = joinPassword || undefined;
-    let modChecksum: string | undefined;
-    let hosts: string[] | undefined;
+    let checksum = offer?.checksum || inviteChecksum || undefined;
+    let hosts = inviteHosts;
 
     const secretRaw = secret.trim() || host.trim();
     if (looksLikeRoomInvite(secretRaw)) {
@@ -92,15 +222,13 @@ export function RoomSidebar() {
         h = inv.host;
         p = inv.port;
         pwd = inv.password || pwd;
-        modChecksum = inv.modChecksum;
-        hosts = inv.hosts;
+        checksum = inv.modChecksum || checksum;
+        hosts = inv.hosts ?? [];
         setHost(inv.host);
         setJoinPort(String(inv.port));
         if (inv.password) setJoinPassword(inv.password);
       } catch (e) {
-        setBusy(false);
-        setErr(e instanceof Error ? e.message : "邀请码无效");
-        return;
+        return { error: e instanceof Error ? e.message : "邀请码无效" };
       }
     } else if (h.includes(":") && !h.includes("::")) {
       const [hh, pp] = h.split(":");
@@ -111,24 +239,65 @@ export function RoomSidebar() {
       }
     }
 
-    if (!h) {
+    if (!h) return { error: "请粘贴邀请码，或填写房主 IP" };
+    const candidates = [h, ...hosts.filter((x) => x && x !== h)];
+    return { host: h, port: p, password: pwd, checksum, candidates };
+  };
+
+  const onJoin = async () => {
+    const gen = ++joinGen.current;
+    setBusy(true);
+    setErr(null);
+    setProgress(null);
+
+    const target = resolveJoinTarget();
+    if ("error" in target) {
       setBusy(false);
-      setErr("请粘贴邀请码，或填写房主 IP");
+      setErr(target.error);
       return;
     }
 
-    const candidates = [h, ...(hosts ?? []).filter((x) => x && x !== h)];
+    const primary = joinPrimaryAction({
+      inviteChecksum: target.checksum,
+      offer,
+      cacheHit,
+    });
+    const needSync = primary === "sync-join";
+    const checksum = target.checksum || offer?.checksum;
+
     let lastError = "";
-    for (const candidate of candidates) {
+    for (const candidate of target.candidates) {
+      if (gen !== joinGen.current) return;
+      if (needSync) {
+        if (!checksum) {
+          lastError = "缺少模组校验码";
+          break;
+        }
+        setProgress("同步中…");
+        const fetched = await fetchRoomMod({
+          host: candidate,
+          port: target.port,
+          checksum,
+        });
+        if (gen !== joinGen.current) return;
+        if (!fetched.ok) {
+          lastError = fetched.error ?? "同步失败";
+          continue;
+        }
+      }
+      if (gen !== joinGen.current) return;
+      setProgress(needSync ? "加入中…" : null);
       const res = await joinRoom({
         host: candidate,
-        port: p,
-        password: pwd,
-        modChecksum,
-        hosts: candidates,
+        port: target.port,
+        password: target.password,
+        modChecksum: checksum,
+        hosts: target.candidates,
       });
+      if (gen !== joinGen.current) return;
       if (res.ok) {
         setBusy(false);
+        setProgress(null);
         resetForms();
         closeRoomDialog();
         return;
@@ -136,6 +305,7 @@ export function RoomSidebar() {
       lastError = res.error ?? "加入失败";
     }
     setBusy(false);
+    setProgress(null);
     setErr(lastError || "加入失败");
   };
 
@@ -257,9 +427,7 @@ export function RoomSidebar() {
             <div
               className="room-modal-overlay"
               role="presentation"
-              onClick={() => {
-                if (!busy) closeRoomDialog();
-              }}
+              onClick={() => dismissDialog()}
             >
           <div
             className="room-modal"
@@ -272,8 +440,7 @@ export function RoomSidebar() {
               <button
                 type="button"
                 className="btn btn-ghost btn-sm"
-                disabled={busy}
-                onClick={() => closeRoomDialog()}
+                onClick={() => dismissDialog()}
               >
                 ×
               </button>
@@ -307,6 +474,22 @@ export function RoomSidebar() {
                     onChange={(e) => setPort(e.target.value)}
                   />
                 </label>
+                <label className="settings-field">
+                  玩法模组（可选）
+                  <select
+                    className="select"
+                    value={packDir}
+                    onChange={(e) => setPackDir(e.target.value)}
+                  >
+                    <option value="">不使用模组</option>
+                    {packs.map((pack) => (
+                      <option key={`${pack.source}:${pack.packDir}`} value={pack.packDir}>
+                        {pack.name} ({pack.id}@{pack.version}
+                        {pack.source === "cache" ? " · 缓存" : ""})
+                      </option>
+                    ))}
+                  </select>
+                </label>
                 <p className="settings-hint">
                   创建后本机在 0.0.0.0:端口 监听。对方用「邀请码」加入；防火墙需放行该
                   TCP 端口。
@@ -330,10 +513,20 @@ export function RoomSidebar() {
                           setHost(inv.host);
                           setJoinPort(String(inv.port));
                           if (inv.password) setJoinPassword(inv.password);
+                          setInviteHosts(inv.hosts ?? []);
+                          setInviteChecksum(inv.modChecksum ?? "");
+                          if (inv.modChecksum) {
+                            void hasRoomMod(inv.modChecksum).then(setCacheHit);
+                          } else {
+                            setCacheHit(undefined);
+                          }
                           setErr(null);
                         } catch {
                           // incomplete
                         }
+                      } else {
+                        setInviteHosts([]);
+                        setInviteChecksum("");
                       }
                     }}
                   />
@@ -364,6 +557,29 @@ export function RoomSidebar() {
                     />
                   </label>
                 </details>
+                {inviteChecksum ? (
+                  <p className="room-join-hint">
+                    此房间需要模组（校验 {inviteChecksum.slice(0, 8)}）
+                  </p>
+                ) : null}
+                {offerHasMod(offer) ? (
+                  <>
+                    <p className="room-join-meta">{formatModBadge(offer)}</p>
+                    {cacheHit ? (
+                      <p className="room-join-hint">
+                        将使用本地模组「{offer?.name}」v{offer?.version}
+                      </p>
+                    ) : (
+                      <p className="room-join-hint">
+                        缺少模组「{offer?.name}」v{offer?.version}（约{" "}
+                        {formatModSize(offer?.size)}
+                        ）。将从房主同步后再加入。
+                      </p>
+                    )}
+                  </>
+                ) : peeking ? (
+                  <p className="room-join-hint">正在查询房间模组…</p>
+                ) : null}
               </div>
             )}
 
@@ -377,8 +593,7 @@ export function RoomSidebar() {
               <button
                 type="button"
                 className="btn btn-ghost btn-sm"
-                disabled={busy}
-                onClick={() => closeRoomDialog()}
+                onClick={() => dismissDialog()}
               >
                 取消
               </button>
@@ -393,13 +608,20 @@ export function RoomSidebar() {
                   void (dialog === "create" ? onCreate() : onJoin())
                 }
               >
-                {busy
-                  ? dialog === "create"
+                {dialog === "create"
+                  ? busy
                     ? "创建中…"
-                    : "加入中…"
-                  : dialog === "create"
-                    ? "创建并开口"
-                    : "加入"}
+                    : "创建并开口"
+                  : busy
+                    ? progress ||
+                      (joinPrimaryAction({ inviteChecksum, offer, cacheHit }) ===
+                      "sync-join"
+                        ? "同步中…"
+                        : "加入中…")
+                    : joinPrimaryAction({ inviteChecksum, offer, cacheHit }) ===
+                        "sync-join"
+                      ? "同步下载并加入"
+                      : "加入"}
               </button>
             </footer>
           </div>

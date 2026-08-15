@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { hashModFiles } from "@claude-desktop/shared/mod-hash";
 import { MOD_BUNDLE_MAX_BYTES } from "@claude-desktop/shared";
 import {
+  hasModCache,
+  listModPacks,
   loadModCache,
   loadModDir,
   parseManifest,
@@ -168,5 +170,29 @@ describe("mod cache", () => {
     const written = writeModBytes(e, bytes);
     expect(written.checksum).toBe(loaded.checksum);
     expect(written.hostJsSource).toBe(loaded.hostJsSource);
+  });
+
+  it("listModPacks returns bundled then uncached cache entries", () => {
+    const root = tmp();
+    const bundledRoot = path.join(root, "bundled");
+    const a = loadModDir(writePack(path.join(bundledRoot, "vote")));
+    const e = envFor(path.join(root, "ud"));
+    writeModCache(e, a);
+    const other = loadModDir(
+      writePack(path.join(root, "other"), {
+        manifest: { ...VALID_MANIFEST, id: "vote-extra", name: "Extra" },
+      }),
+    );
+    writeModCache(e, other);
+    const listed = listModPacks(e, bundledRoot);
+    expect(listed.some((p) => p.source === "bundled" && p.id === "werewolf")).toBe(
+      true,
+    );
+    expect(listed.filter((p) => p.checksum === a.checksum)).toHaveLength(1);
+    expect(listed.some((p) => p.source === "cache" && p.id === "vote-extra")).toBe(
+      true,
+    );
+    expect(hasModCache(e, a.checksum)).toBe(true);
+    expect(hasModCache(e, "ab".repeat(32))).toBe(false);
   });
 });

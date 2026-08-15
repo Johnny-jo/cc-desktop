@@ -171,6 +171,20 @@ export function getModCacheDir(env: RuntimePathEnv): string {
   return path.join(env.userDataDir, "mod-cache");
 }
 
+/** Bundled packs: extraResources/mods when packaged, apps/desktop/resources/mods in dev. */
+export function getBundledModsDir(env: RuntimePathEnv): string {
+  if (env.isPackaged) {
+    const resources =
+      env.resourcesPath ??
+      (typeof process !== "undefined" ? process.resourcesPath : "");
+    return path.join(resources, "mods");
+  }
+  if (env.projectRoot) {
+    return path.join(env.projectRoot, "apps", "desktop", "resources", "mods");
+  }
+  return path.resolve(__dirname, "../../resources/mods");
+}
+
 const MOD_CHECKSUM_RE = /^[0-9a-f]{64}$/;
 const MOD_ROOM_ID_RE = /^[A-Za-z0-9_-]+$/;
 

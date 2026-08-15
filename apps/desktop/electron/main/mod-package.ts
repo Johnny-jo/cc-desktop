@@ -3,9 +3,20 @@ import path from "node:path";
 import { hashModFiles } from "@claude-desktop/shared/mod-hash";
 import { MOD_BUNDLE_MAX_BYTES, MOD_HOST_API } from "@claude-desktop/shared";
 import {
+  getBundledModsDir,
+  getModCacheDir,
   getModCachePath,
   type RuntimePathEnv,
 } from "./runtime-paths";
+
+export type ModPackInfo = {
+  id: string;
+  name: string;
+  version: string;
+  checksum: string;
+  packDir: string;
+  source: "bundled" | "cache";
+};
 
 export type ModManifest = {
   id: string;
@@ -159,6 +170,75 @@ export function loadModCache(env: RuntimePathEnv, checksum: string): LoadedMod {
     throw new Error("mod cache checksum mismatch");
   }
   return loaded;
+}
+
+export function hasModCache(env: RuntimePathEnv, checksum: string): boolean {
+  try {
+    loadModCache(env, checksum);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function packInfo(loaded: LoadedMod, source: "bundled" | "cache"): ModPackInfo {
+  return {
+    id: loaded.manifest.id,
+    name: loaded.manifest.name,
+    version: loaded.manifest.version,
+    checksum: loaded.checksum,
+    packDir: loaded.dir,
+    source,
+  };
+}
+
+function readPackDirs(root: string): string[] {
+  if (!fs.existsSync(root)) return [];
+  let names: string[];
+  try {
+    names = fs.readdirSync(root);
+  } catch {
+    return [];
+  }
+  const out: string[] = [];
+  for (const name of names) {
+    const dir = path.join(root, name);
+    try {
+      if (fs.statSync(dir).isDirectory()) out.push(dir);
+    } catch {
+      // skip
+    }
+  }
+  return out;
+}
+
+export function listModPacks(
+  env: RuntimePathEnv,
+  bundledDir = getBundledModsDir(env),
+): ModPackInfo[] {
+  const out: ModPackInfo[] = [];
+  const seen = new Set<string>();
+  for (const dir of readPackDirs(bundledDir)) {
+    try {
+      const loaded = loadModDir(dir);
+      if (seen.has(loaded.checksum)) continue;
+      seen.add(loaded.checksum);
+      out.push(packInfo({ ...loaded, dir }, "bundled"));
+    } catch {
+      // skip invalid packs
+    }
+  }
+  for (const dir of readPackDirs(getModCacheDir(env))) {
+    try {
+      const loaded = loadModDir(dir);
+      if (seen.has(loaded.checksum)) continue;
+      seen.add(loaded.checksum);
+      out.push(packInfo(loaded, "cache"));
+    } catch {
+      // skip invalid / incomplete cache
+    }
+  }
+  return out;
 }
 
 export function listBundleFiles(loaded: LoadedMod): BundleFile[] {

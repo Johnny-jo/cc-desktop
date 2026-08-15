@@ -9,6 +9,8 @@ export const ROOM_MOD_ALLOWED = `mcp__${ROOM_MOD_MCP}__${ROOM_MOD_TOOL}`;
 
 export type RoomModAct = { action: string; payload: unknown };
 
+export type ModActionSchema = { params?: unknown; hint?: string };
+
 export function actionNames(actions: unknown): string[] {
   if (Array.isArray(actions)) {
     const out: string[] = [];
@@ -22,6 +24,38 @@ export function actionNames(actions: unknown): string[] {
   }
   if (actions && typeof actions === "object") return Object.keys(actions);
   return [];
+}
+
+export function toModActionMap(
+  actions: unknown,
+): Record<string, ModActionSchema> {
+  const out: Record<string, ModActionSchema> = {};
+  if (Array.isArray(actions)) {
+    for (const a of actions) {
+      if (typeof a === "string" && a) {
+        out[a] = {};
+      } else if (
+        a &&
+        typeof a === "object" &&
+        typeof (a as { name?: unknown }).name === "string"
+      ) {
+        const o = a as { name: string; params?: unknown; hint?: string };
+        out[o.name] = { params: o.params, hint: o.hint };
+      }
+    }
+    return out;
+  }
+  if (!actions || typeof actions !== "object") return out;
+  for (const [name, raw] of Object.entries(actions as Record<string, unknown>)) {
+    if (!name) continue;
+    if (raw && typeof raw === "object") {
+      const o = raw as { params?: unknown; hint?: string };
+      out[name] = { params: o.params, hint: o.hint };
+    } else {
+      out[name] = {};
+    }
+  }
+  return out;
 }
 
 export function formatRoomModPrompt(turn: AgentTurn): string {

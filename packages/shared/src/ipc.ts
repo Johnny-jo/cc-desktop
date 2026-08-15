@@ -142,6 +142,8 @@ export const IPC = {
   roomResetMod: "room:reset-mod",
   roomRecoverMod: "room:recover-mod",
   roomModIntent: "room:mod-intent",
+  roomListMods: "room:list-mods",
+  roomHasMod: "room:has-mod",
   roomEvent: "room:event",
 } as const;
 
@@ -581,6 +583,23 @@ export type IpcInvokeMap = {
     args: [{ roomId: string; seatId: string; name: string; payload?: unknown }];
     result: { ok: boolean; error?: string };
   };
+  [IPC.roomListMods]: {
+    args: [];
+    result: {
+      mods: Array<{
+        id: string;
+        name: string;
+        version: string;
+        checksum: string;
+        packDir: string;
+        source: "bundled" | "cache";
+      }>;
+    };
+  };
+  [IPC.roomHasMod]: {
+    args: [{ checksum: string }];
+    result: { ok: boolean; has: boolean };
+  };
 };
 
 /** Mirrors main auto-updater status (kept in shared so renderer can type it). */
@@ -637,6 +656,8 @@ export type IpcEventMap = {
       seatViews?: Record<string, unknown>;
       seq?: number;
       fail?: string;
+      /** getActions for the preferred local seat */
+      actions?: Record<string, { params?: unknown; hint?: string }>;
     };
   };
   // also permission mode can piggyback via settings
