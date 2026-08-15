@@ -393,6 +393,7 @@ function bootstrap() {
     sessions,
     settings,
     archive: roomArchive,
+    userDataDir,
   });
 
   const applyCliModelToDesktop = (model: string) => {

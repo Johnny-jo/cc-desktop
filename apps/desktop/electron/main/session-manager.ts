@@ -55,6 +55,12 @@ export type QueryFn = (args: {
   options: Record<string, unknown>;
 }) => QueryHandle;
 
+/** Extra MCP / tools attached to one session (room-mod agent seats). */
+export type SessionRunOpts = {
+  extraMcpServers?: Record<string, unknown>;
+  extraAllowedTools?: string[];
+};
+
 export type SessionManagerDeps = {
   queryFn: QueryFn;
   permissionBroker: PermissionBroker;
@@ -189,6 +195,8 @@ type SessionEntry = {
   items: ChatItem[];
   itemsHydrated: boolean;
   nextId: (prefix: string) => string;
+  extraMcpServers?: Record<string, unknown>;
+  extraAllowedTools?: string[];
 };
 
 /**
@@ -1173,7 +1181,11 @@ export class SessionManager {
     }
   }
 
-  async start(prompt: UserPrompt, cwd: string): Promise<string> {
+  async start(
+    prompt: UserPrompt,
+    cwd: string,
+    opts?: SessionRunOpts,
+  ): Promise<string> {
     await this.ensureCpaOrThrow();
 
     const { content, errors } = buildUserContent(prompt);
@@ -1205,6 +1217,8 @@ export class SessionManager {
       items: [],
       itemsHydrated: true,
       nextId: createIdFactory(),
+      extraMcpServers: opts?.extraMcpServers,
+      extraAllowedTools: opts?.extraAllowedTools,
     };
     this.sessions.set(sessionId, entry);
     this.emitSession({ ...summary });
@@ -1223,10 +1237,25 @@ export class SessionManager {
     return sessionId;
   }
 
-  async continue(sessionId: string, prompt: UserPrompt): Promise<void> {
+  async continue(
+    sessionId: string,
+    prompt: UserPrompt,
+    opts?: SessionRunOpts,
+  ): Promise<void> {
     const entry = this.sessions.get(sessionId);
     if (!entry) {
       throw new Error(`Unknown session: ${sessionId}`);
+    }
+    if (opts?.extraMcpServers) {
+      entry.extraMcpServers = {
+        ...(entry.extraMcpServers ?? {}),
+        ...opts.extraMcpServers,
+      };
+    }
+    if (opts?.extraAllowedTools?.length) {
+      const have = new Set(entry.extraAllowedTools ?? []);
+      for (const t of opts.extraAllowedTools) have.add(t);
+      entry.extraAllowedTools = [...have];
     }
 
     await this.ensureCpaOrThrow(sessionId);
@@ -1369,6 +1398,7 @@ export class SessionManager {
         "TaskUpdate",
         "TaskList",
         "TaskGet",
+        ...(entry.extraAllowedTools ?? []),
       ],
       // Load CLAUDE.md hierarchy (user → project → local) into the system
       // prompt, matching Claude Code. Must include 'project' for project CLAUDE.md.
@@ -1376,8 +1406,15 @@ export class SessionManager {
       // Configured MCP servers (stdio/sse/http). Passed through as-is; the
       // config shape matches the SDK. Kept out of `env` so the CPA token is
       // never leaked into MCP server subprocesses.
-      ...(Object.keys(settings.mcpServers ?? {}).length
-        ? { mcpServers: settings.mcpServers }
+      // Per-session extras (in-process room_mod_act) merge on top.
+      ...(Object.keys(settings.mcpServers ?? {}).length ||
+      Object.keys(entry.extraMcpServers ?? {}).length
+        ? {
+            mcpServers: {
+              ...(settings.mcpServers ?? {}),
+              ...(entry.extraMcpServers ?? {}),
+            },
+          }
         : {}),
       // Only use the MCP servers this app passes in — ignore project
       // .mcp.json, user settings, and plugin-declared servers so desktop

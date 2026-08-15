@@ -134,6 +134,14 @@ export const IPC = {
   roomRps: "room:rps",
   roomInvite: "room:invite",
   roomDelete: "room:delete",
+  roomPeek: "room:peek",
+  roomFetchMod: "room:fetch-mod",
+  roomEnableMod: "room:enable-mod",
+  roomStartMod: "room:start-mod",
+  roomEndMod: "room:end-mod",
+  roomResetMod: "room:reset-mod",
+  roomRecoverMod: "room:recover-mod",
+  roomModIntent: "room:mod-intent",
   roomEvent: "room:event",
 } as const;
 
@@ -527,6 +535,52 @@ export type IpcInvokeMap = {
     args: [{ roomId: string }];
     result: { ok: boolean; error?: string };
   };
+  [IPC.roomPeek]: {
+    args: [{ host: string; port: number }];
+    result: {
+      ok: boolean;
+      offer?: import("./room-protocol").ModOfferPayload;
+      error?: string;
+    };
+  };
+  [IPC.roomFetchMod]: {
+    args: [{ host: string; port: number; checksum: string }];
+    result: {
+      ok: boolean;
+      checksum?: string;
+      offer?: import("./room-protocol").ModOfferPayload;
+      error?: string;
+    };
+  };
+  [IPC.roomEnableMod]: {
+    args: [{ roomId: string; packDir: string }];
+    result: {
+      ok: boolean;
+      room?: import("./room-protocol").RoomSnapshot;
+      offer?: import("./room-protocol").ModOfferPayload;
+      error?: string;
+    };
+  };
+  [IPC.roomStartMod]: {
+    args: [{ roomId: string }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.roomEndMod]: {
+    args: [{ roomId: string }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.roomResetMod]: {
+    args: [{ roomId: string }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.roomRecoverMod]: {
+    args: [{ roomId: string }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.roomModIntent]: {
+    args: [{ roomId: string; seatId: string; name: string; payload?: unknown }];
+    result: { ok: boolean; error?: string };
+  };
 };
 
 /** Mirrors main auto-updater status (kept in shared so renderer can type it). */
@@ -573,6 +627,14 @@ export type IpcEventMap = {
     /** host rejected a guest action (send / takeover) */
     error?: boolean;
     message?: string;
+    /** Play-loop views for PR5 UI. Never includes full play state. */
+    mod?: {
+      offer?: import("./room-protocol").ModOfferPayload;
+      publicView?: unknown;
+      seatView?: unknown;
+      seq?: number;
+      fail?: string;
+    };
   };
   // also permission mode can piggyback via settings
   permissionMode?: PermissionMode;
