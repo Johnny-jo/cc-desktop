@@ -1582,7 +1582,7 @@ export class RoomService {
           : text,
       attachments: [],
     };
-    const extras = this.roomModSessionOpts(r, seat);
+    const extras = this.roomModToolOpts(r, seat);
     try {
       if (!seat.sessionId) {
         const id = await this.sessions.start(prompt, cwd, extras);
@@ -2374,22 +2374,28 @@ export class RoomService {
     }
   }
 
-  private roomModSessionOpts(
+  private roomModToolOpts(
     r: RoomRecord,
     seat: RoomSeat,
     fallbackActions?: unknown,
   ): SessionRunOpts {
-    const handler = (act: { action: string; payload: unknown }) =>
-      this.dispatchAgentAct(r, seat, act, fallbackActions);
-    const mcp =
-      r.modHost && r.modStarted && !r.modEnded
-        ? tryCreateRoomModMcp(handler)
-        : null;
+    if (!r.modHost || !r.modStarted || r.modEnded) return {};
+    const mcp = tryCreateRoomModMcp((act) =>
+      this.dispatchAgentAct(r, seat, act, fallbackActions),
+    );
+    return mcp?.opts ?? {};
+  }
+
+  private roomModInjectOpts(
+    r: RoomRecord,
+    seat: RoomSeat,
+    fallbackActions?: unknown,
+  ): SessionRunOpts {
     return {
       hiddenFromList: true,
       title: `${ROOM_MOD_PREFIX} ${seat.name}`,
       persistText: `${ROOM_MOD_PREFIX} ${r.roomId} ${seat.id}`,
-      ...(mcp?.opts ?? {}),
+      ...this.roomModToolOpts(r, seat, fallbackActions),
     };
   }
 
@@ -2425,7 +2431,7 @@ export class RoomService {
     const cwd = this.settings.get().lastProjectPath;
     if (!cwd) return;
     const text = formatRoomModPrompt(turn);
-    const extras = this.roomModSessionOpts(r, seat, turn.actions);
+    const extras = this.roomModInjectOpts(r, seat, turn.actions);
     const mcpAttached = Boolean(extras.extraMcpServers);
     seat.running = true;
     try {

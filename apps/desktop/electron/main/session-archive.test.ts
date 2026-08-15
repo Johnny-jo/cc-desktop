@@ -50,6 +50,28 @@ describe("SessionArchive", () => {
     expect(list.find((s) => s.id === "s1")?.sdkSessionId).toBe("sdk-1");
   });
 
+  it("persists and reloads hiddenFromList", () => {
+    const arch = new SessionArchive(tmpDir());
+    arch.upsertSummary({
+      id: "hidden",
+      title: "[room_mod] Bot",
+      cwd: "D:/proj",
+      updatedAt: 50,
+      status: "idle",
+      hiddenFromList: true,
+    });
+    arch.upsertSummary({
+      id: "visible",
+      title: "normal",
+      cwd: "D:/proj",
+      updatedAt: 40,
+      status: "idle",
+    });
+    const list = arch.loadIndex();
+    expect(list.find((s) => s.id === "hidden")?.hiddenFromList).toBe(true);
+    expect(list.find((s) => s.id === "visible")?.hiddenFromList).toBeUndefined();
+  });
+
   it("persists transcript items", () => {
     const arch = new SessionArchive(tmpDir());
     const items: ChatItem[] = [

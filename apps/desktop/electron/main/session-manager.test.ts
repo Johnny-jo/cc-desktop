@@ -836,6 +836,71 @@ describe("SessionManager", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("hides room-mod sessions from list and keeps hiddenFromList after restart", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sess-hide-"));
+    const archive = new SessionArchive(dir);
+    const ctx = makeDeps();
+    const manager = new SessionManager({
+      queryFn: ctx.queryFn,
+      permissionBroker: ctx.permissionBroker,
+      diffTracker: ctx.diffTracker,
+      cpa: ctx.cpa as never,
+      settings: ctx.settings,
+      archive,
+      emit: ctx.emit,
+      emitSession: ctx.emitSession,
+      emitDiff: ctx.emitDiff,
+    });
+    const hiddenId = await manager.start(
+      { text: "[room_mod]\nsecret-view", attachments: [] },
+      "D:/proj",
+      {
+        hiddenFromList: true,
+        title: "[room_mod] Bot",
+        persistText: "[room_mod] room-1 seat-1",
+      },
+    );
+    const visibleId = await manager.start(
+      { text: "hello", attachments: [] },
+      "D:/proj",
+    );
+    expect(manager.list().map((s) => s.id)).toEqual([visibleId]);
+    expect(archive.loadIndex().find((s) => s.id === hiddenId)?.hiddenFromList).toBe(
+      true,
+    );
+    expect(
+      manager
+        .getTranscript(hiddenId)
+        .some((i) => i.kind === "text" && i.role === "user" && i.text.includes("secret-view")),
+    ).toBe(false);
+    expect(
+      manager
+        .getTranscript(hiddenId)
+        .some(
+          (i) =>
+            i.kind === "text" &&
+            i.role === "user" &&
+            i.text === "[room_mod] room-1 seat-1",
+        ),
+    ).toBe(true);
+
+    const restarted = new SessionManager({
+      queryFn: ctx.queryFn,
+      permissionBroker: ctx.permissionBroker,
+      diffTracker: ctx.diffTracker,
+      cpa: ctx.cpa as never,
+      settings: ctx.settings,
+      archive,
+      emit: ctx.emit,
+      emitSession: ctx.emitSession,
+      emitDiff: ctx.emitDiff,
+    });
+    expect(restarted.list().map((s) => s.id)).toEqual([visibleId]);
+    expect(restarted.getSummary(hiddenId)?.hiddenFromList).toBe(true);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("continue appends the next user turn onto hydrated disk items", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sess-cont-"));
     const archive = new SessionArchive(dir);
