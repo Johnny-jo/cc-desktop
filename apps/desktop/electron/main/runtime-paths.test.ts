@@ -6,6 +6,10 @@ import {
   applyCpaConfigDefaults,
   getClaudeExecutablePath,
   getCpaUserConfigPath,
+  getBundledModsDir,
+  getModCacheDir,
+  getModCachePath,
+  getModPersistPath,
   materializeCpaConfig,
   repairCpaManagementConfig,
   writeCpaConfigWithApiKey,
@@ -211,6 +215,32 @@ describe("runtime-paths", () => {
     writeCpaConfigWithApiKey(e, { apiKey: "new-key-2" });
     expect(fs.readFileSync(dest, "utf8")).toContain("new-key-2");
     expect(fs.readFileSync(dest, "utf8")).not.toContain("new-key-1");
+  });
+
+  it("places mod cache and persist files under userData", () => {
+    const userDataDir = path.join(tmp(), "ud");
+    const e = env({ userDataDir });
+    const checksum = "ab".repeat(32);
+    expect(getModCacheDir(e)).toBe(path.join(userDataDir, "mod-cache"));
+    expect(getModCachePath(e, checksum)).toBe(
+      path.join(userDataDir, "mod-cache", checksum),
+    );
+    expect(getModPersistPath(e, "room-1")).toBe(
+      path.join(userDataDir, "rooms", "room-1.mod.json"),
+    );
+    expect(getBundledModsDir({ ...e, isPackaged: true, resourcesPath: "/res" })).toBe(
+      path.join("/res", "mods"),
+    );
+  });
+
+  it("rejects path-traversal checksums and unsafe room ids", () => {
+    const e = env({ userDataDir: path.join(tmp(), "ud") });
+    expect(() => getModCachePath(e, "../etc/passwd")).toThrow(/checksum/);
+    expect(() => getModCachePath(e, "abc123")).toThrow(/checksum/);
+    expect(() => getModCachePath(e, "AB".repeat(32))).toThrow(/checksum/);
+    expect(() => getModPersistPath(e, "../x")).toThrow(/room id/);
+    expect(() => getModPersistPath(e, "a/b")).toThrow(/room id/);
+    expect(() => getModPersistPath(e, "a\\b")).toThrow(/room id/);
   });
 
   it("packaged claude path under resources/bin/claude", () => {

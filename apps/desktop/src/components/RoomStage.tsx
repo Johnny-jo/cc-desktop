@@ -12,6 +12,9 @@ import {
   useRoomStore,
 } from "../state/room-store";
 import { getDesktop, hasDesktopApi } from "../lib/desktop-api";
+import { formatModBadge } from "../lib/room-mod-ui";
+import { useI18n } from "../i18n/useI18n";
+import { ModPlayPanel } from "./ModPlayPanel";
 
 function SeatAvatar({ kind }: { kind: "human" | "agent" }) {
   if (kind === "agent") {
@@ -33,11 +36,13 @@ function SeatAvatar({ kind }: { kind: "human" | "agent" }) {
 }
 
 export function RoomStage() {
+  const { t } = useI18n();
   const room = useRoomStore((s) => s.activeRoom);
   const selectedSeatId = useRoomStore((s) => s.selectedSeatId);
   const rooms = useRoomStore((s) => s.rooms);
   const reconnectNote = useRoomStore((s) => s.reconnectNote);
   const lastError = useRoomStore((s) => s.lastError);
+  const mod = useRoomStore((s) => s.mod);
   const settings = useAppStore((s) => s.settings);
   const [draft, setDraft] = useState("");
   const [inviteOpen, setInviteOpen] = useState(false);
@@ -74,6 +79,15 @@ export function RoomStage() {
   const myRole = rooms.find((r) => r.roomId === room.roomId)?.role ?? "member";
   const canHost = myRole === "host";
   const myUserId = room.localUserId;
+  const modActive = Boolean(room.modChecksum);
+  const stageBadge = formatModBadge(
+    mod?.offer?.checksum === room.modChecksum
+      ? mod.offer
+      : room.modChecksum
+        ? { id: "", version: "", checksum: room.modChecksum }
+        : null,
+    t.room.modBadge,
+  );
 
   const onSend = async () => {
     const t = draft.trim();
@@ -138,6 +152,11 @@ export function RoomStage() {
           <span className="room-meta">
             {room.memberCount} 人 · {room.status === "open" ? "开着" : "已结束"}
           </span>
+          {stageBadge ? (
+            <span className="room-mod-badge" title={stageBadge}>
+              {stageBadge}
+            </span>
+          ) : null}
         </div>
         <div className="room-stage-actions">
           {canHost && room.status === "open" ? (
@@ -179,6 +198,14 @@ export function RoomStage() {
       </header>
 
       {reconnectNote ? <div className="room-reconnect-banner">{reconnectNote}</div> : null}
+
+      {modActive ? (
+        <ModPlayPanel
+          role={myRole}
+          seats={room.seats}
+          localUserId={myUserId}
+        />
+      ) : null}
 
       {inviteOpen ? (
         <div className="room-invite-bar">

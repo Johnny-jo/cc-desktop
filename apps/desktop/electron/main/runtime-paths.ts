@@ -167,6 +167,41 @@ export function getCpaUserConfigPath(env: RuntimePathEnv): string {
   return path.join(env.userDataDir, "cpa", "config.yaml");
 }
 
+export function getModCacheDir(env: RuntimePathEnv): string {
+  return path.join(env.userDataDir, "mod-cache");
+}
+
+/** Bundled packs: extraResources/mods when packaged, apps/desktop/resources/mods in dev. */
+export function getBundledModsDir(env: RuntimePathEnv): string {
+  if (env.isPackaged) {
+    const resources =
+      env.resourcesPath ??
+      (typeof process !== "undefined" ? process.resourcesPath : "");
+    return path.join(resources, "mods");
+  }
+  if (env.projectRoot) {
+    return path.join(env.projectRoot, "apps", "desktop", "resources", "mods");
+  }
+  return path.resolve(__dirname, "../../resources/mods");
+}
+
+const MOD_CHECKSUM_RE = /^[0-9a-f]{64}$/;
+const MOD_ROOM_ID_RE = /^[A-Za-z0-9_-]+$/;
+
+export function getModCachePath(env: RuntimePathEnv, checksum: string): string {
+  if (!MOD_CHECKSUM_RE.test(checksum)) {
+    throw new Error("invalid mod checksum");
+  }
+  return path.join(getModCacheDir(env), checksum);
+}
+
+export function getModPersistPath(env: RuntimePathEnv, roomId: string): string {
+  if (!MOD_ROOM_ID_RE.test(roomId)) {
+    throw new Error("invalid room id");
+  }
+  return path.join(env.userDataDir, "rooms", `${roomId}.mod.json`);
+}
+
 function readCpaConfigTemplate(env: RuntimePathEnv): string {
   const template = getCpaConfigTemplatePath(env);
   if (template && fs.existsSync(template)) {

@@ -2,8 +2,9 @@ import { randomUUID } from "node:crypto";
 import os from "node:os";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import type { BrowserWindow } from "electron";
-import { IPC } from "@claude-desktop/shared";
+import { IPC, MOD_BUNDLE_MAX_BYTES } from "@claude-desktop/shared";
 import type {
+  ModOfferPayload,
   RoomListItem,
   RoomMember,
   RoomSeat,
@@ -19,9 +20,39 @@ import {
   makeRoomFrame,
   parseRoomFrame,
 } from "@claude-desktop/shared";
-import type { SessionManager } from "./session-manager";
+import type { SessionManager, SessionRunOpts } from "./session-manager";
 import type { SettingsStore } from "./settings-store";
 import type { RoomArchive, StoredRoom } from "./room-archive";
+import { ModHost, type ModSeat } from "./mod-host";
+import {
+  hasModCache,
+  listModPacks,
+  loadModDir,
+  readModBytes,
+  writeModBytes,
+  writeModCache,
+  type LoadedMod,
+  type ModPackInfo,
+} from "./mod-package";
+import {
+  getModPersistPath,
+  type RuntimePathEnv,
+} from "./runtime-paths";
+import {
+  actionNames,
+  formatRoomModPrompt,
+  illegalActionMessage,
+  parseRoomModAct,
+  ROOM_MOD_PREFIX,
+  toModActionMap,
+  tryCreateRoomModMcp,
+  type ModActionSchema,
+} from "./room-mod-agent";
+
+const MOD_CHECKSUM_RE = /^[0-9a-f]{64}$/;
+export const ROOM_MOD_BUNDLE_CHUNK = 48 * 1024;
+
+type GuestWs = WebSocket & { userId?: string; fetching?: boolean };
 
 type RoomRecord = {
   roomId: string;
@@ -57,6 +88,17 @@ type RoomRecord = {
   closing?: boolean;
   /** Bumped to cancel an in-flight reconnect loop. */
   reconnectGen?: number;
+  modLoaded?: LoadedMod;
+  modHost?: ModHost;
+  modStarted?: boolean;
+  modEnded?: boolean;
+  modOffer?: ModOfferPayload;
+  modPublicView?: unknown;
+  modSeatViews?: Record<string, unknown>;
+  modSeq?: number;
+  modFail?: string;
+  modActionsBySeat?: Record<string, Record<string, ModActionSchema>>;
+  intentChain?: Promise<unknown>;
 };
 
 function lanAddresses(): string[] {
@@ -143,18 +185,43 @@ export class RoomService {
   private readonly sessions: SessionManager;
   private readonly settings: SettingsStore;
   private readonly archive: RoomArchive | null;
+  private readonly userDataDir: string;
+  private readonly isPackaged: boolean;
+  private readonly resourcesPath?: string;
 
   constructor(opts: {
     getWindow: () => BrowserWindow | null;
     sessions: SessionManager;
     settings: SettingsStore;
     archive?: RoomArchive | null;
+    userDataDir?: string;
+    isPackaged?: boolean;
+    resourcesPath?: string;
   }) {
     this.getWindow = opts.getWindow;
     this.sessions = opts.sessions;
     this.settings = opts.settings;
     this.archive = opts.archive ?? null;
+    this.userDataDir = opts.userDataDir ?? os.tmpdir();
+    this.isPackaged = opts.isPackaged ?? false;
+    this.resourcesPath = opts.resourcesPath;
     this.hydrateFromArchive();
+  }
+
+  private pathEnv(): RuntimePathEnv {
+    return {
+      isPackaged: this.isPackaged,
+      userDataDir: this.userDataDir,
+      ...(this.resourcesPath ? { resourcesPath: this.resourcesPath } : {}),
+    };
+  }
+
+  listMods(): { mods: ModPackInfo[] } {
+    return { mods: listModPacks(this.pathEnv()) };
+  }
+
+  hasMod(checksum: string): { ok: true; has: boolean } {
+    return { ok: true, has: hasModCache(this.pathEnv(), checksum) };
   }
 
   private hydrateFromArchive(): void {
@@ -272,6 +339,292 @@ export class RoomService {
       listening: Boolean(r.server),
       secret,
     };
+  }
+
+  async peek(opts: {
+    host: string;
+    port: number;
+  }): Promise<{ ok: boolean; offer?: ModOfferPayload; error?: string }> {
+    const host = this.normalizeHost(opts.host);
+    const port = opts.port;
+    if (!host || !port) return { ok: false, error: "请填写地址和端口" };
+    const cached = this.cachedOffer(host, port);
+    if (cached) return { ok: true, offer: cached };
+    return this.withHostSocket(host, port, async (ws) => {
+      const pending = waitFrame(ws, "mod.offer", 8000);
+      this.sendRaw(ws, "pending", 1, "hello", {
+        protocol: ROOM_PROTOCOL_VERSION,
+      });
+      const frame = await pending;
+      if (!frame) return { ok: false, error: "主机未返回模组信息" };
+      if (frame.type === "error") {
+        return {
+          ok: false,
+          error: (frame.payload as { message?: string })?.message ?? "窥探失败",
+        };
+      }
+      return { ok: true, offer: frame.payload as ModOfferPayload };
+    });
+  }
+
+  async fetchMod(opts: {
+    host: string;
+    port: number;
+    checksum: string;
+  }): Promise<{
+    ok: boolean;
+    checksum?: string;
+    offer?: ModOfferPayload;
+    error?: string;
+  }> {
+    const host = this.normalizeHost(opts.host);
+    const port = opts.port;
+    const checksum = (opts.checksum ?? "").trim();
+    if (!host || !port) return { ok: false, error: "请填写地址和端口" };
+    if (!MOD_CHECKSUM_RE.test(checksum)) {
+      return { ok: false, error: "模组校验码无效" };
+    }
+    return this.withHostSocket(host, port, async (ws) => {
+      const pendingOffer = waitFrame(ws, "mod.offer", 8000);
+      this.sendRaw(ws, "pending", 1, "hello", {
+        protocol: ROOM_PROTOCOL_VERSION,
+      });
+      const offerFrame = await pendingOffer;
+      if (!offerFrame || offerFrame.type === "error") {
+        return {
+          ok: false,
+          error:
+            (offerFrame?.payload as { message?: string })?.message ??
+            "主机未返回模组信息",
+        };
+      }
+      const offer = offerFrame.payload as ModOfferPayload;
+      if (!offer.checksum || offer.size <= 0) {
+        return { ok: false, error: "房间未启用模组", offer };
+      }
+      if (offer.checksum !== checksum) {
+        return { ok: false, error: "模组校验码不一致", offer };
+      }
+      const collecting = collectBundles(ws, checksum, offer.size, 30_000);
+      this.sendRaw(ws, "pending", 2, "mod.fetch", { checksum });
+      const collected = await collecting;
+      if (!collected.ok) {
+        return { ok: false, error: collected.error, offer };
+      }
+      const bytes = collected.bytes;
+      try {
+        const loaded = writeModBytes(this.pathEnv(), bytes);
+        if (loaded.checksum !== checksum) {
+          return { ok: false, error: "模组校验码不一致", offer };
+        }
+        return { ok: true, checksum: loaded.checksum, offer };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+          offer,
+        };
+      }
+    });
+  }
+
+  async enableMod(
+    roomId: string,
+    packDir: string,
+  ): Promise<{
+    ok: boolean;
+    room?: RoomSnapshot;
+    offer?: ModOfferPayload;
+    error?: string;
+  }> {
+    const r = this.rooms.get(roomId);
+    if (!r || r.localRole !== "host") {
+      return { ok: false, error: "只有房主可以启用模组" };
+    }
+    if (r.status !== "open") return { ok: false, error: "房间不可用" };
+    if (r.modStarted && !r.modEnded) {
+      return { ok: false, error: "请先结束当前玩法" };
+    }
+    let loaded: LoadedMod;
+    try {
+      loaded = loadModDir(packDir);
+      readModBytes(loaded);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/exceeds/.test(msg)) {
+        return {
+          ok: false,
+          error: `模组超过 ${MOD_BUNDLE_MAX_BYTES} 字节上限`,
+        };
+      }
+      return { ok: false, error: msg };
+    }
+    let host: ModHost;
+    try {
+      host = await ModHost.start({
+        roomId: r.roomId,
+        loaded,
+        persistPath: getModPersistPath(this.pathEnv(), r.roomId),
+      });
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+    const prev = r.modHost;
+    r.modHost = host;
+    if (prev) {
+      try {
+        prev.dispose();
+      } catch {
+        // ignore
+      }
+    }
+    host.onFail((msg) => this.onModFail(r, msg));
+    try {
+      writeModCache(this.pathEnv(), loaded);
+    } catch {
+      // cache is optional
+    }
+    r.modLoaded = loaded;
+    r.modStarted = false;
+    r.modEnded = false;
+    r.modFail = undefined;
+    r.modPublicView = undefined;
+    r.modSeatViews = undefined;
+    r.modSeq = 0;
+    r.modChecksum = loaded.checksum;
+    r.requireMods = true;
+    r.modOffer = this.buildOffer(r);
+    this.pushState(r);
+    return { ok: true, room: this.snapshot(r), offer: r.modOffer };
+  }
+
+  async startMod(roomId: string): Promise<{ ok: boolean; error?: string }> {
+    const r = this.hostRoom(roomId);
+    if (!r.ok) return r;
+    const rec = r.room;
+    if (!rec.modHost || !rec.modLoaded) {
+      return { ok: false, error: "尚未启用模组" };
+    }
+    if (rec.modFail) return { ok: false, error: rec.modFail };
+    if (rec.modStarted && !rec.modEnded) {
+      return { ok: false, error: "玩法已开始" };
+    }
+    const { min, max } = rec.modLoaded.manifest.seats;
+    if (rec.seats.length < min || rec.seats.length > max) {
+      return { ok: false, error: `席位数量须在 ${min}–${max} 之间` };
+    }
+    return this.enqueueIntent(rec, () =>
+      this.dispatchMod(rec, {
+        seatId: "",
+        name: "mod.start",
+        payload: { seats: toModSeats(rec.seats) },
+        actorUserId: rec.hostUserId,
+        after: () => {
+          rec.modStarted = true;
+          rec.modEnded = false;
+        },
+      }),
+    );
+  }
+
+  async endMod(roomId: string): Promise<{ ok: boolean; error?: string }> {
+    const r = this.hostRoom(roomId);
+    if (!r.ok) return r;
+    const rec = r.room;
+    if (!rec.modHost && !rec.modChecksum) {
+      return { ok: false, error: "尚未启用模组" };
+    }
+    if (rec.modHost && rec.modStarted && !rec.modEnded) {
+      await this.enqueueIntent(rec, () =>
+        this.dispatchMod(rec, {
+          seatId: "",
+          name: "mod.end",
+          payload: {},
+          actorUserId: rec.hostUserId,
+          persist: false,
+        }),
+      );
+    }
+    this.clearMod(rec);
+    this.pushState(rec);
+    return { ok: true };
+  }
+
+  async resetMod(roomId: string): Promise<{ ok: boolean; error?: string }> {
+    const r = this.hostRoom(roomId);
+    if (!r.ok) return r;
+    const rec = r.room;
+    if (!rec.modHost || !rec.modStarted || rec.modEnded) {
+      return { ok: false, error: "玩法未开始" };
+    }
+    return this.enqueueIntent(rec, async () => {
+      try {
+        await rec.modHost!.resetToStart(toModSeats(rec.seats));
+      } catch (err) {
+        return {
+          ok: false as const,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+      rec.modFail = undefined;
+      return this.dispatchMod(rec, {
+        seatId: "",
+        name: "mod.start",
+        payload: { seats: toModSeats(rec.seats) },
+        actorUserId: rec.hostUserId,
+      });
+    });
+  }
+
+  async recoverMod(roomId: string): Promise<{ ok: boolean; error?: string }> {
+    const r = this.hostRoom(roomId);
+    if (!r.ok) return r;
+    const rec = r.room;
+    if (!rec.modHost) return { ok: false, error: "尚未启用模组" };
+    try {
+      await rec.modHost.restoreFromDisk();
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+    rec.modFail = undefined;
+    rec.modStarted = true;
+    rec.modEnded = false;
+    await this.publishViews(rec);
+    return { ok: true };
+  }
+
+  async modIntent(
+    roomId: string,
+    seatId: string,
+    name: string,
+    payload: unknown,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const rec = this.rooms.get(roomId);
+    if (!rec || rec.status !== "open") return { ok: false, error: "房间不可用" };
+    const seat = rec.seats.find((s) => s.id === seatId);
+    if (!seat) return { ok: false, error: "请先选一个席位" };
+    if (rec.localRole !== "host") {
+      if (!this.canAct(seat, rec.localUserId)) {
+        return { ok: false, error: "当前不能操作这个席位" };
+      }
+      this.sendClient(rec, "mod.intent", { seatId, name, payload });
+      return { ok: true };
+    }
+    if (!this.canAct(seat, rec.localUserId)) {
+      return { ok: false, error: "当前不能操作这个席位" };
+    }
+    if (!rec.modHost || !rec.modStarted || rec.modEnded) {
+      return { ok: false, error: "玩法未开始" };
+    }
+    if (rec.modFail) return { ok: false, error: rec.modFail };
+    return this.enqueueIntent(rec, () =>
+      this.dispatchMod(rec, {
+        seatId,
+        name,
+        payload,
+        actorUserId: rec.localUserId,
+      }),
+    );
   }
 
   async create(opts: {
@@ -470,6 +823,7 @@ export class RoomService {
 
     const userId = randomUUID();
     const name = (opts.name ?? displayName()).trim() || displayName();
+    const checksum = (opts.modChecksum ?? "").trim();
 
     return new Promise((resolve) => {
       let settled = false;
@@ -523,7 +877,7 @@ export class RoomService {
           name,
           password: opts.password ?? "",
           protocol: ROOM_PROTOCOL_VERSION,
-          modChecksum: opts.modChecksum ?? "",
+          modChecksum: checksum,
         });
         try {
           ws.send(JSON.stringify(frame));
@@ -590,7 +944,7 @@ export class RoomService {
                 ],
                 port,
                 password: opts.password,
-                modChecksum: opts.modChecksum,
+                modChecksum: checksum,
               },
             };
             this.rooms.set(snap.roomId, rec);
@@ -737,7 +1091,7 @@ export class RoomService {
           name: displayName(),
           password: password ?? "",
           protocol: ROOM_PROTOCOL_VERSION,
-          modChecksum: modChecksum ?? "",
+          modChecksum: (modChecksum ?? "").trim(),
         });
         try {
           ws.send(JSON.stringify(frame));
@@ -781,11 +1135,8 @@ export class RoomService {
           clearTimeout(timer);
           const snap = frame.payload as RoomSnapshot;
           r.client = ws;
-          r.status = "open";
-          r.members = snap.members;
-          r.seats = snap.seats;
-          r.items = snap.items;
           r.seq = frame.seq;
+          this.applyGuestSnapshot(r, snap);
           this.bindGuestSocket(r, ws);
           done(true);
         }
@@ -856,12 +1207,46 @@ export class RoomService {
       if (frame.type === "state.snapshot") {
         if (r.status !== "open") return;
         const snap = frame.payload as RoomSnapshot;
-        r.members = snap.members;
-        r.seats = snap.seats;
-        r.items = snap.items;
-        r.status = snap.status;
         r.seq = frame.seq;
+        this.applyGuestSnapshot(r, snap);
         this.persist(r);
+        this.emit(r);
+        return;
+      }
+      if (frame.type === "mod.patch") {
+        const p = frame.payload as { seq?: number; publicView?: unknown };
+        r.modSeq = p.seq ?? r.modSeq;
+        r.modPublicView = p.publicView;
+        this.emit(r);
+        return;
+      }
+      if (frame.type === "mod.priv") {
+        const p = frame.payload as {
+          seq?: number;
+          seatId?: string;
+          seatView?: unknown;
+          actions?: unknown;
+        };
+        r.modSeq = p.seq ?? r.modSeq;
+        if (p.seatId) {
+          r.modSeatViews = { ...(r.modSeatViews ?? {}), [p.seatId]: p.seatView };
+          if (p.actions !== undefined) {
+            r.modActionsBySeat = {
+              ...(r.modActionsBySeat ?? {}),
+              [p.seatId]: toModActionMap(p.actions),
+            };
+          }
+        }
+        this.emit(r);
+        return;
+      }
+      if (frame.type === "mod.fail") {
+        r.modFail = (frame.payload as { message?: string })?.message ?? "mod fail";
+        this.emit(r);
+        return;
+      }
+      if (frame.type === "mod.offer") {
+        r.modOffer = frame.payload as ModOfferPayload;
         this.emit(r);
         return;
       }
@@ -922,6 +1307,7 @@ export class RoomService {
       }
     }
     r.guests.clear();
+    this.disposeModHost(r);
     try {
       r.server?.close();
     } catch {
@@ -1194,6 +1580,8 @@ export class RoomService {
 
   disposeAll(): void {
     for (const r of this.rooms.values()) {
+      this.cancelGuestReconnect(r);
+      this.disposeModHost(r);
       try {
         r.client?.close();
         r.server?.close();
@@ -1225,12 +1613,13 @@ export class RoomService {
           : text,
       attachments: [],
     };
+    const extras = this.roomModToolOpts(r, seat);
     try {
       if (!seat.sessionId) {
-        const id = await this.sessions.start(prompt, cwd);
+        const id = await this.sessions.start(prompt, cwd, extras);
         seat.sessionId = id;
       } else {
-        await this.sessions.continue(seat.sessionId, prompt);
+        await this.sessions.continue(seat.sessionId, prompt, extras);
       }
       const items = this.sessions.getTranscript(seat.sessionId);
       const last = [...items]
@@ -1275,6 +1664,14 @@ export class RoomService {
       this.reply(ws, r, "error", { message: "房间已结束" });
       return;
     }
+    if (frame.type === "hello") {
+      this.reply(ws, r, "mod.offer", this.buildOffer(r));
+      return;
+    }
+    if (frame.type === "mod.fetch") {
+      void this.serveModBundle(r, ws as GuestWs, frame);
+      return;
+    }
     if (frame.type === "join") {
       const p = frame.payload as {
         userId?: string;
@@ -1293,7 +1690,7 @@ export class RoomService {
         ws.close();
         return;
       }
-      if (r.requireMods && r.modChecksum && p.modChecksum !== r.modChecksum) {
+      if (r.modChecksum && p.modChecksum !== r.modChecksum) {
         this.reply(ws, r, "error", { message: "模组校验码不一致" });
         ws.close();
         return;
@@ -1316,20 +1713,59 @@ export class RoomService {
         });
       }
       r.guests.add(ws);
-      (ws as WebSocket & { userId?: string }).userId = userId;
+      (ws as GuestWs).userId = userId;
       this.append(r, {
         kind: "system",
         text: `${name} 加入了房间`,
         authorLabel: "系统",
       });
       this.reply(ws, r, "welcome", this.snapshot(r));
+      this.sendModViewsTo(r, ws, userId);
       this.pushState(r);
+      if (r.modHost && r.modStarted && !r.modEnded) {
+        void this.publishViews(r);
+      }
       return;
     }
 
-    const userId = (ws as WebSocket & { userId?: string }).userId;
+    const userId = (ws as GuestWs).userId;
     if (!userId) {
       this.reply(ws, r, "error", { message: "请先加入" });
+      return;
+    }
+
+    if (frame.type === "mod.intent") {
+      const p = frame.payload as {
+        seatId?: string;
+        name?: string;
+        payload?: unknown;
+      };
+      const seat = r.seats.find((s) => s.id === p.seatId);
+      const intentName = p.name;
+      if (!seat || !intentName) {
+        this.reply(ws, r, "error", { message: "请先选一个席位" });
+        return;
+      }
+      if (!this.canAct(seat, userId)) {
+        this.reply(ws, r, "error", { message: "当前不能操作这个席位" });
+        return;
+      }
+      if (!r.modHost || !r.modStarted || r.modEnded) {
+        this.reply(ws, r, "error", { message: "玩法未开始" });
+        return;
+      }
+      if (r.modFail) {
+        this.reply(ws, r, "error", { message: r.modFail });
+        return;
+      }
+      void this.enqueueIntent(r, () =>
+        this.dispatchMod(r, {
+          seatId: seat.id,
+          name: intentName,
+          payload: p.payload,
+          actorUserId: userId,
+        }),
+      );
       return;
     }
 
@@ -1581,10 +2017,44 @@ export class RoomService {
   }
 
   private emit(r: RoomRecord) {
-    this.safeSend(IPC.roomEvent, {
+    const payload: {
+      roomId: string;
+      room: RoomSnapshot;
+      mod?: {
+        offer?: ModOfferPayload;
+        publicView?: unknown;
+        seatView?: unknown;
+        seatViews?: Record<string, unknown>;
+        seq?: number;
+        fail?: string;
+        actions?: Record<string, ModActionSchema>;
+      };
+    } = {
       roomId: r.roomId,
       room: this.snapshot(r),
-    });
+    };
+    const offer = r.modOffer ?? this.buildOffer(r);
+    if (
+      r.modChecksum ||
+      offer.checksum ||
+      r.modPublicView !== undefined ||
+      r.modFail
+    ) {
+      const seatViews = this.localSeatViews(r);
+      const preferredId = this.preferredSeatId(r, seatViews);
+      payload.mod = {
+        offer,
+        publicView: r.modPublicView,
+        seatView: preferredId ? seatViews[preferredId] : undefined,
+        seatViews,
+        seq: r.modSeq,
+        ...(r.modFail ? { fail: r.modFail } : {}),
+        ...(preferredId && r.modActionsBySeat?.[preferredId]
+          ? { actions: r.modActionsBySeat[preferredId] }
+          : {}),
+      };
+    }
+    this.safeSend(IPC.roomEvent, payload);
   }
 
   private pushError(message: string) {
@@ -1602,4 +2072,594 @@ export class RoomService {
       // Renderer gone (reload/HMR) — ignore.
     }
   }
+
+  private hostRoom(
+    roomId: string,
+  ): { ok: true; room: RoomRecord } | { ok: false; error: string } {
+    const r = this.rooms.get(roomId);
+    if (!r || r.status !== "open") return { ok: false, error: "房间不可用" };
+    if (r.localRole !== "host") return { ok: false, error: "只有房主可以操作" };
+    return { ok: true, room: r };
+  }
+
+  private buildOffer(r: RoomRecord): ModOfferPayload {
+    if (!r.modLoaded || !r.modChecksum) {
+      return { id: "", name: "", version: "", checksum: "", size: 0 };
+    }
+    const size = Buffer.byteLength(
+      JSON.stringify({
+        manifest: r.modLoaded.manifestSource,
+        hostJs: r.modLoaded.hostJsSource,
+      }),
+      "utf8",
+    );
+    return {
+      id: r.modLoaded.manifest.id,
+      name: r.modLoaded.manifest.name,
+      version: r.modLoaded.manifest.version,
+      checksum: r.modChecksum,
+      size,
+    };
+  }
+
+  private cachedOffer(host: string, port: number): ModOfferPayload | null {
+    for (const r of this.rooms.values()) {
+      if (r.status !== "open") continue;
+      if (r.localRole === "host" && r.server && r.port === port) {
+        if (host === "127.0.0.1" || host === "localhost" || host === lanAddress()) {
+          return r.modOffer ?? this.buildOffer(r);
+        }
+      }
+      if (r.localRole === "member" && r.modOffer && r.joinInfo?.port === port) {
+        const hosts = [r.joinInfo.host, ...(r.joinInfo.hosts ?? [])];
+        if (hosts.includes(host)) return r.modOffer;
+      }
+    }
+    return null;
+  }
+
+  private normalizeHost(raw: string): string {
+    let host = (raw ?? "").trim();
+    host = host
+      .replace(/^wss?:\/\//i, "")
+      .replace(/^https?:\/\//i, "")
+      .replace(/\/.*$/, "")
+      .replace(/^\[|\]$/g, "");
+    if (host.includes(":") && !host.includes("::")) {
+      const [h] = host.split(":");
+      if (h) host = h;
+    }
+    return host;
+  }
+
+  private sendRaw(
+    ws: WebSocket,
+    roomId: string,
+    seq: number,
+    type: RoomFrame["type"],
+    payload: unknown,
+  ): void {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(makeRoomFrame(roomId, seq, type, payload)));
+    }
+  }
+
+  private async withHostSocket<T>(
+    host: string,
+    port: number,
+    fn: (ws: WebSocket) => Promise<T>,
+  ): Promise<T | { ok: false; error: string }> {
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(`ws://${host}:${port}`, { handshakeTimeout: 10_000 });
+    } catch (err) {
+      return {
+        ok: false,
+        error: `无法创建连接：${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+    try {
+      await waitOpen(ws, 10_000);
+      return await fn(ws);
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    } finally {
+      try {
+        ws.close();
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  private async serveModBundle(
+    r: RoomRecord,
+    ws: GuestWs,
+    frame: RoomFrame,
+  ): Promise<void> {
+    if (ws.fetching) {
+      this.reply(ws, r, "error", { message: "已有下载进行中" });
+      return;
+    }
+    const checksum = String(
+      (frame.payload as { checksum?: string })?.checksum ?? "",
+    );
+    if (!r.modLoaded || !r.modChecksum) {
+      this.reply(ws, r, "error", { message: "房间未启用模组" });
+      return;
+    }
+    if (!MOD_CHECKSUM_RE.test(checksum) || checksum !== r.modChecksum) {
+      this.reply(ws, r, "error", { message: "模组校验码不一致" });
+      return;
+    }
+    ws.fetching = true;
+    try {
+      const bytes = readModBytes(r.modLoaded);
+      for (let offset = 0; offset < bytes.length; offset += ROOM_MOD_BUNDLE_CHUNK) {
+        if (ws.readyState !== WebSocket.OPEN) break;
+        const slice = bytes.subarray(offset, offset + ROOM_MOD_BUNDLE_CHUNK);
+        this.reply(ws, r, "mod.bundle", {
+          checksum,
+          offset,
+          chunk: slice.toString("base64"),
+        });
+      }
+    } catch (err) {
+      this.reply(ws, r, "error", {
+        message: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      ws.fetching = false;
+    }
+  }
+
+  private canAct(seat: RoomSeat, userId: string): boolean {
+    if (seat.kind === "human") return seat.occupantUserId === userId;
+    return seat.takenOverBy === userId;
+  }
+
+  private enqueueIntent<T>(
+    r: RoomRecord,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const next = (r.intentChain ?? Promise.resolve()).then(fn, fn);
+    r.intentChain = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  }
+
+  private async dispatchMod(
+    r: RoomRecord,
+    opts: {
+      seatId: string;
+      name: string;
+      payload: unknown;
+      actorUserId: string;
+      after?: () => void;
+      persist?: boolean;
+    },
+  ): Promise<{ ok: boolean; error?: string }> {
+    const host = r.modHost;
+    if (!host) return { ok: false, error: "尚未启用模组" };
+    const result = await host.dispatch(
+      { seatId: opts.seatId, name: opts.name, payload: opts.payload },
+      {
+        now: Date.now(),
+        seats: toModSeats(r.seats),
+        actor: { userId: opts.actorUserId, seatId: opts.seatId },
+      },
+    );
+    if (!result.ok) return { ok: false, error: result.error };
+    opts.after?.();
+    if (opts.persist !== false) {
+      try {
+        await host.persist();
+      } catch {
+        // keep views even if persist fails
+      }
+    }
+    await this.publishViews(r);
+    queueMicrotask(() => {
+      void this.promptAgents(r);
+    });
+    return { ok: true };
+  }
+
+  private async publishViews(r: RoomRecord): Promise<void> {
+    if (!r.modHost) return;
+    let views: {
+      seq: number;
+      publicView: unknown;
+      seatViews: Record<string, unknown>;
+    };
+    try {
+      views = await r.modHost.views(toModSeats(r.seats));
+    } catch {
+      return;
+    }
+    r.modSeq = views.seq;
+    r.modPublicView = views.publicView;
+    r.modSeatViews = views.seatViews;
+    const actionsBySeat: Record<string, Record<string, ModActionSchema>> = {};
+    for (const seat of r.seats) {
+      const target = seat.takenOverBy || seat.occupantUserId;
+      if (!target) continue;
+      try {
+        actionsBySeat[seat.id] = toModActionMap(await r.modHost.actions(seat.id));
+      } catch {
+        // skip
+      }
+    }
+    r.modActionsBySeat = actionsBySeat;
+    this.broadcast(r, "mod.patch", {
+      seq: views.seq,
+      publicView: views.publicView,
+    });
+    for (const seat of r.seats) {
+      const target = seat.takenOverBy || seat.occupantUserId;
+      if (!target) continue;
+      const seatView = views.seatViews[seat.id];
+      if (seatView === undefined) continue;
+      this.sendToUser(r, target, "mod.priv", {
+        seq: views.seq,
+        seatId: seat.id,
+        seatView,
+        ...(actionsBySeat[seat.id] ? { actions: actionsBySeat[seat.id] } : {}),
+      });
+    }
+    this.emit(r);
+  }
+
+  private sendModViewsTo(r: RoomRecord, ws: WebSocket, userId: string): void {
+    if (!r.modStarted || r.modPublicView === undefined) return;
+    this.reply(ws, r, "mod.patch", {
+      seq: r.modSeq ?? 0,
+      publicView: r.modPublicView,
+    });
+    for (const seat of r.seats) {
+      const owns = seat.occupantUserId === userId || seat.takenOverBy === userId;
+      if (!owns) continue;
+      const seatView = r.modSeatViews?.[seat.id];
+      if (seatView === undefined) continue;
+      this.reply(ws, r, "mod.priv", {
+        seq: r.modSeq ?? 0,
+        seatId: seat.id,
+        seatView,
+        ...(r.modActionsBySeat?.[seat.id]
+          ? { actions: r.modActionsBySeat[seat.id] }
+          : {}),
+      });
+    }
+  }
+
+  private sendToUser(
+    r: RoomRecord,
+    userId: string,
+    type: RoomFrame["type"],
+    payload: unknown,
+  ): void {
+    if (userId === r.localUserId) return;
+    for (const g of r.guests) {
+      if ((g as GuestWs).userId === userId && g.readyState === WebSocket.OPEN) {
+        this.reply(g, r, type, payload);
+      }
+    }
+  }
+
+  private localSeatViews(r: RoomRecord): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    if (!r.modSeatViews) return out;
+    for (const seat of r.seats) {
+      const owns =
+        seat.occupantUserId === r.localUserId ||
+        seat.takenOverBy === r.localUserId;
+      if (owns && r.modSeatViews[seat.id] !== undefined) {
+        out[seat.id] = r.modSeatViews[seat.id];
+      }
+    }
+    return out;
+  }
+
+  private preferredSeatId(
+    r: RoomRecord,
+    views: Record<string, unknown>,
+  ): string | undefined {
+    const taken = r.seats.find((s) => s.takenOverBy === r.localUserId);
+    if (taken && views[taken.id] !== undefined) return taken.id;
+    const ids = Object.keys(views);
+    return ids[0];
+  }
+
+  private applyGuestSnapshot(r: RoomRecord, snap: RoomSnapshot): void {
+    r.members = snap.members;
+    r.seats = snap.seats;
+    r.items = snap.items;
+    r.status = snap.status;
+    r.modChecksum = snap.modChecksum;
+    r.requireMods = snap.requireMods;
+    if (r.joinInfo) r.joinInfo.modChecksum = snap.modChecksum;
+    if (!snap.modChecksum) {
+      r.modPublicView = undefined;
+      r.modSeatViews = undefined;
+      r.modActionsBySeat = undefined;
+      r.modFail = undefined;
+      r.modSeq = 0;
+      r.modOffer = undefined;
+    }
+  }
+
+  private onModFail(r: RoomRecord, message: string): void {
+    if (r.modEnded) return;
+    r.modFail = message;
+    this.broadcast(r, "mod.fail", { message });
+    this.emit(r);
+  }
+
+  private clearMod(r: RoomRecord): void {
+    this.disposeModHost(r);
+    r.modLoaded = undefined;
+    r.modStarted = false;
+    r.modEnded = true;
+    r.modChecksum = "";
+    r.requireMods = false;
+    r.modFail = undefined;
+    r.modPublicView = undefined;
+    r.modSeatViews = undefined;
+    r.modActionsBySeat = undefined;
+    r.modSeq = 0;
+    r.modOffer = this.buildOffer(r);
+  }
+
+  private disposeModHost(r: RoomRecord): void {
+    if (!r.modHost) return;
+    try {
+      r.modHost.dispose();
+    } catch {
+      // ignore
+    }
+    r.modHost = undefined;
+  }
+
+  private async promptAgents(r: RoomRecord): Promise<void> {
+    if (!r.modHost || r.modFail || r.modEnded || !r.modStarted) return;
+    for (const seat of r.seats) {
+      if (seat.kind !== "agent" || seat.takenOverBy || seat.running) continue;
+      let turn;
+      try {
+        turn = await r.modHost.agentTurn(seat.id);
+      } catch {
+        continue;
+      }
+      if (!turn) continue;
+      if (seat.takenOverBy) continue;
+      await this.injectAgentTurn(r, seat, turn);
+    }
+  }
+
+  private roomModToolOpts(
+    r: RoomRecord,
+    seat: RoomSeat,
+    fallbackActions?: unknown,
+  ): SessionRunOpts {
+    if (!r.modHost || !r.modStarted || r.modEnded) return {};
+    const mcp = tryCreateRoomModMcp((act) =>
+      this.dispatchAgentAct(r, seat, act, fallbackActions),
+    );
+    return mcp?.opts ?? {};
+  }
+
+  private roomModInjectOpts(
+    r: RoomRecord,
+    seat: RoomSeat,
+    fallbackActions?: unknown,
+  ): SessionRunOpts {
+    return {
+      hiddenFromList: true,
+      title: `${ROOM_MOD_PREFIX} ${seat.name}`,
+      persistText: `${ROOM_MOD_PREFIX} ${r.roomId} ${seat.id}`,
+      ...this.roomModToolOpts(r, seat, fallbackActions),
+    };
+  }
+
+  private async dispatchAgentAct(
+    r: RoomRecord,
+    seat: RoomSeat,
+    act: { action: string; payload: unknown },
+    fallbackActions?: unknown,
+  ): Promise<string> {
+    if (seat.takenOverBy) return "席位已被接管";
+    const names =
+      (await r.modHost?.actions(seat.id).catch(() => fallbackActions)) ??
+      fallbackActions;
+    const legal = new Set(actionNames(names));
+    if (!legal.has(act.action)) return illegalActionMessage(names);
+    const result = await this.enqueueIntent(r, () =>
+      this.dispatchMod(r, {
+        seatId: seat.id,
+        name: act.action,
+        payload: act.payload,
+        actorUserId: seat.occupantUserId || "agent",
+      }),
+    );
+    return result.ok ? "ok" : result.error || "操作失败";
+  }
+
+  private async injectAgentTurn(
+    r: RoomRecord,
+    seat: RoomSeat,
+    turn: { should: boolean; view: unknown; prompt: string; actions: unknown },
+  ): Promise<void> {
+    if (seat.takenOverBy) return;
+    const cwd = this.settings.get().lastProjectPath;
+    if (!cwd) return;
+    const text = formatRoomModPrompt(turn);
+    const extras = this.roomModInjectOpts(r, seat, turn.actions);
+    const mcpAttached = Boolean(extras.extraMcpServers);
+    seat.running = true;
+    try {
+      if (seat.takenOverBy) return;
+      const prompt = { text, attachments: [] as never[] };
+      if (!seat.sessionId) {
+        const id = await this.sessions.start(prompt, cwd, extras);
+        seat.sessionId = id;
+      } else {
+        await this.sessions.continue(seat.sessionId, prompt, extras);
+      }
+      if (seat.takenOverBy) return;
+      if (!mcpAttached && seat.sessionId) {
+        const items = this.sessions.getTranscript(seat.sessionId);
+        const last = [...items]
+          .reverse()
+          .find((i) => i.kind === "text" && i.role === "assistant");
+        const reply = last && last.kind === "text" ? last.text : "";
+        const act = parseRoomModAct(reply);
+        if (act) {
+          if (seat.takenOverBy) return;
+          await this.dispatchAgentAct(r, seat, act, turn.actions);
+        }
+      }
+    } catch {
+      // injection is best-effort; play loop stays up
+    } finally {
+      seat.running = false;
+    }
+  }
+}
+
+function toModSeats(seats: RoomSeat[]): ModSeat[] {
+  return seats.map((s) => ({
+    id: s.id,
+    kind: s.kind,
+    name: s.name,
+    occupantUserId: s.occupantUserId,
+    takenOverBy: s.takenOverBy,
+    sessionId: s.sessionId,
+  }));
+}
+
+function assembledSize(chunks: Map<number, Buffer>): number {
+  let n = 0;
+  for (const buf of chunks.values()) n += buf.length;
+  return n;
+}
+
+function assembleChunks(chunks: Map<number, Buffer>): Buffer {
+  const ordered = [...chunks.entries()].sort((a, b) => a[0] - b[0]);
+  return Buffer.concat(ordered.map(([, b]) => b));
+}
+
+function collectBundles(
+  ws: WebSocket,
+  checksum: string,
+  size: number,
+  timeoutMs: number,
+): Promise<{ ok: true; bytes: Buffer } | { ok: false; error: string }> {
+  return new Promise((resolve) => {
+    const chunks = new Map<number, Buffer>();
+    let settled = false;
+    const finish = (
+      result: { ok: true; bytes: Buffer } | { ok: false; error: string },
+    ) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      ws.off("message", onMsg);
+      ws.off("close", onClose);
+      resolve(result);
+    };
+    const onMsg = (data: RawData) => {
+      const frame = parseRoomFrame(String(data));
+      if (!frame) return;
+      if (frame.type === "error") {
+        finish({
+          ok: false,
+          error: (frame.payload as { message?: string })?.message ?? "下载失败",
+        });
+        return;
+      }
+      if (frame.type !== "mod.bundle") return;
+      const p = frame.payload as {
+        checksum?: string;
+        offset?: number;
+        chunk?: string;
+      };
+      if (p.checksum !== checksum || typeof p.chunk !== "string") return;
+      chunks.set(
+        typeof p.offset === "number" ? p.offset : 0,
+        Buffer.from(p.chunk, "base64"),
+      );
+      if (assembledSize(chunks) >= size) {
+        finish({ ok: true, bytes: assembleChunks(chunks) });
+      }
+    };
+    const onClose = () => finish({ ok: false, error: "模组下载不完整" });
+    const timer = setTimeout(
+      () => finish({ ok: false, error: "模组下载不完整" }),
+      timeoutMs,
+    );
+    ws.on("message", onMsg);
+    ws.on("close", onClose);
+  });
+}
+
+function waitOpen(ws: WebSocket, timeoutMs: number): Promise<void> {
+  if (ws.readyState === WebSocket.OPEN) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("连接超时"));
+    }, timeoutMs);
+    const onOpen = () => {
+      cleanup();
+      resolve();
+    };
+    const onErr = (err: Error) => {
+      cleanup();
+      reject(err);
+    };
+    const cleanup = () => {
+      clearTimeout(timer);
+      ws.off("open", onOpen);
+      ws.off("error", onErr);
+    };
+    ws.on("open", onOpen);
+    ws.on("error", onErr);
+  });
+}
+
+function waitFrame(
+  ws: WebSocket,
+  type: RoomFrame["type"] | RoomFrame["type"][],
+  timeoutMs: number,
+): Promise<RoomFrame | null> {
+  const types = new Set(Array.isArray(type) ? type : [type, "error"]);
+  if (!Array.isArray(type)) types.add("error");
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve(null);
+    }, Math.max(1, timeoutMs));
+    const onMsg = (data: RawData) => {
+      const frame = parseRoomFrame(String(data));
+      if (!frame || !types.has(frame.type)) return;
+      cleanup();
+      resolve(frame);
+    };
+    const onClose = () => {
+      cleanup();
+      resolve(null);
+    };
+    const cleanup = () => {
+      clearTimeout(timer);
+      ws.off("message", onMsg);
+      ws.off("close", onClose);
+    };
+    ws.on("message", onMsg);
+    ws.on("close", onClose);
+  });
 }

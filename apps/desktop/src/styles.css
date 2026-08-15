@@ -4222,6 +4222,7 @@ body.is-resizing-row * {
   align-items: center;
   gap: 8px;
   min-width: 0;
+  flex-wrap: wrap;
 }
 
 .room-meta {
@@ -4615,6 +4616,196 @@ body.is-resizing-row * {
 .room-send-btn {
   border-radius: 10px;
   padding: 9px 16px;
+}
+
+.room-join-hint,
+.room-join-meta {
+  margin: 0;
+  font-size: 0.846rem;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.room-join-meta {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--text-faint);
+  word-break: break-all;
+}
+
+.room-mod-badge {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.769rem;
+  color: var(--text-muted);
+  background: var(--bg-input, color-mix(in srgb, var(--text) 6%, transparent));
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.room-mod-panel {
+  flex-shrink: 0;
+  max-height: 42%;
+  overflow: auto;
+  padding: 8px 14px 10px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--bg-panel);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.room-mod-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.room-mod-host {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.room-mod-fail {
+  color: var(--danger);
+  font-size: 0.846rem;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.room-mod-fail p {
+  margin: 0;
+}
+
+.room-mod-view {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.room-mod-view h4 {
+  margin: 0;
+  font-size: 0.769rem;
+  font-weight: 600;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.room-mod-view-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.room-mod-title {
+  font-weight: 600;
+  font-size: 0.923rem;
+  color: var(--text);
+}
+
+.room-mod-phase {
+  font-size: 0.769rem;
+  color: var(--text-faint);
+}
+
+.room-mod-lines {
+  margin: 0;
+  padding-left: 1.1em;
+  font-size: 0.846rem;
+  color: var(--text);
+}
+
+.room-mod-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.room-mod-chip {
+  font-size: 0.769rem;
+  border-radius: 999px;
+  padding: 1px 7px;
+  border: 1px solid var(--border-soft);
+  color: var(--text-muted);
+}
+
+.room-mod-chip.tone-ok {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+}
+
+.room-mod-chip.tone-wait,
+.room-mod-chip.tone-role {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+}
+
+.room-mod-chip.tone-info {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent, #6ea8fe) 40%, transparent);
+}
+
+.room-mod-chip.tone-danger {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+}
+
+.room-mod-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.room-mod-action {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  min-width: 0;
+}
+
+.room-mod-action-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: baseline;
+}
+
+.room-mod-action-name {
+  font-weight: 600;
+  font-size: 0.846rem;
+}
+
+.room-mod-action-hint {
+  font-size: 0.769rem;
+  color: var(--text-faint);
+}
+
+.room-mod-json {
+  font-size: 0.769rem;
+  color: var(--text-muted);
+}
+
+.room-mod-json pre {
+  margin: 6px 0 0;
+  max-height: 140px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 /* Error banner */

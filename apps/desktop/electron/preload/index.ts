@@ -439,6 +439,77 @@ const desktop = {
       ok: boolean;
       error?: string;
     }>,
+  peekRoom: (opts: { host: string; port: number }) =>
+    ipcRenderer.invoke(IPC.roomPeek, opts) as Promise<{
+      ok: boolean;
+      offer?: import("@claude-desktop/shared").ModOfferPayload;
+      error?: string;
+    }>,
+  fetchRoomMod: (opts: { host: string; port: number; checksum: string }) =>
+    ipcRenderer.invoke(IPC.roomFetchMod, opts) as Promise<{
+      ok: boolean;
+      checksum?: string;
+      offer?: import("@claude-desktop/shared").ModOfferPayload;
+      error?: string;
+    }>,
+  enableRoomMod: (roomId: string, packDir: string) =>
+    ipcRenderer.invoke(IPC.roomEnableMod, { roomId, packDir }) as Promise<{
+      ok: boolean;
+      room?: import("@claude-desktop/shared").RoomSnapshot;
+      offer?: import("@claude-desktop/shared").ModOfferPayload;
+      error?: string;
+    }>,
+  startRoomMod: (roomId: string) =>
+    ipcRenderer.invoke(IPC.roomStartMod, { roomId }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+  endRoomMod: (roomId: string) =>
+    ipcRenderer.invoke(IPC.roomEndMod, { roomId }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+  resetRoomMod: (roomId: string) =>
+    ipcRenderer.invoke(IPC.roomResetMod, { roomId }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+  recoverRoomMod: (roomId: string) =>
+    ipcRenderer.invoke(IPC.roomRecoverMod, { roomId }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+  sendRoomModIntent: (
+    roomId: string,
+    seatId: string,
+    name: string,
+    payload?: unknown,
+  ) =>
+    ipcRenderer.invoke(IPC.roomModIntent, {
+      roomId,
+      seatId,
+      name,
+      payload,
+    }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+  listRoomMods: () =>
+    ipcRenderer.invoke(IPC.roomListMods) as Promise<{
+      mods: Array<{
+        id: string;
+        name: string;
+        version: string;
+        checksum: string;
+        packDir: string;
+        source: "bundled" | "cache";
+      }>;
+    }>,
+  hasRoomMod: (checksum: string) =>
+    ipcRenderer.invoke(IPC.roomHasMod, { checksum }) as Promise<{
+      ok: boolean;
+      has: boolean;
+    }>,
 
   /** List installed skills (user + project scope). */
   listSkills: () =>

@@ -34,6 +34,10 @@ extraResources:
     to: bin/cpa
     filter:
       - "**/*"
+  - from: resources/mods
+    to: mods
+    filter:
+      - "**/*"
 
 # Windows: portable dir + NSIS installer.
 # Disable signing/rcedit so packaging works offline without winCodeSign binaries.

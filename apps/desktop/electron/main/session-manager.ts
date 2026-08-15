@@ -55,6 +55,17 @@ export type QueryFn = (args: {
   options: Record<string, unknown>;
 }) => QueryHandle;
 
+/** Extra MCP / tools attached to one session (room-mod agent seats). */
+export type SessionRunOpts = {
+  extraMcpServers?: Record<string, unknown>;
+  extraAllowedTools?: string[];
+  /** Omit from SessionManager.list / session sidebar */
+  hiddenFromList?: boolean;
+  title?: string;
+  /** Persist this instead of the raw prompt (avoid dumping private views). */
+  persistText?: string;
+};
+
 export type SessionManagerDeps = {
   queryFn: QueryFn;
   permissionBroker: PermissionBroker;
@@ -189,6 +200,8 @@ type SessionEntry = {
   items: ChatItem[];
   itemsHydrated: boolean;
   nextId: (prefix: string) => string;
+  extraMcpServers?: Record<string, unknown>;
+  extraAllowedTools?: string[];
 };
 
 /**
@@ -351,6 +364,7 @@ export class SessionManager {
             ...(stored.contextUsage
               ? { contextUsage: stored.contextUsage }
               : {}),
+            ...(stored.hiddenFromList ? { hiddenFromList: true } : {}),
           },
           abortController: null,
           sdkSessionId: stored.sdkSessionId,
@@ -372,6 +386,7 @@ export class SessionManager {
 
   list(): SessionSummary[] {
     return [...this.sessions.values()]
+      .filter((e) => !e.summary.hiddenFromList)
       .map((e) => ({ ...e.summary }))
       .sort((a, b) => b.updatedAt - a.updatedAt);
   }
@@ -1173,7 +1188,11 @@ export class SessionManager {
     }
   }
 
-  async start(prompt: UserPrompt, cwd: string): Promise<string> {
+  async start(
+    prompt: UserPrompt,
+    cwd: string,
+    opts?: SessionRunOpts,
+  ): Promise<string> {
     await this.ensureCpaOrThrow();
 
     const { content, errors } = buildUserContent(prompt);
@@ -1190,10 +1209,11 @@ export class SessionManager {
     const now = Date.now();
     const summary: SessionSummary = {
       id: sessionId,
-      title: titleFromPrompt(prompt),
+      title: opts?.title ?? titleFromPrompt(prompt),
       cwd,
       updatedAt: now,
       status: "running",
+      ...(opts?.hiddenFromList ? { hiddenFromList: true } : {}),
     };
     const entry: SessionEntry = {
       summary,
@@ -1205,15 +1225,17 @@ export class SessionManager {
       items: [],
       itemsHydrated: true,
       nextId: createIdFactory(),
+      extraMcpServers: opts?.extraMcpServers,
+      extraAllowedTools: opts?.extraAllowedTools,
     };
     this.sessions.set(sessionId, entry);
-    this.emitSession({ ...summary });
+    if (!summary.hiddenFromList) this.emitSession({ ...summary });
     this.persistSummary(entry);
     this.replaceTranscript(
       entry,
       appendUserItem(
         { items: entry.items, optimisticUserTexts: [] },
-        displayPrompt(prompt),
+        opts?.persistText ?? displayPrompt(prompt),
         { nextId: entry.nextId },
       ).items,
       { persist: true },
@@ -1223,11 +1245,34 @@ export class SessionManager {
     return sessionId;
   }
 
-  async continue(sessionId: string, prompt: UserPrompt): Promise<void> {
+  async continue(
+    sessionId: string,
+    prompt: UserPrompt,
+    opts?: SessionRunOpts,
+  ): Promise<void> {
     const entry = this.sessions.get(sessionId);
     if (!entry) {
       throw new Error(`Unknown session: ${sessionId}`);
     }
+    let reopenForExtras = false;
+    if (opts?.extraMcpServers) {
+      const incoming = Object.keys(opts.extraMcpServers);
+      reopenForExtras = incoming.some((k) => !entry.extraMcpServers?.[k]);
+      entry.extraMcpServers = {
+        ...(entry.extraMcpServers ?? {}),
+        ...opts.extraMcpServers,
+      };
+    }
+    if (opts?.extraAllowedTools?.length) {
+      const have = new Set(entry.extraAllowedTools ?? []);
+      for (const t of opts.extraAllowedTools) {
+        if (!have.has(t)) reopenForExtras = true;
+        have.add(t);
+      }
+      entry.extraAllowedTools = [...have];
+    }
+    if (opts?.hiddenFromList) entry.summary.hiddenFromList = true;
+    if (opts?.title) entry.summary.title = opts.title;
 
     await this.ensureCpaOrThrow(sessionId);
 
@@ -1244,7 +1289,7 @@ export class SessionManager {
     this.hydrateItems(entry);
     const next = appendUserItem(
       { items: entry.items, optimisticUserTexts: [] },
-      displayPrompt(prompt),
+      opts?.persistText ?? displayPrompt(prompt),
       { nextId: entry.nextId },
     );
     this.replaceTranscript(entry, next.items, { persist: true });
@@ -1255,18 +1300,20 @@ export class SessionManager {
       updatedAt: Date.now(),
     };
     entry.turnActive = true;
-    this.emitSession({ ...entry.summary });
+    if (!entry.summary.hiddenFromList) this.emitSession({ ...entry.summary });
     this.persistSummary(entry);
 
     // Live streaming session: just push the next user message.
     // Skipped when a rewind anchor is pending — the conversation must be
     // re-opened truncated at the anchor, so force the resume path below.
     // Also skip if the stream was torn down by abort() (input closed / cleared).
+    // Reopen when extra MCP/tools just changed so they attach to the query.
     if (
       entry.input &&
       !entry.input.isClosed &&
       entry.consumer &&
-      !entry.resumeAtAnchor
+      !entry.resumeAtAnchor &&
+      !reopenForExtras
     ) {
       try {
         entry.input.push(content, entry.sdkSessionId);
@@ -1369,6 +1416,7 @@ export class SessionManager {
         "TaskUpdate",
         "TaskList",
         "TaskGet",
+        ...(entry.extraAllowedTools ?? []),
       ],
       // Load CLAUDE.md hierarchy (user → project → local) into the system
       // prompt, matching Claude Code. Must include 'project' for project CLAUDE.md.
@@ -1376,8 +1424,15 @@ export class SessionManager {
       // Configured MCP servers (stdio/sse/http). Passed through as-is; the
       // config shape matches the SDK. Kept out of `env` so the CPA token is
       // never leaked into MCP server subprocesses.
-      ...(Object.keys(settings.mcpServers ?? {}).length
-        ? { mcpServers: settings.mcpServers }
+      // Per-session extras (in-process room_mod_act) merge on top.
+      ...(Object.keys(settings.mcpServers ?? {}).length ||
+      Object.keys(entry.extraMcpServers ?? {}).length
+        ? {
+            mcpServers: {
+              ...(settings.mcpServers ?? {}),
+              ...(entry.extraMcpServers ?? {}),
+            },
+          }
         : {}),
       // Only use the MCP servers this app passes in — ignore project
       // .mcp.json, user settings, and plugin-declared servers so desktop

@@ -124,6 +124,7 @@ export class SessionArchive {
               },
             }
           : {}),
+        ...(s.hiddenFromList ? { hiddenFromList: true } : {}),
       }));
     } catch {
       return [];
@@ -143,6 +144,7 @@ export class SessionArchive {
           ...(s.sdkSessionId ? { sdkSessionId: s.sdkSessionId } : {}),
           ...(s.usage ? { usage: s.usage } : {}),
           ...(s.contextUsage ? { contextUsage: s.contextUsage } : {}),
+          ...(s.hiddenFromList ? { hiddenFromList: true } : {}),
         }))
         .sort((a, b) => b.updatedAt - a.updatedAt),
     };

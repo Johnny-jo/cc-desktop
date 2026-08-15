@@ -1,0 +1,13 @@
+{
+  "id": "werewolf",
+  "name": "狼人杀",
+  "version": "1.0.0",
+  "hostApi": 1,
+  "permissions": [],
+  "seats": {
+    "min": 4,
+    "max": 12,
+    "roles": ["seer", "wolf", "villager", "judge"]
+  },
+  "agent": true
+}

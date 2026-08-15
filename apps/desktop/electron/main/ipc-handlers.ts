@@ -879,6 +879,45 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
     if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
     return ctx.rooms.deleteLocal(roomId);
   });
+  ipcMain.handle(IPC.roomPeek, async (_e, opts) => {
+    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    return ctx.rooms.peek(opts);
+  });
+  ipcMain.handle(IPC.roomFetchMod, async (_e, opts) => {
+    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    return ctx.rooms.fetchMod(opts);
+  });
+  ipcMain.handle(IPC.roomEnableMod, async (_e, { roomId, packDir }) => {
+    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    return ctx.rooms.enableMod(roomId, packDir);
+  });
+  ipcMain.handle(IPC.roomStartMod, async (_e, { roomId }) => {
+    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    return ctx.rooms.startMod(roomId);
+  });
+  ipcMain.handle(IPC.roomEndMod, async (_e, { roomId }) => {
+    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    return ctx.rooms.endMod(roomId);
+  });
+  ipcMain.handle(IPC.roomResetMod, async (_e, { roomId }) => {
+    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    return ctx.rooms.resetMod(roomId);
+  });
+  ipcMain.handle(IPC.roomRecoverMod, async (_e, { roomId }) => {
+    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    return ctx.rooms.recoverMod(roomId);
+  });
+  ipcMain.handle(IPC.roomModIntent, async (_e, { roomId, seatId, name, payload }) => {
+    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    return ctx.rooms.modIntent(roomId, seatId, name, payload);
+  });
+  ipcMain.handle(IPC.roomListMods, async () => {
+    return { mods: ctx.rooms?.listMods().mods ?? [] };
+  });
+  ipcMain.handle(IPC.roomHasMod, async (_e, { checksum }) => {
+    if (!ctx.rooms) return { ok: true, has: false };
+    return ctx.rooms.hasMod(checksum);
+  });
 
   ipcMain.handle(IPC.skillsList, async () => {
     const cwd = ctx.settings.get().lastProjectPath ?? null;
