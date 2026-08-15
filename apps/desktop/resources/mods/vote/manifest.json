@@ -1,0 +1,13 @@
+{
+  "id": "vote",
+  "name": "投票",
+  "version": "1.0.0",
+  "hostApi": 1,
+  "permissions": [],
+  "seats": {
+    "min": 2,
+    "max": 16,
+    "roles": ["voter"]
+  },
+  "agent": true
+}
