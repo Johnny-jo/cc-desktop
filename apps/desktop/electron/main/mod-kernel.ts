@@ -53,11 +53,25 @@ export type RoomKv = {
   namespace(ns: string): RoomKvNs;
 };
 
-export type ChatInHandler = (env: {
-  text: string;
+export type ChatInEnvelope = {
+  roomId: string;
   seatId: string;
-  userId: string;
-}) => { action: "continue" | "replace" | "drop"; value?: { text: string } };
+  authorUserId: string;
+  authorLabel: string;
+  text: string;
+  at: number;
+};
+
+export type WaterfallResult<T> =
+  | { action: "continue"; value: T }
+  | { action: "replace"; value: T }
+  | { action: "drop"; reason?: string };
+
+export type ChatInHandler = (
+  env: ChatInEnvelope,
+) => WaterfallResult<ChatInEnvelope> | Promise<WaterfallResult<ChatInEnvelope>>;
+
+export const CHAT_IN_HOOK_TIMEOUT_MS = 50;
 
 export type KernelCtx = {
   readonly room: KernelRoomView;
@@ -485,6 +499,43 @@ export function runKernelActivate(
   };
 }
 
+export async function runChatInRailway(
+  handlers: ChatInHandler[],
+  env: ChatInEnvelope,
+): Promise<WaterfallResult<ChatInEnvelope>> {
+  let current = env;
+  for (const handler of handlers) {
+    let result: WaterfallResult<ChatInEnvelope>;
+    try {
+      result = await withTimeout(Promise.resolve(handler(current)), CHAT_IN_HOOK_TIMEOUT_MS);
+    } catch {
+      continue;
+    }
+    if (!result || (result.action !== "continue" && result.action !== "replace" && result.action !== "drop")) {
+      continue;
+    }
+    if (result.action === "drop") return result;
+    if (result.value) current = result.value;
+  }
+  return { action: "continue", value: current };
+}
+
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error("hook timeout")), ms);
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (err) => {
+        clearTimeout(t);
+        reject(err);
+      },
+    );
+  });
+}
+
 type LivePack = {
   id: string;
   disposers: Array<() => void | Promise<void>>;
@@ -493,6 +544,7 @@ type LivePack = {
 export class ModKernel {
   private graph: KernelGraph = { active: [], pending: [], failed: [] };
   private live: LivePack[] = [];
+  private chatInHandlers: ChatInHandler[] = [];
   private disposed = false;
 
   constructor(private readonly storage?: RoomKv) {}
@@ -543,7 +595,18 @@ export class ModKernel {
         pack.activate(session.ctx);
         session.seal();
         for (const reg of session.provides) providedNames.add(reg.name);
-        this.live.push({ id: pack.manifest.id, disposers: session.disposers });
+        for (const h of session.hooks) this.chatInHandlers.push(h.handler);
+        this.live.push({
+          id: pack.manifest.id,
+          disposers: [
+            ...session.disposers,
+            () => {
+              this.chatInHandlers = this.chatInHandlers.filter(
+                (fn) => !session.hooks.some((h) => h.handler === fn),
+              );
+            },
+          ],
+        });
         active.push({
           id: pack.manifest.id,
           version: pack.manifest.version,
@@ -568,6 +631,11 @@ export class ModKernel {
 
     this.graph = { active, pending, failed };
     return this.snapshot();
+  }
+
+  runChatIn(env: ChatInEnvelope): Promise<WaterfallResult<ChatInEnvelope>> {
+    if (this.disposed) return Promise.resolve({ action: "continue", value: env });
+    return runChatInRailway(this.chatInHandlers, env);
   }
 
   async dispose(): Promise<void> {

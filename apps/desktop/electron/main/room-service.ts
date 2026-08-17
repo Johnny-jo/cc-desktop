@@ -34,9 +34,14 @@ import {
   type LoadedMod,
   type ModPackInfo,
 } from "./mod-package";
-import { ModKernel } from "./mod-kernel";
+import {
+  ModKernel,
+  type ChatInEnvelope,
+  type KernelActivatePack,
+} from "./mod-kernel";
 import { HostRoomKv } from "./mod-kernel-store";
 import {
+  getKernelStorePath,
   getModPersistPath,
   type RuntimePathEnv,
 } from "./runtime-paths";
@@ -103,6 +108,7 @@ type RoomRecord = {
   intentChain?: Promise<unknown>;
   kernel?: ModKernel;
   kernelStore?: HostRoomKv;
+  inboundChain?: Promise<unknown>;
 };
 
 function lanAddresses(): string[] {
@@ -1523,6 +1529,25 @@ export class RoomService {
     return { ok: true };
   }
 
+  startKernel(
+    roomId: string,
+    packs: KernelActivatePack[],
+  ): { ok: boolean; error?: string } {
+    const r = this.rooms.get(roomId);
+    if (!r || r.status !== "open") return { ok: false, error: "房间不可用" };
+    if (r.localRole !== "host") return { ok: false, error: "只有房主可以启用扩展" };
+    if (!r.kernelStore) {
+      r.kernelStore = new HostRoomKv(getKernelStorePath(this.pathEnv(), r.roomId));
+    }
+    if (r.kernel) void r.kernel.dispose();
+    r.kernel = new ModKernel(r.kernelStore);
+    r.kernel.start(packs, {
+      id: r.roomId,
+      seats: r.seats.map((s) => ({ id: s.id, kind: s.kind, name: s.name })),
+    });
+    return { ok: true };
+  }
+
   async send(roomId: string, seatId: string, text: string) {
     const r = this.rooms.get(roomId);
     if (!r || r.status !== "open") return { ok: false, error: "房间不可用" };
@@ -1557,30 +1582,40 @@ export class RoomService {
       (seat.kind === "human" && seat.occupantUserId === r.localUserId) ||
       (seat.kind === "agent" && seat.takenOverBy === r.localUserId);
     if (!canTalk && seat.kind === "agent" && !seat.takenOverBy) {
-      // Host speaking *to* the agent seat → start/continue agent
-      this.append(r, {
-        kind: "user",
-        seatId,
-        authorUserId: r.localUserId,
-        authorLabel: this.memberName(r, r.localUserId),
-        text: trimmed,
-      });
-      this.pushState(r);
-      void this.runAgentSeat(r, seat, trimmed);
+      void this.enqueueInbound(r, () =>
+        this.ingestUserChat(
+          r,
+          {
+            roomId: r.roomId,
+            seatId,
+            authorUserId: r.localUserId,
+            authorLabel: this.memberName(r, r.localUserId),
+            text: trimmed,
+            at: Date.now(),
+          },
+          { runAgent: true },
+        ),
+      );
       return { ok: true };
     }
     if (!canTalk) {
       return { ok: false, error: "当前不能在这个席位发言（先接管或选自己的人席）" };
     }
 
-    this.append(r, {
-      kind: "user",
-      seatId,
-      authorUserId: r.localUserId,
-      authorLabel: this.memberName(r, r.localUserId),
-      text: trimmed,
-    });
-    this.pushState(r);
+    void this.enqueueInbound(r, () =>
+      this.ingestUserChat(
+        r,
+        {
+          roomId: r.roomId,
+          seatId,
+          authorUserId: r.localUserId,
+          authorLabel: this.memberName(r, r.localUserId),
+          text: trimmed,
+          at: Date.now(),
+        },
+        { runAgent: false },
+      ),
+    );
     return { ok: true };
   }
 
@@ -1793,15 +1828,20 @@ export class RoomService {
         });
         return;
       }
-      this.append(r, {
-        kind: "user",
-        seatId: seat.id,
-        authorUserId: userId,
-        authorLabel: this.memberName(r, userId),
-        text,
-      });
-      this.pushState(r);
-      if (toAgent) void this.runAgentSeat(r, seat, text);
+      void this.enqueueInbound(r, () =>
+        this.ingestUserChat(
+          r,
+          {
+            roomId: r.roomId,
+            seatId: seat.id,
+            authorUserId: userId,
+            authorLabel: this.memberName(r, userId),
+            text,
+            at: Date.now(),
+          },
+          { runAgent: toAgent },
+        ),
+      );
       return;
     }
 
@@ -2430,6 +2470,49 @@ export class RoomService {
       // ignore
     }
     r.modHost = undefined;
+  }
+
+  private enqueueInbound(r: RoomRecord, fn: () => Promise<void>): Promise<void> {
+    const run = (r.inboundChain ?? Promise.resolve()).then(fn, fn);
+    r.inboundChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  private async ingestUserChat(
+    r: RoomRecord,
+    env: ChatInEnvelope,
+    next: { runAgent: boolean },
+  ): Promise<void> {
+    let current = env;
+    if (r.kernel) {
+      const result = await r.kernel.runChatIn(env);
+      if (result.action === "drop") {
+        this.append(r, {
+          kind: "system",
+          text: result.reason
+            ? `消息被模组丢弃：${result.reason}`
+            : "消息被模组丢弃",
+          authorLabel: "系统",
+        });
+        this.pushState(r);
+        return;
+      }
+      if (result.value) current = result.value;
+    }
+    this.append(r, {
+      kind: "user",
+      seatId: current.seatId,
+      authorUserId: current.authorUserId,
+      authorLabel: current.authorLabel,
+      text: current.text,
+    });
+    this.pushState(r);
+    if (!next.runAgent) return;
+    const seat = r.seats.find((s) => s.id === current.seatId);
+    if (seat) void this.runAgentSeat(r, seat, current.text);
   }
 
   private disposeKernel(r: RoomRecord, deleteStore: boolean): void {

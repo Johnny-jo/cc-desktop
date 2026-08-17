@@ -6,8 +6,10 @@ import {
   ModKernel,
   parseKernelManifest,
   planKernelGraph,
+  runChatInRailway,
   runKernelActivate,
   scanKernelForbiddenApis,
+  type ChatInEnvelope,
   type KernelManifest,
 } from "./mod-kernel";
 
@@ -183,7 +185,7 @@ describe("createModCtx", () => {
     expect(() => ctx.provide("other", { get: () => 1 })).toThrow(/undeclared provide/);
     ctx.provide("memory", { get: () => "x", set: () => undefined });
     expect(provides[0]?.methods.sort()).toEqual(["get", "set"]);
-    ctx.hooks.on("room.chat.in", () => ({ action: "continue" }));
+    ctx.hooks.on("room.chat.in", (env) => ({ action: "continue", value: env }));
     seal();
     expect(() => ctx.provide("memory", { get: () => 1 })).toThrow(/after activate/);
   });
@@ -272,5 +274,50 @@ describe("ModKernel", () => {
     await kernel.dispose();
     expect(order).toEqual(["b", "a"]);
     expect(kernel.snapshot().active.every((x) => x.state === "disposed")).toBe(true);
+  });
+});
+
+const envOf = (text: string): ChatInEnvelope => ({
+  roomId: "r1",
+  seatId: "s1",
+  authorUserId: "u1",
+  authorLabel: "A",
+  text,
+  at: 1,
+});
+
+describe("runChatInRailway", () => {
+  it("replaces then drops; thrown handler is skipped", async () => {
+    const seen: string[] = [];
+    const out = await runChatInRailway(
+      [
+        (e) => {
+          seen.push(`a:${e.text}`);
+          return { action: "replace", value: { ...e, text: "rewritten" } };
+        },
+        () => {
+          throw new Error("boom");
+        },
+        (e) => {
+          seen.push(`c:${e.text}`);
+          return { action: "drop", reason: "blocked" };
+        },
+        () => {
+          seen.push("d");
+          return { action: "continue", value: envOf("nope") };
+        },
+      ],
+      envOf("hello"),
+    );
+    expect(out).toEqual({ action: "drop", reason: "blocked" });
+    expect(seen).toEqual(["a:hello", "c:rewritten"]);
+  });
+
+  it("empty chain is identity continue", async () => {
+    const e = envOf("plain");
+    await expect(runChatInRailway([], e)).resolves.toEqual({
+      action: "continue",
+      value: e,
+    });
   });
 });
