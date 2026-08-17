@@ -527,6 +527,21 @@ describe("room mod handshake + play loop", () => {
     );
   });
 
+  it("lists shared-memory as kernel and projects it on the snapshot", async () => {
+    const { rooms } = makeRooms();
+    const listed = rooms.listMods().mods;
+    expect(listed.some((p) => p.id === "shared-memory" && p.hostApi === 2)).toBe(true);
+    expect(listed.some((p) => p.id === "werewolf" && p.hostApi === 1)).toBe(true);
+    const { room } = await createHost(rooms, "kmem");
+    const mem = listed.find((p) => p.id === "shared-memory")!;
+    const en = rooms.enableKernelMod(room.roomId, mem.packDir);
+    expect(en.ok).toBe(true);
+    const snap = rooms.get(room.roomId)!;
+    expect(snap.kernel?.mods.some((m) => m.id === "shared-memory" && m.state === "active")).toBe(
+      true,
+    );
+  });
+
   it("rewrites and drops inbound chat through kernel railway", async () => {
     const { rooms } = makeRooms();
     const { room } = await createHost(rooms, "hook");

@@ -17,6 +17,7 @@ import { useI18n } from "../i18n/useI18n";
 import {
   closeRoomDialog,
   createRoom,
+  enableRoomKernelMod,
   enableRoomMod,
   fetchRoomMod,
   hasRoomMod,
@@ -56,6 +57,7 @@ export function RoomSidebar() {
   const [progress, setProgress] = useState<string | null>(null);
   const [packs, setPacks] = useState<RoomModPack[]>([]);
   const [packDir, setPackDir] = useState("");
+  const [kernelDirs, setKernelDirs] = useState<string[]>([]);
 
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -172,6 +174,7 @@ export function RoomSidebar() {
     setCacheHit(undefined);
     setPacks([]);
     setPackDir("");
+    setKernelDirs([]);
     setErr(null);
   };
 
@@ -200,6 +203,18 @@ export function RoomSidebar() {
         resetForms();
         closeRoomDialog();
         return;
+      }
+    }
+    if (res.roomId) {
+      for (const dir of kernelDirs) {
+        const enabled = await enableRoomKernelMod(res.roomId, dir);
+        if (gen !== joinGen.current) return;
+        if (!enabled.ok) {
+          setBusy(false);
+          resetForms();
+          closeRoomDialog();
+          return;
+        }
       }
     }
     setBusy(false);
@@ -488,7 +503,9 @@ export function RoomSidebar() {
                     onChange={(e) => setPackDir(e.target.value)}
                   >
                     <option value="">{t.room.packNone}</option>
-                    {packs.map((pack) => (
+                    {packs
+                      .filter((pack) => pack.hostApi !== 2)
+                      .map((pack) => (
                       <option key={`${pack.source}:${pack.packDir}`} value={pack.packDir}>
                         {pack.name} ({pack.id}@{pack.version}
                         {pack.source === "cache" ? ` · ${t.room.packCached}` : ""})
@@ -496,6 +513,30 @@ export function RoomSidebar() {
                     ))}
                   </select>
                 </label>
+                {packs.some((p) => p.hostApi === 2) ? (
+                  <fieldset className="settings-field">
+                    <legend>{t.room.kernelOptional}</legend>
+                    {packs
+                      .filter((p) => p.hostApi === 2)
+                      .map((pack) => (
+                        <label key={pack.packDir} className="room-kernel-opt">
+                          <input
+                            type="checkbox"
+                            checked={kernelDirs.includes(pack.packDir)}
+                            onChange={(e) => {
+                              setKernelDirs((cur) =>
+                                e.target.checked
+                                  ? [...cur, pack.packDir]
+                                  : cur.filter((d) => d !== pack.packDir),
+                              );
+                            }}
+                          />
+                          {pack.name} ({pack.id}@{pack.version})
+                        </label>
+                      ))}
+                    <p className="settings-hint">{t.room.kernelHint}</p>
+                  </fieldset>
+                ) : null}
                 <p className="settings-hint">
                   创建后本机在 0.0.0.0:端口 监听。对方用「邀请码」加入；防火墙需放行该
                   TCP 端口。

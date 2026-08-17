@@ -171,6 +171,10 @@ export function getModCacheDir(env: RuntimePathEnv): string {
   return path.join(env.userDataDir, "mod-cache");
 }
 
+export function getKernelCacheDir(env: RuntimePathEnv): string {
+  return path.join(env.userDataDir, "kernel-mod-cache");
+}
+
 /** Bundled packs: extraResources/mods when packaged, apps/desktop/resources/mods in dev. */
 export function getBundledModsDir(env: RuntimePathEnv): string {
   if (env.isPackaged) {

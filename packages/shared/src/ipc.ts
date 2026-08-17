@@ -144,6 +144,7 @@ export const IPC = {
   roomModIntent: "room:mod-intent",
   roomListMods: "room:list-mods",
   roomHasMod: "room:has-mod",
+  roomEnableKernelMod: "room:enable-kernel-mod",
   roomEvent: "room:event",
 } as const;
 
@@ -593,8 +594,13 @@ export type IpcInvokeMap = {
         checksum: string;
         packDir: string;
         source: "bundled" | "cache";
+        hostApi?: 1 | 2;
       }>;
     };
+  };
+  [IPC.roomEnableKernelMod]: {
+    args: [{ roomId: string; packDir: string }];
+    result: { ok: boolean; room?: import("./room-protocol").RoomSnapshot; error?: string };
   };
   [IPC.roomHasMod]: {
     args: [{ checksum: string }];

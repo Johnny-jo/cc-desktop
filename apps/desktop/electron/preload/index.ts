@@ -503,7 +503,14 @@ const desktop = {
         checksum: string;
         packDir: string;
         source: "bundled" | "cache";
+        hostApi?: 1 | 2;
       }>;
+    }>,
+  enableRoomKernelMod: (roomId: string, packDir: string) =>
+    ipcRenderer.invoke(IPC.roomEnableKernelMod, { roomId, packDir }) as Promise<{
+      ok: boolean;
+      room?: import("@claude-desktop/shared").RoomSnapshot;
+      error?: string;
     }>,
   hasRoomMod: (checksum: string) =>
     ipcRenderer.invoke(IPC.roomHasMod, { checksum }) as Promise<{

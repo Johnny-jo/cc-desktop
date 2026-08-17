@@ -35,6 +35,11 @@ import {
   type ModPackInfo,
 } from "./mod-package";
 import {
+  listKernelPacks,
+  loadKernelDir,
+  toKernelActivatePack,
+} from "./mod-kernel-package";
+import {
   ModKernel,
   type ChatInEnvelope,
   type KernelActivatePack,
@@ -109,6 +114,8 @@ type RoomRecord = {
   intentChain?: Promise<unknown>;
   kernel?: ModKernel;
   kernelStore?: HostRoomKv;
+  kernelPacks?: KernelActivatePack[];
+  kernelProjection?: RoomSnapshot["kernel"];
   inboundChain?: Promise<unknown>;
 };
 
@@ -227,8 +234,12 @@ export class RoomService {
     };
   }
 
-  listMods(): { mods: ModPackInfo[] } {
-    return { mods: listModPacks(this.pathEnv()) };
+  listMods(): {
+    mods: Array<ModPackInfo & { hostApi?: 1 | 2 }>;
+  } {
+    const play = listModPacks(this.pathEnv()).map((p) => ({ ...p, hostApi: 1 as const }));
+    const kernel = listKernelPacks(this.pathEnv());
+    return { mods: [...play, ...kernel] };
   }
 
   hasMod(checksum: string): { ok: true; has: boolean } {
@@ -1530,6 +1541,27 @@ export class RoomService {
     return { ok: true };
   }
 
+  enableKernelMod(
+    roomId: string,
+    packDir: string,
+  ): { ok: boolean; room?: RoomSnapshot; error?: string } {
+    const r = this.rooms.get(roomId);
+    if (!r || r.status !== "open") return { ok: false, error: "房间不可用" };
+    if (r.localRole !== "host") return { ok: false, error: "只有房主可以启用扩展" };
+    try {
+      const loaded = loadKernelDir(packDir);
+      const pack = toKernelActivatePack(loaded);
+      r.kernelPacks = (r.kernelPacks ?? []).filter((p) => p.manifest.id !== pack.manifest.id);
+      r.kernelPacks.push(pack);
+      const started = this.startKernel(roomId, r.kernelPacks);
+      if (!started.ok) return started;
+      this.emit(r);
+      return { ok: true, room: this.snapshot(r) };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
   startKernel(
     roomId: string,
     packs: KernelActivatePack[],
@@ -2032,7 +2064,22 @@ export class RoomService {
       seats: r.seats,
       items: r.items,
       localUserId: r.localUserId || undefined,
+      kernel: r.localRole === "host" ? this.kernelProjection(r) : r.kernelProjection,
     };
+  }
+
+  private kernelProjection(r: RoomRecord): RoomSnapshot["kernel"] {
+    if (!r.kernel) return undefined;
+    const names = new Map((r.kernelPacks ?? []).map((p) => [p.manifest.id, p.manifest.name]));
+    const graph = r.kernel.snapshot();
+    const mods = [...graph.active, ...graph.pending, ...graph.failed].map((m) => ({
+      id: m.id,
+      name: names.get(m.id) ?? m.id,
+      version: m.version,
+      state: m.state,
+      ...(m.pendingReason ? { pendingReason: m.pendingReason } : {}),
+    }));
+    return { mods };
   }
 
   private pushState(r: RoomRecord) {
@@ -2442,6 +2489,7 @@ export class RoomService {
       r.modSeq = 0;
       r.modOffer = undefined;
     }
+    r.kernelProjection = snap.kernel;
   }
 
   private onModFail(r: RoomRecord, message: string): void {

@@ -1,3 +1,4 @@
+import vm from "node:vm";
 import { MOD_KERNEL_API } from "@claude-desktop/shared";
 
 export { MOD_KERNEL_API };
@@ -169,6 +170,79 @@ export function scanKernelForbiddenApis(source: string): void {
   for (const rule of KERNEL_FORBIDDEN) {
     if (rule.re.test(source)) throw new Error(rule.message);
   }
+}
+
+export function compileKernelActivate(source: string): (ctx: KernelCtx) => void {
+  scanKernelForbiddenApis(source);
+  const transformed = source
+    .replace(/export\s+default\s+function\s+activate\b/g, "function activate")
+    .replace(/export\s+function\s+activate\b/g, "function activate")
+    .replace(/export\s+const\s+activate\s*=/g, "const activate =")
+    .replace(/export\s+default\s+activate\b/g, "")
+    .replace(/export\s*\{\s*activate\s*(?:as\s+default\s*)?\}/g, "");
+  const exportsObj: Record<string, unknown> = {};
+  const moduleObj = { exports: exportsObj };
+  const sandbox: Record<string, unknown> = {
+    Object,
+    Array,
+    String,
+    Number,
+    Boolean,
+    Error,
+    TypeError,
+    RangeError,
+    JSON,
+    Math,
+    Date,
+    parseInt,
+    parseFloat,
+    isNaN,
+    isFinite,
+    Infinity,
+    NaN,
+    undefined,
+    Map,
+    Set,
+    WeakMap,
+    WeakSet,
+    Promise,
+    Symbol,
+    ArrayBuffer,
+    Uint8Array,
+    Int8Array,
+    Uint16Array,
+    Int16Array,
+    Uint32Array,
+    Int32Array,
+    Float32Array,
+    Float64Array,
+    DataView,
+    RegExp,
+    console,
+    exports: exportsObj,
+    module: moduleObj,
+  };
+  sandbox.globalThis = sandbox;
+  sandbox.global = sandbox;
+  const wrapped = `(function (exports, module) {
+${transformed}
+if (typeof activate === "function") exports.activate = activate;
+else if (typeof module.exports === "function") exports.activate = module.exports;
+else if (module.exports && typeof module.exports.activate === "function") {
+  exports.activate = module.exports.activate;
+} else if (module.exports && typeof module.exports.default === "function") {
+  exports.activate = module.exports.default;
+}
+})(exports, module);`;
+  try {
+    vm.runInNewContext(wrapped, sandbox, { timeout: 1000, displayErrors: true });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`mod.js failed to load: ${msg}`);
+  }
+  const activate = exportsObj.activate;
+  if (typeof activate !== "function") throw new Error("activate is required");
+  return activate as (ctx: KernelCtx) => void;
 }
 
 function instanceOf(

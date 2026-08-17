@@ -64,6 +64,8 @@ export const zh: Messages = {
     leave: "退出",
     invite: "邀请",
     packOptional: "玩法模组（可选）",
+    kernelOptional: "房间扩展（可多选）",
+    kernelHint: "扩展在房主运行，客人只看结果。共享记忆对房内 Agent 可见。",
     packNone: "不使用模组",
     packCached: "缓存",
     needMod: "此房间需要模组（校验 {checksum}）",

@@ -151,6 +151,9 @@ export function RoomStage() {
           <span className={`room-dot ${room.status === "open" ? "on" : ""}`} />
           <span className="room-meta">
             {room.memberCount} 人 · {room.status === "open" ? "开着" : "已结束"}
+            {room.kernel?.mods.length
+              ? ` · 扩展 ${room.kernel.mods.map((m) => m.id).join("、")}`
+              : ""}
           </span>
           {stageBadge ? (
             <span className="room-mod-badge" title={stageBadge}>

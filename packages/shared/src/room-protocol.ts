@@ -142,6 +142,16 @@ export type RoomSnapshot = {
   items: RoomTimelineItem[];
   /** This client's user id (so UI can pick our own human seat). */
   localUserId?: string;
+  /** Read-only kernel projection. Never includes source or KV. */
+  kernel?: {
+    mods: Array<{
+      id: string;
+      name: string;
+      version: string;
+      state: string;
+      pendingReason?: string;
+    }>;
+  };
 };
 
 export type RoomListItem = {
