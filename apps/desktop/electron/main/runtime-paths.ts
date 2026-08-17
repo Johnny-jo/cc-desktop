@@ -202,6 +202,13 @@ export function getModPersistPath(env: RuntimePathEnv, roomId: string): string {
   return path.join(env.userDataDir, "rooms", `${roomId}.mod.json`);
 }
 
+export function getKernelStorePath(env: RuntimePathEnv, roomId: string): string {
+  if (!MOD_ROOM_ID_RE.test(roomId)) {
+    throw new Error("invalid room id");
+  }
+  return path.join(env.userDataDir, "rooms", `${roomId}.kernel-store.json`);
+}
+
 function readCpaConfigTemplate(env: RuntimePathEnv): string {
   const template = getCpaConfigTemplatePath(env);
   if (template && fs.existsSync(template)) {

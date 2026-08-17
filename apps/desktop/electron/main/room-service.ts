@@ -34,6 +34,8 @@ import {
   type LoadedMod,
   type ModPackInfo,
 } from "./mod-package";
+import { ModKernel } from "./mod-kernel";
+import { HostRoomKv } from "./mod-kernel-store";
 import {
   getModPersistPath,
   type RuntimePathEnv,
@@ -99,6 +101,8 @@ type RoomRecord = {
   modFail?: string;
   modActionsBySeat?: Record<string, Record<string, ModActionSchema>>;
   intentChain?: Promise<unknown>;
+  kernel?: ModKernel;
+  kernelStore?: HostRoomKv;
 };
 
 function lanAddresses(): string[] {
@@ -1308,6 +1312,7 @@ export class RoomService {
     }
     r.guests.clear();
     this.disposeModHost(r);
+    this.disposeKernel(r, shouldDelete);
     try {
       r.server?.close();
     } catch {
@@ -1343,6 +1348,7 @@ export class RoomService {
     } catch {
       // ignore
     }
+    if (r) this.disposeKernel(r, true);
     this.rooms.delete(roomId);
     this.archive?.removeRoom(roomId);
     return { ok: true };
@@ -1582,6 +1588,7 @@ export class RoomService {
     for (const r of this.rooms.values()) {
       this.cancelGuestReconnect(r);
       this.disposeModHost(r);
+      this.disposeKernel(r, false);
       try {
         r.client?.close();
         r.server?.close();
@@ -2423,6 +2430,15 @@ export class RoomService {
       // ignore
     }
     r.modHost = undefined;
+  }
+
+  private disposeKernel(r: RoomRecord, deleteStore: boolean): void {
+    const kernel = r.kernel;
+    r.kernel = undefined;
+    if (kernel) void kernel.dispose();
+    if (deleteStore) r.kernelStore?.deleteFile();
+    else r.kernelStore?.seal();
+    r.kernelStore = undefined;
   }
 
   private async promptAgents(r: RoomRecord): Promise<void> {

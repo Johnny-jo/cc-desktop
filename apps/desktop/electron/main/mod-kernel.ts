@@ -484,3 +484,109 @@ export function runKernelActivate(
     provides: liveProvides,
   };
 }
+
+type LivePack = {
+  id: string;
+  disposers: Array<() => void | Promise<void>>;
+};
+
+export class ModKernel {
+  private graph: KernelGraph = { active: [], pending: [], failed: [] };
+  private live: LivePack[] = [];
+  private disposed = false;
+
+  constructor(private readonly storage?: RoomKv) {}
+
+  snapshot(): KernelGraph {
+    return {
+      active: [...this.graph.active],
+      pending: [...this.graph.pending],
+      failed: [...this.graph.failed],
+    };
+  }
+
+  start(packs: KernelActivatePack[], room: KernelRoomView): KernelGraph {
+    if (this.disposed) throw new Error("kernel disposed");
+    const manifests = packs.map((p) => p.manifest);
+    const byId = new Map(packs.map((p) => [p.manifest.id, p]));
+    const planned = planKernelGraph(manifests);
+    const active: KernelInstance[] = [];
+    const pending = [...planned.graph.pending];
+    const failed = [...planned.graph.failed];
+    const providedNames = new Set<string>();
+
+    for (const id of planned.order) {
+      const pack = byId.get(id);
+      if (!pack) continue;
+      const missing = pack.manifest.inject.filter((x) => !providedNames.has(x));
+      if (missing.length) {
+        pending.push({
+          id: pack.manifest.id,
+          version: pack.manifest.version,
+          state: "pending",
+          pendingReason: `missing inject: ${missing.join(", ")}`,
+          provides: [...pack.manifest.provides],
+          inject: [...pack.manifest.inject],
+          hooks: [...pack.manifest.hooks],
+        });
+        continue;
+      }
+      const bag: Record<string, unknown> = {};
+      for (const name of pack.manifest.inject) bag[name] = { provided: true };
+      const session = createModCtx({
+        manifest: pack.manifest,
+        room,
+        bag,
+        storage: this.storage,
+      });
+      try {
+        pack.activate(session.ctx);
+        session.seal();
+        for (const reg of session.provides) providedNames.add(reg.name);
+        this.live.push({ id: pack.manifest.id, disposers: session.disposers });
+        active.push({
+          id: pack.manifest.id,
+          version: pack.manifest.version,
+          state: "active",
+          provides: [...pack.manifest.provides],
+          inject: [...pack.manifest.inject],
+          hooks: [...pack.manifest.hooks],
+        });
+      } catch (err) {
+        session.seal();
+        failed.push({
+          id: pack.manifest.id,
+          version: pack.manifest.version,
+          state: "failed",
+          failedReason: err instanceof Error ? err.message : String(err),
+          provides: [...pack.manifest.provides],
+          inject: [...pack.manifest.inject],
+          hooks: [...pack.manifest.hooks],
+        });
+      }
+    }
+
+    this.graph = { active, pending, failed };
+    return this.snapshot();
+  }
+
+  async dispose(): Promise<void> {
+    if (this.disposed) return;
+    this.disposed = true;
+    for (const pack of [...this.live].reverse()) {
+      for (const fn of [...pack.disposers].reverse()) {
+        try {
+          await fn();
+        } catch {
+          // disposer errors must not block unload
+        }
+      }
+    }
+    this.live = [];
+    this.graph = {
+      active: this.graph.active.map((x) => ({ ...x, state: "disposed" })),
+      pending: this.graph.pending,
+      failed: this.graph.failed,
+    };
+  }
+}

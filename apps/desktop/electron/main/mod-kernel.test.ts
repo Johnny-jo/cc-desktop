@@ -3,6 +3,7 @@ import { MOD_HOST_API, MOD_KERNEL_API } from "@claude-desktop/shared";
 import { parseManifest } from "./mod-package";
 import {
   createModCtx,
+  ModKernel,
   parseKernelManifest,
   planKernelGraph,
   runKernelActivate,
@@ -236,5 +237,40 @@ describe("runKernelActivate", () => {
     expect(graph.failed[0]?.failedReason).toBe("boom");
     expect(graph.pending.map((x) => x.id)).toEqual(["user"]);
     expect(graph.active).toEqual([]);
+  });
+});
+
+describe("ModKernel", () => {
+  it("runs disposers in reverse and is idempotent", async () => {
+    const order: string[] = [];
+    const kernel = new ModKernel();
+    kernel.start(
+      [
+        {
+          manifest: man({ id: "a", provides: ["x"] }),
+          activate: (ctx) => {
+            ctx.onDispose(() => {
+              order.push("a");
+            });
+            ctx.provide("x", { ping: () => 1 });
+          },
+        },
+        {
+          manifest: man({ id: "b", inject: ["x"] }),
+          activate: (ctx) => {
+            ctx.onDispose(() => {
+              order.push("b");
+            });
+          },
+        },
+      ],
+      room,
+    );
+    expect(kernel.snapshot().active.map((x) => x.id)).toEqual(["a", "b"]);
+    await kernel.dispose();
+    expect(order).toEqual(["b", "a"]);
+    await kernel.dispose();
+    expect(order).toEqual(["b", "a"]);
+    expect(kernel.snapshot().active.every((x) => x.state === "disposed")).toBe(true);
   });
 });
