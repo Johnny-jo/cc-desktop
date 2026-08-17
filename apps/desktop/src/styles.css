@@ -4923,6 +4923,13 @@ body.is-resizing-row * {
   color: var(--text-muted);
 }
 
+.room-kernel-opt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+}
+
 .settings-field input,
 .settings-field textarea,
 .settings-field select {

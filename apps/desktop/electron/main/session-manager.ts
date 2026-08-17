@@ -59,6 +59,11 @@ export type QueryFn = (args: {
 export type SessionRunOpts = {
   extraMcpServers?: Record<string, unknown>;
   extraAllowedTools?: string[];
+  /**
+   * When true, extraMcpServers / extraAllowedTools replace the session extras
+   * instead of merging. Room seats always pass this.
+   */
+  replaceExtras?: boolean;
   /** Omit from SessionManager.list / session sidebar */
   hiddenFromList?: boolean;
   title?: string;
@@ -215,6 +220,24 @@ const SESSION_TOOLS = { type: "preset", preset: "claude_code" } as const;
 
 function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+function sameKeySet(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  const left = new Set(a);
+  return b.every((k) => left.has(k));
+}
+
+function extrasChanged(
+  prevServers: Record<string, unknown> | undefined,
+  prevTools: string[] | undefined,
+  nextServers: Record<string, unknown>,
+  nextTools: string[],
+): boolean {
+  return (
+    !sameKeySet(Object.keys(prevServers ?? {}), Object.keys(nextServers)) ||
+    !sameKeySet(prevTools ?? [], nextTools)
+  );
 }
 
 function titleFromPrompt(prompt: UserPrompt): string {
@@ -981,6 +1004,22 @@ export class SessionManager {
     }
   }
 
+  syncExtras(sessionId: string, extras: SessionRunOpts): void {
+    const entry = this.sessions.get(sessionId);
+    if (!entry) return;
+    const nextServers = extras.extraMcpServers ?? {};
+    const nextTools = extras.extraAllowedTools ?? [];
+    const changed = extrasChanged(
+      entry.extraMcpServers,
+      entry.extraAllowedTools,
+      nextServers,
+      nextTools,
+    );
+    entry.extraMcpServers = nextServers;
+    entry.extraAllowedTools = nextTools;
+    if (changed) this.abort(sessionId);
+  }
+
   abort(sessionId: string): void {
     const entry = this.sessions.get(sessionId);
     if (!entry) return;
@@ -1255,21 +1294,34 @@ export class SessionManager {
       throw new Error(`Unknown session: ${sessionId}`);
     }
     let reopenForExtras = false;
-    if (opts?.extraMcpServers) {
-      const incoming = Object.keys(opts.extraMcpServers);
-      reopenForExtras = incoming.some((k) => !entry.extraMcpServers?.[k]);
-      entry.extraMcpServers = {
-        ...(entry.extraMcpServers ?? {}),
-        ...opts.extraMcpServers,
-      };
-    }
-    if (opts?.extraAllowedTools?.length) {
-      const have = new Set(entry.extraAllowedTools ?? []);
-      for (const t of opts.extraAllowedTools) {
-        if (!have.has(t)) reopenForExtras = true;
-        have.add(t);
+    if (opts?.replaceExtras) {
+      const nextServers = opts.extraMcpServers ?? {};
+      const nextTools = opts.extraAllowedTools ?? [];
+      reopenForExtras = extrasChanged(
+        entry.extraMcpServers,
+        entry.extraAllowedTools,
+        nextServers,
+        nextTools,
+      );
+      entry.extraMcpServers = nextServers;
+      entry.extraAllowedTools = nextTools;
+    } else {
+      if (opts?.extraMcpServers) {
+        const incoming = Object.keys(opts.extraMcpServers);
+        reopenForExtras = incoming.some((k) => !entry.extraMcpServers?.[k]);
+        entry.extraMcpServers = {
+          ...(entry.extraMcpServers ?? {}),
+          ...opts.extraMcpServers,
+        };
       }
-      entry.extraAllowedTools = [...have];
+      if (opts?.extraAllowedTools?.length) {
+        const have = new Set(entry.extraAllowedTools ?? []);
+        for (const t of opts.extraAllowedTools) {
+          if (!have.has(t)) reopenForExtras = true;
+          have.add(t);
+        }
+        entry.extraAllowedTools = [...have];
+      }
     }
     if (opts?.hiddenFromList) entry.summary.hiddenFromList = true;
     if (opts?.title) entry.summary.title = opts.title;

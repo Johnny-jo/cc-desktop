@@ -23,6 +23,7 @@ export type RoomModPack = {
   checksum: string;
   packDir: string;
   source: "bundled" | "cache";
+  hostApi?: 1 | 2;
 };
 
 type RoomUiState = {
@@ -398,6 +399,24 @@ export async function listRoomMods(): Promise<RoomModPack[]> {
   if (!hasDesktopApi("listRoomMods")) return [];
   const res = await getDesktop().listRoomMods();
   return res.mods ?? [];
+}
+
+export async function enableRoomKernelMod(
+  roomId: string,
+  packDir: string,
+): Promise<{ ok: boolean; error?: string }> {
+  if (!hasDesktopApi("enableRoomKernelMod")) {
+    return { ok: false, error: "请完全重启应用后再使用房间扩展" };
+  }
+  const res = await getDesktop().enableRoomKernelMod(roomId, packDir);
+  if (!res.ok) {
+    set({ lastError: res.error ?? "启用扩展失败" });
+    return { ok: false, error: res.error };
+  }
+  if (res.room && state.activeRoomId === roomId) {
+    set({ activeRoom: res.room, lastError: null });
+  }
+  return { ok: true };
 }
 
 export async function enableRoomMod(

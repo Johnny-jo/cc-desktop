@@ -3,6 +3,7 @@
 export const ROOM_PROTOCOL_VERSION = 1;
 export const ROOM_DEFAULT_PORT = 18765;
 export const MOD_HOST_API = 1;
+export const MOD_KERNEL_API = 2;
 export const MOD_BUNDLE_MAX_BYTES = 512 * 1024;
 
 export type RoomRole = "host" | "member";
@@ -141,6 +142,16 @@ export type RoomSnapshot = {
   items: RoomTimelineItem[];
   /** This client's user id (so UI can pick our own human seat). */
   localUserId?: string;
+  /** Read-only kernel projection. Never includes source or KV. */
+  kernel?: {
+    mods: Array<{
+      id: string;
+      name: string;
+      version: string;
+      state: string;
+      pendingReason?: string;
+    }>;
+  };
 };
 
 export type RoomListItem = {

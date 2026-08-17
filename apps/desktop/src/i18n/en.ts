@@ -62,6 +62,9 @@ export const en = {
     leave: "Leave",
     invite: "Invite",
     packOptional: "Play pack (optional)",
+    kernelOptional: "Room extensions (multi-select)",
+    kernelHint:
+      "Extensions run on the host. Guests only see results. Shared memory is visible to room agents.",
     packNone: "None",
     packCached: "cached",
     needMod: "This room requires a pack (checksum {checksum})",

@@ -7,6 +7,7 @@ import {
   getClaudeExecutablePath,
   getCpaUserConfigPath,
   getBundledModsDir,
+  getKernelStorePath,
   getModCacheDir,
   getModCachePath,
   getModPersistPath,
@@ -227,6 +228,9 @@ describe("runtime-paths", () => {
     );
     expect(getModPersistPath(e, "room-1")).toBe(
       path.join(userDataDir, "rooms", "room-1.mod.json"),
+    );
+    expect(getKernelStorePath(e, "room-1")).toBe(
+      path.join(userDataDir, "rooms", "room-1.kernel-store.json"),
     );
     expect(getBundledModsDir({ ...e, isPackaged: true, resourcesPath: "/res" })).toBe(
       path.join("/res", "mods"),

@@ -1,0 +1,10 @@
+{
+  "id": "shared-memory",
+  "name": "群共享记忆",
+  "version": "1.0.0",
+  "hostApi": 2,
+  "inject": [],
+  "provides": ["memory"],
+  "permissions": ["storage:room"],
+  "hooks": []
+}

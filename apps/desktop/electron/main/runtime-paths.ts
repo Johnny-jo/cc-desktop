@@ -171,6 +171,10 @@ export function getModCacheDir(env: RuntimePathEnv): string {
   return path.join(env.userDataDir, "mod-cache");
 }
 
+export function getKernelCacheDir(env: RuntimePathEnv): string {
+  return path.join(env.userDataDir, "kernel-mod-cache");
+}
+
 /** Bundled packs: extraResources/mods when packaged, apps/desktop/resources/mods in dev. */
 export function getBundledModsDir(env: RuntimePathEnv): string {
   if (env.isPackaged) {
@@ -200,6 +204,13 @@ export function getModPersistPath(env: RuntimePathEnv, roomId: string): string {
     throw new Error("invalid room id");
   }
   return path.join(env.userDataDir, "rooms", `${roomId}.mod.json`);
+}
+
+export function getKernelStorePath(env: RuntimePathEnv, roomId: string): string {
+  if (!MOD_ROOM_ID_RE.test(roomId)) {
+    throw new Error("invalid room id");
+  }
+  return path.join(env.userDataDir, "rooms", `${roomId}.kernel-store.json`);
 }
 
 function readCpaConfigTemplate(env: RuntimePathEnv): string {

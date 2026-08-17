@@ -13,6 +13,7 @@ import {
 } from "@claude-desktop/shared";
 import { RoomService, ROOM_MOD_BUNDLE_CHUNK } from "./room-service";
 import { loadModCache } from "./mod-package";
+import { parseKernelManifest } from "./mod-kernel";
 import { RoomArchive } from "./room-archive";
 import type { SessionManager } from "./session-manager";
 import type { SettingsStore } from "./settings-store";
@@ -141,11 +142,13 @@ function mockSessions() {
     continue: vi.fn().mockResolvedValue(undefined),
     getTranscript: vi.fn().mockReturnValue([]),
     abort: vi.fn(),
+    syncExtras: vi.fn(),
   } as unknown as SessionManager & {
     start: ReturnType<typeof vi.fn>;
     continue: ReturnType<typeof vi.fn>;
     getTranscript: ReturnType<typeof vi.fn>;
     abort: ReturnType<typeof vi.fn>;
+    syncExtras: ReturnType<typeof vi.fn>;
   };
 }
 
@@ -522,5 +525,58 @@ describe("room mod handshake + play loop", () => {
     expect(sess2.start.mock.calls.length + sess2.continue.mock.calls.length).toBe(
       calls,
     );
+  });
+
+  it("lists shared-memory as kernel and projects it on the snapshot", async () => {
+    const { rooms } = makeRooms();
+    const listed = rooms.listMods().mods;
+    expect(listed.some((p) => p.id === "shared-memory" && p.hostApi === 2)).toBe(true);
+    expect(listed.some((p) => p.id === "werewolf" && p.hostApi === 1)).toBe(true);
+    const { room } = await createHost(rooms, "kmem");
+    const mem = listed.find((p) => p.id === "shared-memory")!;
+    const en = rooms.enableKernelMod(room.roomId, mem.packDir);
+    expect(en.ok).toBe(true);
+    const snap = rooms.get(room.roomId)!;
+    expect(snap.kernel?.mods.some((m) => m.id === "shared-memory" && m.state === "active")).toBe(
+      true,
+    );
+  });
+
+  it("rewrites and drops inbound chat through kernel railway", async () => {
+    const { rooms } = makeRooms();
+    const { room } = await createHost(rooms, "hook");
+    const started = rooms.startKernel(room.roomId, [
+      {
+        manifest: parseKernelManifest({
+          id: "filter",
+          version: "1.0.0",
+          hostApi: 2,
+          hooks: ["room.chat.in"],
+        }),
+        activate: (ctx) => {
+          ctx.hooks.on("room.chat.in", (env) => {
+            if (env.text === "dropme") return { action: "drop", reason: "nope" };
+            return { action: "replace", value: { ...env, text: "rewritten" } };
+          });
+        },
+      },
+    ]);
+    expect(started.ok).toBe(true);
+    const seatId = room.seats[0]!.id;
+    await rooms.send(room.roomId, seatId, "hello");
+    await vi.waitFor(() => {
+      const items = rooms.get(room.roomId)!.items;
+      expect(items.some((i) => i.kind === "user" && i.text === "rewritten")).toBe(
+        true,
+      );
+    });
+    await rooms.send(room.roomId, seatId, "dropme");
+    await vi.waitFor(() => {
+      const items = rooms.get(room.roomId)!.items;
+      expect(items.some((i) => i.kind === "user" && i.text === "dropme")).toBe(
+        false,
+      );
+      expect(items.some((i) => i.text.includes("消息被模组丢弃"))).toBe(true);
+    });
   });
 });

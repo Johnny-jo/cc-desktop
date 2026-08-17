@@ -914,6 +914,10 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
   ipcMain.handle(IPC.roomListMods, async () => {
     return { mods: ctx.rooms?.listMods().mods ?? [] };
   });
+  ipcMain.handle(IPC.roomEnableKernelMod, async (_e, { roomId, packDir }) => {
+    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    return ctx.rooms.enableKernelMod(roomId, packDir);
+  });
   ipcMain.handle(IPC.roomHasMod, async (_e, { checksum }) => {
     if (!ctx.rooms) return { ok: true, has: false };
     return ctx.rooms.hasMod(checksum);

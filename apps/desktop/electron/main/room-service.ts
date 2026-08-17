@@ -35,6 +35,18 @@ import {
   type ModPackInfo,
 } from "./mod-package";
 import {
+  listKernelPacks,
+  loadKernelDir,
+  toKernelActivatePack,
+} from "./mod-kernel-package";
+import {
+  ModKernel,
+  type ChatInEnvelope,
+  type KernelActivatePack,
+} from "./mod-kernel";
+import { HostRoomKv } from "./mod-kernel-store";
+import {
+  getKernelStorePath,
   getModPersistPath,
   type RuntimePathEnv,
 } from "./runtime-paths";
@@ -48,6 +60,7 @@ import {
   tryCreateRoomModMcp,
   type ModActionSchema,
 } from "./room-mod-agent";
+import { mergeSessionRunOpts, tryCreateMemoryMcp } from "./mod-kernel-compile";
 
 const MOD_CHECKSUM_RE = /^[0-9a-f]{64}$/;
 export const ROOM_MOD_BUNDLE_CHUNK = 48 * 1024;
@@ -99,6 +112,11 @@ type RoomRecord = {
   modFail?: string;
   modActionsBySeat?: Record<string, Record<string, ModActionSchema>>;
   intentChain?: Promise<unknown>;
+  kernel?: ModKernel;
+  kernelStore?: HostRoomKv;
+  kernelPacks?: KernelActivatePack[];
+  kernelProjection?: RoomSnapshot["kernel"];
+  inboundChain?: Promise<unknown>;
 };
 
 function lanAddresses(): string[] {
@@ -216,8 +234,12 @@ export class RoomService {
     };
   }
 
-  listMods(): { mods: ModPackInfo[] } {
-    return { mods: listModPacks(this.pathEnv()) };
+  listMods(): {
+    mods: Array<ModPackInfo & { hostApi?: 1 | 2 }>;
+  } {
+    const play = listModPacks(this.pathEnv()).map((p) => ({ ...p, hostApi: 1 as const }));
+    const kernel = listKernelPacks(this.pathEnv());
+    return { mods: [...play, ...kernel] };
   }
 
   hasMod(checksum: string): { ok: true; has: boolean } {
@@ -1308,6 +1330,7 @@ export class RoomService {
     }
     r.guests.clear();
     this.disposeModHost(r);
+    this.disposeKernel(r, shouldDelete);
     try {
       r.server?.close();
     } catch {
@@ -1343,6 +1366,7 @@ export class RoomService {
     } catch {
       // ignore
     }
+    if (r) this.disposeKernel(r, true);
     this.rooms.delete(roomId);
     this.archive?.removeRoom(roomId);
     return { ok: true };
@@ -1517,6 +1541,46 @@ export class RoomService {
     return { ok: true };
   }
 
+  enableKernelMod(
+    roomId: string,
+    packDir: string,
+  ): { ok: boolean; room?: RoomSnapshot; error?: string } {
+    const r = this.rooms.get(roomId);
+    if (!r || r.status !== "open") return { ok: false, error: "房间不可用" };
+    if (r.localRole !== "host") return { ok: false, error: "只有房主可以启用扩展" };
+    try {
+      const loaded = loadKernelDir(packDir);
+      const pack = toKernelActivatePack(loaded);
+      r.kernelPacks = (r.kernelPacks ?? []).filter((p) => p.manifest.id !== pack.manifest.id);
+      r.kernelPacks.push(pack);
+      const started = this.startKernel(roomId, r.kernelPacks);
+      if (!started.ok) return started;
+      this.emit(r);
+      return { ok: true, room: this.snapshot(r) };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  startKernel(
+    roomId: string,
+    packs: KernelActivatePack[],
+  ): { ok: boolean; error?: string } {
+    const r = this.rooms.get(roomId);
+    if (!r || r.status !== "open") return { ok: false, error: "房间不可用" };
+    if (r.localRole !== "host") return { ok: false, error: "只有房主可以启用扩展" };
+    if (!r.kernelStore) {
+      r.kernelStore = new HostRoomKv(getKernelStorePath(this.pathEnv(), r.roomId));
+    }
+    if (r.kernel) void r.kernel.dispose();
+    r.kernel = new ModKernel(r.kernelStore);
+    r.kernel.start(packs, {
+      id: r.roomId,
+      seats: r.seats.map((s) => ({ id: s.id, kind: s.kind, name: s.name })),
+    });
+    return { ok: true };
+  }
+
   async send(roomId: string, seatId: string, text: string) {
     const r = this.rooms.get(roomId);
     if (!r || r.status !== "open") return { ok: false, error: "房间不可用" };
@@ -1551,30 +1615,40 @@ export class RoomService {
       (seat.kind === "human" && seat.occupantUserId === r.localUserId) ||
       (seat.kind === "agent" && seat.takenOverBy === r.localUserId);
     if (!canTalk && seat.kind === "agent" && !seat.takenOverBy) {
-      // Host speaking *to* the agent seat → start/continue agent
-      this.append(r, {
-        kind: "user",
-        seatId,
-        authorUserId: r.localUserId,
-        authorLabel: this.memberName(r, r.localUserId),
-        text: trimmed,
-      });
-      this.pushState(r);
-      void this.runAgentSeat(r, seat, trimmed);
+      void this.enqueueInbound(r, () =>
+        this.ingestUserChat(
+          r,
+          {
+            roomId: r.roomId,
+            seatId,
+            authorUserId: r.localUserId,
+            authorLabel: this.memberName(r, r.localUserId),
+            text: trimmed,
+            at: Date.now(),
+          },
+          { runAgent: true },
+        ),
+      );
       return { ok: true };
     }
     if (!canTalk) {
       return { ok: false, error: "当前不能在这个席位发言（先接管或选自己的人席）" };
     }
 
-    this.append(r, {
-      kind: "user",
-      seatId,
-      authorUserId: r.localUserId,
-      authorLabel: this.memberName(r, r.localUserId),
-      text: trimmed,
-    });
-    this.pushState(r);
+    void this.enqueueInbound(r, () =>
+      this.ingestUserChat(
+        r,
+        {
+          roomId: r.roomId,
+          seatId,
+          authorUserId: r.localUserId,
+          authorLabel: this.memberName(r, r.localUserId),
+          text: trimmed,
+          at: Date.now(),
+        },
+        { runAgent: false },
+      ),
+    );
     return { ok: true };
   }
 
@@ -1582,6 +1656,7 @@ export class RoomService {
     for (const r of this.rooms.values()) {
       this.cancelGuestReconnect(r);
       this.disposeModHost(r);
+      this.disposeKernel(r, false);
       try {
         r.client?.close();
         r.server?.close();
@@ -1613,7 +1688,10 @@ export class RoomService {
           : text,
       attachments: [],
     };
-    const extras = this.roomModToolOpts(r, seat);
+    const extras = {
+      ...this.seatToolOpts(r, seat),
+      replaceExtras: true,
+    };
     try {
       if (!seat.sessionId) {
         const id = await this.sessions.start(prompt, cwd, extras);
@@ -1786,15 +1864,20 @@ export class RoomService {
         });
         return;
       }
-      this.append(r, {
-        kind: "user",
-        seatId: seat.id,
-        authorUserId: userId,
-        authorLabel: this.memberName(r, userId),
-        text,
-      });
-      this.pushState(r);
-      if (toAgent) void this.runAgentSeat(r, seat, text);
+      void this.enqueueInbound(r, () =>
+        this.ingestUserChat(
+          r,
+          {
+            roomId: r.roomId,
+            seatId: seat.id,
+            authorUserId: userId,
+            authorLabel: this.memberName(r, userId),
+            text,
+            at: Date.now(),
+          },
+          { runAgent: toAgent },
+        ),
+      );
       return;
     }
 
@@ -1981,7 +2064,22 @@ export class RoomService {
       seats: r.seats,
       items: r.items,
       localUserId: r.localUserId || undefined,
+      kernel: r.localRole === "host" ? this.kernelProjection(r) : r.kernelProjection,
     };
+  }
+
+  private kernelProjection(r: RoomRecord): RoomSnapshot["kernel"] {
+    if (!r.kernel) return undefined;
+    const names = new Map((r.kernelPacks ?? []).map((p) => [p.manifest.id, p.manifest.name]));
+    const graph = r.kernel.snapshot();
+    const mods = [...graph.active, ...graph.pending, ...graph.failed].map((m) => ({
+      id: m.id,
+      name: names.get(m.id) ?? m.id,
+      version: m.version,
+      state: m.state,
+      ...(m.pendingReason ? { pendingReason: m.pendingReason } : {}),
+    }));
+    return { mods };
   }
 
   private pushState(r: RoomRecord) {
@@ -2391,6 +2489,7 @@ export class RoomService {
       r.modSeq = 0;
       r.modOffer = undefined;
     }
+    r.kernelProjection = snap.kernel;
   }
 
   private onModFail(r: RoomRecord, message: string): void {
@@ -2425,6 +2524,71 @@ export class RoomService {
     r.modHost = undefined;
   }
 
+  private enqueueInbound(r: RoomRecord, fn: () => Promise<void>): Promise<void> {
+    const run = (r.inboundChain ?? Promise.resolve()).then(fn, fn);
+    r.inboundChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  private async ingestUserChat(
+    r: RoomRecord,
+    env: ChatInEnvelope,
+    next: { runAgent: boolean },
+  ): Promise<void> {
+    let current = env;
+    if (r.kernel) {
+      const result = await r.kernel.runChatIn(env);
+      if (result.action === "drop") {
+        this.append(r, {
+          kind: "system",
+          text: result.reason
+            ? `消息被模组丢弃：${result.reason}`
+            : "消息被模组丢弃",
+          authorLabel: "系统",
+        });
+        this.pushState(r);
+        return;
+      }
+      if (result.value) current = result.value;
+    }
+    this.append(r, {
+      kind: "user",
+      seatId: current.seatId,
+      authorUserId: current.authorUserId,
+      authorLabel: current.authorLabel,
+      text: current.text,
+    });
+    this.pushState(r);
+    if (!next.runAgent) return;
+    const seat = r.seats.find((s) => s.id === current.seatId);
+    if (seat) void this.runAgentSeat(r, seat, current.text);
+  }
+
+  private disposeKernel(r: RoomRecord, deleteStore: boolean): void {
+    const leftover = this.roomModToolOpts(r, {
+      id: "",
+      kind: "agent",
+      name: "",
+      occupantUserId: null,
+      takenOverBy: null,
+      sessionId: null,
+      running: false,
+      agentName: null,
+    });
+    for (const seat of r.seats) {
+      if (seat.sessionId) this.sessions.syncExtras(seat.sessionId, leftover);
+    }
+    const kernel = r.kernel;
+    r.kernel = undefined;
+    if (kernel) void kernel.dispose();
+    if (deleteStore) r.kernelStore?.deleteFile();
+    else r.kernelStore?.seal();
+    r.kernelStore = undefined;
+  }
+
   private async promptAgents(r: RoomRecord): Promise<void> {
     if (!r.modHost || r.modFail || r.modEnded || !r.modStarted) return;
     for (const seat of r.seats) {
@@ -2439,6 +2603,25 @@ export class RoomService {
       if (seat.takenOverBy) continue;
       await this.injectAgentTurn(r, seat, turn);
     }
+  }
+
+  private kernelToolOpts(r: RoomRecord): SessionRunOpts {
+    if (!r.kernel || !r.kernelStore) return {};
+    if (!r.kernel.snapshot().active.some((p) => p.provides.includes("memory"))) {
+      return {};
+    }
+    return tryCreateMemoryMcp(r.kernelStore) ?? {};
+  }
+
+  private seatToolOpts(
+    r: RoomRecord,
+    seat: RoomSeat,
+    fallbackActions?: unknown,
+  ): SessionRunOpts {
+    return mergeSessionRunOpts(
+      this.roomModToolOpts(r, seat, fallbackActions),
+      this.kernelToolOpts(r),
+    );
   }
 
   private roomModToolOpts(
@@ -2462,7 +2645,7 @@ export class RoomService {
       hiddenFromList: true,
       title: `${ROOM_MOD_PREFIX} ${seat.name}`,
       persistText: `${ROOM_MOD_PREFIX} ${r.roomId} ${seat.id}`,
-      ...this.roomModToolOpts(r, seat, fallbackActions),
+      ...this.seatToolOpts(r, seat, fallbackActions),
     };
   }
 
@@ -2498,7 +2681,10 @@ export class RoomService {
     const cwd = this.settings.get().lastProjectPath;
     if (!cwd) return;
     const text = formatRoomModPrompt(turn);
-    const extras = this.roomModInjectOpts(r, seat, turn.actions);
+    const extras = {
+      ...this.roomModInjectOpts(r, seat, turn.actions),
+      replaceExtras: true,
+    };
     const mcpAttached = Boolean(extras.extraMcpServers);
     seat.running = true;
     try {
