@@ -55,6 +55,7 @@ import {
   tryCreateRoomModMcp,
   type ModActionSchema,
 } from "./room-mod-agent";
+import { mergeSessionRunOpts, tryCreateMemoryMcp } from "./mod-kernel-compile";
 
 const MOD_CHECKSUM_RE = /^[0-9a-f]{64}$/;
 export const ROOM_MOD_BUNDLE_CHUNK = 48 * 1024;
@@ -1655,7 +1656,10 @@ export class RoomService {
           : text,
       attachments: [],
     };
-    const extras = this.roomModToolOpts(r, seat);
+    const extras = {
+      ...this.seatToolOpts(r, seat),
+      replaceExtras: true,
+    };
     try {
       if (!seat.sessionId) {
         const id = await this.sessions.start(prompt, cwd, extras);
@@ -2516,6 +2520,19 @@ export class RoomService {
   }
 
   private disposeKernel(r: RoomRecord, deleteStore: boolean): void {
+    const leftover = this.roomModToolOpts(r, {
+      id: "",
+      kind: "agent",
+      name: "",
+      occupantUserId: null,
+      takenOverBy: null,
+      sessionId: null,
+      running: false,
+      agentName: null,
+    });
+    for (const seat of r.seats) {
+      if (seat.sessionId) this.sessions.syncExtras(seat.sessionId, leftover);
+    }
     const kernel = r.kernel;
     r.kernel = undefined;
     if (kernel) void kernel.dispose();
@@ -2540,6 +2557,25 @@ export class RoomService {
     }
   }
 
+  private kernelToolOpts(r: RoomRecord): SessionRunOpts {
+    if (!r.kernel || !r.kernelStore) return {};
+    if (!r.kernel.snapshot().active.some((p) => p.provides.includes("memory"))) {
+      return {};
+    }
+    return tryCreateMemoryMcp(r.kernelStore) ?? {};
+  }
+
+  private seatToolOpts(
+    r: RoomRecord,
+    seat: RoomSeat,
+    fallbackActions?: unknown,
+  ): SessionRunOpts {
+    return mergeSessionRunOpts(
+      this.roomModToolOpts(r, seat, fallbackActions),
+      this.kernelToolOpts(r),
+    );
+  }
+
   private roomModToolOpts(
     r: RoomRecord,
     seat: RoomSeat,
@@ -2561,7 +2597,7 @@ export class RoomService {
       hiddenFromList: true,
       title: `${ROOM_MOD_PREFIX} ${seat.name}`,
       persistText: `${ROOM_MOD_PREFIX} ${r.roomId} ${seat.id}`,
-      ...this.roomModToolOpts(r, seat, fallbackActions),
+      ...this.seatToolOpts(r, seat, fallbackActions),
     };
   }
 
@@ -2597,7 +2633,10 @@ export class RoomService {
     const cwd = this.settings.get().lastProjectPath;
     if (!cwd) return;
     const text = formatRoomModPrompt(turn);
-    const extras = this.roomModInjectOpts(r, seat, turn.actions);
+    const extras = {
+      ...this.roomModInjectOpts(r, seat, turn.actions),
+      replaceExtras: true,
+    };
     const mcpAttached = Boolean(extras.extraMcpServers);
     seat.running = true;
     try {

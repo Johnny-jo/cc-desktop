@@ -142,11 +142,13 @@ function mockSessions() {
     continue: vi.fn().mockResolvedValue(undefined),
     getTranscript: vi.fn().mockReturnValue([]),
     abort: vi.fn(),
+    syncExtras: vi.fn(),
   } as unknown as SessionManager & {
     start: ReturnType<typeof vi.fn>;
     continue: ReturnType<typeof vi.fn>;
     getTranscript: ReturnType<typeof vi.fn>;
     abort: ReturnType<typeof vi.fn>;
+    syncExtras: ReturnType<typeof vi.fn>;
   };
 }
 
