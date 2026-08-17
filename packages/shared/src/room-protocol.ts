@@ -3,6 +3,7 @@
 export const ROOM_PROTOCOL_VERSION = 1;
 export const ROOM_DEFAULT_PORT = 18765;
 export const MOD_HOST_API = 1;
+export const MOD_KERNEL_API = 2;
 export const MOD_BUNDLE_MAX_BYTES = 512 * 1024;
 
 export type RoomRole = "host" | "member";

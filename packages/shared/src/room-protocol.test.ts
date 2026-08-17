@@ -8,6 +8,8 @@ import {
   makeRoomFrame,
   parseRoomFrame,
   ROOM_PROTOCOL_VERSION,
+  MOD_HOST_API,
+  MOD_KERNEL_API,
   shortChecksum,
 } from "./room-protocol";
 
@@ -43,6 +45,13 @@ describe("room invite secret key", () => {
 
   it("rejects garbage", () => {
     expect(() => decodeRoomInvite("not-a-key")).toThrow(/无效/);
+  });
+});
+
+describe("mod api versions", () => {
+  it("keeps play hostApi at 1 and kernel at 2", () => {
+    expect(MOD_HOST_API).toBe(1);
+    expect(MOD_KERNEL_API).toBe(2);
   });
 });
 
