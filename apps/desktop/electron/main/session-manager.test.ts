@@ -98,6 +98,7 @@ function makeDeps(overrides: {
     has: vi.fn().mockReturnValue(false),
     findByEvent: vi.fn().mockReturnValue(null),
     truncateAt: vi.fn(),
+    markDeleted: vi.fn().mockReturnValue(false),
     refreshBashWritesFromDisk: vi.fn().mockResolvedValue(undefined),
     captureBashBaseline: vi.fn().mockResolvedValue(undefined),
   } as unknown as DiffTracker;

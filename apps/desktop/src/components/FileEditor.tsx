@@ -165,6 +165,7 @@ export function FileEditor({
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [missing, setMissing] = useState(false);
   const [truncated, setTruncated] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -172,6 +173,7 @@ export function FileEditor({
   const [readOnly, setReadOnly] = useState(false);
   const [encoding, setEncoding] = useState("utf-8");
   const [encMenuOpen, setEncMenuOpen] = useState(false);
+  const fsChangeTick = useAppStore((s) => s.fsChangeTick);
 
   const langLabel = useMemo(() => languageLabelForPath(rel), [rel]);
   const canWrite = hasDesktopApi("writeProjectFile");
@@ -236,6 +238,7 @@ export function FileEditor({
 
     setLoading(true);
     setError(null);
+    setMissing(false);
     setTruncated(false);
     setDirty(false);
     setSaveMsg(null);
@@ -379,6 +382,25 @@ export function FileEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectPath, rel, isDark, canWrite, encoding]);
 
+  // Probe: file deleted/renamed on disk → swap content for a missing notice.
+  // Dirty tabs keep their unsaved buffer untouched.
+  useEffect(() => {
+    if (!projectPath || !rel || dirty || loading || error) return;
+    let cancelled = false;
+    void getDesktop()
+      .readProjectFile(projectPath, rel, 1, encodingRef.current)
+      .then((res) => {
+        if (!cancelled) setMissing(!res.ok);
+      })
+      .catch(() => {
+        if (!cancelled) setMissing(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fsChangeTick]);
+
   const changeEncoding = async (next: string) => {
     if (next === encoding) {
       setEncMenuOpen(false);
@@ -447,6 +469,19 @@ export function FileEditor({
       </div>
       {error ? (
         <p className="file-editor-hint">无法打开：{error}</p>
+      ) : missing ? (
+        <div className="file-editor-missing">
+          <p className="file-editor-hint">
+            文件已被删除或移动，内容已不存在。
+          </p>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={onClose}
+          >
+            关闭标签
+          </button>
+        </div>
       ) : (
         <>
           {truncated ? (
@@ -462,7 +497,7 @@ export function FileEditor({
           <div
             className="file-editor-body file-editor-cm"
             ref={hostRef}
-            style={{ display: error ? "none" : undefined }}
+            style={{ display: error || missing ? "none" : undefined }}
           />
           {loading ? <p className="file-editor-hint">加载中…</p> : null}
         </>

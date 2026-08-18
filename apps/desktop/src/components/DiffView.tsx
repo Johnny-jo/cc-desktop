@@ -1,11 +1,13 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { FileChange } from "@claude-desktop/shared";
 import {
   DIFF_PREVIEW_ROWS,
   extractLineRangeSummary,
+  mergeFullTextWithHunks,
   parseHunkForDisplay,
   type DiffDisplayRow,
 } from "@claude-desktop/shared";
+import { useI18n } from "../i18n/useI18n";
 
 function rowClass(kind: DiffDisplayRow["kind"]): string {
   switch (kind) {
@@ -28,21 +30,71 @@ function fmtNo(n: number | null): string {
 
 const PAGE = DIFF_PREVIEW_ROWS;
 
-export function DiffView({ change }: { change: FileChange }) {
-  const [limit, setLimit] = useState(PAGE);
+type ViewMode = "diff" | "full";
 
-  // Reset page when switching files / hunks
+export function DiffView({
+  change,
+  loadFullText,
+}: {
+  change: FileChange;
+  /** Read the current full file text; null/throw → full mode unavailable. */
+  loadFullText?: () => Promise<string | null>;
+}) {
+  const { t } = useI18n();
+  const [limit, setLimit] = useState(PAGE);
+  const [mode, setMode] = useState<ViewMode>("diff");
+  const [fullText, setFullText] = useState<string | null>(null);
+  const [fullFailed, setFullFailed] = useState(false);
+
+  // Reset page + full-text cache when switching files / hunks
   const hunkKey = `${change.path}:${change.updatedAt}:${change.hunks.length}`;
   const [prevKey, setPrevKey] = useState(hunkKey);
   if (prevKey !== hunkKey) {
     setPrevKey(hunkKey);
     setLimit(PAGE);
+    setFullText(null);
+    setFullFailed(false);
   }
 
-  const rows = useMemo(
+  // Lazily load full text when entering full mode.
+  const loadingRef = useRef(false);
+  useEffect(() => {
+    if (mode !== "full" || fullText !== null || fullFailed || !loadFullText) {
+      return;
+    }
+    if (loadingRef.current) return;
+    loadingRef.current = true;
+    let cancelled = false;
+    void loadFullText()
+      .then((text) => {
+        if (cancelled) return;
+        if (text == null) setFullFailed(true);
+        else setFullText(text);
+      })
+      .catch(() => {
+        if (!cancelled) setFullFailed(true);
+      })
+      .finally(() => {
+        loadingRef.current = false;
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [mode, fullText, fullFailed, loadFullText, hunkKey]);
+
+  const diffRows = useMemo(
     () => parseHunkForDisplay(change.hunks, limit),
     [change.hunks, limit],
   );
+  const fullRows = useMemo(
+    () =>
+      mode === "full" && fullText !== null
+        ? mergeFullTextWithHunks(fullText, change.hunks)
+        : null,
+    [mode, fullText, change.hunks],
+  );
+  const rows = fullRows ?? diffRows;
+
   const rangeSummary = useMemo(
     () => extractLineRangeSummary(change.hunks),
     [change.hunks],
@@ -57,6 +109,9 @@ export function DiffView({ change }: { change: FileChange }) {
     for (let i = 0; i < s.length; i++) if (s.charCodeAt(i) === 10) n += 1;
     return n + 1;
   }, [change.hunks]);
+
+  const fullAvailable = Boolean(loadFullText) && !fullFailed;
+  const isDeleted = change.status === "D";
 
   return (
     <div className="diff-view">
@@ -75,7 +130,46 @@ export function DiffView({ change }: { change: FileChange }) {
         <span className="diff-meta">
           {change.events.length} change{change.events.length !== 1 ? "s" : ""}
         </span>
+        {loadFullText ? (
+          <span className="diff-mode-switch" role="tablist">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === "diff"}
+              className={
+                mode === "diff" ? "diff-mode-btn active" : "diff-mode-btn"
+              }
+              onClick={() => setMode("diff")}
+            >
+              {t.changes.diffOnly}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === "full"}
+              className={
+                mode === "full" ? "diff-mode-btn active" : "diff-mode-btn"
+              }
+              disabled={!fullAvailable}
+              title={
+                fullAvailable ? undefined : t.changes.fullTextFailed
+              }
+              onClick={() => setMode("full")}
+            >
+              {t.changes.fullText}
+            </button>
+          </span>
+        ) : null}
       </div>
+      {isDeleted ? (
+        <p className="diff-deleted-hint">{t.changes.deletedHint}</p>
+      ) : null}
+      {mode === "full" && fullFailed ? (
+        <p className="diff-deleted-hint">{t.changes.fullTextFailed}</p>
+      ) : null}
+      {mode === "full" && fullText === null && !fullFailed ? (
+        <p className="diff-deleted-hint">…</p>
+      ) : null}
       <div className="diff-content" role="table" aria-label="diff">
         <div className="diff-gutter-head" aria-hidden>
           <span className="diff-gutter-col">旧</span>
@@ -94,7 +188,7 @@ export function DiffView({ change }: { change: FileChange }) {
           </div>
         ))}
       </div>
-      {capped || rawLineCount > limit ? (
+      {mode === "diff" && (capped || rawLineCount > limit) ? (
         <div className="diff-more">
           <span className="diff-more-hint">
             预览已截断（约 {Math.min(limit, rawLineCount)} / {rawLineCount} 行）

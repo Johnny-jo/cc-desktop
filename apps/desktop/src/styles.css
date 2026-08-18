@@ -928,6 +928,24 @@ textarea {
   flex-shrink: 0;
 }
 
+/* Placeholder when the open file was deleted/renamed on disk. */
+.file-editor-missing {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.file-editor-missing .file-editor-hint {
+  color: var(--warn);
+}
+
+.file-editor-missing .btn {
+  margin-left: 14px;
+}
+
 /* Bottom status bar (encoding etc.) */
 .file-editor-statusbar {
   flex-shrink: 0;
@@ -1063,9 +1081,9 @@ textarea {
   top: 8px;
   right: 12px;
   left: auto;
-  width: min(480px, calc(100% - 24px));
+  width: min(560px, calc(100% - 24px));
   margin: 0;
-  padding: 10px 12px;
+  padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--bg-elevated);
@@ -1083,7 +1101,7 @@ textarea {
 }
 
 .cm-vs-row + .cm-vs-row {
-  margin-top: 8px;
+  margin-top: 6px;
 }
 
 .cm-vs-replace-row {
@@ -1095,18 +1113,21 @@ textarea {
 }
 
 .cm-vs-replace-spacer {
-  width: 28px;
+  width: 24px;
   flex-shrink: 0;
 }
 
 .cm-vs-input-wrap {
+  position: relative;
   flex: 1 1 auto;
-  min-width: 0;
+  min-width: 220px;
+  display: flex;
+  align-items: center;
 }
 
 .cm-vs-input {
   width: 100%;
-  height: 32px;
+  height: 30px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--bg-input);
@@ -1116,18 +1137,42 @@ textarea {
   outline: none;
 }
 
+/* Room for the in-input toggle group (Aa / W / .*). */
+.cm-vs-input[main-field="true"] {
+  padding-right: 84px;
+}
+
 .cm-vs-input:focus {
   border-color: var(--accent);
   box-shadow: var(--focus-ring);
 }
 
+/* Toggle group docked inside the find input, VS Code style. */
+.cm-vs-input-toggles {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.cm-vs-input-toggles .cm-vs-toggle {
+  height: 22px;
+  min-width: 22px;
+  padding: 0 4px;
+  font-size: 0.77rem;
+  border-radius: 4px;
+}
+
 .cm-vs-matches {
   flex-shrink: 0;
-  min-width: 64px;
-  text-align: center;
+  min-width: 56px;
+  text-align: right;
   font-size: 0.846rem;
   color: var(--text-muted);
-  padding: 0 6px;
+  padding: 0 4px;
   white-space: nowrap;
 }
 
@@ -1139,8 +1184,8 @@ textarea {
 .cm-vs-iconbtn,
 .cm-vs-textbtn {
   flex-shrink: 0;
-  height: 32px;
-  min-width: 32px;
+  height: 30px;
+  min-width: 30px;
   border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
@@ -1155,8 +1200,8 @@ textarea {
 
 /* Prev / next: larger hit target + clearer glyphs */
 .cm-vs-iconbtn.cm-vs-nav {
-  min-width: 36px;
-  height: 34px;
+  min-width: 30px;
+  height: 30px;
   font-size: 0.85rem;
   line-height: 1;
   border: 1px solid var(--border-soft);
@@ -1186,20 +1231,20 @@ textarea {
 .cm-vs-textbtn {
   font-size: 0.846rem;
   padding: 0 10px;
-  height: 32px;
+  height: 30px;
 }
 
 .cm-vs-close {
   font-size: 1.15rem;
   line-height: 1;
-  min-width: 34px;
-  height: 34px;
+  min-width: 30px;
+  height: 30px;
 }
 
 .cm-vs-replace-toggle {
-  width: 28px;
-  min-width: 28px;
-  height: 32px;
+  width: 24px;
+  min-width: 24px;
+  height: 30px;
   padding: 0;
   color: var(--text-faint);
   font-size: 1rem;
@@ -3004,6 +3049,26 @@ body.is-resizing-row * {
   background: var(--bg-hover);
 }
 
+/* Write/Edit cards jump to the changes panel on click. */
+.tool-card-linked {
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+}
+
+.tool-card-linked .tool-card-toggle:hover {
+  background: var(--accent-soft);
+}
+
+.tool-card-linked .tool-chevron {
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 1px 2px;
+}
+
+.tool-card-linked .tool-chevron:hover {
+  background: var(--bg-active);
+  color: var(--text);
+}
+
 .tool-chevron {
   flex-shrink: 0;
   width: 12px;
@@ -3639,6 +3704,33 @@ body.is-resizing-row * {
   color: var(--warn);
 }
 
+.change-status.status-D {
+  color: var(--danger);
+}
+
+.change-deleted-tag {
+  flex-shrink: 0;
+  font-size: 0.77rem;
+  color: var(--danger);
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+  border-radius: 999px;
+  padding: 0 6px;
+}
+
+/* One-shot highlight when the chat tool card jumps to a change record. */
+.change-item.flash {
+  animation: change-flash 2.2s ease-out;
+}
+
+@keyframes change-flash {
+  0% {
+    background: color-mix(in srgb, var(--accent) 32%, transparent);
+  }
+  100% {
+    background: transparent;
+  }
+}
+
 .change-path {
   min-width: 0;
   overflow: hidden;
@@ -3692,6 +3784,52 @@ body.is-resizing-row * {
 .diff-meta {
   color: var(--text-faint);
   font-size: 0.846rem;
+}
+
+/* 仅变更 / 全文 segmented switch in the diff header. */
+.diff-mode-switch {
+  margin-left: auto;
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.diff-mode-btn {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.808rem;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+
+.diff-mode-btn + .diff-mode-btn {
+  border-left: 1px solid var(--border);
+}
+
+.diff-mode-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.diff-mode-btn.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.diff-mode-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.diff-deleted-hint {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  font-size: 0.846rem;
+  color: var(--warn);
+  border-top: 1px solid var(--border-soft);
 }
 
 .diff-content {
@@ -4157,6 +4295,24 @@ body.is-resizing-row * {
   background: var(--ok);
 }
 
+.room-dot.on.is-pulse {
+  animation: room-pulse-live 1.6s ease-in-out infinite;
+}
+
+@keyframes room-pulse-live {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 45%, transparent);
+  }
+  50% {
+    opacity: 0.7;
+    transform: scale(0.85);
+    box-shadow: 0 0 0 5px transparent;
+  }
+}
+
 .room-err {
   color: var(--danger);
   font-size: 0.846rem;
@@ -4476,6 +4632,14 @@ body.is-resizing-row * {
 
 .room-msg.is-me .room-msg-author {
   color: var(--accent);
+}
+
+.room-msg-source {
+  font-size: 0.7rem;
+  color: var(--text-faint);
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  padding: 0 6px;
 }
 
 .room-msg-seat {
@@ -4928,6 +5092,114 @@ body.is-resizing-row * {
   align-items: center;
   gap: 8px;
   color: var(--text);
+}
+
+.room-settings-modal {
+  width: min(600px, 100%);
+  max-height: min(84vh, 720px);
+}
+
+.room-improve-pack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+}
+
+.room-improve-src {
+  min-height: 88px;
+  resize: vertical;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 0.77rem;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  padding: 6px 8px;
+}
+
+.room-improve-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.room-improve-pending {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.room-improve-pending li {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+}
+
+.room-settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.room-settings-section h4 {
+  margin: 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.room-memory-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.room-memory-row {
+  display: grid;
+  grid-template-columns: minmax(72px, 28%) 1fr auto;
+  gap: 8px;
+  align-items: start;
+  padding: 6px 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+}
+
+.room-memory-key {
+  font-size: 0.77rem;
+  word-break: break-all;
+}
+
+.room-memory-val {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.room-memory-add {
+  display: grid;
+  grid-template-columns: minmax(80px, 28%) 1fr auto;
+  gap: 8px;
+}
+
+.room-memory-add input {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  padding: 6px 8px;
 }
 
 .settings-field input,

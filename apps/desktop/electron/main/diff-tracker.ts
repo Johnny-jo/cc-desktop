@@ -14,6 +14,8 @@ import {
 export type DiffTrackerDeps = {
   /** Optional DI to read previous file content for Write; throw/fail → status A */
   readFile?: (path: string) => string;
+  /** Optional DI for existence checks (markDeleted); defaults to fs.existsSync */
+  fileExists?: (path: string) => boolean;
   now?: () => number;
 };
 
@@ -76,6 +78,7 @@ export function parseBashWriteTarget(command: string): string | null {
 export class DiffTracker {
   private readonly sessions = new Map<string, Map<string, FileChange>>();
   private readonly readFile?: DiffTrackerDeps["readFile"];
+  private readonly fileExists: (path: string) => boolean;
   private readonly now: () => number;
   /**
    * Per-session baseline for Bash post-scan: path → mtimeMs captured when
@@ -98,6 +101,8 @@ export class DiffTracker {
 
   constructor(deps: DiffTrackerDeps = {}) {
     this.readFile = deps.readFile;
+    this.fileExists =
+      deps.fileExists ?? ((p: string) => fs.existsSync(p));
     this.now = deps.now ?? (() => Date.now());
   }
 
@@ -117,10 +122,10 @@ export class DiffTracker {
     sessionId: string,
     toolName: string,
     input: Record<string, unknown>,
-    opts?: { cwd?: string },
+    opts?: { cwd?: string; toolUseId?: string },
   ): void {
     if (toolName === "Edit" || toolName === "Write") {
-      this.onEditOrWrite(sessionId, toolName, input);
+      this.onEditOrWrite(sessionId, toolName, input, opts?.toolUseId);
       return;
     }
     if (toolName === "Bash") {
@@ -165,6 +170,7 @@ export class DiffTracker {
     sessionId: string,
     toolName: "Edit" | "Write",
     input: Record<string, unknown>,
+    toolUseId?: string,
   ): void {
     const path = String(input.file_path ?? input.path ?? "");
     if (!path) return;
@@ -210,6 +216,7 @@ export class DiffTracker {
           hunk,
           at,
           status: "M",
+          toolUseId,
         }),
       );
       return;
@@ -237,6 +244,7 @@ export class DiffTracker {
         hunk,
         at,
         status,
+        toolUseId,
       }),
     );
   }
@@ -525,6 +533,46 @@ export class DiffTracker {
     return changesToArray(map);
   }
 
+  /**
+   * Sync file-existence state: tracked paths that vanished from disk become
+   * status "D" (deleted); a "D" path that reappears flips back to "M".
+   * Called before diff emit so the UI never offers to open a missing file.
+   * Returns true when any status changed.
+   */
+  markDeleted(sessionId: string): boolean {
+    const map = this.sessions.get(sessionId);
+    if (!map) return false;
+    let next: Map<string, FileChange> | null = null;
+    for (const [filePath, change] of map) {
+      let exists = true;
+      try {
+        exists = this.fileExists(filePath);
+      } catch {
+        exists = true; // check failed — keep previous status
+      }
+      if (!exists && change.status !== "D") {
+        next = next ?? new Map(map);
+        next.set(filePath, {
+          ...change,
+          status: "D",
+          updatedAt: this.now(),
+        });
+      } else if (exists && change.status === "D") {
+        next = next ?? new Map(map);
+        next.set(filePath, {
+          ...change,
+          status: "M",
+          updatedAt: this.now(),
+        });
+      }
+    }
+    if (next) {
+      this.sessions.set(sessionId, next);
+      return true;
+    }
+    return false;
+  }
+
   /** True when the session has tracked changes for the file. */
   has(sessionId: string, path: string): boolean {
     return this.sessions.get(sessionId)?.has(path) ?? false;
@@ -578,7 +626,10 @@ export class DiffTracker {
       if (!c?.path) continue;
       map.set(c.path, {
         path: c.path,
-        status: c.status === "A" || c.status === "M" ? c.status : "M",
+        status:
+          c.status === "A" || c.status === "M" || c.status === "D"
+            ? c.status
+            : "M",
         hunks: c.hunks ?? "",
         updatedAt: c.updatedAt ?? Date.now(),
         events: Array.isArray(c.events)
@@ -594,6 +645,9 @@ export class DiffTracker {
                   : "Write",
               at: Number(e.at) || Date.now(),
               hunk: String(e.hunk ?? ""),
+              ...(typeof e.toolUseId === "string" && e.toolUseId
+                ? { toolUseId: e.toolUseId }
+                : {}),
             }))
           : [],
       });

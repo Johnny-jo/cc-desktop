@@ -144,6 +144,7 @@ export function App() {
 
   const {
     layout,
+    patch,
     toggleSidebar,
     toggleChanges,
     toggleTerminal,
@@ -151,6 +152,15 @@ export function App() {
     setChangesWidth,
     setTerminalHeight,
   } = usePanelLayout();
+
+  // Tool card "jump to change" → make sure the changes panel is visible.
+  const revealChangeRequest = useAppStore((s) => s.revealChangeRequest);
+  useEffect(() => {
+    if (revealChangeRequest && !layout.changesOpen) {
+      patch({ changesOpen: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revealChangeRequest]);
 
   useEffect(() => {
     void bootstrapStore();

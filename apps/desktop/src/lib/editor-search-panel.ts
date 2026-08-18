@@ -92,11 +92,15 @@ class VscodeSearchPanel implements Panel {
 
     const findRow = el("div", { class: "cm-vs-row" }, [
       this.replaceToggle,
-      el("div", { class: "cm-vs-input-wrap" }, [this.searchField]),
+      el("div", { class: "cm-vs-input-wrap" }, [
+        this.searchField,
+        el("div", { class: "cm-vs-input-toggles" }, [
+          this.caseBtn,
+          this.wordBtn,
+          this.reBtn,
+        ]),
+      ]),
       this.matchInfo,
-      this.caseBtn,
-      this.wordBtn,
-      this.reBtn,
       prevBtn,
       nextBtn,
       closeBtn,

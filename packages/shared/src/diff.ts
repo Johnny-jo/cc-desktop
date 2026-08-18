@@ -350,6 +350,7 @@ export function upsertFileChange(
     hunk: string;
     at: number;
     status: FileChangeStatus;
+    toolUseId?: string;
   },
 ): Map<string, FileChange> {
   const next = new Map(map);
@@ -359,6 +360,7 @@ export function upsertFileChange(
     tool: event.tool,
     at: event.at,
     hunk: event.hunk,
+    ...(event.toolUseId ? { toolUseId: event.toolUseId } : {}),
   };
   if (!prev) {
     next.set(event.path, {
@@ -514,4 +516,84 @@ export function extractLineRangeSummary(hunks: string): string | null {
   if (add) parts.push(`+${add}`);
   if (del) parts.push(`−${del}`);
   return parts.join(" ");
+}
+
+/** Caps for the full-text (whole file + inline changes) view. */
+export const FULLTEXT_MAX_LINES = 4000;
+export const FULLTEXT_MAX_CHARS = 512_000;
+
+/**
+ * Merge the current full file text with a recorded hunk: every file line is
+ * shown, added lines are marked `add`, deleted lines are spliced back in at
+ * their original positions as `del`. Used by DiffView's "全文" mode.
+ *
+ * Anchor rule: a deleted line belongs just before the next hunk row that has
+ * a new-file line number (ctx or add); trailing dels anchor past the end.
+ */
+export function mergeFullTextWithHunks(
+  fullText: string,
+  hunks: string,
+  maxLines = FULLTEXT_MAX_LINES,
+): DiffDisplayRow[] {
+  const hunkRows = parseHunkForDisplay(hunks, Number.MAX_SAFE_INTEGER);
+  const addNewNos = new Set<number>();
+  const dels = new Map<number, { text: string; oldNo: number | null }[]>();
+  let pendingDels: { text: string; oldNo: number | null }[] = [];
+  const flushDels = (anchor: number) => {
+    if (!pendingDels.length) return;
+    const list = dels.get(anchor) ?? [];
+    list.push(...pendingDels);
+    dels.set(anchor, list);
+    pendingDels = [];
+  };
+  for (const r of hunkRows) {
+    if (r.kind === "del") {
+      pendingDels.push({ text: r.text, oldNo: r.oldNo });
+    } else if ((r.kind === "add" || r.kind === "ctx") && r.newNo != null) {
+      if (r.kind === "add") addNewNos.add(r.newNo);
+      flushDels(r.newNo);
+    }
+  }
+  flushDels(Number.POSITIVE_INFINITY);
+
+  let text = fullText;
+  let truncated = false;
+  if (text.length > FULLTEXT_MAX_CHARS) {
+    text = text.slice(0, FULLTEXT_MAX_CHARS);
+    truncated = true;
+  }
+  const lines = text.split("\n");
+  if (lines.length && lines[lines.length - 1] === "") lines.pop();
+  const totalLines = lines.length;
+  const shown = lines.slice(0, maxLines);
+  if (totalLines > maxLines) truncated = true;
+
+  const rows: DiffDisplayRow[] = [];
+  const emitDels = (anchor: number) => {
+    const list = dels.get(anchor);
+    if (!list) return;
+    for (const d of list) {
+      rows.push({ kind: "del", text: d.text, oldNo: d.oldNo, newNo: null });
+    }
+  };
+
+  shown.forEach((line, i) => {
+    const newNo = i + 1;
+    emitDels(newNo);
+    if (addNewNos.has(newNo)) {
+      rows.push({ kind: "add", text: `+${line}`, oldNo: null, newNo });
+    } else {
+      rows.push({ kind: "ctx", text: ` ${line}` || " ", oldNo: newNo, newNo });
+    }
+  });
+  if (!truncated) emitDels(Number.POSITIVE_INFINITY);
+  if (truncated) {
+    rows.push({
+      kind: "meta",
+      text: `# full text capped · file has ${totalLines} lines · showing first ${Math.min(maxLines, totalLines)}`,
+      oldNo: null,
+      newNo: null,
+    });
+  }
+  return rows;
 }

@@ -41,6 +41,18 @@ export type AppState = {
   hasMoreBySession: Record<string, boolean>;
   /** Lightweight CLI page; drops renderer transcript cache while active. */
   cliMode: boolean;
+  /**
+   * Cross-component request: chat tool card asks the changes panel to
+   * reveal one change record. nonce forces re-fire for repeated clicks.
+   */
+  revealChangeRequest: {
+    sessionId: string;
+    toolUseId?: string;
+    path?: string;
+    nonce: number;
+  } | null;
+  /** Bumped on every diff:updated — file tree / open editors refresh. */
+  fsChangeTick: number;
 };
 
 type Listener = () => void;
@@ -61,6 +73,8 @@ let state: AppState = {
   lastError: null,
   hasMoreBySession: {},
   cliMode: false,
+  revealChangeRequest: null,
+  fsChangeTick: 0,
 };
 
 const listeners = new Set<Listener>();
@@ -289,6 +303,7 @@ function subscribeDesktopEvents(): void {
           ...state.changesBySession,
           [sessionId]: changes,
         },
+        fsChangeTick: state.fsChangeTick + 1,
       });
     }),
   );
@@ -926,6 +941,22 @@ export function clearUserPromptRequest(): void {
   setState({ userPromptRequest: null });
 }
 
+let revealNonce = 0;
+
+/** Chat tool card → changes panel: reveal the matching change record. */
+export function requestRevealChange(req: {
+  sessionId: string;
+  toolUseId?: string;
+  path?: string;
+}): void {
+  revealNonce += 1;
+  setState({ revealChangeRequest: { ...req, nonce: revealNonce } });
+}
+
+export function clearRevealChange(): void {
+  if (state.revealChangeRequest) setState({ revealChangeRequest: null });
+}
+
 /** Test helper — reset module state. */
 export function __resetStoreForTests(): void {
   state = {
@@ -944,6 +975,8 @@ export function __resetStoreForTests(): void {
     lastError: null,
     hasMoreBySession: {},
     cliMode: false,
+    revealChangeRequest: null,
+    fsChangeTick: 0,
   };
   pendingStartPrompt = null;
   autoCompressedAt.clear();

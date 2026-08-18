@@ -1,8 +1,8 @@
-import React, { useEffect, useMemo, useState } from "react";
-import type { FileChangeEvent } from "@claude-desktop/shared";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import type { FileChange, FileChangeEvent } from "@claude-desktop/shared";
 import { extractLineRangeSummary } from "@claude-desktop/shared";
 import { getDesktop } from "../lib/desktop-api";
-import { useAppStore } from "../state/store";
+import { clearRevealChange, useAppStore } from "../state/store";
 import { useI18n } from "../i18n/useI18n";
 import { DiffView } from "./DiffView";
 
@@ -27,13 +27,13 @@ function fileName(p: string): string {
 type OpRow = {
   eventId: string;
   path: string;
-  status: "A" | "M";
+  status: FileChange["status"];
   event: FileChangeEvent;
 };
 
 type FileGroup = {
   path: string;
-  status: "A" | "M";
+  status: FileChange["status"];
   ops: OpRow[];
 };
 
@@ -65,6 +65,7 @@ export function ChangesPanel() {
     : [];
 
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
+  const [flashEventId, setFlashEventId] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [git, setGit] = useState<{
@@ -75,12 +76,15 @@ export function ChangesPanel() {
   const [fileLimit, setFileLimit] = useState(FILE_PAGE);
   const [opLimit, setOpLimit] = useState<Record<string, number>>({});
   const [openFiles, setOpenFiles] = useState<Set<string>>(() => new Set());
+  const revealRequest = useAppStore((s) => s.revealChangeRequest);
+  const flashRef = useRef<HTMLLIElement | null>(null);
 
   useEffect(() => {
     setFileLimit(FILE_PAGE);
     setOpLimit({});
     setOpenFiles(new Set());
     setSelectedEventId(null);
+    setFileViewPath(null);
   }, [activeSessionId]);
 
   // Git overlay: branch + whether each changed file is also dirty in git.
@@ -138,10 +142,55 @@ export function ChangesPanel() {
     () => groups.flatMap((g) => g.ops),
     [groups],
   );
+  // File-level view (aggregate of all ops) when the file row itself was
+  // clicked last; single-op view when an op row was clicked.
+  const [fileViewPath, setFileViewPath] = useState<string | null>(null);
   const selected =
     allOps.find((r) => r.eventId === selectedEventId) ??
     visibleGroups[0]?.ops[0];
+  const fileView: FileChange | null = useMemo(() => {
+    if (!fileViewPath) return null;
+    const c = changes.find((x) => x.path === fileViewPath);
+    return c ?? null;
+  }, [changes, fileViewPath]);
   const restorable = allOps.filter((r) => r.event.canRestore);
+
+  // Chat tool card → reveal the matching change record here.
+  useEffect(() => {
+    if (!revealRequest || revealRequest.sessionId !== activeSessionId) return;
+    const byTool = revealRequest.toolUseId
+      ? allOps.find((r) => r.event.toolUseId === revealRequest.toolUseId)
+      : undefined;
+    const normReq = revealRequest.path
+      ? normPath(revealRequest.path)
+      : null;
+    const byPath = normReq
+      ? allOps.find((r) => normPath(r.path) === normReq)
+      : undefined;
+    const hit = byTool ?? byPath;
+    if (hit) {
+      setOpenFiles((prev) => {
+        if (prev.has(hit.path)) return prev;
+        const next = new Set(prev);
+        next.add(hit.path);
+        return next;
+      });
+      setSelectedEventId(hit.eventId);
+      setFileViewPath(null);
+      setFlashEventId(hit.eventId);
+    }
+    clearRevealChange();
+    // allOps changes on every diff push; only re-run for new requests.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revealRequest, activeSessionId]);
+
+  // Scroll the flashed row into view + clear the flash after the animation.
+  useEffect(() => {
+    if (!flashEventId) return;
+    flashRef.current?.scrollIntoView({ block: "nearest" });
+    const timer = window.setTimeout(() => setFlashEventId(null), 2200);
+    return () => window.clearTimeout(timer);
+  }, [flashEventId]);
 
   const toggleFile = (path: string) => {
     setOpenFiles((prev) => {
@@ -150,6 +199,25 @@ export function ChangesPanel() {
       else next.add(path);
       return next;
     });
+    // Clicking a file row shows the file's total changes (all ops merged).
+    setFileViewPath(path);
+  };
+
+  /** Read current full file text for DiffView's 全文 mode. */
+  const loadFullText = async (path: string): Promise<string | null> => {
+    if (!projectPath) return null;
+    try {
+      // path.resolve(cwd, rel) on the main side accepts absolute paths too.
+      const res = await getDesktop().readProjectFile(
+        projectPath,
+        resolvePath(projectPath, path),
+        512 * 1024,
+        "utf-8",
+      );
+      return res.ok ? (res.content ?? "") : null;
+    } catch {
+      return null;
+    }
   };
 
   async function restoreOp(row: OpRow) {
@@ -248,6 +316,11 @@ export function ChangesPanel() {
                       <span className="change-file-name">
                         {fileName(g.path)}
                       </span>
+                      {g.status === "D" ? (
+                        <span className="change-deleted-tag">
+                          {t.changes.deleted}
+                        </span>
+                      ) : null}
                       {gitDirty.has(normPath(g.path)) ? (
                         <span
                           className="change-git-dot"
@@ -258,41 +331,51 @@ export function ChangesPanel() {
                         {g.ops.length} {t.changes.showMore === "Show more" ? "ops" : "次"}
                       </span>
                     </button>
-                    <button
-                      type="button"
-                      className="btn btn-ghost btn-sm change-open"
-                      title="Open in editor"
-                      onClick={() =>
-                        void getDesktop()
-                          .openInEditor(resolvePath(projectPath, g.path))
-                          .then((res) => {
-                            if (!res.ok) setNote(res.error ?? "Open failed");
-                          })
-                          .catch(() => undefined)
-                      }
-                    >
-                      ↗
-                    </button>
+                    {g.status !== "D" ? (
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-sm change-open"
+                        title="Open in editor"
+                        onClick={() =>
+                          void getDesktop()
+                            .openInEditor(resolvePath(projectPath, g.path))
+                            .then((res) => {
+                              if (!res.ok) setNote(res.error ?? "Open failed");
+                            })
+                            .catch(() => undefined)
+                        }
+                      >
+                        ↗
+                      </button>
+                    ) : null}
                   </div>
                   {open ? (
                     <ul className="change-ops">
                       {ops.map((r) => (
-                        <li key={r.eventId} className="change-item-row">
+                        <li
+                          key={r.eventId}
+                          className="change-item-row"
+                          ref={flashEventId === r.eventId ? flashRef : undefined}
+                        >
                           <button
                             type="button"
                             className={
-                              selected?.eventId === r.eventId
+                              (selected?.eventId === r.eventId
                                 ? "change-item active"
-                                : "change-item"
+                                : "change-item") +
+                              (flashEventId === r.eventId ? " flash" : "")
                             }
-                            onClick={() => setSelectedEventId(r.eventId)}
+                            onClick={() => {
+                              setFileViewPath(null);
+                              setSelectedEventId(r.eventId);
+                            }}
                             title={opLabel(r.event)}
                           >
                             <span className="change-op-meta">
                               {opLabel(r.event)}
                             </span>
                           </button>
-                          {r.event.canRestore ? (
+                          {r.event.canRestore && g.status !== "D" ? (
                             <button
                               type="button"
                               className="btn btn-ghost btn-sm change-restore"
@@ -340,7 +423,16 @@ export function ChangesPanel() {
               </li>
             ) : null}
           </ul>
-          {selected ? (
+          {fileView ? (
+            <DiffView
+              change={fileView}
+              loadFullText={
+                fileView.status === "D"
+                  ? undefined
+                  : () => loadFullText(fileView.path)
+              }
+            />
+          ) : selected ? (
             <DiffView
               change={{
                 path: selected.path,
@@ -349,6 +441,11 @@ export function ChangesPanel() {
                 updatedAt: selected.event.at,
                 events: [selected.event],
               }}
+              loadFullText={
+                selected.status === "D"
+                  ? undefined
+                  : () => loadFullText(selected.path)
+              }
             />
           ) : null}
         </>

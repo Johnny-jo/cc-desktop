@@ -22,6 +22,59 @@ describe("DiffTracker", () => {
     expect(changes[0].hunks).toContain("+b");
   });
 
+  it("threads toolUseId onto Edit/Write change events", () => {
+    const tracker = new DiffTracker();
+    tracker.onToolUse(
+      "s1",
+      "Edit",
+      { file_path: "src/a.ts", old_string: "a\n", new_string: "b\n" },
+      { toolUseId: "tu-123" },
+    );
+    tracker.onToolUse(
+      "s1",
+      "Write",
+      { file_path: "src/b.ts", content: "x\n" },
+      { toolUseId: "tu-456" },
+    );
+    const a = tracker.list("s1").find((c) => c.path === "src/a.ts")!;
+    const b = tracker.list("s1").find((c) => c.path === "src/b.ts")!;
+    expect(a.events[0].toolUseId).toBe("tu-123");
+    expect(b.events[0].toolUseId).toBe("tu-456");
+  });
+
+  it("markDeleted flags missing files D and restores reappeared ones to M", () => {
+    const alive = new Set<string>(["src/a.ts", "src/b.ts"]);
+    const tracker = new DiffTracker({
+      fileExists: (p) => alive.has(p),
+    });
+    tracker.onToolUse("s1", "Edit", {
+      file_path: "src/a.ts",
+      old_string: "a\n",
+      new_string: "b\n",
+    });
+    tracker.onToolUse("s1", "Edit", {
+      file_path: "src/b.ts",
+      old_string: "a\n",
+      new_string: "b\n",
+    });
+
+    alive.delete("src/a.ts");
+    expect(tracker.markDeleted("s1")).toBe(true);
+    const after = tracker.list("s1");
+    expect(after.find((c) => c.path === "src/a.ts")!.status).toBe("D");
+    expect(after.find((c) => c.path === "src/b.ts")!.status).toBe("M");
+
+    // No further changes → no-op
+    expect(tracker.markDeleted("s1")).toBe(false);
+
+    // File reappears → back to M
+    alive.add("src/a.ts");
+    expect(tracker.markDeleted("s1")).toBe(true);
+    expect(
+      tracker.list("s1").find((c) => c.path === "src/a.ts")!.status,
+    ).toBe("M");
+  });
+
   it("records Bash cat>heredoc as added file change", () => {
     expect(
       parseBashWriteTarget("cat > UIManager.cs <<'EOF'\nhello\nEOF"),

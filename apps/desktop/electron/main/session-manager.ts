@@ -290,7 +290,12 @@ function extractSdkSessionId(msg: unknown): string | undefined {
 
 function isToolUseBlock(
   block: unknown,
-): block is { type: "tool_use"; name: string; input: Record<string, unknown> } {
+): block is {
+  type: "tool_use";
+  name: string;
+  input: Record<string, unknown>;
+  id?: string;
+} {
   if (typeof block !== "object" || block === null) return false;
   const b = block as Record<string, unknown>;
   return (
@@ -663,6 +668,8 @@ export class SessionManager {
   }
 
   private emitDiffAndPersist(sessionId: string): void {
+    // Sync deleted/reappeared files before pushing to the renderer.
+    this.diffTracker.markDeleted(sessionId);
     const list = this.listChanges(sessionId);
     this.emitDiff(sessionId, list);
     this.persistChanges(sessionId);
@@ -1895,7 +1902,10 @@ export class SessionManager {
         typeof block.input === "object" && block.input !== null
           ? (block.input as Record<string, unknown>)
           : {};
-      this.diffTracker.onToolUse(sessionId, block.name, input, { cwd });
+      this.diffTracker.onToolUse(sessionId, block.name, input, {
+        cwd,
+        toolUseId: typeof block.id === "string" ? block.id : undefined,
+      });
       this.emitDiffAndPersist(sessionId);
     }
   }

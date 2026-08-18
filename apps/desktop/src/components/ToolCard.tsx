@@ -1,5 +1,6 @@
 import React, { memo, useState } from "react";
 import type { ToolCardState, TodoItem } from "@claude-desktop/shared";
+import { requestRevealChange, useAppStore } from "../state/store";
 
 function formatElapsed(sec?: number): string {
   if (sec == null || !Number.isFinite(sec)) return "";
@@ -29,12 +30,15 @@ export const ToolCard = memo(function ToolCard({
 }) {
   // Collapsed by default — user expands to inspect details.
   const [open, setOpen] = useState(false);
+  const activeSessionId = useAppStore((s) => s.activeSessionId);
   const isTodo =
     (tool.name === "TodoWrite" ||
       tool.name === "TaskCreate" ||
       tool.name === "TaskList") &&
     Boolean(tool.todos?.length);
   const isTask = tool.name === "Task" || tool.name === "Agent";
+  // Write/Edit cards jump to the changes panel instead of expanding inline.
+  const isFileEdit = tool.name === "Write" || tool.name === "Edit";
   const hasBody = Boolean(
     tool.summary || tool.resultPreview || isTodo || (isTask && tool.summary),
   );
@@ -43,16 +47,47 @@ export const ToolCard = memo(function ToolCard({
       ? formatElapsed(tool.elapsedSeconds)
       : "";
 
+  const jumpToChange = () => {
+    if (!activeSessionId) return;
+    requestRevealChange({
+      sessionId: activeSessionId,
+      toolUseId: tool.id,
+      path: tool.summary || undefined,
+    });
+  };
+
   return (
-    <div className={`tool-card tool-${tool.status}${open ? " open" : ""}`}>
+    <div
+      className={`tool-card tool-${tool.status}${open ? " open" : ""}${
+        isFileEdit ? " tool-card-linked" : ""
+      }`}
+    >
       <button
         type="button"
         className="tool-card-toggle"
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-        title={open ? "Collapse tool details" : "Expand tool details"}
+        onClick={isFileEdit ? jumpToChange : () => setOpen((v) => !v)}
+        aria-expanded={isFileEdit ? undefined : open}
+        title={
+          isFileEdit
+            ? "View this change in the Changes panel"
+            : open
+              ? "Collapse tool details"
+              : "Expand tool details"
+        }
       >
-        <span className="tool-chevron" aria-hidden>
+        <span
+          className="tool-chevron"
+          aria-hidden
+          role={isFileEdit ? "button" : undefined}
+          onClick={
+            isFileEdit
+              ? (e) => {
+                  e.stopPropagation();
+                  setOpen((v) => !v);
+                }
+              : undefined
+          }
+        >
           {open ? "▾" : "▸"}
         </span>
         {tool.isSubagent ? (

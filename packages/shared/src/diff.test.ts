@@ -5,6 +5,7 @@ import {
   buildWriteHunk,
   extractLineRangeSummary,
   findSnippetStartLine,
+  mergeFullTextWithHunks,
   parseHunkForDisplay,
   truncateFileChange,
   upsertFileChange,
@@ -186,5 +187,92 @@ describe("parseHunkForDisplay", () => {
   it("extractLineRangeSummary reads @@ annotation", () => {
     const hunk = "@@ -1,1 +1,1 @@  lines −1, +1\n-a\n+b\n";
     expect(extractLineRangeSummary(hunk)).toContain("lines");
+  });
+});
+
+describe("mergeFullTextWithHunks", () => {
+  it("marks added lines and keeps the rest as ctx", () => {
+    const full = "alpha\nbeta\ngamma";
+    const hunk = [
+      "--- a/f.ts",
+      "+++ b/f.ts",
+      "@@ -1,2 +1,3 @@  lines +2",
+      " alpha",
+      "+beta",
+      " gamma",
+    ].join("\n");
+    const rows = mergeFullTextWithHunks(full, hunk);
+    expect(rows.map((r) => r.kind)).toEqual(["ctx", "add", "ctx"]);
+    expect(rows[1]).toMatchObject({ newNo: 2, text: "+beta" });
+    expect(rows[0]).toMatchObject({ newNo: 1 });
+    expect(rows[2]).toMatchObject({ newNo: 3 });
+  });
+
+  it("splices deleted lines back before the following new line", () => {
+    const full = "keep1\nkeep2";
+    const hunk = [
+      "--- a/f.ts",
+      "+++ b/f.ts",
+      "@@ -1,3 +1,2 @@  lines −2",
+      " keep1",
+      "-gone",
+      " keep2",
+    ].join("\n");
+    const rows = mergeFullTextWithHunks(full, hunk);
+    expect(rows.map((r) => r.kind)).toEqual(["ctx", "del", "ctx"]);
+    expect(rows[1]).toMatchObject({ kind: "del", text: "-gone", oldNo: 2 });
+    expect(rows[2]).toMatchObject({ kind: "ctx", newNo: 2 });
+  });
+
+  it("anchors trailing deletions after the last line", () => {
+    const full = "only";
+    const hunk = [
+      "--- a/f.ts",
+      "+++ b/f.ts",
+      "@@ -1,2 +1,1 @@  lines −2",
+      " only",
+      "-tail",
+    ].join("\n");
+    const rows = mergeFullTextWithHunks(full, hunk);
+    expect(rows.map((r) => r.kind)).toEqual(["ctx", "del"]);
+  });
+
+  it("handles add+del replacement pairs", () => {
+    const full = "a\nb2\nc";
+    const hunk = [
+      "--- a/f.ts",
+      "+++ b/f.ts",
+      "@@ -1,3 +1,3 @@  lines −2, +2",
+      " a",
+      "-b1",
+      "+b2",
+      " c",
+    ].join("\n");
+    const rows = mergeFullTextWithHunks(full, hunk);
+    expect(rows.map((r) => r.kind)).toEqual(["ctx", "del", "add", "ctx"]);
+    expect(rows[1].text).toBe("-b1");
+    expect(rows[2].text).toBe("+b2");
+  });
+
+  it("treats every line as add for a brand-new file hunk", () => {
+    const full = "x\ny";
+    const hunk = [
+      "--- /dev/null",
+      "+++ b/f.ts",
+      "@@ -0,0 +1,2 @@  new file · lines +1–2",
+      "+x",
+      "+y",
+    ].join("\n");
+    const rows = mergeFullTextWithHunks(full, hunk);
+    expect(rows.map((r) => r.kind)).toEqual(["add", "add"]);
+  });
+
+  it("caps output and notes truncation", () => {
+    const full = Array.from({ length: 10 }, (_, i) => `l${i + 1}`).join("\n");
+    const rows = mergeFullTextWithHunks(full, "", 3);
+    expect(rows.filter((r) => r.kind === "ctx")).toHaveLength(3);
+    const meta = rows[rows.length - 1]!;
+    expect(meta.kind).toBe("meta");
+    expect(meta.text).toContain("capped");
   });
 });

@@ -7,7 +7,7 @@ export type CpaStatus =
   | { state: "ready"; port: number; managedByApp: boolean }
   | { state: "error"; message: string };
 
-export type FileChangeStatus = "A" | "M";
+export type FileChangeStatus = "A" | "M" | "D";
 
 /**
  * One tracked file-write operation (Edit / Write / Bash redirect).
@@ -24,6 +24,11 @@ export type FileChangeEvent = {
    * hydrated on IPC payloads).
    */
   canRestore?: boolean;
+  /**
+   * SDK tool_use block id that produced this change (Edit/Write only).
+   * Lets the chat tool card jump straight to this change record.
+   */
+  toolUseId?: string;
 };
 
 export type FileChange = {

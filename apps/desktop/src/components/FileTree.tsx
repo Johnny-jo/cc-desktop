@@ -11,25 +11,47 @@ type TreeNodeProps = {
   selected: string | null;
   onSelect: (rel: string) => void;
   onOpen: (rel: string) => void;
+  /** Bumped when the filesystem may have changed — reloads expanded dirs. */
+  refreshKey: number;
 };
 
-function TreeNode({ cwd, entry, depth, selected, onSelect, onOpen }: TreeNodeProps) {
+function TreeNode({
+  cwd,
+  entry,
+  depth,
+  selected,
+  onSelect,
+  onOpen,
+  refreshKey,
+}: TreeNodeProps) {
   const [expanded, setExpanded] = useState(false);
   const [children, setChildren] = useState<DirEntry[] | null>(null);
+
+  const fetchChildren = useCallback(async () => {
+    try {
+      const res = await getDesktop().listProjectDir(cwd, entry.rel);
+      setChildren(res.entries);
+    } catch {
+      setChildren([]);
+    }
+  }, [cwd, entry.rel]);
 
   const toggle = async () => {
     if (entry.kind !== "dir") return;
     const next = !expanded;
     setExpanded(next);
     if (next && children === null) {
-      try {
-        const res = await getDesktop().listProjectDir(cwd, entry.rel);
-        setChildren(res.entries);
-      } catch {
-        setChildren([]);
-      }
+      await fetchChildren();
     }
   };
+
+  // Sync expanded dirs with filesystem changes (file added/deleted/renamed).
+  useEffect(() => {
+    if (entry.kind === "dir" && expanded) {
+      void fetchChildren();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshKey]);
 
   if (entry.kind === "file") {
     return (
@@ -74,6 +96,7 @@ function TreeNode({ cwd, entry, depth, selected, onSelect, onOpen }: TreeNodePro
               selected={selected}
               onSelect={onSelect}
               onOpen={onOpen}
+              refreshKey={refreshKey}
             />
           ))
         : null}
@@ -104,6 +127,8 @@ export function FileTree({
   selected: string | null;
 }) {
   const projectPath = useAppStore((s) => s.projectPath);
+  // Any diff push means the agent likely touched the filesystem.
+  const refreshKey = useAppStore((s) => s.fsChangeTick);
   const [roots, setRoots] = useState<DirEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -126,6 +151,12 @@ export function FileTree({
     setRoots(null);
     void load();
   }, [load]);
+
+  // Refresh root listing on filesystem changes (keeps children via refreshKey).
+  useEffect(() => {
+    void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshKey]);
 
   if (!projectPath) {
     return <p className="ft-hint">先打开项目</p>;
@@ -157,6 +188,7 @@ export function FileTree({
           selected={selected}
           onSelect={onSelectFile}
           onOpen={onOpenFile}
+          refreshKey={refreshKey}
         />
       ))}
     </div>
