@@ -15,12 +15,21 @@ import {
 } from "../lib/room-mod-ui";
 import { useI18n } from "../i18n/useI18n";
 import {
+  loadLastCollectionId,
+  loadModCollections,
+  saveLastCollectionId,
+  type ModCollection,
+} from "../lib/mod-collections";
+import {
   closeRoomDialog,
   createRoom,
+  enableRoomKernelMod,
+  enableRoomMod,
   fetchRoomMod,
   hasRoomMod,
   joinRoom,
   leaveActiveRoom,
+  listRoomMods,
   openRoomDialog,
   peekRoom,
   selectRoom,
@@ -40,6 +49,11 @@ export function RoomSidebar() {
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
   const [port, setPort] = useState(String(ROOM_DEFAULT_PORT));
+  // Mod 选集（创建时一键套用）
+  const [collections, setCollections] = useState<ModCollection[]>([]);
+  const [collectionId, setCollectionId] = useState<string>(() =>
+    loadLastCollectionId(),
+  );
   // Join form
   const [secret, setSecret] = useState("");
   const [host, setHost] = useState("");
@@ -140,6 +154,11 @@ export function RoomSidebar() {
     };
   }, [dialog, host, joinPort, secret, inviteHosts, inviteChecksum]);
 
+  // 打开创建对话框时刷新选集列表（可能在设置里刚编辑过）
+  useEffect(() => {
+    if (dialog === "create") setCollections(loadModCollections());
+  }, [dialog]);
+
   const resetForms = () => {
     abortOps();
     setName("");
@@ -161,7 +180,7 @@ export function RoomSidebar() {
     setBusy(true);
     setErr(null);
     const p = Number(port) || ROOM_DEFAULT_PORT;
-    const roomName = name.trim() || `房间-${p}`;
+    const roomName = name.trim() || `群聊-${p}`;
     const res = await createRoom({
       name: roomName,
       password: password || undefined,
@@ -172,6 +191,29 @@ export function RoomSidebar() {
       setBusy(false);
       setErr(res.error ?? "创建失败");
       return;
+    }
+    // 套用 Mod 选集：单个失败不阻断进群
+    const col = collections.find((c) => c.id === collectionId);
+    if (res.roomId && col && col.modIds.length) {
+      saveLastCollectionId(col.id);
+      setProgress("正在套用 Mod 选集…");
+      const packs = await listRoomMods();
+      const byKey = new Map<string, (typeof packs)[number]>(
+        packs.map((pk) => [`${pk.hostApi === 2 ? "k" : "p"}:${pk.id}`, pk]),
+      );
+      for (const key of col.modIds) {
+        if (gen !== joinGen.current) return;
+        const pack = byKey.get(key);
+        if (!pack) continue;
+        if (pack.hostApi === 2) {
+          await enableRoomKernelMod(res.roomId, pack.packDir);
+        } else {
+          await enableRoomMod(res.roomId, pack.packDir);
+        }
+      }
+      setProgress(null);
+    } else {
+      saveLastCollectionId("");
     }
     setBusy(false);
     resetForms();
@@ -215,7 +257,7 @@ export function RoomSidebar() {
       }
     }
 
-    if (!h) return { error: "请粘贴邀请码，或填写房主 IP" };
+    if (!h) return { error: "请粘贴邀请码，或填写群主 IP" };
     if (!checksum) checksum = offer?.checksum || undefined;
     const candidates = [h, ...hosts.filter((x) => x && x !== h)];
     return { host: h, port: p, password: pwd, checksum, candidates };
@@ -305,7 +347,7 @@ export function RoomSidebar() {
             />
           </svg>
         </span>
-        <span className="sidebar-files-label">房间</span>
+        <span className="sidebar-files-label">群聊</span>
         {rooms.some((r) => r.status === "open") ? (
           <span className="room-dot on" />
         ) : null}
@@ -322,7 +364,7 @@ export function RoomSidebar() {
                 openRoomDialog("create");
               }}
             >
-              + 创建房间
+              + 创建群聊
             </button>
             <button
               type="button"
@@ -332,13 +374,13 @@ export function RoomSidebar() {
                 openRoomDialog("join");
               }}
             >
-              加入房间
+              加入群聊
             </button>
             {activeRoomId ? (
               <button
                 type="button"
                 className="btn btn-ghost btn-sm"
-                title="退出当前房间"
+                title="退出当前群聊"
                 onClick={() => void leaveActiveRoom()}
               >
                 退出
@@ -357,7 +399,7 @@ export function RoomSidebar() {
           ) : null}
 
           {rooms.length === 0 ? (
-            <p className="ft-hint">还没有房间</p>
+            <p className="ft-hint">还没有群聊</p>
           ) : (
             rooms.map((r) => (
               <div key={r.roomId} className="room-list-row">
@@ -375,7 +417,7 @@ export function RoomSidebar() {
                     <span>
                       {r.memberCount} 人 ·{" "}
                       {r.status === "open" ? "开着" : "已结束"}
-                      {r.role === "host" ? " · 房主" : ""}
+                      {r.role === "host" ? " · 群主" : ""}
                     </span>
                   </span>
                 </button>
@@ -383,7 +425,7 @@ export function RoomSidebar() {
                   <button
                     type="button"
                     className="btn btn-ghost btn-sm room-row-leave"
-                    title={r.role === "host" ? "解散房间" : "退出房间"}
+                    title={r.role === "host" ? "解散群聊" : "退出群聊"}
                     onClick={(e) => {
                       e.stopPropagation();
                       void leaveActiveRoom();
@@ -409,11 +451,11 @@ export function RoomSidebar() {
           <div
             className="room-modal"
             role="dialog"
-            aria-label={dialog === "create" ? "创建房间" : "加入房间"}
+            aria-label={dialog === "create" ? "创建群聊" : "加入群聊"}
             onClick={(e) => e.stopPropagation()}
           >
             <header className="room-modal-head">
-              <h3>{dialog === "create" ? "创建房间" : "加入房间"}</h3>
+              <h3>{dialog === "create" ? "创建群聊" : "加入群聊"}</h3>
               <button
                 type="button"
                 className="btn btn-ghost btn-sm"
@@ -426,9 +468,9 @@ export function RoomSidebar() {
             {dialog === "create" ? (
               <div className="room-modal-body">
                 <label className="settings-field">
-                  房间名
+                  群聊名
                   <input
-                    placeholder="可空，默认 房间-端口"
+                    placeholder="可空，默认 群聊-端口"
                     value={name}
                     onChange={(e) => setName(e.target.value)}
                     autoFocus
@@ -450,6 +492,26 @@ export function RoomSidebar() {
                     value={port}
                     onChange={(e) => setPort(e.target.value)}
                   />
+                </label>
+                <label className="settings-field">
+                  Mod 选集
+                  <select
+                    className="select"
+                    value={collectionId}
+                    onChange={(e) => setCollectionId(e.target.value)}
+                  >
+                    <option value="">不使用</option>
+                    {collections.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}（{c.modIds.length} 个 Mod）
+                      </option>
+                    ))}
+                  </select>
+                  {!collections.length ? (
+                    <p className="settings-hint">
+                      可在「设置 → 群聊设置 → 选集设置」中创建选集
+                    </p>
+                  ) : null}
                 </label>
                 <p className="settings-hint">{t.room.createHint}</p>
               </div>
@@ -489,7 +551,7 @@ export function RoomSidebar() {
                 <details className="room-join-advanced">
                   <summary>高级：手动填 IP / 端口</summary>
                   <label className="settings-field">
-                    房主 IP
+                    群主 IP
                     <input
                       placeholder="127.0.0.1 或局域网 IP"
                       value={host}

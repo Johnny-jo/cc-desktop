@@ -24,6 +24,10 @@ export type StoredRoom = {
   };
   memberCount: number;
   updatedAt: number;
+  /** Guest identity, reused on rejoin so the host keeps seats */
+  localUserId?: string;
+  /** Guest dropped — kept locally, rejoinable */
+  offline?: boolean;
   items: RoomTimelineItem[];
   /** Last known snapshot fields for offline browse */
   seats?: RoomSnapshot["seats"];
@@ -117,6 +121,7 @@ export class RoomArchive {
       memberCount: r.memberCount,
       port: r.port,
       inviteHost: r.inviteHost,
+      ...(r.offline ? { offline: true } : {}),
     }));
   }
 
@@ -128,7 +133,7 @@ export class RoomArchive {
   private normalize(r: StoredRoom): StoredRoom {
     return {
       roomId: String(r.roomId),
-      name: String(r.name ?? "房间"),
+      name: String(r.name ?? "群聊"),
       status: r.status === "open" ? "open" : "ended",
       role: r.role === "host" ? "host" : "member",
       port: Number(r.port) || 18765,
@@ -136,6 +141,8 @@ export class RoomArchive {
       memberCount: Number(r.memberCount) || 0,
       updatedAt: Number(r.updatedAt) || Date.now(),
       items: Array.isArray(r.items) ? r.items : [],
+      ...(r.localUserId ? { localUserId: r.localUserId } : {}),
+      ...(r.offline ? { offline: true } : {}),
       ...(r.join ? { join: r.join } : {}),
       ...(r.seats ? { seats: r.seats } : {}),
       ...(r.members ? { members: r.members } : {}),

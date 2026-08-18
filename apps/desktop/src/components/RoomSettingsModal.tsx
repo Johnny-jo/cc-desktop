@@ -37,6 +37,9 @@ export function RoomSettingsModal({ room, canHost, onClose }: Props) {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [tab, setTab] = useState<"mods" | "improve" | "memory" | "overview">(
+    "mods",
+  );
   const memoryOn = Boolean(
     room.kernel?.mods.some((m) => m.id === "shared-memory" && m.state === "active"),
   );
@@ -237,241 +240,297 @@ export function RoomSettingsModal({ room, canHost, onClose }: Props) {
             ×
           </button>
         </header>
-        <div className="room-modal-body">
-          <section className="room-settings-section">
-            <h4>{t.room.settingsOverview}</h4>
-            <p className="settings-hint">
-              {room.name} · {room.memberCount} ·{" "}
-              {t.room.settingsPort.replace("{port}", String(room.port))}
-            </p>
-          </section>
 
-          <section className="room-settings-section">
-            <h4>{t.room.settingsPlay}</h4>
-            <p className="settings-hint">{t.room.settingsPlayHint}</p>
-            {!canHost ? <p className="settings-hint">{t.room.settingsGuestHint}</p> : null}
-            {playPacks.length === 0 && kernelPacks.length === 0 ? (
-              <p className="settings-hint">{t.room.settingsMemoryEmpty}</p>
-            ) : null}
-            {playPacks.map((pack) => {
-              const on = activePlay?.packDir === pack.packDir;
-              return (
-                <label key={pack.packDir} className="room-kernel-opt">
-                  <input
-                    type="checkbox"
-                    checked={on}
-                    disabled={!canHost || room.status !== "open" || busyId === "play"}
-                    onChange={() => void setPlayPack(on ? "" : pack.packDir)}
-                  />
-                  <span>
-                    {pack.name} ({pack.id}@{pack.version}
-                    {pack.source === "cache" ? ` · ${t.room.packCached}` : ""})
-                    <span className="settings-hint">
-                      {" "}
-                      · {on ? t.room.settingsExtOn : t.room.settingsExtOff}
-                    </span>
-                  </span>
-                </label>
-              );
-            })}
-            {kernelPacks.map((pack) => {
-              const on = activeIds.has(pack.id);
-              const live = room.kernel?.mods.find((m) => m.id === pack.id);
-              return (
-                <label key={pack.packDir} className="room-kernel-opt">
-                  <input
-                    type="checkbox"
-                    checked={on}
-                    disabled={!canHost || room.status !== "open" || busyId === pack.id}
-                    onChange={() => void togglePack(pack, !on)}
-                  />
-                  <span>
-                    {pack.name}{" "}
-                    <span className="settings-hint">
-                      {on ? t.room.settingsExtOn : t.room.settingsExtOff}
-                      {live?.state && live.state !== "active"
-                        ? ` · ${live.state}`
-                        : ""}
-                      {live?.pendingReason ? ` · ${live.pendingReason}` : ""}
-                      {live?.failedReason ? ` · ${live.failedReason}` : ""}
-                    </span>
-                  </span>
-                </label>
-              );
-            })}
-          </section>
+        <div className="room-settings-layout">
+          <nav className="settings-nav">
+            {(
+              [
+                ["mods", t.room.settingsPlay],
+                ["improve", t.room.settingsImprove],
+                ["memory", t.room.settingsMemory],
+                ["overview", t.room.settingsOverview],
+              ] as Array<[typeof tab, string]>
+            ).map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                className={`settings-nav-item${tab === key ? " active" : ""}`}
+                onClick={() => setTab(key)}
+              >
+                <span className="settings-nav-label">{label}</span>
+              </button>
+            ))}
+          </nav>
 
-          <section className="room-settings-section">
-            <h4>{t.room.settingsImprove}</h4>
-            <p className="settings-hint">{t.room.settingsImproveHint}</p>
-            {!canHost ? (
-              <p className="settings-hint">{t.room.settingsGuestHint}</p>
-            ) : (
-              <>
-                <label className="room-improve-actions">
-                  <span className="settings-hint">{t.room.settingsAutonomy}</span>
-                  <select
-                    value={improve?.autonomy ?? 0}
-                    disabled={room.status !== "open" || busyId === "autonomy"}
-                    onChange={(e) =>
-                      void changeAutonomy(Number(e.target.value) as 0 | 1 | 2)
-                    }
-                  >
-                    <option value={0}>{t.room.settingsAutonomyL0}</option>
-                    <option value={1}>{t.room.settingsAutonomyL1}</option>
-                    <option value={2}>{t.room.settingsAutonomyL2}</option>
-                  </select>
-                </label>
-                {enabledKernel.length === 0 ? (
-                  <p className="settings-hint">{t.room.settingsExtOff}</p>
-                ) : (
-                  enabledKernel.map((pack) => (
-                    <div key={pack.id} className="room-improve-pack">
-                      <span>
-                        {pack.name}{" "}
-                        <span className="settings-hint">{pack.id}</span>
-                      </span>
-                      <textarea
-                        className="room-improve-src"
-                        placeholder={t.room.settingsProposeHint}
-                        value={drafts[pack.id] ?? ""}
-                        disabled={room.status !== "open"}
-                        onChange={(e) =>
-                          setDrafts((cur) => ({ ...cur, [pack.id]: e.target.value }))
-                        }
-                      />
-                      <div className="room-improve-actions">
-                        <button
-                          type="button"
-                          className="btn btn-sm"
-                          disabled={
-                            room.status !== "open" ||
-                            !(drafts[pack.id] ?? "").trim() ||
-                            busyId === `propose:${pack.id}`
-                          }
-                          onClick={() => void proposePack(pack.id)}
-                        >
-                          {t.room.settingsPropose}
-                        </button>
-                        {canRollback.has(pack.id) ? (
+          <div className="room-modal-body room-settings-content">
+          {tab === "overview" ? (
+            <section className="room-settings-section">
+              <h4>{t.room.settingsOverview}</h4>
+              <p className="settings-hint">
+                {room.name} · {room.memberCount} ·{" "}
+                {t.room.settingsPort.replace("{port}", String(room.port))}
+              </p>
+            </section>
+          ) : null}
+
+          {tab === "mods" ? (
+            <div className="room-mods-page">
+              {!canHost ? <p className="settings-hint">{t.room.settingsGuestHint}</p> : null}
+              {playPacks.length === 0 && kernelPacks.length === 0 ? (
+                <p className="settings-hint">{t.room.settingsMemoryEmpty}</p>
+              ) : null}
+
+              {playPacks.length ? (
+                <>
+                  <div className="room-mods-group-title">
+                    {t.room.settingsPlay}
+                    <span className="settings-hint"> · 单选</span>
+                  </div>
+                  {playPacks.map((pack) => {
+                    const on = activePlay?.packDir === pack.packDir;
+                    return (
+                      <div key={pack.packDir} className="mods-row">
+                        <div className="mods-row-main">
+                          <span className="mods-row-name">{pack.name}</span>
+                          <span className="mods-row-meta">
+                            {pack.id}@v{pack.version}
+                            {pack.source === "cache" ? ` · ${t.room.packCached}` : ""}
+                          </span>
+                        </div>
+                        <div className="mods-row-actions">
                           <button
                             type="button"
-                            className="btn btn-ghost btn-sm"
-                            disabled={
-                              room.status !== "open" || busyId === `rollback:${pack.id}`
-                            }
-                            onClick={() => void rollbackPack(pack.id)}
+                            className={`btn btn-sm${on ? " btn-primary" : ""}`}
+                            disabled={!canHost || room.status !== "open" || busyId === "play"}
+                            onClick={() => void setPlayPack(on ? "" : pack.packDir)}
                           >
-                            {t.room.settingsRollback}
+                            {on ? t.room.modDisable : t.room.modEnable}
                           </button>
-                        ) : null}
+                        </div>
                       </div>
-                    </div>
-                  ))
-                )}
-                <h4>{t.room.settingsPending}</h4>
-                {pending.length === 0 ? (
-                  <p className="settings-hint">{t.room.settingsNoPending}</p>
-                ) : (
-                  <ul className="room-improve-pending">
-                    {pending.map((prop) => (
-                      <li key={prop.id}>
+                    );
+                  })}
+                </>
+              ) : null}
+
+              {kernelPacks.length ? (
+                <>
+                  <div className="room-mods-group-title">
+                    {t.room.settingsExtensions}
+                    <span className="settings-hint"> · 可多选</span>
+                  </div>
+                  <p className="settings-hint">{t.room.settingsExtHint}</p>
+                  {kernelPacks.map((pack) => {
+                    const on = activeIds.has(pack.id);
+                    const live = room.kernel?.mods.find((m) => m.id === pack.id);
+                    return (
+                      <div key={pack.packDir} className="mods-row">
+                        <div className="mods-row-main">
+                          <span className="mods-row-name">{pack.name}</span>
+                          <span className="mods-row-meta">
+                            {pack.id}@v{pack.version}
+                            {pack.source === "cache" ? ` · ${t.room.packCached}` : ""}
+                            {live?.state && live.state !== "active" ? ` · ${live.state}` : ""}
+                            {live?.pendingReason ? ` · ${live.pendingReason}` : ""}
+                            {live?.failedReason ? ` · ${live.failedReason}` : ""}
+                          </span>
+                        </div>
+                        <div className="mods-row-actions">
+                          <button
+                            type="button"
+                            className={`btn btn-sm${on ? " btn-primary" : ""}`}
+                            disabled={!canHost || room.status !== "open" || busyId === pack.id}
+                            onClick={() => void togglePack(pack, !on)}
+                          >
+                            {on ? t.room.modDisable : t.room.modEnable}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </>
+              ) : null}
+            </div>
+          ) : null}
+
+          {tab === "improve" ? (
+            <section className="room-settings-section">
+              <h4>{t.room.settingsImprove}</h4>
+              <p className="settings-hint">{t.room.settingsImproveHint}</p>
+              {!canHost ? (
+                <p className="settings-hint">{t.room.settingsGuestHint}</p>
+              ) : (
+                <>
+                  <label className="room-improve-actions">
+                    <span className="settings-hint">{t.room.settingsAutonomy}</span>
+                    <select
+                      className="select"
+                      value={improve?.autonomy ?? 0}
+                      disabled={room.status !== "open" || busyId === "autonomy"}
+                      onChange={(e) =>
+                        void changeAutonomy(Number(e.target.value) as 0 | 1 | 2)
+                      }
+                    >
+                      <option value={0}>{t.room.settingsAutonomyL0}</option>
+                      <option value={1}>{t.room.settingsAutonomyL1}</option>
+                      <option value={2}>{t.room.settingsAutonomyL2}</option>
+                    </select>
+                  </label>
+                  {enabledKernel.length === 0 ? (
+                    <p className="settings-hint">{t.room.settingsExtOff}</p>
+                  ) : (
+                    enabledKernel.map((pack) => (
+                      <div key={pack.id} className="room-improve-pack">
                         <span>
-                          {prop.packId}
-                          {prop.note ? ` · ${prop.note}` : ""}
+                          {pack.name}{" "}
+                          <span className="settings-hint">{pack.id}</span>
                         </span>
                         <textarea
                           className="room-improve-src"
-                          readOnly
-                          value={prop.modJs}
+                          placeholder={t.room.settingsProposeHint}
+                          value={drafts[pack.id] ?? ""}
+                          disabled={room.status !== "open"}
+                          onChange={(e) =>
+                            setDrafts((cur) => ({ ...cur, [pack.id]: e.target.value }))
+                          }
                         />
                         <div className="room-improve-actions">
                           <button
                             type="button"
                             className="btn btn-sm"
                             disabled={
-                              room.status !== "open" || busyId === `prop:${prop.id}`
+                              room.status !== "open" ||
+                              !(drafts[pack.id] ?? "").trim() ||
+                              busyId === `propose:${pack.id}`
                             }
-                            onClick={() => void decideProposal(prop.id, true)}
+                            onClick={() => void proposePack(pack.id)}
                           >
-                            {t.room.settingsApplyProposal}
+                            {t.room.settingsPropose}
                           </button>
+                          {canRollback.has(pack.id) ? (
+                            <button
+                              type="button"
+                              className="btn btn-ghost btn-sm"
+                              disabled={
+                                room.status !== "open" || busyId === `rollback:${pack.id}`
+                              }
+                              onClick={() => void rollbackPack(pack.id)}
+                            >
+                              {t.room.settingsRollback}
+                            </button>
+                          ) : null}
+                        </div>
+                      </div>
+                    ))
+                  )}
+                  <h4>{t.room.settingsPending}</h4>
+                  {pending.length === 0 ? (
+                    <p className="settings-hint">{t.room.settingsNoPending}</p>
+                  ) : (
+                    <ul className="room-improve-pending">
+                      {pending.map((prop) => (
+                        <li key={prop.id}>
+                          <span>
+                            {prop.packId}
+                            {prop.note ? ` · ${prop.note}` : ""}
+                          </span>
+                          <textarea
+                            className="room-improve-src"
+                            readOnly
+                            value={prop.modJs}
+                          />
+                          <div className="room-improve-actions">
+                            <button
+                              type="button"
+                              className="btn btn-sm"
+                              disabled={
+                                room.status !== "open" || busyId === `prop:${prop.id}`
+                              }
+                              onClick={() => void decideProposal(prop.id, true)}
+                            >
+                              {t.room.settingsApplyProposal}
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-ghost btn-sm"
+                              disabled={
+                                room.status !== "open" || busyId === `prop:${prop.id}`
+                              }
+                              onClick={() => void decideProposal(prop.id, false)}
+                            >
+                              {t.room.settingsRejectProposal}
+                            </button>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </>
+              )}
+            </section>
+          ) : null}
+
+          {tab === "memory" ? (
+            <section className="room-settings-section">
+              <h4>{t.room.settingsMemory}</h4>
+              <p className="settings-hint">{t.room.settingsMemoryHint}</p>
+              {!memoryOn ? (
+                <p className="settings-hint">{t.room.settingsMemoryNeedPack}</p>
+              ) : !canHost ? (
+                <p className="settings-hint">{t.room.settingsGuestHint}</p>
+              ) : (
+                <>
+                  {entries.length === 0 ? (
+                    <p className="settings-hint">{t.room.settingsMemoryEmpty}</p>
+                  ) : (
+                    <ul className="room-memory-list">
+                      {entries.map((row) => (
+                        <li key={row.key} className="room-memory-row">
+                          <code className="room-memory-key">{row.key}</code>
+                          <span className="room-memory-val">{row.value}</span>
                           <button
                             type="button"
                             className="btn btn-ghost btn-sm"
-                            disabled={
-                              room.status !== "open" || busyId === `prop:${prop.id}`
-                            }
-                            onClick={() => void decideProposal(prop.id, false)}
+                            disabled={busyId === `del:${row.key}` || room.status !== "open"}
+                            onClick={() => void removeEntry(row.key)}
                           >
-                            {t.room.settingsRejectProposal}
+                            {t.common.delete}
                           </button>
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </>
-            )}
-          </section>
-
-          <section className="room-settings-section">
-            <h4>{t.room.settingsMemory}</h4>
-            <p className="settings-hint">{t.room.settingsMemoryHint}</p>
-            {!memoryOn ? (
-              <p className="settings-hint">{t.room.settingsMemoryNeedPack}</p>
-            ) : !canHost ? (
-              <p className="settings-hint">{t.room.settingsGuestHint}</p>
-            ) : (
-              <>
-                {entries.length === 0 ? (
-                  <p className="settings-hint">{t.room.settingsMemoryEmpty}</p>
-                ) : (
-                  <ul className="room-memory-list">
-                    {entries.map((row) => (
-                      <li key={row.key} className="room-memory-row">
-                        <code className="room-memory-key">{row.key}</code>
-                        <span className="room-memory-val">{row.value}</span>
-                        <button
-                          type="button"
-                          className="btn btn-ghost btn-sm"
-                          disabled={busyId === `del:${row.key}` || room.status !== "open"}
-                          onClick={() => void removeEntry(row.key)}
-                        >
-                          {t.common.delete}
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                <div className="room-memory-add">
-                  <input
-                    placeholder={t.room.settingsMemoryKey}
-                    value={keyDraft}
-                    disabled={room.status !== "open"}
-                    onChange={(e) => setKeyDraft(e.target.value)}
-                  />
-                  <input
-                    placeholder={t.room.settingsMemoryValue}
-                    value={valueDraft}
-                    disabled={room.status !== "open"}
-                    onChange={(e) => setValueDraft(e.target.value)}
-                  />
-                  <button
-                    type="button"
-                    className="btn btn-sm"
-                    disabled={!keyDraft.trim() || room.status !== "open" || busyId === "memory-add"}
-                    onClick={() => void addEntry()}
-                  >
-                    {t.room.settingsMemoryAdd}
-                  </button>
-                </div>
-              </>
-            )}
-          </section>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  <div className="room-memory-add">
+                    <input
+                      placeholder={t.room.settingsMemoryKey}
+                      value={keyDraft}
+                      disabled={room.status !== "open"}
+                      onChange={(e) => setKeyDraft(e.target.value)}
+                    />
+                    <input
+                      placeholder={t.room.settingsMemoryValue}
+                      value={valueDraft}
+                      disabled={room.status !== "open"}
+                      onChange={(e) => setValueDraft(e.target.value)}
+                    />
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      disabled={!keyDraft.trim() || room.status !== "open" || busyId === "memory-add"}
+                      onClick={() => void addEntry()}
+                    >
+                      {t.room.settingsMemoryAdd}
+                    </button>
+                  </div>
+                </>
+              )}
+            </section>
+          ) : null}
 
           {err ? <p className="room-err">{err}</p> : null}
+          </div>
         </div>
+
         <footer className="room-modal-foot">
           <button type="button" className="btn btn-sm" onClick={onClose}>
             {t.common.close}

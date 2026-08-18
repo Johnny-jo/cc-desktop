@@ -156,6 +156,12 @@ export const IPC = {
   roomRejectKernelProposal: "room:reject-kernel-proposal",
   roomRollbackKernelImprove: "room:rollback-kernel-improve",
   roomEvent: "room:event",
+  /** Rejoin a room the guest dropped from (uses stored join info) */
+  roomRejoin: "room:rejoin",
+  /** Mod pack management (outside a live room) */
+  modsDelete: "mods:delete",
+  modsOpenDir: "mods:open-dir",
+  modsScaffold: "mods:scaffold",
 } as const;
 
 export type IpcInvokeMap = {
@@ -518,7 +524,14 @@ export type IpcInvokeMap = {
     result: { ok: boolean; error?: string };
   };
   [IPC.roomSend]: {
-    args: [{ roomId: string; seatId: string; text: string }];
+    args: [
+      {
+        roomId: string;
+        seatId: string;
+        text: string;
+        quote?: import("./room-protocol").RoomQuoteRef;
+      },
+    ];
     result: { ok: boolean; error?: string };
   };
   [IPC.roomDice]: {
@@ -671,6 +684,22 @@ export type IpcInvokeMap = {
     args: [{ checksum: string }];
     result: { ok: boolean; has: boolean };
   };
+  [IPC.roomRejoin]: {
+    args: [{ roomId: string }];
+    result: { ok: boolean; room?: import("./room-protocol").RoomSnapshot; error?: string };
+  };
+  [IPC.modsDelete]: {
+    args: [{ packDir: string }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.modsOpenDir]: {
+    args: [{ packDir: string }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.modsScaffold]: {
+    args: [{ id: string; name: string }];
+    result: { ok: boolean; packDir?: string; error?: string };
+  };
 };
 
 /** Mirrors main auto-updater status (kept in shared so renderer can type it). */
@@ -709,6 +738,8 @@ export type IpcEventMap = {
     room?: import("./room-protocol").RoomSnapshot;
     /** host left / room deleted — guest should alert and remove */
     closed?: boolean;
+    /** guest dropped after reconnect retries — room kept locally, can rejoin */
+    offline?: boolean;
     /** local-initiated close (host dismissed) — no alert */
     silent?: boolean;
     /** guest reconnecting */

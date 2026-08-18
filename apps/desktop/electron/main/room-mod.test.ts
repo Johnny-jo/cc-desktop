@@ -581,7 +581,7 @@ describe("room mod handshake + play loop", () => {
     const wolf = listed.find((p) => p.id === "werewolf")!;
     const asPlay = await rooms.enableMod(room.roomId, mem.packDir);
     expect(asPlay.ok).toBe(false);
-    expect(asPlay.error).toMatch(/房间扩展/);
+    expect(asPlay.error).toMatch(/群聊扩展/);
     const asKernel = rooms.enableKernelMod(room.roomId, wolf.packDir);
     expect(asKernel.ok).toBe(false);
     expect(asKernel.error).toMatch(/玩法模组/);
@@ -707,7 +707,7 @@ describe("room mod handshake + play loop", () => {
     expect(ticked.ok).toBe(true);
     const snap = rooms.get(room.roomId)!;
     expect(snap.items.length).toBe(before);
-    expect(snap.items.some((i) => i.text === "房间心跳")).toBe(false);
+    expect(snap.items.some((i) => i.text === "群聊心跳")).toBe(false);
     expect(snap.kernel?.mods.some((m) => m.id === "room-pulse" && m.state === "active")).toBe(
       true,
     );

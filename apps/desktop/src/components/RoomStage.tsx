@@ -66,9 +66,9 @@ export function RoomStage() {
               <path d="M15.5 14.6c2.3.3 4 1.9 4 4.1" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
             </svg>
           </div>
-          <p className="room-stage-empty-title">协作房间</p>
+          <p className="room-stage-empty-title">协作群聊</p>
           <p className="room-stage-empty">
-            在左侧「房间」里创建房间，让局域网内的其他人加入；
+            在左侧「群聊」里创建群聊，让局域网内的其他人加入；
             <br />
             每个席位可以是一个 Agent，也可以由人随时接管。
           </p>
@@ -122,7 +122,7 @@ export function RoomStage() {
     if (!hasDesktopApi("getRoomInvite")) return;
     const inv = await getDesktop().getRoomInvite(room.roomId);
     if (!inv.ok) {
-      setErr(inv.error ?? "只有房主可以邀请");
+      setErr(inv.error ?? "只有群主可以邀请");
       return;
     }
     if (!inv.secret) {
@@ -132,11 +132,11 @@ export function RoomStage() {
     const text = inv.secret;
     setInviteText(
       [
-        `房间邀请码（复制给对方）`,
+        `群聊邀请码（复制给对方）`,
         text,
         inv.listening === false
-          ? "警告：主机未在监听，请重新创建房间"
-          : `对方在「房间 → 加入房间」粘贴即可；本机防火墙需放行 TCP ${inv.port}`,
+          ? "警告：主机未在监听，请重新创建群聊"
+          : `对方在「群聊 → 加入群聊」粘贴即可；本机防火墙需放行 TCP ${inv.port}`,
       ].join("\n"),
     );
     setInviteOpen(true);
@@ -212,7 +212,7 @@ export function RoomStage() {
               className="btn btn-sm"
               onClick={() => setConfirmLeave(true)}
             >
-              {canHost ? "退出并解散" : "退出房间"}
+              {canHost ? "退出并解散" : "退出群聊"}
             </button>
           )}
         </div>

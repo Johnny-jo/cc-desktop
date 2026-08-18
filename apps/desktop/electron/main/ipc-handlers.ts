@@ -826,19 +826,19 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
   });
 
   ipcMain.handle(IPC.roomCreate, async (_e, opts) => {
-    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.create(opts);
   });
   ipcMain.handle(IPC.roomJoin, async (_e, opts) => {
-    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.join(opts);
   });
   ipcMain.handle(IPC.roomLeave, async (_e, { roomId }) => {
-    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.leave(roomId);
   });
   ipcMain.handle(IPC.roomEnd, async (_e, { roomId }) => {
-    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.end(roomId);
   });
   ipcMain.handle(IPC.roomList, async () => {
@@ -848,114 +848,133 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
     return { room: ctx.rooms?.get(roomId) ?? null };
   });
   ipcMain.handle(IPC.roomAddSeat, async (_e, opts) => {
-    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.addSeat(opts.roomId, opts.kind, opts.name, opts.agentName);
   });
   ipcMain.handle(IPC.roomTakeover, async (_e, { roomId, seatId }) => {
-    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.takeover(roomId, seatId);
   });
   ipcMain.handle(IPC.roomReturnSeat, async (_e, { roomId, seatId }) => {
-    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.returnSeat(roomId, seatId);
   });
-  ipcMain.handle(IPC.roomSend, async (_e, { roomId, seatId, text }) => {
-    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
-    return ctx.rooms.send(roomId, seatId, text);
+  ipcMain.handle(IPC.roomSend, async (_e, { roomId, seatId, text, quote }) => {
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
+    return ctx.rooms.send(roomId, seatId, text, quote);
+  });
+  ipcMain.handle(IPC.roomRejoin, async (_e, { roomId }) => {
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
+    return ctx.rooms.rejoin(roomId);
   });
   ipcMain.handle(IPC.roomDice, async (_e, { roomId, seatId }) => {
-    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.rollDice(roomId, seatId);
   });
   ipcMain.handle(IPC.roomRps, async (_e, { roomId, seatId, hand }) => {
-    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.playRps(roomId, seatId, hand);
   });
   ipcMain.handle(IPC.roomInvite, async (_e, { roomId }) => {
-    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.invite(roomId);
   });
   ipcMain.handle(IPC.roomDelete, async (_e, { roomId }) => {
-    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.deleteLocal(roomId);
   });
   ipcMain.handle(IPC.roomPeek, async (_e, opts) => {
-    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.peek(opts);
   });
   ipcMain.handle(IPC.roomFetchMod, async (_e, opts) => {
-    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.fetchMod(opts);
   });
   ipcMain.handle(IPC.roomEnableMod, async (_e, { roomId, packDir }) => {
-    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.enableMod(roomId, packDir);
   });
   ipcMain.handle(IPC.roomStartMod, async (_e, { roomId }) => {
-    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.startMod(roomId);
   });
   ipcMain.handle(IPC.roomEndMod, async (_e, { roomId }) => {
-    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.endMod(roomId);
   });
   ipcMain.handle(IPC.roomResetMod, async (_e, { roomId }) => {
-    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.resetMod(roomId);
   });
   ipcMain.handle(IPC.roomRecoverMod, async (_e, { roomId }) => {
-    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.recoverMod(roomId);
   });
   ipcMain.handle(IPC.roomModIntent, async (_e, { roomId, seatId, name, payload }) => {
-    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.modIntent(roomId, seatId, name, payload);
   });
   ipcMain.handle(IPC.roomListMods, async () => {
     return { mods: ctx.rooms?.listMods().mods ?? [] };
   });
+  ipcMain.handle(IPC.modsDelete, async (_e, { packDir }) => {
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
+    return ctx.rooms.deleteMod(packDir);
+  });
+  ipcMain.handle(IPC.modsOpenDir, async (_e, { packDir }) => {
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
+    const mod = ctx.rooms.listMods().mods.find((m) => m.packDir === packDir);
+    if (!mod) return { ok: false, error: "Mod 不存在或已删除" };
+    const err = await shell.openPath(mod.packDir);
+    return err ? { ok: false, error: err } : { ok: true };
+  });
+  ipcMain.handle(IPC.modsScaffold, async (_e, payload) => {
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
+    return ctx.rooms.scaffoldMod(payload);
+  });
   ipcMain.handle(IPC.roomEnableKernelMod, async (_e, { roomId, packDir }) => {
-    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.enableKernelMod(roomId, packDir);
   });
   ipcMain.handle(IPC.roomDisableKernelMod, async (_e, { roomId, id }) => {
-    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.disableKernelMod(roomId, id);
   });
   ipcMain.handle(IPC.roomListKernelMemory, async (_e, { roomId }) => {
-    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.listKernelMemory(roomId);
   });
   ipcMain.handle(IPC.roomSetKernelMemory, async (_e, { roomId, key, value }) => {
-    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.setKernelMemory(roomId, key, value);
   });
   ipcMain.handle(IPC.roomDeleteKernelMemory, async (_e, { roomId, key }) => {
-    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.deleteKernelMemory(roomId, key);
   });
   ipcMain.handle(IPC.roomSetKernelAutonomy, async (_e, { roomId, level }) => {
-    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.setKernelAutonomy(roomId, level);
   });
   ipcMain.handle(IPC.roomGetKernelImprove, async (_e, { roomId }) => {
-    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.getKernelImprove(roomId);
   });
   ipcMain.handle(IPC.roomProposeKernelImprove, async (_e, { roomId, packId, modJs, note }) => {
-    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.proposeKernelImprove(roomId, packId, modJs, note);
   });
   ipcMain.handle(IPC.roomApplyKernelProposal, async (_e, { roomId, proposalId }) => {
-    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.applyKernelProposal(roomId, proposalId);
   });
   ipcMain.handle(IPC.roomRejectKernelProposal, async (_e, { roomId, proposalId }) => {
-    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.rejectKernelProposal(roomId, proposalId);
   });
   ipcMain.handle(IPC.roomRollbackKernelImprove, async (_e, { roomId, packId }) => {
-    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.rollbackKernelImprove(roomId, packId);
   });
   ipcMain.handle(IPC.roomHasMod, async (_e, { checksum }) => {

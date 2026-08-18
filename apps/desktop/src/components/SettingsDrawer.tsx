@@ -22,11 +22,22 @@ import {
   syncCpaModels,
   useAppStore,
 } from "../state/store";
+import { RoomModsSettings } from "./settings/RoomModsSettings";
 
 export type SettingsDrawerProps = {
   open: boolean;
   onClose: () => void;
 };
+
+type SettingsPage =
+  | "general"
+  | "room"
+  | "cpa"
+  | "permissions"
+  | "agents"
+  | "skills"
+  | "plugins"
+  | "mcp";
 
 /** Editable draft of one MCP server row (strings for free typing). */
 type McpServerDraft = {
@@ -288,8 +299,8 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   const [mcpProbing, setMcpProbing] = useState(false);
   const [mcpBusy, setMcpBusy] = useState<string | null>(null);
   const [mcpNote, setMcpNote] = useState<string | null>(null);
-  /** Advanced sections start collapsed for a cleaner first look */
-  const [showAdvanced, setShowAdvanced] = useState<Record<string, boolean>>({});
+  /** IDEA 风格左侧导航当前页 */
+  const [page, setPage] = useState<SettingsPage>("general");
   const [skillsInfo, setSkillsInfo] = useState<{
     userDir: string;
     projectDir: string | null;
@@ -347,28 +358,6 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
     } catch (err) {
       setSkillsNote(err instanceof Error ? err.message : String(err));
     }
-  }
-
-  function toggleAdvanced(key: string) {
-    setShowAdvanced((prev) => ({ ...prev, [key]: !prev[key] }));
-  }
-
-  function sectionHeader(key: string, title: string, sub: string) {
-    const openNow = Boolean(showAdvanced[key]);
-    return (
-      <button
-        type="button"
-        className="settings-section"
-        onClick={() => toggleAdvanced(key)}
-        aria-expanded={openNow}
-      >
-        <span className="settings-chevron">{openNow ? "▾" : "▸"}</span>
-        <span>{title}</span>
-        <span className="settings-section-sub" style={{ marginLeft: "auto" }}>
-          {sub}
-        </span>
-      </button>
-    );
   }
 
   async function refreshCatalog() {
@@ -1230,22 +1219,56 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
     }
   };
 
+  const pages: Array<{ key: SettingsPage; label: string; sub: string }> = [
+    { key: "general", label: "通用", sub: "模型 / 语言 / 字体 / 更新" },
+    { key: "room", label: "群聊设置", sub: "Mod / 选集 / 制作" },
+    { key: "cpa", label: "CPA 与上下文", sub: "exe / config / 端口 / 窗口" },
+    { key: "permissions", label: "权限规则", sub: "allow / deny" },
+    { key: "agents", label: "自定义 Agents", sub: "Task 子代理" },
+    {
+      key: "skills",
+      label: "Skills",
+      sub: `${skillsInfo?.skills.length ?? 0} 个`,
+    },
+    { key: "plugins", label: "本地插件", sub: "plugin 目录" },
+    { key: "mcp", label: "MCP 服务器", sub: `${form.mcpServers.length} 个` },
+  ];
+  const activePage = pages.find((p) => p.key === page) ?? pages[0];
+
   return (
     <div className="settings-overlay" role="presentation" onClick={onClose}>
-      <aside
-        className="settings-drawer"
+      <div
+        className="settings-modal"
         role="dialog"
-        aria-label="Settings"
+        aria-label="设置"
         onClick={(e) => e.stopPropagation()}
       >
-        <header className="settings-header">
-          <h2>设置</h2>
-          <button type="button" className="btn" onClick={onClose}>
-            Close
-          </button>
-        </header>
+        <nav className="settings-nav">
+          <div className="settings-nav-title">设置</div>
+          {pages.map((p) => (
+            <button
+              key={p.key}
+              type="button"
+              className={`settings-nav-item${page === p.key ? " active" : ""}`}
+              onClick={() => setPage(p.key)}
+            >
+              <span className="settings-nav-label">{p.label}</span>
+              <span className="settings-nav-sub">{p.sub}</span>
+            </button>
+          ))}
+        </nav>
 
-        <div className="settings-body">
+        <div className="settings-main">
+          <header className="settings-header">
+            <h2>{activePage.label}</h2>
+            <button type="button" className="btn" onClick={onClose}>
+              关闭
+            </button>
+          </header>
+
+          <div className="settings-body">
+            {page === "general" ? (
+              <>
           {/* ===== 基础：日常最常改的三件事 ===== */}
           <label className="settings-field">
             默认模型
@@ -1326,63 +1349,61 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
             />
           </label>
 
-          <div className="settings-font-row">
-            <label className="settings-field">
-              语言 / Language
-              <select
-                className="select"
-                value={form.locale}
-                onChange={(e) => setField("locale", e.target.value)}
-              >
-                <option value="system">跟随系统 / Follow system</option>
-                <option value="zh">中文</option>
-                <option value="en">English</option>
-              </select>
-              <p className="settings-hint">界面语言（保存后生效）</p>
-            </label>
-            <label className="settings-field">
-              全局字体大小
-              <div className="settings-font-control">
-                <input
-                  type="range"
-                  min={11}
-                  max={20}
-                  step={0.5}
-                  value={form.uiFontSize}
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    setField("uiFontSize", v);
-                    // Live preview: rem root scales the whole UI immediately
-                    document.documentElement.style.setProperty(
-                      "--ui-font-size",
-                      `${v}px`,
-                    );
-                  }}
-                />
-                <span className="settings-font-value">{form.uiFontSize}px</span>
-              </div>
-              <p className="settings-hint">
-                侧边栏、会话、设置等界面文字（拖动即时预览，点保存写入配置）
-              </p>
-            </label>
-            <label className="settings-field">
-              编辑页字体大小
-              <div className="settings-font-control">
-                <input
-                  type="range"
-                  min={10}
-                  max={24}
-                  step={0.5}
-                  value={form.editorFontSize}
-                  onChange={(e) => setField("editorFontSize", e.target.value)}
-                />
-                <span className="settings-font-value">
-                  {form.editorFontSize}px
-                </span>
-              </div>
-              <p className="settings-hint">仅代码编辑器内代码字号（保存后生效）</p>
-            </label>
-          </div>
+          <label className="settings-field">
+            语言 / Language
+            <select
+              className="select"
+              value={form.locale}
+              onChange={(e) => setField("locale", e.target.value)}
+            >
+              <option value="system">跟随系统 / Follow system</option>
+              <option value="zh">中文</option>
+              <option value="en">English</option>
+            </select>
+            <p className="settings-hint">界面语言（保存后生效）</p>
+          </label>
+          <label className="settings-field">
+            全局字体大小
+            <div className="settings-font-control">
+              <input
+                type="range"
+                min={11}
+                max={20}
+                step={0.5}
+                value={form.uiFontSize}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setField("uiFontSize", v);
+                  // Live preview: rem root scales the whole UI immediately
+                  document.documentElement.style.setProperty(
+                    "--ui-font-size",
+                    `${v}px`,
+                  );
+                }}
+              />
+              <span className="settings-font-value">{form.uiFontSize}px</span>
+            </div>
+            <p className="settings-hint">
+              侧边栏、会话、设置等界面文字（拖动即时预览，点保存写入配置）
+            </p>
+          </label>
+          <label className="settings-field">
+            编辑页字体大小
+            <div className="settings-font-control">
+              <input
+                type="range"
+                min={10}
+                max={24}
+                step={0.5}
+                value={form.editorFontSize}
+                onChange={(e) => setField("editorFontSize", e.target.value)}
+              />
+              <span className="settings-font-value">
+                {form.editorFontSize}px
+              </span>
+            </div>
+            <p className="settings-hint">仅代码编辑器内代码字号（保存后生效）</p>
+          </label>
 
           <div className="settings-update">
             <div className="settings-context-limits-title">检查更新</div>
@@ -1538,11 +1559,13 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
               ) : null}
             </div>
           </div>
+              </>
+            ) : null}
 
-          {/* ===== 高级：CPA 路径与上下文 ===== */}
-          {sectionHeader("advanced-cpa", "高级 · CPA 与上下文", "exe / config / 端口 / 窗口")}
-          {showAdvanced["advanced-cpa"] ? (
-            <>
+            {page === "room" ? <RoomModsSettings /> : null}
+
+            {page === "cpa" ? (
+              <>
               <label className="settings-field">
                 CPA 可执行文件
                 <input
@@ -1599,45 +1622,34 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
             </>
           ) : null}
 
-          {/* ===== 权限 ===== */}
-          {sectionHeader("permissions", "权限规则", "allow / deny")}
-          {showAdvanced["permissions"] ? renderPermissions() : null}
+            {page === "permissions" ? renderPermissions() : null}
 
-          {/* ===== Agents ===== */}
-          {sectionHeader("agents", "自定义 Agents", "Task 子代理")}
-          {showAdvanced["agents"] ? renderAgents() : null}
+            {page === "agents" ? renderAgents() : null}
 
-          {/* ===== Skills ===== */}
-          {sectionHeader(
-            "skills",
-            "Skills",
-            `${skillsInfo?.skills.length ?? 0} 个`,
-          )}
-          {showAdvanced["skills"] ? renderSkills() : null}
+            {page === "skills" ? renderSkills() : null}
 
-          {/* ===== 插件 ===== */}
-          {sectionHeader("plugins", "本地插件", "plugin 目录")}
-          {showAdvanced["plugins"] ? renderPlugins() : null}
+            {page === "plugins" ? renderPlugins() : null}
 
-          {/* ===== MCP ===== */}
-          {sectionHeader("mcp", "MCP 服务器", `${form.mcpServers.length} 个`)}
-          {showAdvanced["mcp"] ? renderMcpServers() : null}
+            {page === "mcp" ? renderMcpServers() : null}
 
-          {localError ? <p className="settings-error">{localError}</p> : null}
-          {savedNote ? <p className="settings-ok">{savedNote}</p> : null}
+            {localError ? <p className="settings-error">{localError}</p> : null}
+            {savedNote ? <p className="settings-ok">{savedNote}</p> : null}
+          </div>
+
+          {page !== "room" ? (
+            <footer className="settings-footer">
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={saving}
+                onClick={() => void onSave()}
+              >
+                {saving ? "保存中…" : "保存"}
+              </button>
+            </footer>
+          ) : null}
         </div>
-
-        <footer className="settings-footer">
-          <button
-            type="button"
-            className="btn btn-primary"
-            disabled={saving}
-            onClick={() => void onSave()}
-          >
-            {saving ? "保存中…" : "保存"}
-          </button>
-        </footer>
-      </aside>
+      </div>
     </div>
   );
 }

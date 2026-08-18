@@ -1,6 +1,7 @@
 import vm from "node:vm";
 import * as acorn from "acorn";
 import { MOD_KERNEL_API } from "@claude-desktop/shared";
+import type { RoomQuoteRef } from "@claude-desktop/shared";
 
 export { MOD_KERNEL_API };
 
@@ -108,6 +109,8 @@ export type ChatInEnvelope = {
   authorLabel: string;
   text: string;
   at: number;
+  /** Optional quoted-message reference, carried through chat hooks untouched */
+  quote?: RoomQuoteRef;
 };
 
 export type WaterfallResult<T> =

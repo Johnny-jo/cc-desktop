@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
 import os from "node:os";
+import path from "node:path";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import type { BrowserWindow } from "electron";
 import { IPC, MOD_BUNDLE_MAX_BYTES } from "@claude-desktop/shared";
@@ -7,6 +9,7 @@ import type {
   ModOfferPayload,
   RoomListItem,
   RoomMember,
+  RoomQuoteRef,
   RoomSeat,
   RoomSeatKind,
   RoomSnapshot,
@@ -58,8 +61,10 @@ import {
 } from "./mod-kernel-improve";
 import { hashModFiles } from "@claude-desktop/shared/mod-hash";
 import {
+  getKernelCacheDir,
   getKernelImprovePath,
   getKernelStorePath,
+  getModCacheDir,
   getModPersistPath,
   type RuntimePathEnv,
 } from "./runtime-paths";
@@ -115,6 +120,8 @@ type RoomRecord = {
     secret?: string;
   };
   reconnecting?: boolean;
+  /** Guest dropped (reconnect exhausted) — room + history kept, can rejoin */
+  offline?: boolean;
   /** Guest is leaving on purpose — do not reconnect. */
   closing?: boolean;
   /** Bumped to cancel an in-flight reconnect loop. */
@@ -267,6 +274,74 @@ export class RoomService {
     return { ok: true, has: hasModCache(this.pathEnv(), checksum) };
   }
 
+  /** Delete a cached (user/synced) mod pack. Bundled packs are read-only. */
+  deleteMod(packDir: string): { ok: boolean; error?: string } {
+    const env = this.pathEnv();
+    const resolved = path.resolve(packDir);
+    const cacheRoots = [getModCacheDir(env), getKernelCacheDir(env)].map((r) =>
+      path.resolve(r),
+    );
+    if (!cacheRoots.some((root) => path.dirname(resolved) === root)) {
+      return { ok: false, error: "只能删除缓存目录中的 Mod" };
+    }
+    try {
+      fs.rmSync(resolved, { recursive: true, force: true });
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /** Scaffold a minimal kernel mod (hostApi 2) into the kernel cache dir. */
+  scaffoldMod(input: { id: string; name: string }): {
+    ok: boolean;
+    packDir?: string;
+    error?: string;
+  } {
+    const id = input.id.trim();
+    if (!/^[a-z0-9][a-z0-9-]{1,48}$/.test(id)) {
+      return { ok: false, error: "id 只能包含小写字母、数字和连字符（2-49 字符）" };
+    }
+    const name = input.name.trim() || id;
+    const dir = path.join(getKernelCacheDir(this.pathEnv()), `user-${id}`);
+    if (fs.existsSync(dir)) {
+      return { ok: false, error: "同名 Mod 目录已存在" };
+    }
+    const manifest = {
+      id,
+      name,
+      version: "0.1.0",
+      hostApi: 2,
+      inject: [],
+      provides: [],
+      permissions: [],
+      hooks: ["room.chat.in"],
+    };
+    const modJs = `// ${name} — kernel mod (hostApi 2)
+// 文档参见 docs/mods/hostapi-2.md
+export function activate(ctx) {
+  ctx.hooks.on("room.chat.in", (env) => {
+    // 返回 { action: "drop", reason } 丢弃消息；
+    // 返回 { action: "replace", value: { ...env, text } } 改写；
+    // 返回 { action: "continue" } 或不返回则原样透传。
+    return { action: "continue" };
+  });
+}
+`;
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, "manifest.json"),
+        JSON.stringify(manifest, null, 2) + "\n",
+        "utf8",
+      );
+      fs.writeFileSync(path.join(dir, "mod.js"), modJs, "utf8");
+      return { ok: true, packDir: dir };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
   private hydrateFromArchive(): void {
     if (!this.archive) return;
     for (const stored of this.archive.loadIndex()) {
@@ -283,7 +358,7 @@ export class RoomService {
         status,
         hostUserId: "",
         hostLabel: stored.hostLabel ?? "",
-        localUserId: "",
+        localUserId: stored.localUserId ?? "",
         localRole: stored.role,
         members: stored.members ?? [],
         seats: stored.seats ?? [],
@@ -292,6 +367,7 @@ export class RoomService {
         server: null,
         guests: new Set(),
         client: null,
+        ...(stored.offline ? { offline: true } : {}),
         ...(stored.join
           ? {
               joinInfo: {
@@ -321,6 +397,7 @@ export class RoomService {
         memberCount: r.members.length,
         port: r.port,
         inviteHost: r.joinInfo?.host || lanAddress(),
+        ...(r.offline ? { offline: true } : {}),
       }))
       .sort((a, b) => {
         // open first
@@ -355,7 +432,7 @@ export class RoomService {
   invite(roomId: string) {
     const r = this.rooms.get(roomId);
     if (!r || r.localRole !== "host") {
-      return { ok: false as const, error: "只有房主可以邀请" };
+      return { ok: false as const, error: "只有群主可以邀请" };
     }
     const hosts = lanAddresses();
     const host = hosts[0] ?? "127.0.0.1";
@@ -443,7 +520,7 @@ export class RoomService {
       }
       const offer = offerFrame.payload as ModOfferPayload;
       if (!offer.checksum || offer.size <= 0) {
-        return { ok: false, error: "房间未启用模组", offer };
+        return { ok: false, error: "群聊未启用模组", offer };
       }
       if (offer.checksum !== checksum) {
         return { ok: false, error: "模组校验码不一致", offer };
@@ -482,14 +559,14 @@ export class RoomService {
   }> {
     const r = this.rooms.get(roomId);
     if (!r || r.localRole !== "host") {
-      return { ok: false, error: "只有房主可以启用模组" };
+      return { ok: false, error: "只有群主可以启用模组" };
     }
-    if (r.status !== "open") return { ok: false, error: "房间不可用" };
+    if (r.status !== "open") return { ok: false, error: "群聊不可用" };
     if (r.modStarted && !r.modEnded) {
       return { ok: false, error: "请先结束当前玩法" };
     }
     if (peekHostApi(packDir) === 2) {
-      return { ok: false, error: "这是房间扩展，请用扩展入口启用" };
+      return { ok: false, error: "这是群聊扩展，请用扩展入口启用" };
     }
     let loaded: LoadedMod;
     try {
@@ -646,7 +723,7 @@ export class RoomService {
     payload: unknown,
   ): Promise<{ ok: boolean; error?: string }> {
     const rec = this.rooms.get(roomId);
-    if (!rec || rec.status !== "open") return { ok: false, error: "房间不可用" };
+    if (!rec || rec.status !== "open") return { ok: false, error: "群聊不可用" };
     const seat = rec.seats.find((s) => s.id === seatId);
     if (!seat) return { ok: false, error: "请先选一个席位" };
     if (rec.localRole !== "host") {
@@ -681,7 +758,7 @@ export class RoomService {
     autoApprove?: boolean;
   }): Promise<{ ok: boolean; room?: RoomSnapshot; error?: string }> {
     const name = opts.name.trim();
-    if (!name) return { ok: false, error: "请填写房间名" };
+    if (!name) return { ok: false, error: "请填写群聊名" };
     const port = opts.port && opts.port > 0 ? opts.port : ROOM_DEFAULT_PORT;
 
     // Refuse if we already host an open room on this port
@@ -694,7 +771,7 @@ export class RoomService {
       ) {
         return {
           ok: false,
-          error: `端口 ${port} 上已有房间「${existing.name}」，请先结束它或换端口`,
+          error: `端口 ${port} 上已有群聊「${existing.name}」，请先结束它或换端口`,
         };
       }
     }
@@ -738,7 +815,7 @@ export class RoomService {
           authorUserId: hostUserId,
           authorLabel: "系统",
           kind: "system",
-          text: `房间「${name}」已创建 · 监听 0.0.0.0:${port}`,
+          text: `群聊「${name}」已创建 · 监听 0.0.0.0:${port}`,
         },
       ],
       seq: 1,
@@ -761,7 +838,7 @@ export class RoomService {
     rec.server = wss;
     wss.on("connection", (ws) => this.onGuest(rec, ws));
     wss.on("error", (err) => {
-      this.pushError(`房间端口 ${port} 错误：${err.message}`);
+      this.pushError(`群聊端口 ${port} 错误：${err.message}`);
     });
 
     try {
@@ -843,6 +920,8 @@ export class RoomService {
     name?: string;
     modChecksum?: string;
     hosts?: string[];
+    /** Rejoin: reuse the previous member identity so the host keeps seats */
+    userId?: string;
   }): Promise<{ ok: boolean; room?: RoomSnapshot; error?: string }> {
     let host = opts.host.trim();
     // Strip accidental scheme / path / brackets
@@ -867,7 +946,7 @@ export class RoomService {
       return { ok: false, error: "端口无效" };
     }
 
-    const userId = randomUUID();
+    const userId = opts.userId ?? randomUUID();
     const name = (opts.name ?? displayName()).trim() || displayName();
     const checksum = (opts.modChecksum ?? "").trim();
 
@@ -903,9 +982,9 @@ export class RoomService {
           ok: false,
           error:
             `连接超时 ${host}:${port}\n` +
-            `请确认：① 房主已点「创建并开口」且房间显示「开着」` +
-            ` ② 房主 Windows 防火墙放行 TCP ${port} 入站` +
-            ` ③ IP 是否正确（房主点「邀请」复制）` +
+            `请确认：① 群主已点「创建并打开」且群聊显示「开着」` +
+            ` ② 群主 Windows 防火墙放行 TCP ${port} 入站` +
+            ` ③ IP 是否正确（群主点「邀请」复制）` +
             ` ④ 本机自测可先填 127.0.0.1` +
             (lastErr ? `\n底层：${lastErr}` : ""),
         });
@@ -1008,7 +1087,7 @@ export class RoomService {
           this.dismissGuest(
             rec,
             (frame.payload as { message?: string })?.message ??
-              "房主已解散房间",
+              "群主已解散群聊",
           );
         }
       });
@@ -1019,7 +1098,7 @@ export class RoomService {
           done({
             ok: false,
             error: lastErr
-              ? `连接被关闭 ${host}:${port}（${lastErr}）\n若是 ECONNREFUSED：房主未监听该端口；若超时：多半是防火墙`
+              ? `连接被关闭 ${host}:${port}（${lastErr}）\n若是 ECONNREFUSED：群主未监听该端口；若超时：多半是防火墙`
               : `连接被关闭 ${host}:${port}`,
           });
         }
@@ -1096,7 +1175,11 @@ export class RoomService {
 
     r.reconnecting = false;
     if (r.closing || (r.reconnectGen ?? 0) !== gen) return;
-    this.dismissGuest(r, "无法连接主机（已重试 3 次），已退出房间");
+    this.dismissGuest(
+      r,
+      "无法连接主机（已重试 3 次），连接已断开；聊天记录已保留，可稍后重连",
+      { offline: true },
+    );
   }
 
   private tryReconnectOnce(
@@ -1158,7 +1241,7 @@ export class RoomService {
           this.dismissGuest(
             r,
             (frame.payload as { message?: string })?.message ??
-              "房主已解散房间",
+              "群主已解散群聊",
           );
           try {
             ws.close();
@@ -1199,7 +1282,7 @@ export class RoomService {
 
   leave(roomId: string) {
     const r = this.rooms.get(roomId);
-    if (!r) return { ok: false, error: "房间不存在" };
+    if (!r) return { ok: false, error: "群聊不存在" };
     // Host leave = delete room for everyone
     if (r.localRole === "host") {
       return this.end(roomId, { delete: true });
@@ -1224,8 +1307,43 @@ export class RoomService {
   }
 
   /** Guest: host dismissed / reconnect exhausted — drop local copy and notify UI. */
-  private dismissGuest(r: RoomRecord, message: string): void {
-    if (r.closing && !this.rooms.has(r.roomId)) return;
+  /** Rejoin a room the guest dropped from (or that ended): reuse joinInfo. */
+  async rejoin(
+    roomId: string,
+  ): Promise<{ ok: boolean; room?: RoomSnapshot; error?: string }> {
+    const old = this.rooms.get(roomId);
+    if (!old) return { ok: false, error: "群聊不存在或已被删除" };
+    if (old.localRole !== "member" || !old.joinInfo) {
+      return { ok: false, error: "该群聊没有可重连的信息" };
+    }
+    if (old.status === "open" && old.client?.readyState === WebSocket.OPEN) {
+      return { ok: true, room: this.snapshot(old) };
+    }
+    const info = old.joinInfo;
+    const userId = old.localUserId || undefined;
+    // Archive 保留；主机快照会把完整历史带回来
+    this.rooms.delete(roomId);
+    const res = await this.join({
+      host: info.host,
+      hosts: info.hosts,
+      port: info.port,
+      password: info.password,
+      modChecksum: info.modChecksum,
+      userId,
+    });
+    if (!res.ok) {
+      // 重连失败：恢复旧记录，本地历史不丢
+      this.rooms.set(roomId, old);
+    }
+    return res;
+  }
+
+  private dismissGuest(
+    r: RoomRecord,
+    message: string,
+    opts?: { offline?: boolean },
+  ): void {
+    if (!this.rooms.has(r.roomId)) return;
     this.cancelGuestReconnect(r);
     r.status = "ended";
     try {
@@ -1234,11 +1352,14 @@ export class RoomService {
       // ignore
     }
     r.client = null;
-    this.archive?.removeRoom(r.roomId);
-    this.rooms.delete(r.roomId);
+    r.offline = opts?.offline ? true : undefined;
+    // 不再删除房间与归档：聊天记录本地保留，可稍后重连
+    this.persist(r);
+    this.emit(r);
     this.safeSend(IPC.roomEvent, {
       roomId: r.roomId,
       closed: true,
+      ...(r.offline ? { offline: true } : {}),
       message,
     });
   }
@@ -1300,7 +1421,7 @@ export class RoomService {
       if (frame.type === "room.closed") {
         this.dismissGuest(
           r,
-          (frame.payload as { message?: string })?.message ?? "房主已解散房间",
+          (frame.payload as { message?: string })?.message ?? "群主已解散群聊",
         );
         return;
       }
@@ -1332,19 +1453,19 @@ export class RoomService {
    */
   end(roomId: string, opts?: { delete?: boolean }) {
     const r = this.rooms.get(roomId);
-    if (!r) return { ok: false, error: "房间不存在" };
+    if (!r) return { ok: false, error: "群聊不存在" };
     if (r.localRole !== "host") {
-      return { ok: false, error: "只有房主可以结束房间" };
+      return { ok: false, error: "只有群主可以结束群聊" };
     }
     const shouldDelete = opts?.delete !== false;
     r.status = "ended";
     this.append(r, {
       kind: "system",
-      text: shouldDelete ? "房主已解散房间" : "房间已结束",
+      text: shouldDelete ? "群主已解散群聊" : "群聊已结束",
       authorLabel: "系统",
     });
     this.broadcast(r, "room.closed", {
-      message: shouldDelete ? "房主已解散房间" : "房间已结束",
+      message: shouldDelete ? "群主已解散群聊" : "群聊已结束",
     });
     for (const g of r.guests) {
       try {
@@ -1370,7 +1491,7 @@ export class RoomService {
         roomId,
         closed: true,
         silent: true,
-        message: "房间已解散",
+        message: "群聊已解散",
       });
     } else {
       this.persist(r);
@@ -1405,7 +1526,7 @@ export class RoomService {
   ) {
     const r = this.rooms.get(roomId);
     if (!r || r.status !== "open") {
-      return { ok: false, error: "房间不可用" };
+      return { ok: false, error: "群聊不可用" };
     }
     if (r.localRole !== "host") {
       // Member asks host to add their own seat
@@ -1471,7 +1592,7 @@ export class RoomService {
   /** Roll a die (1-6). */
   rollDice(roomId: string, seatId: string) {
     const r = this.rooms.get(roomId);
-    if (!r || r.status !== "open") return { ok: false, error: "房间不可用" };
+    if (!r || r.status !== "open") return { ok: false, error: "群聊不可用" };
     const seat = r.seats.find((s) => s.id === seatId);
     if (!seat) return { ok: false, error: "请先选一个席位" };
     const value = String(Math.floor(Math.random() * 6) + 1);
@@ -1496,7 +1617,7 @@ export class RoomService {
   /** Rock-paper-scissors. */
   playRps(roomId: string, seatId: string, hand: "rock" | "scissors" | "paper") {
     const r = this.rooms.get(roomId);
-    if (!r || r.status !== "open") return { ok: false, error: "房间不可用" };
+    if (!r || r.status !== "open") return { ok: false, error: "群聊不可用" };
     const seat = r.seats.find((s) => s.id === seatId);
     if (!seat) return { ok: false, error: "请先选一个席位" };
     const label =
@@ -1519,7 +1640,7 @@ export class RoomService {
 
   takeover(roomId: string, seatId: string) {
     const r = this.rooms.get(roomId);
-    if (!r || r.status !== "open") return { ok: false, error: "房间不可用" };
+    if (!r || r.status !== "open") return { ok: false, error: "群聊不可用" };
     const seat = r.seats.find((s) => s.id === seatId);
     if (!seat) return { ok: false, error: "席位不存在" };
     if (seat.kind !== "agent") return { ok: false, error: "只能接管 Agent 席位" };
@@ -1548,7 +1669,7 @@ export class RoomService {
 
   returnSeat(roomId: string, seatId: string) {
     const r = this.rooms.get(roomId);
-    if (!r || r.status !== "open") return { ok: false, error: "房间不可用" };
+    if (!r || r.status !== "open") return { ok: false, error: "群聊不可用" };
     const seat = r.seats.find((s) => s.id === seatId);
     if (!seat) return { ok: false, error: "席位不存在" };
     if (r.localRole === "host") {
@@ -1571,8 +1692,8 @@ export class RoomService {
     packDir: string,
   ): { ok: boolean; room?: RoomSnapshot; error?: string } {
     const r = this.rooms.get(roomId);
-    if (!r || r.status !== "open") return { ok: false, error: "房间不可用" };
-    if (r.localRole !== "host") return { ok: false, error: "只有房主可以启用扩展" };
+    if (!r || r.status !== "open") return { ok: false, error: "群聊不可用" };
+    if (r.localRole !== "host") return { ok: false, error: "只有群主可以启用扩展" };
     if (peekHostApi(packDir) === 1) {
       return { ok: false, error: "这是玩法模组，请用玩法入口启用" };
     }
@@ -1608,8 +1729,8 @@ export class RoomService {
     roomId: string,
   ): { ok: boolean; entries?: Array<{ key: string; value: string }>; error?: string } {
     const r = this.rooms.get(roomId);
-    if (!r || r.status !== "open") return { ok: false, error: "房间不可用" };
-    if (r.localRole !== "host") return { ok: false, error: "只有房主可以查看共享记忆" };
+    if (!r || r.status !== "open") return { ok: false, error: "群聊不可用" };
+    if (r.localRole !== "host") return { ok: false, error: "只有群主可以查看共享记忆" };
     if (!this.hasMemoryProvide(r) || !r.kernelStore) {
       return { ok: true, entries: [] };
     }
@@ -1622,8 +1743,8 @@ export class RoomService {
     value: string,
   ): { ok: boolean; error?: string } {
     const r = this.rooms.get(roomId);
-    if (!r || r.status !== "open") return { ok: false, error: "房间不可用" };
-    if (r.localRole !== "host") return { ok: false, error: "只有房主可以改共享记忆" };
+    if (!r || r.status !== "open") return { ok: false, error: "群聊不可用" };
+    if (r.localRole !== "host") return { ok: false, error: "只有群主可以改共享记忆" };
     if (!this.hasMemoryProvide(r) || !r.kernelStore) {
       return { ok: false, error: "未启用共享记忆" };
     }
@@ -1636,8 +1757,8 @@ export class RoomService {
     key: string,
   ): { ok: boolean; error?: string } {
     const r = this.rooms.get(roomId);
-    if (!r || r.status !== "open") return { ok: false, error: "房间不可用" };
-    if (r.localRole !== "host") return { ok: false, error: "只有房主可以改共享记忆" };
+    if (!r || r.status !== "open") return { ok: false, error: "群聊不可用" };
+    if (r.localRole !== "host") return { ok: false, error: "只有群主可以改共享记忆" };
     if (!this.hasMemoryProvide(r) || !r.kernelStore) {
       return { ok: false, error: "未启用共享记忆" };
     }
@@ -1650,8 +1771,8 @@ export class RoomService {
     id: string,
   ): { ok: boolean; room?: RoomSnapshot; error?: string } {
     const r = this.rooms.get(roomId);
-    if (!r || r.status !== "open") return { ok: false, error: "房间不可用" };
-    if (r.localRole !== "host") return { ok: false, error: "只有房主可以卸载扩展" };
+    if (!r || r.status !== "open") return { ok: false, error: "群聊不可用" };
+    if (r.localRole !== "host") return { ok: false, error: "只有群主可以卸载扩展" };
     const packs = (r.kernelPacks ?? []).filter((p) => p.manifest.id !== id);
     if (packs.length === (r.kernelPacks ?? []).length) {
       return { ok: false, error: "未找到该扩展" };
@@ -1773,7 +1894,7 @@ export class RoomService {
     const applied = this.applyKernelSource(r.room, loaded, prop.modJs, prop.note ?? "apply");
     if (!applied.ok) return applied;
     r.store.updateProposal(prop.id, { status: "applied" });
-    this.auditImprove(r.room, `房主批准扩展 ${prop.packId} 的提案`);
+    this.auditImprove(r.room, `群主批准扩展 ${prop.packId} 的提案`);
     this.emit(r.room);
     return { ok: true };
   }
@@ -1788,7 +1909,7 @@ export class RoomService {
     if (!cur || cur.status !== "pending") return { ok: false, error: "没有待批提案" };
     const prop = r.store.updateProposal(proposalId, { status: "rejected" });
     if (!prop) return { ok: false, error: "提案不存在" };
-    this.auditImprove(r.room, `房主拒绝扩展 ${prop.packId} 的提案`);
+    this.auditImprove(r.room, `群主拒绝扩展 ${prop.packId} 的提案`);
     return { ok: true };
   }
 
@@ -1836,8 +1957,8 @@ export class RoomService {
     roomId: string,
   ): { ok: true; room: RoomRecord; store: KernelImproveStore } | { ok: false; error: string } {
     const room = this.rooms.get(roomId);
-    if (!room || room.status !== "open") return { ok: false, error: "房间不可用" };
-    if (room.localRole !== "host") return { ok: false, error: "只有房主可以管理扩展改善" };
+    if (!room || room.status !== "open") return { ok: false, error: "群聊不可用" };
+    if (room.localRole !== "host") return { ok: false, error: "只有群主可以管理扩展改善" };
     if (!room.kernelImprove) {
       room.kernelImprove = new KernelImproveStore(getKernelImprovePath(this.pathEnv(), roomId));
     }
@@ -1897,8 +2018,8 @@ export class RoomService {
     packs: KernelActivatePack[],
   ): { ok: boolean; error?: string } {
     const r = this.rooms.get(roomId);
-    if (!r || r.status !== "open") return { ok: false, error: "房间不可用" };
-    if (r.localRole !== "host") return { ok: false, error: "只有房主可以启用扩展" };
+    if (!r || r.status !== "open") return { ok: false, error: "群聊不可用" };
+    if (r.localRole !== "host") return { ok: false, error: "只有群主可以启用扩展" };
     if (!r.kernelStore) {
       r.kernelStore = new HostRoomKv(getKernelStorePath(this.pathEnv(), r.roomId));
     }
@@ -1916,15 +2037,20 @@ export class RoomService {
     roomId: string,
   ): Promise<{ ok: boolean; error?: string }> {
     const r = this.rooms.get(roomId);
-    if (!r || r.status !== "open") return { ok: false, error: "房间不可用" };
-    if (r.localRole !== "host") return { ok: false, error: "只有房主可以触发调度" };
+    if (!r || r.status !== "open") return { ok: false, error: "群聊不可用" };
+    if (r.localRole !== "host") return { ok: false, error: "只有群主可以触发调度" };
     await this.runKernelScheduleJobs(r);
     return { ok: true };
   }
 
-  async send(roomId: string, seatId: string, text: string) {
+  async send(
+    roomId: string,
+    seatId: string,
+    text: string,
+    quote?: RoomQuoteRef,
+  ) {
     const r = this.rooms.get(roomId);
-    if (!r || r.status !== "open") return { ok: false, error: "房间不可用" };
+    if (!r || r.status !== "open") return { ok: false, error: "群聊不可用" };
     const trimmed = text.trim();
     if (!trimmed) return { ok: false, error: "消息为空" };
     const seat = r.seats.find((s) => s.id === seatId);
@@ -1948,6 +2074,7 @@ export class RoomService {
         seatId,
         userId: r.localUserId,
         text: trimmed,
+        ...(quote ? { quote } : {}),
       });
       return { ok: true };
     }
@@ -1966,6 +2093,7 @@ export class RoomService {
             authorLabel: this.memberName(r, r.localUserId),
             text: trimmed,
             at: Date.now(),
+            ...(quote ? { quote } : {}),
           },
           { runAgent: true },
         ),
@@ -1986,6 +2114,7 @@ export class RoomService {
           authorLabel: this.memberName(r, r.localUserId),
           text: trimmed,
           at: Date.now(),
+          ...(quote ? { quote } : {}),
         },
         { runAgent: false },
       ),
@@ -2014,7 +2143,7 @@ export class RoomService {
       this.append(r, {
         kind: "system",
         seatId: seat.id,
-        text: "房主尚未打开项目，Agent 无法执行",
+        text: "群主尚未打开项目，Agent 无法执行",
         authorLabel: "系统",
       });
       this.pushState(r);
@@ -2025,7 +2154,7 @@ export class RoomService {
     const prompt = {
       text:
         seat.agentName && !seat.sessionId
-          ? `【你是房间席位「${seat.name}」，人设：${seat.agentName}】\n${text}`
+          ? `【你是群聊席位「${seat.name}」，人设：${seat.agentName}】\n${text}`
           : text,
       attachments: [],
     };
@@ -2080,7 +2209,7 @@ export class RoomService {
 
   private handleGuestFrame(r: RoomRecord, ws: WebSocket, frame: RoomFrame) {
     if (r.status !== "open") {
-      this.reply(ws, r, "error", { message: "房间已结束" });
+      this.reply(ws, r, "error", { message: "群聊已结束" });
       return;
     }
     if (frame.type === "hello") {
@@ -2135,7 +2264,7 @@ export class RoomService {
       (ws as GuestWs).userId = userId;
       this.append(r, {
         kind: "system",
-        text: `${name} 加入了房间`,
+        text: `${name} 加入了群聊`,
         authorLabel: "系统",
       });
       this.reply(ws, r, "welcome", this.snapshot(r));
@@ -2189,7 +2318,11 @@ export class RoomService {
     }
 
     if (frame.type === "chat.user") {
-      const p = frame.payload as { seatId?: string; text?: string };
+      const p = frame.payload as {
+        seatId?: string;
+        text?: string;
+        quote?: RoomQuoteRef;
+      };
       const seat = r.seats.find((s) => s.id === p.seatId);
       const text = (p.text ?? "").trim();
       if (!seat || !text) {
@@ -2215,6 +2348,7 @@ export class RoomService {
             authorLabel: this.memberName(r, userId),
             text,
             at: Date.now(),
+            ...(p.quote ? { quote: p.quote } : {}),
           },
           { runAgent: toAgent },
         ),
@@ -2342,6 +2476,7 @@ export class RoomService {
       text: item.text,
       ...(item.source ? { source: item.source } : {}),
       ...(item.game ? { game: item.game } : {}),
+      ...(item.quote ? { quote: item.quote } : {}),
     });
     if (r.items.length > 400) r.items.splice(0, r.items.length - 400);
     this.persist(r);
@@ -2367,6 +2502,8 @@ export class RoomService {
         requireMods: r.requireMods,
         modChecksum: r.modChecksum,
         hostLabel: r.hostLabel,
+        localUserId: r.localUserId || undefined,
+        ...(r.offline ? { offline: true } : {}),
         ...(r.joinInfo
           ? {
               join: {
@@ -2519,8 +2656,8 @@ export class RoomService {
     roomId: string,
   ): { ok: true; room: RoomRecord } | { ok: false; error: string } {
     const r = this.rooms.get(roomId);
-    if (!r || r.status !== "open") return { ok: false, error: "房间不可用" };
-    if (r.localRole !== "host") return { ok: false, error: "只有房主可以操作" };
+    if (!r || r.status !== "open") return { ok: false, error: "群聊不可用" };
+    if (r.localRole !== "host") return { ok: false, error: "只有群主可以操作" };
     return { ok: true, room: r };
   }
 
@@ -2630,7 +2767,7 @@ export class RoomService {
       (frame.payload as { checksum?: string })?.checksum ?? "",
     );
     if (!r.modLoaded || !r.modChecksum) {
-      this.reply(ws, r, "error", { message: "房间未启用模组" });
+      this.reply(ws, r, "error", { message: "群聊未启用模组" });
       return;
     }
     if (!MOD_CHECKSUM_RE.test(checksum) || checksum !== r.modChecksum) {
@@ -2910,6 +3047,7 @@ export class RoomService {
       authorUserId: current.authorUserId,
       authorLabel: current.authorLabel,
       text: current.text,
+      ...(current.quote ? { quote: current.quote } : {}),
     });
     this.pushState(r);
     if (!next.runAgent) return;

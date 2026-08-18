@@ -2,6 +2,7 @@ import { useSyncExternalStore } from "react";
 import type {
   ModOfferPayload,
   RoomListItem,
+  RoomQuoteRef,
   RoomSnapshot,
 } from "@claude-desktop/shared";
 import { getDesktop, hasDesktopApi } from "../lib/desktop-api";
@@ -155,6 +156,7 @@ export function bindRoomEvents(): () => void {
       roomId: string;
       room?: RoomSnapshot;
       closed?: boolean;
+      offline?: boolean;
       silent?: boolean;
       reconnecting?: boolean;
       reconnectAttempt?: number;
@@ -164,35 +166,21 @@ export function bindRoomEvents(): () => void {
     };
     if (!ev?.roomId) return;
 
-    // Guest: host left / reconnect failed
+    // Guest: host left / reconnect exhausted — room + history are kept in main;
+    // refresh the list so it shows ended / offline instead of disappearing.
     if (ev.closed) {
-      const msg = ev.message ?? "房间已关闭";
-      const rooms = state.rooms.filter((r) => r.roomId !== ev.roomId);
-      const wasActive = state.activeRoomId === ev.roomId;
+      const msg = ev.message ?? "群聊已关闭";
       modsByRoom.delete(ev.roomId);
-      set({
-        rooms,
-        reconnectNote: null,
-        ...(wasActive
-          ? {
-              activeRoomId: null,
-              activeRoom: null,
-              selectedSeatId: null,
-              mod: null,
-            }
-          : {}),
-      });
+      set({ reconnectNote: null });
+      void refreshRooms();
       if (!ev.silent) {
         set({ lastError: msg });
-      }
-      if (hasDesktopApi("deleteRoom")) {
-        void getDesktop().deleteRoom(ev.roomId).catch(() => undefined);
       }
       return;
     }
 
     if (ev.error) {
-      set({ lastError: ev.message ?? "房间操作失败" });
+      set({ lastError: ev.message ?? "群聊操作失败" });
       return;
     }
 
@@ -254,7 +242,7 @@ export async function createRoom(opts: {
   autoApprove?: boolean;
 }): Promise<{ ok: boolean; error?: string; roomId?: string }> {
   if (!hasDesktopApi("createRoom")) {
-    return { ok: false, error: "请完全重启应用后再使用房间" };
+    return { ok: false, error: "请完全重启应用后再使用群聊" };
   }
   const res = await getDesktop().createRoom(opts);
   if (!res.ok || !res.room) {
@@ -276,7 +264,7 @@ export async function joinRoom(opts: {
   hosts?: string[];
 }): Promise<{ ok: boolean; error?: string }> {
   if (!hasDesktopApi("joinRoom")) {
-    return { ok: false, error: "请完全重启应用后再使用房间" };
+    return { ok: false, error: "请完全重启应用后再使用群聊" };
   }
   const res = await getDesktop().joinRoom(opts);
   if (!res.ok || !res.room) {
@@ -351,16 +339,35 @@ export async function returnSeat(seatId: string): Promise<void> {
 
 export async function sendToSeat(
   text: string,
+  quote?: RoomQuoteRef,
 ): Promise<{ ok: boolean; error?: string }> {
   const id = state.activeRoomId;
   const seatId = state.selectedSeatId;
   if (!id || !seatId) return { ok: false, error: "请先选一个席位" };
   if (!hasDesktopApi("sendRoomMessage")) {
-    return { ok: false, error: "请完全重启应用后再使用房间" };
+    return { ok: false, error: "请完全重启应用后再使用群聊" };
   }
-  const res = await getDesktop().sendRoomMessage(id, seatId, text);
+  const res = await getDesktop().sendRoomMessage(id, seatId, text, quote);
   if (res.ok) set({ lastError: null });
   return res;
+}
+
+/** Rejoin a room we dropped from (uses stored join info in main). */
+export async function rejoinRoom(
+  roomId: string,
+): Promise<{ ok: boolean; error?: string }> {
+  if (!hasDesktopApi("rejoinRoom")) {
+    return { ok: false, error: "请完全重启应用后再使用群聊" };
+  }
+  const res = await getDesktop().rejoinRoom(roomId);
+  if (!res.ok) {
+    set({ lastError: res.error ?? "重连失败" });
+    return { ok: false, error: res.error };
+  }
+  set({ lastError: null, reconnectNote: null });
+  await refreshRooms();
+  selectRoom(roomId);
+  return { ok: true };
 }
 
 export async function peekRoom(opts: {
@@ -368,7 +375,7 @@ export async function peekRoom(opts: {
   port: number;
 }): Promise<{ ok: boolean; offer?: ModOfferPayload; error?: string }> {
   if (!hasDesktopApi("peekRoom")) {
-    return { ok: false, error: "请完全重启应用后再使用房间" };
+    return { ok: false, error: "请完全重启应用后再使用群聊" };
   }
   return getDesktop().peekRoom(opts);
 }
@@ -384,7 +391,7 @@ export async function fetchRoomMod(opts: {
   error?: string;
 }> {
   if (!hasDesktopApi("fetchRoomMod")) {
-    return { ok: false, error: "请完全重启应用后再使用房间" };
+    return { ok: false, error: "请完全重启应用后再使用群聊" };
   }
   return getDesktop().fetchRoomMod(opts);
 }
@@ -406,7 +413,7 @@ export async function disableRoomKernelMod(
   id: string,
 ): Promise<{ ok: boolean; error?: string }> {
   if (!hasDesktopApi("disableRoomKernelMod")) {
-    return { ok: false, error: "请完全重启应用后再卸载房间扩展" };
+    return { ok: false, error: "请完全重启应用后再卸载群聊扩展" };
   }
   const res = await getDesktop().disableRoomKernelMod(roomId, id);
   if (!res.ok) {
@@ -545,7 +552,7 @@ export async function enableRoomKernelMod(
   packDir: string,
 ): Promise<{ ok: boolean; error?: string }> {
   if (!hasDesktopApi("enableRoomKernelMod")) {
-    return { ok: false, error: "请完全重启应用后再使用房间扩展" };
+    return { ok: false, error: "请完全重启应用后再使用群聊扩展" };
   }
   const res = await getDesktop().enableRoomKernelMod(roomId, packDir);
   if (!res.ok) {
@@ -563,7 +570,7 @@ export async function enableRoomMod(
   packDir: string,
 ): Promise<{ ok: boolean; error?: string }> {
   if (!hasDesktopApi("enableRoomMod")) {
-    return { ok: false, error: "请完全重启应用后再使用房间" };
+    return { ok: false, error: "请完全重启应用后再使用群聊" };
   }
   const res = await getDesktop().enableRoomMod(roomId, packDir);
   if (!res.ok) {
@@ -635,7 +642,7 @@ export async function sendRoomModIntent(
   const id = state.activeRoomId;
   if (!id || !seatId) return { ok: false, error: "请先选一个席位" };
   if (!hasDesktopApi("sendRoomModIntent")) {
-    return { ok: false, error: "请完全重启应用后再使用房间" };
+    return { ok: false, error: "请完全重启应用后再使用群聊" };
   }
   const res = await getDesktop().sendRoomModIntent(id, seatId, name, payload);
   if (!res.ok) set({ lastError: res.error ?? "操作失败" });

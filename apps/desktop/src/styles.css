@@ -1033,19 +1033,6 @@ textarea {
   background: var(--accent-soft);
 }
 
-/* Settings: dual font size sliders */
-.settings-font-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
-}
-
-@media (max-width: 720px) {
-  .settings-font-row {
-    grid-template-columns: 1fr;
-  }
-}
-
 .settings-font-control {
   display: flex;
   align-items: center;
@@ -4996,7 +4983,7 @@ body.is-resizing-row * {
   flex-shrink: 0;
 }
 
-/* Settings drawer */
+/* Settings modal (IDEA-style: left nav + right content) */
 .settings-overlay {
   position: fixed;
   /* Start below the frameless title bar so the window caption buttons and
@@ -5008,20 +4995,83 @@ body.is-resizing-row * {
   background: var(--overlay-bg);
   z-index: 40;
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: center;
 }
 
-.settings-drawer {
-  width: min(460px, 100vw);
-  height: 100%;
+.settings-modal {
+  width: min(880px, 94vw);
+  height: min(660px, 92%);
   background: var(--bg-elevated);
-  /* Flush with the window edge — no border, no rounding (rounding creates a
-     visible seam against the overlay, especially in light mode). */
-  border: none;
-  border-radius: 0;
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.35);
+  display: flex;
+  overflow: hidden;
+}
+
+.settings-nav {
+  width: 200px;
+  flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  box-shadow: none;
+  gap: 2px;
+  padding: var(--space-3) var(--space-2);
+  border-right: 1px solid var(--border-soft);
+  background: var(--bg);
+  overflow-y: auto;
+}
+
+.settings-nav-title {
+  padding: 4px 10px 10px;
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.settings-nav-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  text-align: left;
+  cursor: pointer;
+}
+
+.settings-nav-item:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.settings-nav-item.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.settings-nav-label {
+  font-size: 0.923rem;
+  font-weight: 600;
+}
+
+.settings-nav-sub {
+  font-size: 0.769rem;
+  color: var(--text-faint);
+}
+
+.settings-nav-item.active .settings-nav-sub {
+  color: var(--accent);
+  opacity: 0.75;
+}
+
+.settings-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .settings-header {
@@ -5030,38 +5080,6 @@ body.is-resizing-row * {
   justify-content: space-between;
   padding: var(--space-4);
   border-bottom: 1px solid var(--border-soft);
-}
-
-/* Collapsible section headers (基础 / 高级) */
-.settings-section {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  background: transparent;
-  border: none;
-  padding: 10px 0 4px;
-  cursor: pointer;
-  color: var(--text);
-  font-size: 0.962rem;
-  font-weight: 600;
-  text-align: left;
-}
-
-.settings-section:hover {
-  color: var(--accent);
-}
-
-.settings-section .settings-chevron {
-  font-size: 0.769rem;
-  color: var(--text-faint);
-  transition: transform 0.15s ease;
-}
-
-.settings-section-sub {
-  margin: 0 0 6px;
-  font-size: 0.846rem;
-  color: var(--text-faint);
 }
 
 .settings-header h2 {
@@ -5087,17 +5105,41 @@ body.is-resizing-row * {
   color: var(--text-muted);
 }
 
-.room-kernel-opt {
+.room-settings-modal {
+  width: min(760px, 94vw);
+  max-height: min(86vh, 720px);
+  height: min(620px, 86vh);
+}
+
+/* IDEA 式：左侧导航 + 右侧内容 */
+.room-settings-layout {
   display: flex;
-  align-items: center;
+  flex: 1;
+  min-height: 0;
+}
+
+.room-settings-layout .settings-nav {
+  width: 160px;
+}
+
+.room-settings-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.room-mods-page {
+  display: flex;
+  flex-direction: column;
   gap: 8px;
+}
+
+.room-mods-group-title {
+  margin-top: 4px;
+  font-size: 0.885rem;
+  font-weight: 600;
   color: var(--text);
 }
 
-.room-settings-modal {
-  width: min(600px, 100%);
-  max-height: min(84vh, 720px);
-}
 
 .room-improve-pack {
   display: flex;
@@ -5149,6 +5191,14 @@ body.is-resizing-row * {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: var(--bg);
+}
+
+.room-settings-section + .room-settings-section {
+  margin-top: 4px;
 }
 
 .room-settings-section h4 {
@@ -5779,4 +5829,252 @@ body.is-resizing-row * {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+/* ===== 群聊设置 · Mod 管理 / 选集 / 制作 ===== */
+.mods-settings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.mods-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border-soft);
+  padding-bottom: 0;
+}
+
+.mods-tab {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.923rem;
+  font-weight: 600;
+  padding: 8px 12px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+
+.mods-tab:hover {
+  color: var(--text);
+}
+
+.mods-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.mods-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mods-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.mods-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.mods-row-name {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.mods-row-meta {
+  font-size: 0.769rem;
+  color: var(--text-faint);
+}
+
+.mods-row-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* 选集：Paradox 启动器式左右主从布局 */
+.mods-coll-layout {
+  display: flex;
+  gap: 12px;
+  min-height: 280px;
+}
+
+.mods-coll-list {
+  width: 190px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.mods-coll-list-head {
+  padding: 8px 12px;
+  font-size: 0.846rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.mods-coll-items {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.mods-coll-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+  border: none;
+  border-left: 2px solid transparent;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.mods-coll-item:hover {
+  background: var(--bg-hover);
+}
+
+.mods-coll-item.active {
+  background: var(--accent-soft);
+  border-left-color: var(--accent);
+}
+
+.mods-coll-item-name {
+  font-size: 0.923rem;
+  font-weight: 600;
+}
+
+.mods-coll-item.active .mods-coll-item-name {
+  color: var(--accent);
+}
+
+.mods-coll-item-count {
+  font-size: 0.769rem;
+  color: var(--text-faint);
+}
+
+.mods-coll-new {
+  display: flex;
+  gap: 6px;
+  padding: 8px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.mods-coll-new input {
+  flex: 1;
+  min-width: 0;
+}
+
+.mods-coll-detail {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: var(--bg);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mods-coll-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mods-coll-detail-name {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.mods-coll-detail-sub {
+  font-size: 0.846rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.mods-coll-detail-mods {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mods-coll-mod {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.mods-coll-mod:hover {
+  border-color: var(--border-strong);
+}
+
+.mods-coll-mod input[type="checkbox"] {
+  accent-color: var(--accent);
+}
+
+.mods-coll-mod-name {
+  font-size: 0.885rem;
+  font-weight: 600;
+}
+
+.mods-coll-mod-meta {
+  margin-left: auto;
+  font-size: 0.769rem;
+  color: var(--text-faint);
+}
+
+.mods-guide {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.mods-guide-code {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--bg);
+  font-size: 0.846rem;
+  line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.mods-guide code,
+.mods-collections code {
+  font-size: 0.846rem;
+  background: var(--bg-hover);
+  border-radius: 4px;
+  padding: 1px 5px;
 }

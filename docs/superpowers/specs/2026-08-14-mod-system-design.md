@@ -422,3 +422,46 @@ v1 不实现可视化生成器；给狼人杀、投票两个示例包当模板�
 - 未下载仍可进房旁观
 - 公开市场
 - 多玩法 mod 同时当局
+
+## Key Decisions
+
+- **权威逻辑在房主主进程 UtilityProcess**：CLI 轻冻结不渲染 `RoomStage`，渲染崩溃不得丢当局；客人 v1 不执行 `host.js`。
+- **v1 无 `ui.js` / iframe**：人类只用宿主通用壳（`getPublicView` + `getSeatView` + `getActions` 生成按钮/表单）。
+- **入房前一键同步**：`hello` 窥探 → `mod.offer` → 缺包则「同步下载并加入」；未装上不可 `join`。
+- **日常同步发视图补丁**：不广播全量 `state`；人类与 Agent 都走公开视图 + 本席位私有视图。
+- **Agent 门闩 + 单一内置工具 `room_mod_act`**：只在 `shouldPromptAgent` 为真时注入；不热挂第三方 MCP。
+- **协议仍为 v1**：新增 `mod.*` 帧，不升 `ROOM_PROTOCOL_VERSION`，避免旧客户端被误伤。
+- **校验和是真实文件哈希**：对 `manifest.json` + `host.js` 哈希，实现 `shortChecksum` 注释里的 M3。
+
+## PR Plan
+
+### PR 1: Add mod protocol frames and file checksum
+
+- **Description:** Extend room protocol v1 with `mod.offer` / `mod.fetch` / `mod.bundle` / `mod.intent` / `mod.patch` / `mod.priv` / `mod.fail` payload types. Add a real SHA-256 file checksum for `manifest.json` + `host.js` (M3). Keep `ROOM_PROTOCOL_VERSION = 1`. Do not change RoomService behavior yet.
+- **Files/components affected:** packages/shared/src/room-protocol.ts, packages/shared/src/room-protocol.test.ts
+- **Dependencies:** None
+
+### PR 2: Add mod package loader, cache, and ModHost runtime
+
+- **Description:** Validate `manifest.json` + required `host.js` (reject `ui.js`, non-empty `permissions`, missing fields, unsupported `hostApi`). Hash the package and cache under `userData/mod-cache/<checksum>/`. Spawn host.js in an Electron UtilityProcess with whitelist ctx (`rng`, `now`, `seats`, `actor`). Persist `state` + intent log to `userData/rooms/<id>.mod.json`. Crash of the utility process must not tear down the room WebSocket; surface `mod.fail` to the caller. Include unit tests with fixture packs.
+- **Files/components affected:** apps/desktop/electron/main/mod-package.ts, apps/desktop/electron/main/mod-package.test.ts, apps/desktop/electron/main/mod-host.ts, apps/desktop/electron/main/mod-host.test.ts, apps/desktop/electron/main/mod-host-worker.ts, apps/desktop/electron/main/runtime-paths.ts
+- **Dependencies:** PR 1
+
+### PR 3: Wire RoomService handshake, play loop, and Agent tool
+
+- **Description:** Treat `hello` as a pre-join peek that replies with `mod.offer` and does not occupy a seat. Serve `mod.fetch`/`mod.bundle` (≤512KB, one fetch per connection). When a room has a mod, force `requireMods=true`, write the real checksum into `modChecksum` and the invite, and reject `join` on missing/mismatch. Serialise `mod.intent` into ModHost.reduce; broadcast `mod.patch` and unicast `mod.priv`. Host lifecycle: enable, `mod.start` / `mod.end`, reset-to-start, crash → `mod.fail`. Inject Agent turns only when `shouldPromptAgent` is true, via a single built-in `room_mod_act` tool on the existing seat session. Do not put full play state into `RoomSnapshot` or the chat timeline.
+- **Files/components affected:** apps/desktop/electron/main/room-service.ts, apps/desktop/electron/main/ipc-handlers.ts, apps/desktop/electron/main/session-manager.ts, apps/desktop/electron/preload/index.ts, packages/shared/src/ipc.ts
+- **Dependencies:** PR 2
+
+### PR 4: Add official werewolf and vote example mods
+
+- **Description:** Ship two host.js example packs (werewolf, vote) as templates under `apps/desktop/resources/mods/`. Each must implement `createGame` with public/seat views, actions, and agent latch. No `ui.js`. Used as fixtures and as host-selectable local packs.
+- **Files/components affected:** apps/desktop/resources/mods/werewolf/manifest.json, apps/desktop/resources/mods/werewolf/host.js, apps/desktop/resources/mods/vote/manifest.json, apps/desktop/resources/mods/vote/host.js
+- **Dependencies:** PR 2
+
+### PR 5: Add sync-download join UI and host generic play shell
+
+- **Description:** Join dialog: after invite paste, peek via hello; show local-hit vs missing pack; primary button is 「加入」 or 「同步下载并加入」. Download progress, then join in the same action; close aborts and never joins. Create-room UI: pick a local/bundled pack (no requireMods toggle). Room stage generic shell renders public + own seat view and `getActions` buttons/simple forms. Host controls: start / end / reset / recover-from-snapshot. Top bar and join dialog show `id@version · checksum[:8]`. Hide play chrome in CLI mode (already unmounts RoomStage).
+- **Files/components affected:** apps/desktop/src/components/RoomSidebar.tsx, apps/desktop/src/components/RoomStage.tsx, apps/desktop/src/components/ModPlayPanel.tsx, apps/desktop/src/state/room-store.ts, apps/desktop/src/i18n/zh.ts, apps/desktop/src/i18n/en.ts, apps/desktop/src/styles.css
+- **Dependencies:** PR 3, PR 4
+

@@ -407,9 +407,20 @@ const desktop = {
       ok: boolean;
       error?: string;
     }>,
-  sendRoomMessage: (roomId: string, seatId: string, text: string) =>
-    ipcRenderer.invoke(IPC.roomSend, { roomId, seatId, text }) as Promise<{
+  sendRoomMessage: (
+    roomId: string,
+    seatId: string,
+    text: string,
+    quote?: import("@claude-desktop/shared").RoomQuoteRef,
+  ) =>
+    ipcRenderer.invoke(IPC.roomSend, { roomId, seatId, text, quote }) as Promise<{
       ok: boolean;
+      error?: string;
+    }>,
+  rejoinRoom: (roomId: string) =>
+    ipcRenderer.invoke(IPC.roomRejoin, { roomId }) as Promise<{
+      ok: boolean;
+      room?: import("@claude-desktop/shared").RoomSnapshot;
       error?: string;
     }>,
   roomDice: (roomId: string, seatId: string) =>
@@ -505,6 +516,22 @@ const desktop = {
         source: "bundled" | "cache";
         hostApi?: 1 | 2;
       }>;
+    }>,
+  modsDelete: (packDir: string) =>
+    ipcRenderer.invoke(IPC.modsDelete, { packDir }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+  modsOpenDir: (packDir: string) =>
+    ipcRenderer.invoke(IPC.modsOpenDir, { packDir }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+  modsScaffold: (input: { id: string; name: string }) =>
+    ipcRenderer.invoke(IPC.modsScaffold, input) as Promise<{
+      ok: boolean;
+      packDir?: string;
+      error?: string;
     }>,
   enableRoomKernelMod: (roomId: string, packDir: string) =>
     ipcRenderer.invoke(IPC.roomEnableKernelMod, { roomId, packDir }) as Promise<{

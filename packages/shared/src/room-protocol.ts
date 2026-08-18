@@ -113,6 +113,13 @@ export type RoomSeat = {
   agentName: string | null;
 };
 
+/** QQ-style quoted message reference (id + excerpt snapshot) */
+export type RoomQuoteRef = {
+  id: string;
+  authorLabel: string;
+  text: string;
+};
+
 export type RoomTimelineItem = {
   id: string;
   at: number;
@@ -125,6 +132,7 @@ export type RoomTimelineItem = {
   game?: { type: "dice" | "rps"; value: string };
   /** Host kernel railway / system note. Guests render as a badge only. */
   source?: "kernel";
+  quote?: RoomQuoteRef;
 };
 
 export type RoomSnapshot = {
@@ -165,6 +173,8 @@ export type RoomListItem = {
   memberCount: number;
   port: number;
   inviteHost: string;
+  /** guest lost connection — room + history kept locally, can rejoin */
+  offline?: boolean;
 };
 
 export function makeRoomFrame<T>(

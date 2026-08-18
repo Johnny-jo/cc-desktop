@@ -1,6 +1,6 @@
 {
   "id": "room-pulse",
-  "name": "房间心跳",
+  "name": "群聊心跳",
   "version": "1.0.0",
   "hostApi": 2,
   "inject": [],
