@@ -145,6 +145,16 @@ export const IPC = {
   roomListMods: "room:list-mods",
   roomHasMod: "room:has-mod",
   roomEnableKernelMod: "room:enable-kernel-mod",
+  roomDisableKernelMod: "room:disable-kernel-mod",
+  roomListKernelMemory: "room:list-kernel-memory",
+  roomSetKernelMemory: "room:set-kernel-memory",
+  roomDeleteKernelMemory: "room:delete-kernel-memory",
+  roomSetKernelAutonomy: "room:set-kernel-autonomy",
+  roomGetKernelImprove: "room:get-kernel-improve",
+  roomProposeKernelImprove: "room:propose-kernel-improve",
+  roomApplyKernelProposal: "room:apply-kernel-proposal",
+  roomRejectKernelProposal: "room:reject-kernel-proposal",
+  roomRollbackKernelImprove: "room:rollback-kernel-improve",
   roomEvent: "room:event",
 } as const;
 
@@ -601,6 +611,61 @@ export type IpcInvokeMap = {
   [IPC.roomEnableKernelMod]: {
     args: [{ roomId: string; packDir: string }];
     result: { ok: boolean; room?: import("./room-protocol").RoomSnapshot; error?: string };
+  };
+  [IPC.roomDisableKernelMod]: {
+    args: [{ roomId: string; id: string }];
+    result: { ok: boolean; room?: import("./room-protocol").RoomSnapshot; error?: string };
+  };
+  [IPC.roomListKernelMemory]: {
+    args: [{ roomId: string }];
+    result: { ok: boolean; entries?: Array<{ key: string; value: string }>; error?: string };
+  };
+  [IPC.roomSetKernelMemory]: {
+    args: [{ roomId: string; key: string; value: string }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.roomDeleteKernelMemory]: {
+    args: [{ roomId: string; key: string }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.roomSetKernelAutonomy]: {
+    args: [{ roomId: string; level: 0 | 1 | 2 }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.roomGetKernelImprove]: {
+    args: [{ roomId: string }];
+    result: {
+      ok: boolean;
+      autonomy?: 0 | 1 | 2;
+      proposals?: Array<{
+        id: string;
+        packId: string;
+        modJs: string;
+        at: number;
+        note?: string;
+        status: "pending" | "applied" | "rejected" | "failed";
+        decision: "pending" | "apply" | "reject";
+        error?: string;
+      }>;
+      canRollback?: string[];
+      error?: string;
+    };
+  };
+  [IPC.roomProposeKernelImprove]: {
+    args: [{ roomId: string; packId: string; modJs: string; note?: string }];
+    result: { ok: boolean; decision?: string; status?: string; error?: string };
+  };
+  [IPC.roomApplyKernelProposal]: {
+    args: [{ roomId: string; proposalId: string }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.roomRejectKernelProposal]: {
+    args: [{ roomId: string; proposalId: string }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.roomRollbackKernelImprove]: {
+    args: [{ roomId: string; packId: string }];
+    result: { ok: boolean; error?: string };
   };
   [IPC.roomHasMod]: {
     args: [{ checksum: string }];

@@ -3,6 +3,8 @@ import { MOD_HOST_API, MOD_KERNEL_API } from "@claude-desktop/shared";
 import { parseManifest } from "./mod-package";
 import {
   createModCtx,
+  KernelBudgetGate,
+  KERNEL_BUDGET_DEFAULT,
   ModKernel,
   parseKernelManifest,
   planKernelGraph,
@@ -33,6 +35,30 @@ function man(
 }
 
 describe("parseKernelManifest", () => {
+  it("parses optional budget and rejects invalid values", () => {
+    const def = parseKernelManifest({
+      id: "x",
+      version: "1",
+      hostApi: 2,
+    });
+    expect(def.budget).toEqual(KERNEL_BUDGET_DEFAULT);
+    const custom = parseKernelManifest({
+      id: "x",
+      version: "1",
+      hostApi: 2,
+      budget: { hookPerMin: 3, schedulePerMin: 2 },
+    });
+    expect(custom.budget).toEqual({ hookPerMin: 3, schedulePerMin: 2 });
+    expect(() =>
+      parseKernelManifest({
+        id: "x",
+        version: "1",
+        hostApi: 2,
+        budget: { hookPerMin: 0 },
+      }),
+    ).toThrow(/budget.hookPerMin/);
+  });
+
   it("parses hostApi 2 and defaults name to id", () => {
     const m = parseKernelManifest({
       id: "shared-memory",
@@ -52,6 +78,14 @@ describe("parseKernelManifest", () => {
     expect(() =>
       parseKernelManifest({ id: "x", version: "1", hostApi: 1 }),
     ).toThrow(/hostApi must be 2/);
+    expect(
+      parseKernelManifest({
+        id: "x",
+        version: "1",
+        hostApi: 2,
+        permissions: ["schedule:room"],
+      }).permissions,
+    ).toEqual(["schedule:room"]);
     expect(() =>
       parseKernelManifest({
         id: "x",
@@ -85,6 +119,26 @@ describe("parseKernelManifest", () => {
   });
 });
 
+describe("KernelBudgetGate", () => {
+  it("caps pack and room rates and rolls the window", () => {
+    let now = 1_000;
+    const gate = new KernelBudgetGate(
+      100,
+      { hookPerMin: 3, schedulePerMin: 2 },
+      () => now,
+    );
+    expect(gate.allowHook("a", 2)).toBe(true);
+    expect(gate.allowHook("a", 2)).toBe(true);
+    expect(gate.allowHook("a", 2)).toBe(false);
+    expect(gate.allowHook("b", 2)).toBe(true);
+    expect(gate.allowHook("b", 2)).toBe(false);
+    now = 1_200;
+    expect(gate.allowHook("a", 2)).toBe(true);
+    expect(gate.allowSchedule("a", 1)).toBe(true);
+    expect(gate.allowSchedule("a", 1)).toBe(false);
+  });
+});
+
 describe("scanKernelForbiddenApis", () => {
   it("allows Date and Math.random, rejects require and any import", () => {
     expect(() =>
@@ -97,6 +151,15 @@ describe("scanKernelForbiddenApis", () => {
     expect(() => scanKernelForbiddenApis("const x = import('node:fs')")).toThrow(
       /dynamic import/,
     );
+    expect(() => scanKernelForbiddenApis("setInterval(() => {}, 10)")).toThrow(
+      /ctx.schedule/,
+    );
+    expect(() => scanKernelForbiddenApis("new Function('return 1')")).toThrow(
+      /Function constructor/,
+    );
+    expect(() =>
+      scanKernelForbiddenApis('export function activate() { return "setTimeout("; }'),
+    ).not.toThrow();
   });
 });
 
@@ -189,6 +252,26 @@ describe("createModCtx", () => {
     seal();
     expect(() => ctx.provide("memory", { get: () => 1 })).toThrow(/after activate/);
   });
+
+  it("exposes schedule.every only with schedule:room and clamps interval", () => {
+    const bare = man({ id: "bare" });
+    const { ctx } = createModCtx({ manifest: bare, room });
+    expect(() => (ctx as { schedule?: { every: () => void } }).schedule?.every()).toThrow(
+      /undeclared ctx.schedule/,
+    );
+    const scheduled = man({
+      id: "tick",
+      permissions: ["schedule:room"],
+    });
+    const session = createModCtx({ manifest: scheduled, room });
+    session.ctx.schedule!.every(50, () => ({ text: "n" }));
+    expect(session.schedules).toHaveLength(1);
+    expect(session.schedules[0]?.ms).toBe(1000);
+    session.seal();
+    expect(() => session.ctx.schedule!.every(1000, () => undefined)).toThrow(
+      /after activate/,
+    );
+  });
 });
 
 describe("runKernelActivate", () => {
@@ -274,6 +357,74 @@ describe("ModKernel", () => {
     await kernel.dispose();
     expect(order).toEqual(["b", "a"]);
     expect(kernel.snapshot().active.every((x) => x.state === "disposed")).toBe(true);
+  });
+
+  it("injects a host memory stub, not a dummy provided flag", async () => {
+    const { HostRoomKv } = await import("./mod-kernel-store");
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "kinj-"));
+    const kv = new HostRoomKv(path.join(dir, "s.json"));
+    kv.namespace("memory").set("hi", "你好");
+    let seen = "";
+    const kernel = new ModKernel(kv);
+    kernel.start(
+      [
+        {
+          manifest: man({ id: "mem", provides: ["memory"], permissions: ["storage:room"] }),
+          activate: (ctx) => {
+            ctx.provide("memory", {
+              get: () => {
+                throw new Error("author closure must not run");
+              },
+            });
+          },
+        },
+        {
+          manifest: man({
+            id: "user",
+            inject: ["memory"],
+            hooks: ["room.chat.in"],
+          }),
+          activate: (ctx) => {
+            const mem = (ctx as unknown as { memory: { get: (k: string) => string } })
+              .memory;
+            seen = mem.get("hi");
+          },
+        },
+      ],
+      room,
+    );
+    expect(seen).toBe("你好");
+    await kernel.dispose();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("only publishes provides that activate actually registered", () => {
+    const kernel = new ModKernel();
+    kernel.start(
+      [
+        {
+          manifest: man({ id: "mem", provides: ["memory"] }),
+          activate: () => {
+            // declared memory but never provide()
+          },
+        },
+        {
+          manifest: man({ id: "user", inject: ["memory"] }),
+          activate: () => {
+            throw new Error("should stay pending");
+          },
+        },
+      ],
+      room,
+    );
+    const snap = kernel.snapshot();
+    expect(snap.failed.map((x) => x.id)).toEqual(["mem"]);
+    expect(snap.failed[0]?.failedReason).toMatch(/provides mismatch/);
+    expect(snap.pending.map((x) => x.id)).toEqual(["user"]);
+    expect(snap.active).toEqual([]);
   });
 });
 

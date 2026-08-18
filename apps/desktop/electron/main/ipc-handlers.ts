@@ -918,6 +918,46 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
     if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
     return ctx.rooms.enableKernelMod(roomId, packDir);
   });
+  ipcMain.handle(IPC.roomDisableKernelMod, async (_e, { roomId, id }) => {
+    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    return ctx.rooms.disableKernelMod(roomId, id);
+  });
+  ipcMain.handle(IPC.roomListKernelMemory, async (_e, { roomId }) => {
+    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    return ctx.rooms.listKernelMemory(roomId);
+  });
+  ipcMain.handle(IPC.roomSetKernelMemory, async (_e, { roomId, key, value }) => {
+    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    return ctx.rooms.setKernelMemory(roomId, key, value);
+  });
+  ipcMain.handle(IPC.roomDeleteKernelMemory, async (_e, { roomId, key }) => {
+    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    return ctx.rooms.deleteKernelMemory(roomId, key);
+  });
+  ipcMain.handle(IPC.roomSetKernelAutonomy, async (_e, { roomId, level }) => {
+    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    return ctx.rooms.setKernelAutonomy(roomId, level);
+  });
+  ipcMain.handle(IPC.roomGetKernelImprove, async (_e, { roomId }) => {
+    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    return ctx.rooms.getKernelImprove(roomId);
+  });
+  ipcMain.handle(IPC.roomProposeKernelImprove, async (_e, { roomId, packId, modJs, note }) => {
+    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    return ctx.rooms.proposeKernelImprove(roomId, packId, modJs, note);
+  });
+  ipcMain.handle(IPC.roomApplyKernelProposal, async (_e, { roomId, proposalId }) => {
+    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    return ctx.rooms.applyKernelProposal(roomId, proposalId);
+  });
+  ipcMain.handle(IPC.roomRejectKernelProposal, async (_e, { roomId, proposalId }) => {
+    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    return ctx.rooms.rejectKernelProposal(roomId, proposalId);
+  });
+  ipcMain.handle(IPC.roomRollbackKernelImprove, async (_e, { roomId, packId }) => {
+    if (!ctx.rooms) return { ok: false, error: "房间服务未启用" };
+    return ctx.rooms.rollbackKernelImprove(roomId, packId);
+  });
   ipcMain.handle(IPC.roomHasMod, async (_e, { checksum }) => {
     if (!ctx.rooms) return { ok: true, has: false };
     return ctx.rooms.hasMod(checksum);

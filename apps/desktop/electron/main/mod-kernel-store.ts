@@ -50,6 +50,30 @@ export class HostRoomKv implements RoomKv {
     };
   }
 
+  listEntries(ns: string): Array<{ key: string; value: string }> {
+    const bag = this.data[ns] ?? {};
+    return Object.keys(bag)
+      .sort()
+      .map((key) => ({ key, value: bag[key]! }));
+  }
+
+  remove(ns: string, key: string): RoomKvSetResult {
+    if (this.sealed) return { ok: false, error: "store is sealed" };
+    if (!KERNEL_NS_RE.test(ns) || !KERNEL_KEY_RE.test(key)) {
+      return { ok: false, error: "invalid key" };
+    }
+    const bag = { ...(this.data[ns] ?? {}) };
+    if (!(key in bag)) return { ok: false, error: "missing key" };
+    delete bag[key];
+    if (Object.keys(bag).length) this.data[ns] = bag;
+    else delete this.data[ns];
+    fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
+    const tmp = `${this.filePath}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(this.data), "utf8");
+    fs.renameSync(tmp, this.filePath);
+    return { ok: true };
+  }
+
   seal(): void {
     this.sealed = true;
   }

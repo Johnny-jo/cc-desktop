@@ -55,6 +55,23 @@ describe("HostRoomKv", () => {
     expect(mem.search("")).toEqual([]);
   });
 
+  it("lists entries and removes a key from disk", () => {
+    const file = storeFile();
+    const kv = new HostRoomKv(file);
+    const mem = kv.namespace("memory");
+    expect(mem.set("a", "1")).toEqual({ ok: true });
+    expect(mem.set("b", "2")).toEqual({ ok: true });
+    expect(kv.listEntries("memory")).toEqual([
+      { key: "a", value: "1" },
+      { key: "b", value: "2" },
+    ]);
+    expect(kv.remove("memory", "a")).toEqual({ ok: true });
+    expect(kv.listEntries("memory")).toEqual([{ key: "b", value: "2" }]);
+    const again = new HostRoomKv(file);
+    expect(again.namespace("memory").get("a")).toBeUndefined();
+    expect(again.namespace("memory").get("b")).toBe("2");
+  });
+
   it("seal blocks writes; deleteFile removes persist", () => {
     const file = storeFile();
     const kv = new HostRoomKv(file);

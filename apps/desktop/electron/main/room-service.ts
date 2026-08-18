@@ -37,15 +37,28 @@ import {
 import {
   listKernelPacks,
   loadKernelDir,
+  peekHostApi,
   toKernelActivatePack,
+  writeKernelCache,
+  type LoadedKernelMod,
 } from "./mod-kernel-package";
 import {
   ModKernel,
+  KERNEL_BUDGET_DEFAULT,
+  kernelLog,
   type ChatInEnvelope,
   type KernelActivatePack,
 } from "./mod-kernel";
 import { HostRoomKv } from "./mod-kernel-store";
 import {
+  decideImproveApply,
+  KernelImproveStore,
+  trialKernelSource,
+  type KernelAutonomy,
+} from "./mod-kernel-improve";
+import { hashModFiles } from "@claude-desktop/shared/mod-hash";
+import {
+  getKernelImprovePath,
   getKernelStorePath,
   getModPersistPath,
   type RuntimePathEnv,
@@ -60,7 +73,12 @@ import {
   tryCreateRoomModMcp,
   type ModActionSchema,
 } from "./room-mod-agent";
-import { mergeSessionRunOpts, tryCreateMemoryMcp } from "./mod-kernel-compile";
+import {
+  mergeSessionRunOpts,
+  tryCreateImproveMcp,
+  tryCreateMemoryMcp,
+  type KernelImproveHost,
+} from "./mod-kernel-compile";
 
 const MOD_CHECKSUM_RE = /^[0-9a-f]{64}$/;
 export const ROOM_MOD_BUNDLE_CHUNK = 48 * 1024;
@@ -115,8 +133,11 @@ type RoomRecord = {
   kernel?: ModKernel;
   kernelStore?: HostRoomKv;
   kernelPacks?: KernelActivatePack[];
+  kernelLoaded?: LoadedKernelMod[];
+  kernelImprove?: KernelImproveStore;
   kernelProjection?: RoomSnapshot["kernel"];
   inboundChain?: Promise<unknown>;
+  kernelTimers?: ReturnType<typeof setInterval>[];
 };
 
 function lanAddresses(): string[] {
@@ -466,6 +487,9 @@ export class RoomService {
     if (r.status !== "open") return { ok: false, error: "房间不可用" };
     if (r.modStarted && !r.modEnded) {
       return { ok: false, error: "请先结束当前玩法" };
+    }
+    if (peekHostApi(packDir) === 2) {
+      return { ok: false, error: "这是房间扩展，请用扩展入口启用" };
     }
     let loaded: LoadedMod;
     try {
@@ -958,6 +982,7 @@ export class RoomService {
               server: null,
               guests: new Set(),
               client: ws,
+              kernelProjection: snap.kernel,
               joinInfo: {
                 host,
                 hosts: [
@@ -1548,18 +1573,323 @@ export class RoomService {
     const r = this.rooms.get(roomId);
     if (!r || r.status !== "open") return { ok: false, error: "房间不可用" };
     if (r.localRole !== "host") return { ok: false, error: "只有房主可以启用扩展" };
+    if (peekHostApi(packDir) === 1) {
+      return { ok: false, error: "这是玩法模组，请用玩法入口启用" };
+    }
     try {
-      const loaded = loadKernelDir(packDir);
+      const loaded = this.overlayLiveKernel(r, loadKernelDir(packDir));
+      try {
+        writeKernelCache(this.pathEnv(), loaded);
+      } catch {
+        // cache is optional
+      }
+      kernelLog("load", {
+        roomId,
+        id: loaded.manifest.id,
+        version: loaded.manifest.version,
+        checksum: loaded.checksum,
+      });
       const pack = toKernelActivatePack(loaded);
+      r.kernelLoaded = (r.kernelLoaded ?? []).filter((p) => p.manifest.id !== loaded.manifest.id);
+      r.kernelLoaded.push(loaded);
       r.kernelPacks = (r.kernelPacks ?? []).filter((p) => p.manifest.id !== pack.manifest.id);
       r.kernelPacks.push(pack);
       const started = this.startKernel(roomId, r.kernelPacks);
       if (!started.ok) return started;
+      this.syncKernelExtras(r);
       this.emit(r);
       return { ok: true, room: this.snapshot(r) };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
+  }
+
+  listKernelMemory(
+    roomId: string,
+  ): { ok: boolean; entries?: Array<{ key: string; value: string }>; error?: string } {
+    const r = this.rooms.get(roomId);
+    if (!r || r.status !== "open") return { ok: false, error: "房间不可用" };
+    if (r.localRole !== "host") return { ok: false, error: "只有房主可以查看共享记忆" };
+    if (!this.hasMemoryProvide(r) || !r.kernelStore) {
+      return { ok: true, entries: [] };
+    }
+    return { ok: true, entries: r.kernelStore.listEntries("memory") };
+  }
+
+  setKernelMemory(
+    roomId: string,
+    key: string,
+    value: string,
+  ): { ok: boolean; error?: string } {
+    const r = this.rooms.get(roomId);
+    if (!r || r.status !== "open") return { ok: false, error: "房间不可用" };
+    if (r.localRole !== "host") return { ok: false, error: "只有房主可以改共享记忆" };
+    if (!this.hasMemoryProvide(r) || !r.kernelStore) {
+      return { ok: false, error: "未启用共享记忆" };
+    }
+    const result = r.kernelStore.namespace("memory").set(key.trim(), value);
+    return result.ok ? { ok: true } : { ok: false, error: result.error };
+  }
+
+  deleteKernelMemory(
+    roomId: string,
+    key: string,
+  ): { ok: boolean; error?: string } {
+    const r = this.rooms.get(roomId);
+    if (!r || r.status !== "open") return { ok: false, error: "房间不可用" };
+    if (r.localRole !== "host") return { ok: false, error: "只有房主可以改共享记忆" };
+    if (!this.hasMemoryProvide(r) || !r.kernelStore) {
+      return { ok: false, error: "未启用共享记忆" };
+    }
+    const result = r.kernelStore.remove("memory", key);
+    return result.ok ? { ok: true } : { ok: false, error: result.error };
+  }
+
+  disableKernelMod(
+    roomId: string,
+    id: string,
+  ): { ok: boolean; room?: RoomSnapshot; error?: string } {
+    const r = this.rooms.get(roomId);
+    if (!r || r.status !== "open") return { ok: false, error: "房间不可用" };
+    if (r.localRole !== "host") return { ok: false, error: "只有房主可以卸载扩展" };
+    const packs = (r.kernelPacks ?? []).filter((p) => p.manifest.id !== id);
+    if (packs.length === (r.kernelPacks ?? []).length) {
+      return { ok: false, error: "未找到该扩展" };
+    }
+    r.kernelLoaded = (r.kernelLoaded ?? []).filter((p) => p.manifest.id !== id);
+    r.kernelPacks = packs;
+    if (!packs.length) {
+      this.disposeKernel(r, false);
+      this.emit(r);
+      return { ok: true, room: this.snapshot(r) };
+    }
+    const started = this.startKernel(roomId, packs);
+    if (!started.ok) return started;
+    this.syncKernelExtras(r);
+    this.emit(r);
+    return { ok: true, room: this.snapshot(r) };
+  }
+
+  setKernelAutonomy(
+    roomId: string,
+    level: KernelAutonomy,
+  ): { ok: boolean; error?: string } {
+    const r = this.hostKernelRoom(roomId);
+    if (!r.ok) return r;
+    r.store.setAutonomy(level);
+    kernelLog("improve.autonomy", { roomId, level });
+    return { ok: true };
+  }
+
+  getKernelImprove(roomId: string): {
+    ok: boolean;
+    autonomy?: KernelAutonomy;
+    proposals?: ReturnType<KernelImproveStore["snapshot"]>["proposals"];
+    canRollback?: string[];
+    error?: string;
+  } {
+    const r = this.hostKernelRoom(roomId);
+    if (!r.ok) return r;
+    const snap = r.store.snapshot();
+    const packs = new Set((r.room.kernelLoaded ?? []).map((p) => p.manifest.id));
+    return {
+      ok: true,
+      autonomy: snap.autonomy,
+      proposals: snap.proposals,
+      canRollback: [...new Set(snap.revisions.map((x) => x.packId))].filter((id) =>
+        packs.has(id),
+      ),
+    };
+  }
+
+  proposeKernelImprove(
+    roomId: string,
+    packId: string,
+    modJs: string,
+    note?: string,
+  ): { ok: boolean; decision?: string; status?: string; error?: string } {
+    const r = this.hostKernelRoom(roomId);
+    if (!r.ok) return r;
+    const loaded = r.room.kernelLoaded?.find((p) => p.manifest.id === packId);
+    if (!loaded) return { ok: false, error: "未启用该扩展" };
+    const trial = trialKernelSource(loaded.manifest, modJs, r.room.kernelStore);
+    const current =
+      r.room.kernel?.snapshot().active.find((p) => p.id === packId)?.provides ??
+      loaded.manifest.provides;
+    const decision = decideImproveApply({
+      autonomy: r.store.autonomy,
+      trialOk: trial.ok,
+      currentProvides: current,
+      nextProvides: trial.ok ? trial.provides : [],
+    });
+    if (decision === "reject") {
+      r.store.addProposal({
+        packId,
+        modJs,
+        note,
+        status: "failed",
+        decision,
+        error: trial.ok ? undefined : trial.error,
+      });
+      this.auditImprove(r.room, `扩展 ${packId} 提案未通过试用${trial.ok ? "" : `：${trial.error}`}`);
+      return { ok: false, decision, error: trial.ok ? "提案被拒绝" : trial.error };
+    }
+    const prop = r.store.addProposal({
+      packId,
+      modJs,
+      note,
+      status: decision === "apply" ? "applied" : "pending",
+      decision,
+    });
+    if (decision === "apply") {
+      const applied = this.applyKernelSource(r.room, loaded, modJs, note ?? "auto");
+      if (!applied.ok) {
+        r.store.updateProposal(prop.id, { status: "failed", error: applied.error });
+        return applied;
+      }
+      this.auditImprove(r.room, `扩展 ${packId} 已自动应用新实现（L${r.store.autonomy}）`);
+    } else {
+      this.auditImprove(r.room, `扩展 ${packId} 提案待审批（L0/L1 行为有变）`);
+    }
+    this.emit(r.room);
+    return { ok: true, decision, status: prop.status };
+  }
+
+  applyKernelProposal(
+    roomId: string,
+    proposalId: string,
+  ): { ok: boolean; error?: string } {
+    const r = this.hostKernelRoom(roomId);
+    if (!r.ok) return r;
+    const prop = r.store.proposals.find((p) => p.id === proposalId);
+    if (!prop || prop.status !== "pending") return { ok: false, error: "没有待批提案" };
+    const loaded = r.room.kernelLoaded?.find((p) => p.manifest.id === prop.packId);
+    if (!loaded) return { ok: false, error: "未启用该扩展" };
+    const trial = trialKernelSource(loaded.manifest, prop.modJs, r.room.kernelStore);
+    if (!trial.ok) {
+      r.store.updateProposal(prop.id, { status: "failed", error: trial.error });
+      return { ok: false, error: trial.error };
+    }
+    const applied = this.applyKernelSource(r.room, loaded, prop.modJs, prop.note ?? "apply");
+    if (!applied.ok) return applied;
+    r.store.updateProposal(prop.id, { status: "applied" });
+    this.auditImprove(r.room, `房主批准扩展 ${prop.packId} 的提案`);
+    this.emit(r.room);
+    return { ok: true };
+  }
+
+  rejectKernelProposal(
+    roomId: string,
+    proposalId: string,
+  ): { ok: boolean; error?: string } {
+    const r = this.hostKernelRoom(roomId);
+    if (!r.ok) return r;
+    const cur = r.store.proposals.find((p) => p.id === proposalId);
+    if (!cur || cur.status !== "pending") return { ok: false, error: "没有待批提案" };
+    const prop = r.store.updateProposal(proposalId, { status: "rejected" });
+    if (!prop) return { ok: false, error: "提案不存在" };
+    this.auditImprove(r.room, `房主拒绝扩展 ${prop.packId} 的提案`);
+    return { ok: true };
+  }
+
+  rollbackKernelImprove(
+    roomId: string,
+    packId: string,
+  ): { ok: boolean; error?: string } {
+    const r = this.hostKernelRoom(roomId);
+    if (!r.ok) return r;
+    const rev = r.store.lastRevision(packId);
+    if (!rev) return { ok: false, error: "没有可回滚版本" };
+    const loaded = r.room.kernelLoaded?.find((p) => p.manifest.id === packId);
+    if (!loaded) return { ok: false, error: "未启用该扩展" };
+    const applied = this.applyKernelSource(r.room, loaded, rev.modJs, "rollback", {
+      recordRevision: false,
+    });
+    if (!applied.ok) return applied;
+    this.auditImprove(r.room, `扩展 ${packId} 已回滚到上一版`);
+    this.emit(r.room);
+    return { ok: true };
+  }
+
+  private overlayLiveKernel(r: RoomRecord, loaded: LoadedKernelMod): LoadedKernelMod {
+    const gate = this.hostKernelRoom(r.roomId);
+    if (!gate.ok) return loaded;
+    const live = gate.store.liveSource(loaded.manifest.id);
+    if (!live || live === loaded.modJsSource) return loaded;
+    const trial = trialKernelSource(loaded.manifest, live, r.kernelStore);
+    if (!trial.ok) {
+      kernelLog("improve.live.skip", {
+        roomId: r.roomId,
+        id: loaded.manifest.id,
+        error: trial.error,
+      });
+      return loaded;
+    }
+    return {
+      ...loaded,
+      modJsSource: live,
+      checksum: hashModFiles(loaded.manifestSource, live),
+    };
+  }
+
+  private hostKernelRoom(
+    roomId: string,
+  ): { ok: true; room: RoomRecord; store: KernelImproveStore } | { ok: false; error: string } {
+    const room = this.rooms.get(roomId);
+    if (!room || room.status !== "open") return { ok: false, error: "房间不可用" };
+    if (room.localRole !== "host") return { ok: false, error: "只有房主可以管理扩展改善" };
+    if (!room.kernelImprove) {
+      room.kernelImprove = new KernelImproveStore(getKernelImprovePath(this.pathEnv(), roomId));
+    }
+    return { ok: true, room, store: room.kernelImprove };
+  }
+
+  private applyKernelSource(
+    r: RoomRecord,
+    loaded: LoadedKernelMod,
+    modJs: string,
+    note: string,
+    opts?: { recordRevision?: boolean },
+  ): { ok: boolean; error?: string } {
+    if (opts?.recordRevision !== false && r.kernelImprove) {
+      r.kernelImprove.pushRevision({
+        packId: loaded.manifest.id,
+        checksum: loaded.checksum,
+        manifestSource: loaded.manifestSource,
+        modJs: loaded.modJsSource,
+        at: Date.now(),
+      });
+    }
+    const next: LoadedKernelMod = {
+      ...loaded,
+      modJsSource: modJs,
+      checksum: hashModFiles(loaded.manifestSource, modJs),
+    };
+    try {
+      writeKernelCache(this.pathEnv(), next);
+    } catch {
+      // cache optional
+    }
+    r.kernelLoaded = (r.kernelLoaded ?? []).map((p) =>
+      p.manifest.id === next.manifest.id ? next : p,
+    );
+    r.kernelPacks = (r.kernelLoaded ?? []).map(toKernelActivatePack);
+    r.kernelImprove?.setLive(next.manifest.id, next.modJsSource);
+    const started = this.startKernel(r.roomId, r.kernelPacks);
+    if (!started.ok) return started;
+    this.syncKernelExtras(r);
+    kernelLog("improve.apply", { roomId: r.roomId, id: next.manifest.id, note });
+    return { ok: true };
+  }
+
+  private auditImprove(r: RoomRecord, text: string): void {
+    this.append(r, {
+      kind: "system",
+      source: "kernel",
+      text,
+      authorLabel: "系统",
+    });
+    this.pushState(r);
   }
 
   startKernel(
@@ -1578,6 +1908,17 @@ export class RoomService {
       id: r.roomId,
       seats: r.seats.map((s) => ({ id: s.id, kind: s.kind, name: s.name })),
     });
+    this.bindKernelSchedule(r);
+    return { ok: true };
+  }
+
+  async tickKernelSchedule(
+    roomId: string,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const r = this.rooms.get(roomId);
+    if (!r || r.status !== "open") return { ok: false, error: "房间不可用" };
+    if (r.localRole !== "host") return { ok: false, error: "只有房主可以触发调度" };
+    await this.runKernelScheduleJobs(r);
     return { ok: true };
   }
 
@@ -1999,6 +2340,8 @@ export class RoomService {
       authorLabel: item.authorLabel ?? "系统",
       kind: item.kind,
       text: item.text,
+      ...(item.source ? { source: item.source } : {}),
+      ...(item.game ? { game: item.game } : {}),
     });
     if (r.items.length > 400) r.items.splice(0, r.items.length - 400);
     this.persist(r);
@@ -2078,6 +2421,7 @@ export class RoomService {
       version: m.version,
       state: m.state,
       ...(m.pendingReason ? { pendingReason: m.pendingReason } : {}),
+      ...(m.failedReason ? { failedReason: m.failedReason } : {}),
     }));
     return { mods };
   }
@@ -2542,8 +2886,14 @@ export class RoomService {
     if (r.kernel) {
       const result = await r.kernel.runChatIn(env);
       if (result.action === "drop") {
+        kernelLog("hook", {
+          name: "room.chat.in",
+          action: "drop",
+          roomId: r.roomId,
+        });
         this.append(r, {
           kind: "system",
+          source: "kernel",
           text: result.reason
             ? `消息被模组丢弃：${result.reason}`
             : "消息被模组丢弃",
@@ -2581,6 +2931,7 @@ export class RoomService {
     for (const seat of r.seats) {
       if (seat.sessionId) this.sessions.syncExtras(seat.sessionId, leftover);
     }
+    this.stopKernelSchedule(r);
     const kernel = r.kernel;
     r.kernel = undefined;
     if (kernel) void kernel.dispose();
@@ -2605,12 +2956,146 @@ export class RoomService {
     }
   }
 
-  private kernelToolOpts(r: RoomRecord): SessionRunOpts {
-    if (!r.kernel || !r.kernelStore) return {};
-    if (!r.kernel.snapshot().active.some((p) => p.provides.includes("memory"))) {
-      return {};
+  private hasMemoryProvide(r: RoomRecord): boolean {
+    return Boolean(
+      r.kernel?.snapshot().active.some((p) => p.provides.includes("memory")),
+    );
+  }
+
+  private syncKernelExtras(r: RoomRecord): void {
+    for (const seat of r.seats) {
+      if (seat.sessionId) this.sessions.syncExtras(seat.sessionId, this.seatToolOpts(r, seat));
     }
-    return tryCreateMemoryMcp(r.kernelStore) ?? {};
+  }
+
+  private bindKernelSchedule(r: RoomRecord): void {
+    this.stopKernelSchedule(r);
+    const jobs = r.kernel?.listScheduleJobs() ?? [];
+    r.kernelTimers = jobs.map((job) =>
+      setInterval(() => {
+        void this.runKernelScheduleJobs(r);
+      }, job.ms),
+    );
+    if (jobs.length) {
+      kernelLog("schedule.bind", { roomId: r.roomId, jobs: jobs.length });
+    }
+  }
+
+  private stopKernelSchedule(r: RoomRecord): void {
+    for (const timer of r.kernelTimers ?? []) clearInterval(timer);
+    r.kernelTimers = undefined;
+  }
+
+  private async runKernelScheduleJobs(r: RoomRecord): Promise<void> {
+    const jobs = r.kernel?.listScheduleJobs() ?? [];
+    let wrote = false;
+    for (const job of jobs) {
+      if (
+        job.packId &&
+        r.kernel &&
+        !r.kernel.consumeSchedule(
+          job.packId,
+          job.budget?.schedulePerMin ?? KERNEL_BUDGET_DEFAULT.schedulePerMin,
+        )
+      ) {
+        continue;
+      }
+      let tick: { text?: string; toAgent?: boolean } | void;
+      try {
+        tick = await Promise.race([
+          Promise.resolve(job.run()),
+          new Promise<never>((_, reject) => {
+            setTimeout(() => reject(new Error("schedule timeout")), 200);
+          }),
+        ]);
+      } catch {
+        kernelLog("schedule.tick", { roomId: r.roomId, action: "error" });
+        continue;
+      }
+      const text =
+        tick && typeof tick.text === "string" ? tick.text.trim() : "";
+      if (!text) continue;
+      kernelLog("schedule.tick", { roomId: r.roomId, action: "announce" });
+      this.append(r, {
+        kind: "system",
+        source: "kernel",
+        text,
+        authorLabel: "系统",
+      });
+      wrote = true;
+      if (tick && tick.toAgent) {
+        const seat = r.seats.find((s) => s.kind === "agent" && !s.takenOverBy);
+        if (seat) void this.runAgentSeat(r, seat, text);
+      }
+    }
+    if (wrote) this.pushState(r);
+  }
+
+  private kernelToolOpts(r: RoomRecord): SessionRunOpts {
+    if (!r.kernel) return {};
+    const memory =
+      r.kernelStore && this.hasMemoryProvide(r)
+        ? (tryCreateMemoryMcp(r.kernelStore) ?? {})
+        : {};
+    const improve = tryCreateImproveMcp(this.improveHost(r)) ?? {};
+    return mergeSessionRunOpts(memory, improve);
+  }
+
+  private improveHost(r: RoomRecord): KernelImproveHost {
+    return {
+      list: () => {
+        const graph = r.kernel?.snapshot();
+        const stateOf = (id: string) => {
+          const active = graph?.active.find((p) => p.id === id);
+          if (active) return { state: "active" as const };
+          const pending = graph?.pending.find((p) => p.id === id);
+          if (pending) {
+            return { state: "pending" as const, pendingReason: pending.pendingReason };
+          }
+          const failed = graph?.failed.find((p) => p.id === id);
+          if (failed) {
+            return { state: "failed" as const, failedReason: failed.failedReason };
+          }
+          return { state: "unknown" as const };
+        };
+        return (r.kernelLoaded ?? []).map((p) => {
+          const st = stateOf(p.manifest.id);
+          return {
+            id: p.manifest.id,
+            name: p.manifest.name,
+            version: p.manifest.version,
+            inject: [...p.manifest.inject],
+            provides: [...p.manifest.provides],
+            permissions: [...p.manifest.permissions],
+            hooks: [...p.manifest.hooks],
+            state: st.state,
+            ...(st.pendingReason ? { pendingReason: st.pendingReason } : {}),
+            ...(st.failedReason ? { failedReason: st.failedReason } : {}),
+          };
+        });
+      },
+      getSource: (packId) =>
+        r.kernelLoaded?.find((p) => p.manifest.id === packId)?.modJsSource ?? null,
+      propose: (packId, modJs, note) =>
+        this.proposeKernelImprove(r.roomId, packId, modJs, note),
+      status: () => {
+        const snap = this.getKernelImprove(r.roomId);
+        return {
+          autonomy: snap.autonomy ?? 0,
+          proposals: (snap.proposals ?? []).map((p) => ({
+            id: p.id,
+            packId: p.packId,
+            status: p.status,
+            decision: p.decision,
+            at: p.at,
+            ...(p.note ? { note: p.note } : {}),
+            ...(p.error ? { error: p.error } : {}),
+          })),
+          canRollback: snap.canRollback ?? [],
+        };
+      },
+      rollback: (packId) => this.rollbackKernelImprove(r.roomId, packId),
+    };
   }
 
   private seatToolOpts(

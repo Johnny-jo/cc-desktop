@@ -17,18 +17,14 @@ import { useI18n } from "../i18n/useI18n";
 import {
   closeRoomDialog,
   createRoom,
-  enableRoomKernelMod,
-  enableRoomMod,
   fetchRoomMod,
   hasRoomMod,
   joinRoom,
   leaveActiveRoom,
-  listRoomMods,
   openRoomDialog,
   peekRoom,
   selectRoom,
   useRoomStore,
-  type RoomModPack,
 } from "../state/room-store";
 
 export function RoomSidebar() {
@@ -55,10 +51,6 @@ export function RoomSidebar() {
   const [cacheHit, setCacheHit] = useState<boolean | undefined>(undefined);
   const [peeking, setPeeking] = useState(false);
   const [progress, setProgress] = useState<string | null>(null);
-  const [packs, setPacks] = useState<RoomModPack[]>([]);
-  const [packDir, setPackDir] = useState("");
-  const [kernelDirs, setKernelDirs] = useState<string[]>([]);
-
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const peekGen = useRef(0);
@@ -84,17 +76,6 @@ export function RoomSidebar() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [dialog]);
-
-  useEffect(() => {
-    if (dialog !== "create") return;
-    let cancelled = false;
-    void listRoomMods().then((list) => {
-      if (!cancelled) setPacks(list);
-    });
-    return () => {
-      cancelled = true;
-    };
   }, [dialog]);
 
   useEffect(() => {
@@ -172,9 +153,6 @@ export function RoomSidebar() {
     setInviteChecksum("");
     setOffer(null);
     setCacheHit(undefined);
-    setPacks([]);
-    setPackDir("");
-    setKernelDirs([]);
     setErr(null);
   };
 
@@ -194,28 +172,6 @@ export function RoomSidebar() {
       setBusy(false);
       setErr(res.error ?? "创建失败");
       return;
-    }
-    if (packDir && res.roomId) {
-      const enabled = await enableRoomMod(res.roomId, packDir);
-      if (gen !== joinGen.current) return;
-      if (!enabled.ok) {
-        setBusy(false);
-        resetForms();
-        closeRoomDialog();
-        return;
-      }
-    }
-    if (res.roomId) {
-      for (const dir of kernelDirs) {
-        const enabled = await enableRoomKernelMod(res.roomId, dir);
-        if (gen !== joinGen.current) return;
-        if (!enabled.ok) {
-          setBusy(false);
-          resetForms();
-          closeRoomDialog();
-          return;
-        }
-      }
     }
     setBusy(false);
     resetForms();
@@ -495,52 +451,7 @@ export function RoomSidebar() {
                     onChange={(e) => setPort(e.target.value)}
                   />
                 </label>
-                <label className="settings-field">
-                  {t.room.packOptional}
-                  <select
-                    className="select"
-                    value={packDir}
-                    onChange={(e) => setPackDir(e.target.value)}
-                  >
-                    <option value="">{t.room.packNone}</option>
-                    {packs
-                      .filter((pack) => pack.hostApi !== 2)
-                      .map((pack) => (
-                      <option key={`${pack.source}:${pack.packDir}`} value={pack.packDir}>
-                        {pack.name} ({pack.id}@{pack.version}
-                        {pack.source === "cache" ? ` · ${t.room.packCached}` : ""})
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                {packs.some((p) => p.hostApi === 2) ? (
-                  <fieldset className="settings-field">
-                    <legend>{t.room.kernelOptional}</legend>
-                    {packs
-                      .filter((p) => p.hostApi === 2)
-                      .map((pack) => (
-                        <label key={pack.packDir} className="room-kernel-opt">
-                          <input
-                            type="checkbox"
-                            checked={kernelDirs.includes(pack.packDir)}
-                            onChange={(e) => {
-                              setKernelDirs((cur) =>
-                                e.target.checked
-                                  ? [...cur, pack.packDir]
-                                  : cur.filter((d) => d !== pack.packDir),
-                              );
-                            }}
-                          />
-                          {pack.name} ({pack.id}@{pack.version})
-                        </label>
-                      ))}
-                    <p className="settings-hint">{t.room.kernelHint}</p>
-                  </fieldset>
-                ) : null}
-                <p className="settings-hint">
-                  创建后本机在 0.0.0.0:端口 监听。对方用「邀请码」加入；防火墙需放行该
-                  TCP 端口。
-                </p>
+                <p className="settings-hint">{t.room.createHint}</p>
               </div>
             ) : (
               <div className="room-modal-body">

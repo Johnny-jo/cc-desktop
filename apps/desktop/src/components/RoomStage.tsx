@@ -15,6 +15,7 @@ import { getDesktop, hasDesktopApi } from "../lib/desktop-api";
 import { formatModBadge } from "../lib/room-mod-ui";
 import { useI18n } from "../i18n/useI18n";
 import { ModPlayPanel } from "./ModPlayPanel";
+import { RoomSettingsModal } from "./RoomSettingsModal";
 
 function SeatAvatar({ kind }: { kind: "human" | "agent" }) {
   if (kind === "agent") {
@@ -51,6 +52,7 @@ export function RoomStage() {
   const [addName, setAddName] = useState("");
   const [err, setErr] = useState<string | null>(null);
   const [confirmLeave, setConfirmLeave] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   if (!room) {
     return (
@@ -87,6 +89,9 @@ export function RoomStage() {
         ? { id: "", version: "", checksum: room.modChecksum }
         : null,
     t.room.modBadge,
+  );
+  const pulseOn = Boolean(
+    room.kernel?.mods.some((m) => m.id === "room-pulse" && m.state === "active"),
   );
 
   const onSend = async () => {
@@ -148,11 +153,17 @@ export function RoomStage() {
       <header className="room-stage-head">
         <div className="room-stage-title">
           <span className="chat-title">{room.name}</span>
-          <span className={`room-dot ${room.status === "open" ? "on" : ""}`} />
+          <span
+            className={`room-dot${room.status === "open" ? " on" : ""}${pulseOn ? " is-pulse" : ""}`}
+            title={pulseOn ? t.room.pulseLive : undefined}
+            aria-label={pulseOn ? t.room.pulseLive : undefined}
+          />
           <span className="room-meta">
             {room.memberCount} 人 · {room.status === "open" ? "开着" : "已结束"}
-            {room.kernel?.mods.length
-              ? ` · 扩展 ${room.kernel.mods.map((m) => m.id).join("、")}`
+            {room.kernel?.mods.some((m) => m.state === "active")
+              ? ` · ${t.room.settingsExtensions} ${
+                  room.kernel.mods.filter((m) => m.state === "active").length
+                }`
               : ""}
           </span>
           {stageBadge ? (
@@ -162,6 +173,13 @@ export function RoomStage() {
           ) : null}
         </div>
         <div className="room-stage-actions">
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={() => setSettingsOpen(true)}
+          >
+            {t.room.settings}
+          </button>
           {canHost && room.status === "open" ? (
             <button type="button" className="btn btn-sm" onClick={() => void copyInvite()}>
               邀请
@@ -207,6 +225,14 @@ export function RoomStage() {
           role={myRole}
           seats={room.seats}
           localUserId={myUserId}
+        />
+      ) : null}
+
+      {settingsOpen ? (
+        <RoomSettingsModal
+          room={room}
+          canHost={canHost}
+          onClose={() => setSettingsOpen(false)}
         />
       ) : null}
 
@@ -326,6 +352,9 @@ export function RoomStage() {
                 <div className="room-msg-body">
                   <div className="room-msg-meta">
                     <span className="room-msg-author">{it.authorLabel}</span>
+                    {it.source === "kernel" ? (
+                      <span className="room-msg-source">扩展</span>
+                    ) : null}
                     {seatName ? <span className="room-msg-seat">{seatName}</span> : null}
                     <span className="room-msg-time">
                       {new Date(it.at).toLocaleTimeString(undefined, {

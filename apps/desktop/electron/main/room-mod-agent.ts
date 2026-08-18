@@ -106,6 +106,7 @@ type SdkMod = {
     name: string;
     version?: string;
     tools: unknown[];
+    alwaysLoad?: boolean;
   }) => unknown;
   tool?: (
     name: string,
@@ -115,12 +116,29 @@ type SdkMod = {
   ) => unknown;
 };
 
+type ZodMod = {
+  string: () => unknown;
+  any: () => unknown;
+};
+
+function sdkRequire() {
+  return createRequire(
+    typeof __filename !== "undefined" ? __filename : process.cwd() + "/index.js",
+  );
+}
+
 function loadSdk(): SdkMod | null {
   try {
-    const require = createRequire(
-      typeof __filename !== "undefined" ? __filename : process.cwd() + "/index.js",
-    );
-    return require("@anthropic-ai/claude-agent-sdk") as SdkMod;
+    return sdkRequire()("@anthropic-ai/claude-agent-sdk") as SdkMod;
+  } catch {
+    return null;
+  }
+}
+
+function loadZod(): ZodMod | null {
+  try {
+    const req = sdkRequire();
+    return createRequire(req.resolve("@anthropic-ai/claude-agent-sdk"))("zod") as ZodMod;
   } catch {
     return null;
   }
@@ -131,7 +149,12 @@ export function tryCreateRoomModMcp(handler: (act: RoomModAct) => Promise<string
   attached: boolean;
 } | null {
   const sdk = loadSdk();
-  if (typeof sdk?.createSdkMcpServer !== "function" || typeof sdk.tool !== "function") {
+  const z = loadZod();
+  if (
+    typeof sdk?.createSdkMcpServer !== "function" ||
+    typeof sdk.tool !== "function" ||
+    typeof z?.string !== "function"
+  ) {
     return null;
   }
   try {
@@ -139,8 +162,8 @@ export function tryCreateRoomModMcp(handler: (act: RoomModAct) => Promise<string
       ROOM_MOD_TOOL,
       "Submit a legal action for this room seat. Parameters: action (string), payload (any).",
       {
-        action: { type: "string" },
-        payload: {},
+        action: z.string(),
+        payload: z.any(),
       },
       async (args) => {
         const action = String(args.action ?? "");
@@ -151,6 +174,7 @@ export function tryCreateRoomModMcp(handler: (act: RoomModAct) => Promise<string
     const server = sdk.createSdkMcpServer({
       name: ROOM_MOD_MCP,
       version: "1.0.0",
+      alwaysLoad: true,
       tools: [actTool],
     });
     return {

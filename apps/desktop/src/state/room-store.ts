@@ -401,6 +401,145 @@ export async function listRoomMods(): Promise<RoomModPack[]> {
   return res.mods ?? [];
 }
 
+export async function disableRoomKernelMod(
+  roomId: string,
+  id: string,
+): Promise<{ ok: boolean; error?: string }> {
+  if (!hasDesktopApi("disableRoomKernelMod")) {
+    return { ok: false, error: "请完全重启应用后再卸载房间扩展" };
+  }
+  const res = await getDesktop().disableRoomKernelMod(roomId, id);
+  if (!res.ok) {
+    set({ lastError: res.error ?? "卸载扩展失败" });
+    return { ok: false, error: res.error };
+  }
+  if (res.room && state.activeRoomId === roomId) {
+    set({ activeRoom: res.room, lastError: null });
+  }
+  return { ok: true };
+}
+
+export async function listRoomKernelMemory(
+  roomId: string,
+): Promise<{ ok: boolean; entries: Array<{ key: string; value: string }>; error?: string }> {
+  if (!hasDesktopApi("listRoomKernelMemory")) {
+    return { ok: false, entries: [], error: "请完全重启应用后再查看共享记忆" };
+  }
+  const res = await getDesktop().listRoomKernelMemory(roomId);
+  if (!res.ok) {
+    return { ok: false, entries: [], error: res.error };
+  }
+  return { ok: true, entries: res.entries ?? [] };
+}
+
+export async function setRoomKernelMemory(
+  roomId: string,
+  key: string,
+  value: string,
+): Promise<{ ok: boolean; error?: string }> {
+  if (!hasDesktopApi("setRoomKernelMemory")) {
+    return { ok: false, error: "请完全重启应用后再改共享记忆" };
+  }
+  return getDesktop().setRoomKernelMemory(roomId, key, value);
+}
+
+export async function deleteRoomKernelMemory(
+  roomId: string,
+  key: string,
+): Promise<{ ok: boolean; error?: string }> {
+  if (!hasDesktopApi("deleteRoomKernelMemory")) {
+    return { ok: false, error: "请完全重启应用后再改共享记忆" };
+  }
+  return getDesktop().deleteRoomKernelMemory(roomId, key);
+}
+
+export type KernelImproveProposal = {
+  id: string;
+  packId: string;
+  modJs: string;
+  at: number;
+  note?: string;
+  status: "pending" | "applied" | "rejected" | "failed";
+  decision: "pending" | "apply" | "reject";
+  error?: string;
+};
+
+export type KernelImproveState = {
+  autonomy: 0 | 1 | 2;
+  proposals: KernelImproveProposal[];
+  canRollback: string[];
+};
+
+export async function setRoomKernelAutonomy(
+  roomId: string,
+  level: 0 | 1 | 2,
+): Promise<{ ok: boolean; error?: string }> {
+  if (!hasDesktopApi("setRoomKernelAutonomy")) {
+    return { ok: false, error: "请完全重启应用后再改自主权" };
+  }
+  return getDesktop().setRoomKernelAutonomy(roomId, level);
+}
+
+export async function getRoomKernelImprove(
+  roomId: string,
+): Promise<{ ok: boolean; state?: KernelImproveState; error?: string }> {
+  if (!hasDesktopApi("getRoomKernelImprove")) {
+    return { ok: false, error: "请完全重启应用后再查看改善提案" };
+  }
+  const res = await getDesktop().getRoomKernelImprove(roomId);
+  if (!res.ok) return { ok: false, error: res.error };
+  return {
+    ok: true,
+    state: {
+      autonomy: res.autonomy ?? 0,
+      proposals: res.proposals ?? [],
+      canRollback: res.canRollback ?? [],
+    },
+  };
+}
+
+export async function proposeRoomKernelImprove(
+  roomId: string,
+  packId: string,
+  modJs: string,
+  note?: string,
+): Promise<{ ok: boolean; decision?: string; status?: string; error?: string }> {
+  if (!hasDesktopApi("proposeRoomKernelImprove")) {
+    return { ok: false, error: "请完全重启应用后再提交改善提案" };
+  }
+  return getDesktop().proposeRoomKernelImprove(roomId, packId, modJs, note);
+}
+
+export async function applyRoomKernelProposal(
+  roomId: string,
+  proposalId: string,
+): Promise<{ ok: boolean; error?: string }> {
+  if (!hasDesktopApi("applyRoomKernelProposal")) {
+    return { ok: false, error: "请完全重启应用后再批准提案" };
+  }
+  return getDesktop().applyRoomKernelProposal(roomId, proposalId);
+}
+
+export async function rejectRoomKernelProposal(
+  roomId: string,
+  proposalId: string,
+): Promise<{ ok: boolean; error?: string }> {
+  if (!hasDesktopApi("rejectRoomKernelProposal")) {
+    return { ok: false, error: "请完全重启应用后再拒绝提案" };
+  }
+  return getDesktop().rejectRoomKernelProposal(roomId, proposalId);
+}
+
+export async function rollbackRoomKernelImprove(
+  roomId: string,
+  packId: string,
+): Promise<{ ok: boolean; error?: string }> {
+  if (!hasDesktopApi("rollbackRoomKernelImprove")) {
+    return { ok: false, error: "请完全重启应用后再回滚扩展" };
+  }
+  return getDesktop().rollbackRoomKernelImprove(roomId, packId);
+}
+
 export async function enableRoomKernelMod(
   roomId: string,
   packDir: string,
@@ -455,7 +594,16 @@ export async function endRoomMod(): Promise<{ ok: boolean; error?: string }> {
   const res = await getDesktop().endRoomMod(id);
   if (!res.ok) set({ lastError: res.error ?? "结束失败" });
   else modsByRoom.delete(id);
-  if (res.ok && state.activeRoomId === id) set({ mod: null });
+  if (res.ok && state.activeRoomId === id) {
+    const fresh = hasDesktopApi("getRoom")
+      ? await getDesktop().getRoom(id).catch(() => ({ room: null }))
+      : { room: null };
+    set({
+      mod: null,
+      lastError: null,
+      ...(fresh.room ? { activeRoom: fresh.room } : {}),
+    });
+  }
   return res;
 }
 

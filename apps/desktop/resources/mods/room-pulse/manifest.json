@@ -1,0 +1,10 @@
+{
+  "id": "room-pulse",
+  "name": "房间心跳",
+  "version": "1.0.0",
+  "hostApi": 2,
+  "inject": [],
+  "provides": [],
+  "permissions": ["schedule:room"],
+  "hooks": []
+}

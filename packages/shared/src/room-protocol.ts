@@ -123,6 +123,8 @@ export type RoomTimelineItem = {
   text: string;
   /** kind === "game": dice faces / rps hands (emoji string) */
   game?: { type: "dice" | "rps"; value: string };
+  /** Host kernel railway / system note. Guests render as a badge only. */
+  source?: "kernel";
 };
 
 export type RoomSnapshot = {
@@ -150,6 +152,7 @@ export type RoomSnapshot = {
       version: string;
       state: string;
       pendingReason?: string;
+      failedReason?: string;
     }>;
   };
 };

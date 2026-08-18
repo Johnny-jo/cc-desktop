@@ -1,0 +1,10 @@
+{
+  "id": "chat-glossary",
+  "name": "入站词表",
+  "version": "1.0.0",
+  "hostApi": 2,
+  "inject": ["memory"],
+  "provides": [],
+  "permissions": [],
+  "hooks": ["room.chat.in"]
+}

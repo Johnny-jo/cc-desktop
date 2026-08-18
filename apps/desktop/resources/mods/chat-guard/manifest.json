@@ -1,0 +1,10 @@
+{
+  "id": "chat-guard",
+  "name": "入站整理",
+  "version": "1.0.0",
+  "hostApi": 2,
+  "inject": [],
+  "provides": [],
+  "permissions": [],
+  "hooks": ["room.chat.in"]
+}

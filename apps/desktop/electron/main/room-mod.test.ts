@@ -14,6 +14,7 @@ import {
 import { RoomService, ROOM_MOD_BUNDLE_CHUNK } from "./room-service";
 import { loadModCache } from "./mod-package";
 import { parseKernelManifest } from "./mod-kernel";
+import { getKernelCacheDir } from "./runtime-paths";
 import { RoomArchive } from "./room-archive";
 import type { SessionManager } from "./session-manager";
 import type { SettingsStore } from "./settings-store";
@@ -542,6 +543,216 @@ describe("room mod handshake + play loop", () => {
     );
   });
 
+  it("keeps chat-glossary pending until shared-memory is on, then rewrites chat", async () => {
+    const { rooms } = makeRooms();
+    const { room } = await createHost(rooms, "glossary");
+    const listed = rooms.listMods().mods;
+    const gloss = listed.find((p) => p.id === "chat-glossary")!;
+    const mem = listed.find((p) => p.id === "shared-memory")!;
+    expect(gloss).toBeTruthy();
+    expect(rooms.enableKernelMod(room.roomId, gloss.packDir).ok).toBe(true);
+    expect(
+      rooms
+        .get(room.roomId)!
+        .kernel?.mods.some((m) => m.id === "chat-glossary" && m.state === "pending"),
+    ).toBe(true);
+    const seatId = room.seats[0]!.id;
+    await rooms.send(room.roomId, seatId, "hi");
+    await vi.waitFor(() => {
+      expect(
+        rooms.get(room.roomId)!.items.some((i) => i.kind === "user" && i.text === "hi"),
+      ).toBe(true);
+    });
+    expect(rooms.enableKernelMod(room.roomId, mem.packDir).ok).toBe(true);
+    expect(rooms.setKernelMemory(room.roomId, "hi", "你好").ok).toBe(true);
+    await rooms.send(room.roomId, seatId, "say hi");
+    await vi.waitFor(() => {
+      expect(
+        rooms.get(room.roomId)!.items.some((i) => i.kind === "user" && i.text === "say 你好"),
+      ).toBe(true);
+    });
+  });
+
+  it("rejects swapping play and kernel enable entry points", async () => {
+    const { rooms } = makeRooms();
+    const { room } = await createHost(rooms, "cross");
+    const listed = rooms.listMods().mods;
+    const mem = listed.find((p) => p.id === "shared-memory")!;
+    const wolf = listed.find((p) => p.id === "werewolf")!;
+    const asPlay = await rooms.enableMod(room.roomId, mem.packDir);
+    expect(asPlay.ok).toBe(false);
+    expect(asPlay.error).toMatch(/房间扩展/);
+    const asKernel = rooms.enableKernelMod(room.roomId, wolf.packDir);
+    expect(asKernel.ok).toBe(false);
+    expect(asKernel.error).toMatch(/玩法模组/);
+  });
+
+  it("caches kernel packs and guests see kernel projection without a checksum", async () => {
+    const { rooms, userDataDir } = makeRooms();
+    const { room, port } = await createHost(rooms, "konly");
+    const mem = rooms.listMods().mods.find((p) => p.id === "shared-memory")!;
+    expect(rooms.enableKernelMod(room.roomId, mem.packDir).ok).toBe(true);
+    const cached = fs.readdirSync(getKernelCacheDir(envFor(userDataDir)));
+    expect(cached.length).toBeGreaterThan(0);
+    expect(fs.existsSync(path.join(getKernelCacheDir(envFor(userDataDir)), cached[0]!, "mod.js"))).toBe(
+      true,
+    );
+
+    const guest = makeRooms();
+    const joined = await guest.rooms.join({ host: "127.0.0.1", port });
+    expect(joined.ok).toBe(true);
+    expect(joined.room?.modChecksum).toBeFalsy();
+    expect(
+      joined.room?.kernel?.mods.some((m) => m.id === "shared-memory" && m.state === "active"),
+    ).toBe(true);
+  });
+
+  it("attaches improve MCP extras when a kernel pack is on, and removes them on unload", async () => {
+    const { rooms, sessions } = makeRooms();
+    const { room } = await createHost(rooms, "improve-mcp");
+    const pulse = rooms.listMods().mods.find((p) => p.id === "room-pulse")!;
+    expect(rooms.enableKernelMod(room.roomId, pulse.packDir).ok).toBe(true);
+    rooms.addSeat(room.roomId, "agent", "ImpBot");
+    const agent = rooms.get(room.roomId)!.seats.find((s) => s.kind === "agent")!;
+    await rooms.send(room.roomId, agent.id, "can you improve?");
+    await vi.waitFor(() => {
+      expect(sessions.start).toHaveBeenCalled();
+    });
+    const extras = sessions.start.mock.calls[0]![2] as {
+      extraMcpServers?: Record<string, unknown>;
+      extraAllowedTools?: string[];
+    };
+    expect(extras.extraMcpServers?.["mod-improve"]).toBeTruthy();
+    expect(extras.extraAllowedTools).toEqual(
+      expect.arrayContaining(["kernel_propose", "mcp__mod-improve__kernel_propose"]),
+    );
+    expect(extras.extraMcpServers?.["mod-memory"]).toBeUndefined();
+    expect(rooms.disableKernelMod(room.roomId, "room-pulse").ok).toBe(true);
+    const leftover = sessions.syncExtras.mock.calls.at(-1)![1] as {
+      extraMcpServers?: Record<string, unknown>;
+    };
+    expect(leftover.extraMcpServers?.["mod-improve"]).toBeUndefined();
+  });
+
+  it("attaches memory MCP extras when an agent seat is spoken to", async () => {
+    const { rooms, sessions } = makeRooms();
+    const { room } = await createHost(rooms, "kmem-agent");
+    const mem = rooms.listMods().mods.find((p) => p.id === "shared-memory")!;
+    expect(rooms.enableKernelMod(room.roomId, mem.packDir).ok).toBe(true);
+    rooms.addSeat(room.roomId, "agent", "MemBot");
+    const agent = rooms.get(room.roomId)!.seats.find((s) => s.kind === "agent")!;
+    await rooms.send(room.roomId, agent.id, "remember foo=bar");
+    await vi.waitFor(() => {
+      expect(sessions.start).toHaveBeenCalled();
+    });
+    const extras = sessions.start.mock.calls[0]![2] as {
+      extraMcpServers?: Record<string, unknown>;
+      extraAllowedTools?: string[];
+      replaceExtras?: boolean;
+    };
+    expect(extras.replaceExtras).toBe(true);
+    expect(extras.extraMcpServers?.["mod-memory"]).toBeTruthy();
+    expect(extras.extraMcpServers?.["mod-improve"]).toBeTruthy();
+    expect(extras.extraAllowedTools).toEqual(
+      expect.arrayContaining(["memory_set", "mcp__mod-memory__memory_set", "kernel_propose"]),
+    );
+  });
+
+  it("lets the host list, write, and delete shared-memory entries", () => {
+    const { rooms } = makeRooms();
+    return createHost(rooms, "kmem-kv").then(async ({ room }) => {
+      const mem = rooms.listMods().mods.find((p) => p.id === "shared-memory")!;
+      expect(rooms.enableKernelMod(room.roomId, mem.packDir).ok).toBe(true);
+      expect(rooms.setKernelMemory(room.roomId, "topic", "airport").ok).toBe(true);
+      const listed = rooms.listKernelMemory(room.roomId);
+      expect(listed.ok).toBe(true);
+      expect(listed.entries).toEqual([{ key: "topic", value: "airport" }]);
+      expect(rooms.deleteKernelMemory(room.roomId, "topic").ok).toBe(true);
+      expect(rooms.listKernelMemory(room.roomId).entries).toEqual([]);
+    });
+  });
+
+  it("disables a kernel pack and syncs extras off live agent seats", async () => {
+    const { rooms, sessions } = makeRooms();
+    const { room } = await createHost(rooms, "kmem-off");
+    const mem = rooms.listMods().mods.find((p) => p.id === "shared-memory")!;
+    expect(rooms.enableKernelMod(room.roomId, mem.packDir).ok).toBe(true);
+    rooms.addSeat(room.roomId, "agent", "MemBot");
+    const agent = rooms.get(room.roomId)!.seats.find((s) => s.kind === "agent")!;
+    await rooms.send(room.roomId, agent.id, "hi");
+    await vi.waitFor(() => {
+      expect(sessions.start).toHaveBeenCalled();
+    });
+    const off = rooms.disableKernelMod(room.roomId, "shared-memory");
+    expect(off.ok).toBe(true);
+    const snap = rooms.get(room.roomId)!;
+    expect(
+      snap.kernel?.mods.some((m) => m.id === "shared-memory" && m.state === "active") ?? false,
+    ).toBe(false);
+    expect(sessions.syncExtras).toHaveBeenCalled();
+    const leftover = sessions.syncExtras.mock.calls[0]![1] as {
+      extraMcpServers?: Record<string, unknown>;
+    };
+    expect(leftover.extraMcpServers?.["mod-memory"]).toBeUndefined();
+  });
+
+  it("ticks schedule jobs without writing pulse text to the timeline", async () => {
+    const { rooms } = makeRooms();
+    const { room } = await createHost(rooms, "pulse");
+    const pulse = rooms.listMods().mods.find((p) => p.id === "room-pulse")!;
+    expect(pulse).toBeTruthy();
+    expect(rooms.enableKernelMod(room.roomId, pulse.packDir).ok).toBe(true);
+    const before = rooms.get(room.roomId)!.items.length;
+    const ticked = await rooms.tickKernelSchedule(room.roomId);
+    expect(ticked.ok).toBe(true);
+    const snap = rooms.get(room.roomId)!;
+    expect(snap.items.length).toBe(before);
+    expect(snap.items.some((i) => i.text === "房间心跳")).toBe(false);
+    expect(snap.kernel?.mods.some((m) => m.id === "room-pulse" && m.state === "active")).toBe(
+      true,
+    );
+    expect(rooms.disableKernelMod(room.roomId, "room-pulse").ok).toBe(true);
+    const after = rooms.get(room.roomId)!.items.length;
+    await rooms.tickKernelSchedule(room.roomId);
+    expect(rooms.get(room.roomId)!.items.length).toBe(after);
+  });
+
+  it("skips a hook pack after it hits budget.hookPerMin", async () => {
+    const { rooms } = makeRooms();
+    const { room } = await createHost(rooms, "budget");
+    const started = rooms.startKernel(room.roomId, [
+      {
+        manifest: parseKernelManifest({
+          id: "once",
+          version: "1.0.0",
+          hostApi: 2,
+          hooks: ["room.chat.in"],
+          budget: { hookPerMin: 1 },
+        }),
+        activate: (ctx) => {
+          ctx.hooks.on("room.chat.in", (env) => ({
+            action: "replace",
+            value: { ...env, text: "once" },
+          }));
+        },
+      },
+    ]);
+    expect(started.ok).toBe(true);
+    const seatId = room.seats[0]!.id;
+    await rooms.send(room.roomId, seatId, "first");
+    await vi.waitFor(() => {
+      expect(
+        rooms.get(room.roomId)!.items.some((i) => i.kind === "user" && i.text === "once"),
+      ).toBe(true);
+    });
+    await rooms.send(room.roomId, seatId, "second");
+    await vi.waitFor(() => {
+      expect(
+        rooms.get(room.roomId)!.items.some((i) => i.kind === "user" && i.text === "second"),
+      ).toBe(true);
+    });
+  });
+
   it("rewrites and drops inbound chat through kernel railway", async () => {
     const { rooms } = makeRooms();
     const { room } = await createHost(rooms, "hook");
@@ -577,6 +788,137 @@ describe("room mod handshake + play loop", () => {
         false,
       );
       expect(items.some((i) => i.text.includes("消息被模组丢弃"))).toBe(true);
+      expect(items.some((i) => i.source === "kernel")).toBe(true);
     });
+  });
+
+  const HOOK_V1 = `
+    export function activate(ctx) {
+      ctx.hooks.on("room.chat.in", function (env) {
+        return { action: "replace", value: Object.assign({}, env, { text: "v1" }) };
+      });
+    }
+  `;
+  const HOOK_V2 = HOOK_V1.replace("v1", "v2");
+
+  function writeKernelHook(dir: string, id: string, modJs: string): string {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, "manifest.json"),
+      JSON.stringify({
+        id,
+        name: id,
+        version: "1.0.0",
+        hostApi: 2,
+        inject: [],
+        provides: [],
+        permissions: [],
+        hooks: ["room.chat.in"],
+      }),
+      "utf8",
+    );
+    fs.writeFileSync(path.join(dir, "mod.js"), modJs, "utf8");
+    return dir;
+  }
+
+  it("parks L0 proposals until the host applies them", async () => {
+    const { rooms } = makeRooms();
+    const { room } = await createHost(rooms, "improve-l0");
+    const dir = writeKernelHook(path.join(tmp(), "hook"), "rewriter", HOOK_V1);
+    expect(rooms.enableKernelMod(room.roomId, dir).ok).toBe(true);
+    expect(rooms.setKernelAutonomy(room.roomId, 0).ok).toBe(true);
+    const parked = rooms.proposeKernelImprove(room.roomId, "rewriter", HOOK_V2, "try v2");
+    expect(parked.ok).toBe(true);
+    expect(parked.decision).toBe("pending");
+    const seatId = room.seats[0]!.id;
+    await rooms.send(room.roomId, seatId, "hello");
+    await vi.waitFor(() => {
+      expect(rooms.get(room.roomId)!.items.some((i) => i.text === "v1")).toBe(true);
+    });
+    const pending = rooms.getKernelImprove(room.roomId).proposals?.find((p) => p.status === "pending");
+    expect(pending).toBeTruthy();
+    expect(rooms.applyKernelProposal(room.roomId, pending!.id).ok).toBe(true);
+    await rooms.send(room.roomId, seatId, "hello2");
+    await vi.waitFor(() => {
+      expect(rooms.get(room.roomId)!.items.some((i) => i.text === "v2")).toBe(true);
+    });
+  });
+
+  it("auto-applies L1 same-boundary source and rolls back", async () => {
+    const { rooms } = makeRooms();
+    const { room } = await createHost(rooms, "improve-l1");
+    const dir = writeKernelHook(path.join(tmp(), "hook"), "rewriter", HOOK_V1);
+    expect(rooms.enableKernelMod(room.roomId, dir).ok).toBe(true);
+    expect(rooms.setKernelAutonomy(room.roomId, 1).ok).toBe(true);
+    const applied = rooms.proposeKernelImprove(room.roomId, "rewriter", HOOK_V2);
+    expect(applied.ok).toBe(true);
+    expect(applied.status).toBe("applied");
+    const seatId = room.seats[0]!.id;
+    await rooms.send(room.roomId, seatId, "hello");
+    await vi.waitFor(() => {
+      expect(rooms.get(room.roomId)!.items.some((i) => i.text === "v2")).toBe(true);
+    });
+    expect(rooms.getKernelImprove(room.roomId).canRollback).toContain("rewriter");
+    expect(rooms.rollbackKernelImprove(room.roomId, "rewriter").ok).toBe(true);
+    await rooms.send(room.roomId, seatId, "again");
+    await vi.waitFor(() => {
+      expect(rooms.get(room.roomId)!.items.some((i) => i.text === "v1")).toBe(true);
+    });
+  });
+
+  it("rejects forbidden source and missing provide, and keeps memory working", async () => {
+    const { rooms } = makeRooms();
+    const { room } = await createHost(rooms, "improve-bound");
+    const mem = rooms.listMods().mods.find((p) => p.id === "shared-memory")!;
+    expect(rooms.enableKernelMod(room.roomId, mem.packDir).ok).toBe(true);
+    expect(rooms.setKernelAutonomy(room.roomId, 1).ok).toBe(true);
+    const bad = rooms.proposeKernelImprove(
+      room.roomId,
+      "shared-memory",
+      "import fs from 'node:fs'; export function activate() {}",
+    );
+    expect(bad.ok).toBe(false);
+    const missing = rooms.proposeKernelImprove(
+      room.roomId,
+      "shared-memory",
+      "export function activate(ctx) {}",
+    );
+    expect(missing.ok).toBe(false);
+    expect(missing.decision).toBe("reject");
+    expect(rooms.setKernelMemory(room.roomId, "k", "v").ok).toBe(true);
+  });
+
+  it("reloads the applied improve source after disable and re-enable", async () => {
+    const { rooms } = makeRooms();
+    const { room } = await createHost(rooms, "improve-persist");
+    const dir = writeKernelHook(path.join(tmp(), "hook"), "rewriter", HOOK_V1);
+    expect(rooms.enableKernelMod(room.roomId, dir).ok).toBe(true);
+    expect(rooms.setKernelAutonomy(room.roomId, 1).ok).toBe(true);
+    expect(rooms.proposeKernelImprove(room.roomId, "rewriter", HOOK_V2).status).toBe("applied");
+    expect(rooms.disableKernelMod(room.roomId, "rewriter").ok).toBe(true);
+    expect(rooms.enableKernelMod(room.roomId, dir).ok).toBe(true);
+    const seatId = room.seats[0]!.id;
+    await rooms.send(room.roomId, seatId, "hello");
+    await vi.waitFor(() => {
+      expect(rooms.get(room.roomId)!.items.some((i) => i.text === "v2")).toBe(true);
+    });
+  });
+
+  it("re-enables the rolled-back source after disable", async () => {
+    const { rooms } = makeRooms();
+    const { room } = await createHost(rooms, "improve-persist-rb");
+    const dir = writeKernelHook(path.join(tmp(), "hook"), "rewriter", HOOK_V1);
+    expect(rooms.enableKernelMod(room.roomId, dir).ok).toBe(true);
+    expect(rooms.setKernelAutonomy(room.roomId, 1).ok).toBe(true);
+    expect(rooms.proposeKernelImprove(room.roomId, "rewriter", HOOK_V2).status).toBe("applied");
+    expect(rooms.rollbackKernelImprove(room.roomId, "rewriter").ok).toBe(true);
+    expect(rooms.disableKernelMod(room.roomId, "rewriter").ok).toBe(true);
+    expect(rooms.enableKernelMod(room.roomId, dir).ok).toBe(true);
+    const seatId = room.seats[0]!.id;
+    await rooms.send(room.roomId, seatId, "hello");
+    await vi.waitFor(() => {
+      expect(rooms.get(room.roomId)!.items.some((i) => i.text === "v1")).toBe(true);
+    });
+    expect(rooms.get(room.roomId)!.items.some((i) => i.text === "v2")).toBe(false);
   });
 });

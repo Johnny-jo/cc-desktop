@@ -512,6 +512,77 @@ const desktop = {
       room?: import("@claude-desktop/shared").RoomSnapshot;
       error?: string;
     }>,
+  disableRoomKernelMod: (roomId: string, id: string) =>
+    ipcRenderer.invoke(IPC.roomDisableKernelMod, { roomId, id }) as Promise<{
+      ok: boolean;
+      room?: import("@claude-desktop/shared").RoomSnapshot;
+      error?: string;
+    }>,
+  listRoomKernelMemory: (roomId: string) =>
+    ipcRenderer.invoke(IPC.roomListKernelMemory, { roomId }) as Promise<{
+      ok: boolean;
+      entries?: Array<{ key: string; value: string }>;
+      error?: string;
+    }>,
+  setRoomKernelMemory: (roomId: string, key: string, value: string) =>
+    ipcRenderer.invoke(IPC.roomSetKernelMemory, { roomId, key, value }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+  deleteRoomKernelMemory: (roomId: string, key: string) =>
+    ipcRenderer.invoke(IPC.roomDeleteKernelMemory, { roomId, key }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+  setRoomKernelAutonomy: (roomId: string, level: 0 | 1 | 2) =>
+    ipcRenderer.invoke(IPC.roomSetKernelAutonomy, { roomId, level }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+  getRoomKernelImprove: (roomId: string) =>
+    ipcRenderer.invoke(IPC.roomGetKernelImprove, { roomId }) as Promise<{
+      ok: boolean;
+      autonomy?: 0 | 1 | 2;
+      proposals?: Array<{
+        id: string;
+        packId: string;
+        modJs: string;
+        at: number;
+        note?: string;
+        status: "pending" | "applied" | "rejected" | "failed";
+        decision: "pending" | "apply" | "reject";
+        error?: string;
+      }>;
+      canRollback?: string[];
+      error?: string;
+    }>,
+  proposeRoomKernelImprove: (roomId: string, packId: string, modJs: string, note?: string) =>
+    ipcRenderer.invoke(IPC.roomProposeKernelImprove, {
+      roomId,
+      packId,
+      modJs,
+      note,
+    }) as Promise<{
+      ok: boolean;
+      decision?: string;
+      status?: string;
+      error?: string;
+    }>,
+  applyRoomKernelProposal: (roomId: string, proposalId: string) =>
+    ipcRenderer.invoke(IPC.roomApplyKernelProposal, { roomId, proposalId }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+  rejectRoomKernelProposal: (roomId: string, proposalId: string) =>
+    ipcRenderer.invoke(IPC.roomRejectKernelProposal, { roomId, proposalId }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+  rollbackRoomKernelImprove: (roomId: string, packId: string) =>
+    ipcRenderer.invoke(IPC.roomRollbackKernelImprove, { roomId, packId }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
   hasRoomMod: (checksum: string) =>
     ipcRenderer.invoke(IPC.roomHasMod, { checksum }) as Promise<{
       ok: boolean;

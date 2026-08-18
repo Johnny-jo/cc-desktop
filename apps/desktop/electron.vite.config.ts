@@ -25,6 +25,13 @@ export default defineConfig({
   },
   renderer: {
     root: ".",
+    server: {
+      // Windows Hyper-V/WSL/NAT often reserves 5141–5240; Vite's 5173 sits in that
+      // range and bind fails with EACCES on ::1. Force IPv4 + a free port.
+      host: "127.0.0.1",
+      port: 5273,
+      strictPort: false,
+    },
     build: {
       outDir: "out/renderer",
       rollupOptions: {

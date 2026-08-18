@@ -48,6 +48,9 @@ describe("kernel package loader", () => {
     };
     const list = listKernelPacks(env);
     expect(list.some((p) => p.id === "shared-memory")).toBe(true);
+    expect(list.some((p) => p.id === "chat-guard")).toBe(true);
+    expect(list.some((p) => p.id === "chat-glossary")).toBe(true);
+    expect(list.some((p) => p.id === "room-pulse")).toBe(true);
     expect(list.some((p) => p.id === "werewolf")).toBe(false);
   });
 });

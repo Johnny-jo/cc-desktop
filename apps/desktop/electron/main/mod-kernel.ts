@@ -1,12 +1,58 @@
 import vm from "node:vm";
+import * as acorn from "acorn";
 import { MOD_KERNEL_API } from "@claude-desktop/shared";
 
 export { MOD_KERNEL_API };
 
 export const KERNEL_HOOK_CHAT_IN = "room.chat.in" as const;
+
+export function kernelLog(
+  event: string,
+  extra?: Record<string, unknown>,
+): void {
+  if (extra) console.info("[mod-kernel]", event, extra);
+  else console.info("[mod-kernel]", event);
+}
+
+/** Host-side inject stubs. Authors never receive the providing pack's closures. */
+export function hostInjectStub(name: string, storage?: RoomKv): unknown {
+  if (name === "memory" && storage) {
+    const ns = storage.namespace("memory");
+    return {
+      get: (key: unknown) => ns.get(String(key ?? "")),
+      set: (key: unknown, value: unknown) =>
+        ns.set(String(key ?? ""), String(value ?? "")),
+      list: (prefix?: unknown) =>
+        ns.list(prefix == null || prefix === "" ? undefined : String(prefix)),
+      search: (query: unknown) => ns.search(String(query ?? "")),
+    };
+  }
+  return { provided: true };
+}
 export const KERNEL_PERM_STORAGE_ROOM = "storage:room" as const;
+export const KERNEL_PERM_SCHEDULE_ROOM = "schedule:room" as const;
+export const KERNEL_SCHEDULE_MIN_MS = 1000;
+export const KERNEL_SCHEDULE_MAX_JOBS = 4;
+export const KERNEL_SCHEDULE_TICK_MS = 200;
 
 export type KernelModState = "pending" | "active" | "failed" | "disposed";
+
+export type KernelBudget = {
+  hookPerMin: number;
+  schedulePerMin: number;
+};
+
+export const KERNEL_BUDGET_DEFAULT: KernelBudget = {
+  hookPerMin: 120,
+  schedulePerMin: 20,
+};
+
+export const KERNEL_ROOM_BUDGET: KernelBudget = {
+  hookPerMin: 300,
+  schedulePerMin: 40,
+};
+
+export const KERNEL_BUDGET_WINDOW_MS = 60_000;
 
 export type KernelManifest = {
   id: string;
@@ -17,6 +63,7 @@ export type KernelManifest = {
   provides: string[];
   permissions: string[];
   hooks: string[];
+  budget: KernelBudget;
 };
 
 export type KernelInstance = {
@@ -74,6 +121,68 @@ export type ChatInHandler = (
 
 export const CHAT_IN_HOOK_TIMEOUT_MS = 50;
 
+export type KernelScheduleTick = {
+  text?: string;
+  toAgent?: boolean;
+};
+
+export type KernelScheduleJob = {
+  packId?: string;
+  budget?: KernelBudget;
+  ms: number;
+  run: () => KernelScheduleTick | void | Promise<KernelScheduleTick | void>;
+};
+
+export class KernelBudgetGate {
+  private windowStart: number | null = null;
+  private hookByPack = new Map<string, number>();
+  private schedByPack = new Map<string, number>();
+  private roomHook = 0;
+  private roomSched = 0;
+
+  constructor(
+    private readonly windowMs = KERNEL_BUDGET_WINDOW_MS,
+    private readonly room = KERNEL_ROOM_BUDGET,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  allowHook(packId: string, packLimit: number): boolean {
+    return this.allow("hook", packId, packLimit, this.room.hookPerMin);
+  }
+
+  allowSchedule(packId: string, packLimit: number): boolean {
+    return this.allow("schedule", packId, packLimit, this.room.schedulePerMin);
+  }
+
+  private allow(
+    kind: "hook" | "schedule",
+    packId: string,
+    packLimit: number,
+    roomLimit: number,
+  ): boolean {
+    this.roll();
+    const packMap = kind === "hook" ? this.hookByPack : this.schedByPack;
+    const packUsed = packMap.get(packId) ?? 0;
+    const roomUsed = kind === "hook" ? this.roomHook : this.roomSched;
+    if (packUsed >= packLimit || roomUsed >= roomLimit) return false;
+    packMap.set(packId, packUsed + 1);
+    if (kind === "hook") this.roomHook += 1;
+    else this.roomSched += 1;
+    return true;
+  }
+
+  private roll(): void {
+    const t = this.now();
+    if (this.windowStart === null || t - this.windowStart >= this.windowMs) {
+      this.windowStart = t;
+      this.hookByPack.clear();
+      this.schedByPack.clear();
+      this.roomHook = 0;
+      this.roomSched = 0;
+    }
+  }
+}
+
 export type KernelCtx = {
   readonly room: KernelRoomView;
   log: (level: "info" | "warn" | "error", msg: string, extra?: unknown) => void;
@@ -86,6 +195,12 @@ export type KernelCtx = {
     on: (name: typeof KERNEL_HOOK_CHAT_IN, handler: ChatInHandler) => void;
   };
   storage?: RoomKv;
+  schedule?: {
+    every: (
+      ms: number,
+      run: KernelScheduleJob["run"],
+    ) => void;
+  };
 };
 
 export type KernelProvideReg = { name: string; methods: string[] };
@@ -95,6 +210,7 @@ export type CreateModCtxResult = {
   disposers: Array<() => void | Promise<void>>;
   provides: KernelProvideReg[];
   hooks: Array<{ name: typeof KERNEL_HOOK_CHAT_IN; handler: ChatInHandler }>;
+  schedules: KernelScheduleJob[];
   seal: () => void;
 };
 
@@ -106,7 +222,10 @@ const BUILTIN_KEYS = new Set([
   "hooks",
 ]);
 
-const ALLOWED_PERMS = new Set<string>([KERNEL_PERM_STORAGE_ROOM]);
+const ALLOWED_PERMS = new Set<string>([
+  KERNEL_PERM_STORAGE_ROOM,
+  KERNEL_PERM_SCHEDULE_ROOM,
+]);
 const ALLOWED_HOOKS = new Set<string>([KERNEL_HOOK_CHAT_IN]);
 
 function isNonEmptyString(v: unknown): v is string {
@@ -135,6 +254,7 @@ export function parseKernelManifest(raw: unknown): KernelManifest {
   const provides = asStringList(o.provides, "provides");
   const permissions = asStringList(o.permissions, "permissions");
   const hooks = asStringList(o.hooks, "hooks");
+  const budget = parseBudget(o.budget);
   for (const p of permissions) {
     if (!ALLOWED_PERMS.has(p)) {
       throw new Error(`unknown permission: ${p}`);
@@ -156,20 +276,94 @@ export function parseKernelManifest(raw: unknown): KernelManifest {
     provides,
     permissions,
     hooks,
+    budget,
   };
 }
 
-const KERNEL_FORBIDDEN: { re: RegExp; message: string }[] = [
-  { re: /\brequire\s*\(/, message: "require is forbidden" },
-  { re: /\bimport\s*\(/, message: "dynamic import is forbidden" },
-  { re: /\bfrom\s+['"]/, message: "module import is forbidden" },
-  { re: /\bimport\s+['"]/, message: "module import is forbidden" },
-];
+function parseBudget(raw: unknown): KernelBudget {
+  if (raw === undefined) return { ...KERNEL_BUDGET_DEFAULT };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("budget must be an object");
+  }
+  const o = raw as Record<string, unknown>;
+  return {
+    hookPerMin: parseBudgetInt(o.hookPerMin, KERNEL_BUDGET_DEFAULT.hookPerMin, "budget.hookPerMin"),
+    schedulePerMin: parseBudgetInt(
+      o.schedulePerMin,
+      KERNEL_BUDGET_DEFAULT.schedulePerMin,
+      "budget.schedulePerMin",
+    ),
+  };
+}
+
+function parseBudgetInt(v: unknown, fallback: number, field: string): number {
+  if (v === undefined) return fallback;
+  if (typeof v !== "number" || !Number.isInteger(v) || v < 1 || v > 10_000) {
+    throw new Error(`${field} invalid`);
+  }
+  return v;
+}
+
+const FORBIDDEN_ID_MSG: Record<string, string> = {
+  Function: "Function constructor is forbidden",
+  setTimeout: "setTimeout is forbidden; use ctx.schedule",
+  setInterval: "setInterval is forbidden; use ctx.schedule",
+  require: "require is forbidden",
+  process: "process is forbidden",
+  eval: "eval is forbidden",
+};
+
+function walkAst(node: unknown, visit: (n: Record<string, unknown>) => void): void {
+  if (!node || typeof node !== "object") return;
+  const n = node as Record<string, unknown>;
+  if (typeof n.type === "string") visit(n);
+  for (const v of Object.values(n)) {
+    if (Array.isArray(v)) {
+      for (const item of v) walkAst(item, visit);
+    } else {
+      walkAst(v, visit);
+    }
+  }
+}
 
 export function scanKernelForbiddenApis(source: string): void {
-  for (const rule of KERNEL_FORBIDDEN) {
-    if (rule.re.test(source)) throw new Error(rule.message);
+  let ast: unknown;
+  try {
+    ast = acorn.parse(source, {
+      ecmaVersion: "latest",
+      sourceType: "module",
+      allowAwaitOutsideFunction: true,
+      allowReturnOutsideFunction: true,
+    });
+  } catch {
+    throw new Error("mod.js is not valid JavaScript");
   }
+  walkAst(ast, (node) => {
+    const type = String(node.type ?? "");
+    if (type === "ImportExpression") {
+      throw new Error("dynamic import is forbidden");
+    }
+    if (type === "ImportDeclaration") {
+      throw new Error("module import is forbidden");
+    }
+    if (
+      (type === "ExportAllDeclaration" || type === "ExportNamedDeclaration") &&
+      node.source
+    ) {
+      throw new Error("module import is forbidden");
+    }
+    if (type === "Identifier") {
+      const msg = FORBIDDEN_ID_MSG[String(node.name ?? "")];
+      if (msg) throw new Error(msg);
+    }
+    if (type === "MemberExpression" && node.computed) {
+      const prop = node.property as { type?: string; value?: unknown } | undefined;
+      if (prop?.type === "Literal" && typeof prop.value === "string") {
+        const msg = FORBIDDEN_ID_MSG[prop.value];
+        if (msg) throw new Error(msg);
+      }
+    }
+  });
 }
 
 export function compileKernelActivate(source: string): (ctx: KernelCtx) => void {
@@ -221,6 +415,12 @@ export function compileKernelActivate(source: string): (ctx: KernelCtx) => void 
     console,
     exports: exportsObj,
     module: moduleObj,
+    Function: undefined,
+    eval: undefined,
+    setTimeout: undefined,
+    setInterval: undefined,
+    process: undefined,
+    require: undefined,
   };
   sandbox.globalThis = sandbox;
   sandbox.global = sandbox;
@@ -235,7 +435,11 @@ else if (module.exports && typeof module.exports.activate === "function") {
 }
 })(exports, module);`;
   try {
-    vm.runInNewContext(wrapped, sandbox, { timeout: 1000, displayErrors: true });
+    vm.runInNewContext(wrapped, sandbox, {
+      timeout: 1000,
+      displayErrors: true,
+      contextCodeGeneration: { strings: false, wasm: false },
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(`mod.js failed to load: ${msg}`);
@@ -248,17 +452,31 @@ else if (module.exports && typeof module.exports.activate === "function") {
 function instanceOf(
   m: KernelManifest,
   state: KernelModState,
-  extra?: Pick<KernelInstance, "pendingReason" | "failedReason">,
+  extra?: Pick<KernelInstance, "pendingReason" | "failedReason"> & { id?: string },
 ): KernelInstance {
+  const { id: overrideId, ...rest } = extra ?? {};
   return {
-    id: m.id,
+    id: overrideId ?? m.id,
     version: m.version,
     state,
     provides: [...m.provides],
     inject: [...m.inject],
     hooks: [...m.hooks],
-    ...extra,
+    ...rest,
   };
+}
+
+function sameNameSet(a: string[], b: string[]): boolean {
+  const left = [...a].sort();
+  const right = [...b].sort();
+  return left.length === right.length && left.every((x, i) => x === right[i]);
+}
+
+function assertDeclaredProvides(manifest: KernelManifest, got: string[]): void {
+  if (sameNameSet(manifest.provides, got)) return;
+  throw new Error(
+    `provides mismatch: declared [${manifest.provides.join(", ")}] got [${got.join(", ")}]`,
+  );
 }
 
 /**
@@ -279,9 +497,15 @@ export function planKernelGraph(manifests: KernelManifest[]): {
         failed.set(m.id, instanceOf(prev, "failed", { failedReason: "duplicate id" }));
         byId.delete(m.id);
       }
+      let alias = `${m.id}#dup`;
+      let n = 1;
+      while (failed.has(alias)) {
+        n += 1;
+        alias = `${m.id}#dup${n}`;
+      }
       failed.set(
-        `${m.id}#dup`,
-        instanceOf(m, "failed", { failedReason: "duplicate id" }),
+        alias,
+        instanceOf(m, "failed", { failedReason: "duplicate id", id: alias }),
       );
       continue;
     }
@@ -392,13 +616,16 @@ export function createModCtx(opts: {
   const disposers: Array<() => void | Promise<void>> = [];
   const provides: KernelProvideReg[] = [];
   const hooks: CreateModCtxResult["hooks"] = [];
+  const schedules: KernelScheduleJob[] = [];
   let sealed = false;
   const allowStorage = manifest.permissions.includes(KERNEL_PERM_STORAGE_ROOM);
+  const allowSchedule = manifest.permissions.includes(KERNEL_PERM_SCHEDULE_ROOM);
 
   const declared = new Set<string>([
     ...BUILTIN_KEYS,
     ...manifest.inject,
     ...(allowStorage ? ["storage"] : []),
+    ...(allowSchedule ? ["schedule"] : []),
   ]);
 
   const provide: KernelCtx["provide"] = (name, api) => {
@@ -426,6 +653,22 @@ export function createModCtx(opts: {
     },
   };
 
+  const scheduleApi: NonNullable<KernelCtx["schedule"]> = {
+    every: (ms, run) => {
+      if (sealed) throw new Error("schedule.every() after activate");
+      if (typeof run !== "function") throw new Error("schedule.every requires a function");
+      const n = Number(ms);
+      if (!Number.isFinite(n) || n <= 0) throw new Error("schedule interval invalid");
+      if (schedules.length >= KERNEL_SCHEDULE_MAX_JOBS) {
+        throw new Error("schedule job limit");
+      }
+      schedules.push({
+        ms: Math.max(Math.floor(n), KERNEL_SCHEDULE_MIN_MS),
+        run,
+      });
+    },
+  };
+
   const target: KernelCtx = {
     room: opts.room,
     log: opts.log ?? (() => undefined),
@@ -435,6 +678,7 @@ export function createModCtx(opts: {
     provide,
     hooks: hooksApi,
     ...(allowStorage && opts.storage ? { storage: opts.storage } : {}),
+    ...(allowSchedule ? { schedule: scheduleApi } : {}),
   };
 
   const ctx = new Proxy(target, {
@@ -448,6 +692,10 @@ export function createModCtx(opts: {
         const v = t.storage ?? bag.storage;
         if (v === undefined) throw new Error("ctx.storage is not provided");
         return v;
+      }
+      if (prop === "schedule") {
+        if (!allowSchedule) throw new Error("undeclared ctx.schedule");
+        return t.schedule;
       }
       if (BUILTIN_KEYS.has(prop)) return Reflect.get(t, prop, recv);
       if (manifest.inject.includes(prop)) {
@@ -485,6 +733,7 @@ export function createModCtx(opts: {
     disposers,
     provides,
     hooks,
+    schedules,
     seal: () => {
       sealed = true;
     },
@@ -531,7 +780,9 @@ export function runKernelActivate(
       continue;
     }
     const bag: Record<string, unknown> = {};
-    for (const name of pack.manifest.inject) bag[name] = { provided: true };
+    for (const name of pack.manifest.inject) {
+      bag[name] = hostInjectStub(name, storage);
+    }
     const session = createModCtx({
       manifest: pack.manifest,
       room,
@@ -541,6 +792,8 @@ export function runKernelActivate(
     try {
       pack.activate(session.ctx);
       session.seal();
+      const liveNames = session.provides.map((reg) => reg.name);
+      assertDeclaredProvides(pack.manifest, liveNames);
       for (const reg of session.provides) {
         liveProvides.push(reg);
         providedNames.add(reg.name);
@@ -549,7 +802,7 @@ export function runKernelActivate(
         id: pack.manifest.id,
         version: pack.manifest.version,
         state: "active",
-        provides: [...pack.manifest.provides],
+        provides: liveNames,
         inject: [...pack.manifest.inject],
         hooks: [...pack.manifest.hooks],
       });
@@ -618,10 +871,21 @@ type LivePack = {
 export class ModKernel {
   private graph: KernelGraph = { active: [], pending: [], failed: [] };
   private live: LivePack[] = [];
-  private chatInHandlers: ChatInHandler[] = [];
+  private chatInHandlers: Array<{
+    packId: string;
+    handler: ChatInHandler;
+    budget: KernelBudget;
+  }> = [];
+  private scheduleJobs: KernelScheduleJob[] = [];
   private disposed = false;
+  readonly budget: KernelBudgetGate;
 
-  constructor(private readonly storage?: RoomKv) {}
+  constructor(
+    private readonly storage?: RoomKv,
+    opts?: { budget?: KernelBudgetGate },
+  ) {
+    this.budget = opts?.budget ?? new KernelBudgetGate();
+  }
 
   snapshot(): KernelGraph {
     return {
@@ -631,8 +895,21 @@ export class ModKernel {
     };
   }
 
+  listScheduleJobs(): KernelScheduleJob[] {
+    return [...this.scheduleJobs];
+  }
+
+  consumeSchedule(packId: string, limit: number): boolean {
+    const ok = this.budget.allowSchedule(packId, limit);
+    if (!ok) kernelLog("budget", { packId, kind: "schedule", action: "skip" });
+    return ok;
+  }
+
   start(packs: KernelActivatePack[], room: KernelRoomView): KernelGraph {
     if (this.disposed) throw new Error("kernel disposed");
+    this.chatInHandlers = [];
+    this.scheduleJobs = [];
+    this.live = [];
     const manifests = packs.map((p) => p.manifest);
     const byId = new Map(packs.map((p) => [p.manifest.id, p]));
     const planned = planKernelGraph(manifests);
@@ -658,7 +935,9 @@ export class ModKernel {
         continue;
       }
       const bag: Record<string, unknown> = {};
-      for (const name of pack.manifest.inject) bag[name] = { provided: true };
+      for (const name of pack.manifest.inject) {
+        bag[name] = hostInjectStub(name, this.storage);
+      }
       const session = createModCtx({
         manifest: pack.manifest,
         room,
@@ -668,34 +947,55 @@ export class ModKernel {
       try {
         pack.activate(session.ctx);
         session.seal();
-        for (const reg of session.provides) providedNames.add(reg.name);
-        for (const h of session.hooks) this.chatInHandlers.push(h.handler);
+        const liveProvides = session.provides.map((reg) => reg.name);
+        assertDeclaredProvides(pack.manifest, liveProvides);
+        for (const name of liveProvides) providedNames.add(name);
+        for (const h of session.hooks) {
+          this.chatInHandlers.push({
+            packId: pack.manifest.id,
+            handler: h.handler,
+            budget: pack.manifest.budget,
+          });
+        }
+        this.scheduleJobs.push(
+          ...session.schedules.map((job) => ({
+            ...job,
+            packId: pack.manifest.id,
+            budget: pack.manifest.budget,
+          })),
+        );
         this.live.push({
           id: pack.manifest.id,
           disposers: [
             ...session.disposers,
             () => {
               this.chatInHandlers = this.chatInHandlers.filter(
-                (fn) => !session.hooks.some((h) => h.handler === fn),
+                (reg) => !session.hooks.some((h) => h.handler === reg.handler),
               );
             },
           ],
+        });
+        kernelLog("activate", {
+          id: pack.manifest.id,
+          provides: liveProvides,
         });
         active.push({
           id: pack.manifest.id,
           version: pack.manifest.version,
           state: "active",
-          provides: [...pack.manifest.provides],
+          provides: liveProvides,
           inject: [...pack.manifest.inject],
           hooks: [...pack.manifest.hooks],
         });
       } catch (err) {
         session.seal();
+        const failedReason = err instanceof Error ? err.message : String(err);
+        kernelLog("failed", { id: pack.manifest.id, error: failedReason });
         failed.push({
           id: pack.manifest.id,
           version: pack.manifest.version,
           state: "failed",
-          failedReason: err instanceof Error ? err.message : String(err),
+          failedReason,
           provides: [...pack.manifest.provides],
           inject: [...pack.manifest.inject],
           hooks: [...pack.manifest.hooks],
@@ -709,7 +1009,16 @@ export class ModKernel {
 
   runChatIn(env: ChatInEnvelope): Promise<WaterfallResult<ChatInEnvelope>> {
     if (this.disposed) return Promise.resolve({ action: "continue", value: env });
-    return runChatInRailway(this.chatInHandlers, env);
+    const handlers = this.chatInHandlers
+      .filter((reg) => {
+        const ok = this.budget.allowHook(reg.packId, reg.budget.hookPerMin);
+        if (!ok) {
+          kernelLog("budget", { packId: reg.packId, kind: "hook", action: "skip" });
+        }
+        return ok;
+      })
+      .map((reg) => reg.handler);
+    return runChatInRailway(handlers, env);
   }
 
   async dispose(): Promise<void> {
@@ -724,7 +1033,10 @@ export class ModKernel {
         }
       }
     }
+    kernelLog("dispose", { count: this.live.length });
     this.live = [];
+    this.chatInHandlers = [];
+    this.scheduleJobs = [];
     this.graph = {
       active: this.graph.active.map((x) => ({ ...x, state: "disposed" })),
       pending: this.graph.pending,
