@@ -378,7 +378,7 @@ export function App() {
         className={
           layout.terminalOpen
             ? "workspace workspace-terminal-open"
-            : "workspace"
+            : "workspace workspace-terminal-open workspace-terminal-collapsed"
         }
         style={workspaceStyle}
       >
@@ -803,20 +803,25 @@ export function App() {
           ) : null}
         </div>
 
-        {layout.terminalOpen ? (
-          <>
-            {settingsOpen ? null : (
-              <ResizeHandle
-                axis="terminal"
-                size={layout.terminalHeight}
-                onResize={setTerminalHeight}
-              />
-            )}
-            <TerminalPanel open height={layout.terminalHeight} />
-          </>
-        ) : (
-          <TerminalPanel open={false} height={0} />
-        )}
+        <div
+          className={
+            layout.terminalOpen
+              ? "terminal-resize-slot"
+              : "terminal-resize-slot is-collapsed"
+          }
+        >
+          {settingsOpen || !layout.terminalOpen ? null : (
+            <ResizeHandle
+              axis="terminal"
+              size={layout.terminalHeight}
+              onResize={setTerminalHeight}
+            />
+          )}
+        </div>
+        <TerminalPanel
+          open={layout.terminalOpen}
+          height={layout.terminalOpen ? layout.terminalHeight : 0}
+        />
       </div>
 
       <PermissionModal />

@@ -10,6 +10,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { getDesktop } from "../lib/desktop-api";
+import { bindXtermInteractive } from "../lib/xterm-interactive";
 import { useAppStore } from "../state/store";
 
 type Props = {
@@ -81,10 +82,12 @@ function xtermTheme() {
 function XtermView({
   termId,
   active,
+  visible,
   onExit,
 }: {
   termId: string;
   active: boolean;
+  visible: boolean;
   onExit: () => void;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -127,6 +130,9 @@ function XtermView({
     const resizeSub = term.onResize(({ cols, rows }) => {
       void desktop.resizeTerminal(termId, cols, rows);
     });
+    const unbindInteractive = bindXtermInteractive(term, el, {
+      paste: (text) => term.paste(text),
+    });
 
     // PTY → xterm
     const unsubData = desktop.on(IPC.terminalData, (payload) => {
@@ -162,6 +168,7 @@ function XtermView({
     return () => {
       ro.disconnect();
       themeObserver.disconnect();
+      unbindInteractive();
       dataSub.dispose();
       resizeSub.dispose();
       unsubData();
@@ -173,9 +180,9 @@ function XtermView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [termId]);
 
-  // Fit when becoming visible again (hidden views have 0 size).
+  // Fit when becoming visible again (hidden views / collapsed panel have 0 size).
   useEffect(() => {
-    if (!active) return;
+    if (!active || !visible) return;
     const el = containerRef.current;
     if (!el) return;
     requestAnimationFrame(() => {
@@ -190,7 +197,7 @@ function XtermView({
         // ignore
       }
     });
-  }, [active, termId]);
+  }, [active, visible, termId]);
 
   return (
     <div
@@ -261,21 +268,19 @@ export function TerminalPanel({ open }: Props) {
     [],
   );
 
-  // Close all on panel close.
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
   useEffect(() => {
-    if (open) return;
-    for (const t of tabsRef.current) {
-      try {
-        void getDesktop().killTerminal(t.id);
-      } catch {
-        // ignore
+    return () => {
+      for (const t of tabsRef.current) {
+        try {
+          void getDesktop().killTerminal(t.id);
+        } catch {
+          // ignore
+        }
       }
-    }
-    if (tabsRef.current.length) setTabs([]);
-    setActiveId(null);
-  }, [open]);
+    };
+  }, []);
 
   const markExited = useCallback((id: string) => {
     setTabs((prev) =>
@@ -288,10 +293,8 @@ export function TerminalPanel({ open }: Props) {
     [tabs, activeId],
   );
 
-  if (!open) return null;
-
   return (
-    <div className="terminal-panel">
+    <div className="terminal-panel" aria-hidden={!open}>
       <div className="terminal-tabbar">
         <div className="terminal-tabs" role="tablist">
           {tabs.map((t) => (
@@ -343,6 +346,7 @@ export function TerminalPanel({ open }: Props) {
             key={t.id}
             termId={t.id}
             active={t.id === activeId}
+            visible={open}
             onExit={() => markExited(t.id)}
           />
         ))}

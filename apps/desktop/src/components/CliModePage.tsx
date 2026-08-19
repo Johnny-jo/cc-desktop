@@ -4,6 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { IPC } from "@claude-desktop/shared";
 import { getDesktop, hasDesktopApi } from "../lib/desktop-api";
+import { bindXtermInteractive } from "../lib/xterm-interactive";
 import { useAppStore } from "../state/store";
 import { useI18n } from "../i18n/useI18n";
 
@@ -117,6 +118,9 @@ export function CliModePage() {
     const resizeSub = term.onResize(({ cols, rows }) => {
       void desktop.resizeTerminal(termId, cols, rows);
     });
+    const unbindInteractive = bindXtermInteractive(term, el, {
+      paste: (text) => term.paste(text),
+    });
     const unsubData = desktop.on(IPC.terminalData, (payload) => {
       const p = payload as { id: string; data: string };
       if (p?.id !== termId || typeof p.data !== "string") return;
@@ -146,6 +150,7 @@ export function CliModePage() {
     return () => {
       ro.disconnect();
       themeObserver.disconnect();
+      unbindInteractive();
       dataSub.dispose();
       resizeSub.dispose();
       unsubData();

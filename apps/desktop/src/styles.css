@@ -390,8 +390,22 @@ textarea {
 }
 
 .app > .workspace.workspace-terminal-open {
-  /* main | resize handle | terminal */
+  /* main | resize handle | terminal — keep 3 rows so the panel stays mounted */
   grid-template-rows: minmax(0, 1fr) 4px var(--terminal-h, 180px);
+}
+
+.app > .workspace.workspace-terminal-collapsed {
+  grid-template-rows: minmax(0, 1fr) 0 0;
+}
+
+.terminal-resize-slot {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.terminal-resize-slot.is-collapsed {
+  height: 0;
+  pointer-events: none;
 }
 
 .main-row {
@@ -1616,6 +1630,8 @@ body.is-resizing-row * {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   position: relative;
   z-index: 5;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
 }
 
 /* Tabbed PTY terminal (xterm.js) */
@@ -6199,6 +6215,8 @@ body.is-resizing-row * {
   flex: 1;
   min-height: 0;
   position: relative;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
 }
 .cli-xterm .xterm {
   height: 100%;
