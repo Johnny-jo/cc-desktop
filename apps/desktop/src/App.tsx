@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { SessionList } from "./components/SessionList";
 import { ChatPanel } from "./components/ChatPanel";
 import { ChangesPanel } from "./components/ChangesPanel";
@@ -65,6 +66,7 @@ export function App() {
   const activeSessionId = useAppStore((s) => s.activeSessionId);
   const cliMode = useAppStore((s) => s.cliMode);
   const activeRoomId = useRoomStore((s) => s.activeRoomId);
+  const projectPath = useAppStore((s) => s.projectPath);
 
   // ---- File tree + multi-tab editor pane ----
   const [fileTreeOpen, setFileTreeOpen] = useState(false);
@@ -80,6 +82,12 @@ export function App() {
    * drag never covers — user must release and pull again.
    */
   const softMaxArmedRef = useRef(false);
+  /** Changes panel full-cover (chat hidden) + second-pull arming. */
+  const [changesFull, setChangesFull] = useState(false);
+  const changesArmedRef = useRef(false);
+  /** Pinned editor tabs (excluded from bulk close actions). */
+  const [pinnedTabs, setPinnedTabs] = useState<Set<string>>(() => new Set());
+  const [tabMenu, setTabMenu] = useState<{ x: number; y: number; tab: string } | null>(null);
   const tabsStripRef = useRef<HTMLDivElement | null>(null);
   const dragTabRef = useRef<string | null>(null);
 
@@ -130,6 +138,67 @@ export function App() {
     setActiveEditor(null);
     setEditorFull(false);
   }, []);
+
+  // ---- Tab context menu actions (bulk closes keep pinned tabs) ----
+  const togglePinTab = useCallback((tab: string) => {
+    setPinnedTabs((prev) => {
+      const next = new Set(prev);
+      if (next.has(tab)) next.delete(tab);
+      else next.add(tab);
+      return next;
+    });
+  }, []);
+
+  const closeRightTabs = useCallback(
+    (tab: string) => {
+      setEditorTabs((tabs) => {
+        const idx = tabs.indexOf(tab);
+        if (idx < 0) return tabs;
+        const next = tabs.filter((t, i) => i <= idx || pinnedTabs.has(t));
+        setActiveEditor((cur) =>
+          cur && next.includes(cur) ? cur : (next[next.length - 1] ?? null),
+        );
+        if (next.length === 0) setEditorFull(false);
+        return next;
+      });
+    },
+    [pinnedTabs],
+  );
+
+  const closeOtherTabs = useCallback(
+    (keep: string) => {
+      setEditorTabs((tabs) => {
+        const next = tabs.filter((t) => t === keep || pinnedTabs.has(t));
+        setActiveEditor((cur) =>
+          cur && next.includes(cur) ? cur : (next[0] ?? null),
+        );
+        if (next.length === 0) setEditorFull(false);
+        return next;
+      });
+    },
+    [pinnedTabs],
+  );
+
+  const closeAllUnpinnedTabs = useCallback(() => {
+    setEditorTabs((tabs) => {
+      const next = tabs.filter((t) => pinnedTabs.has(t));
+      setActiveEditor((cur) =>
+        cur && next.includes(cur) ? cur : (next[0] ?? null),
+      );
+      if (next.length === 0) setEditorFull(false);
+      return next;
+    });
+  }, [pinnedTabs]);
+
+  // Tab menu: click-outside / Esc closes
+  useEffect(() => {
+    if (!tabMenu) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setTabMenu(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [tabMenu]);
 
   // When full-covered and user switches session → shrink editor to min (keep tabs).
   const prevSessionRef = useRef(activeSessionId);
@@ -350,6 +419,7 @@ export function App() {
             </>
           ) : null}
 
+          {changesFull ? null : (
           <main className="panel panel-chat">
             {cliMode ? (
               <CliModePage />
@@ -424,7 +494,16 @@ export function App() {
                               setActiveEditor(tab);
                               setSelectedFile(tab);
                             }}
+                            onContextMenu={(e) => {
+                              e.preventDefault();
+                              setTabMenu({ x: e.clientX, y: e.clientY, tab });
+                            }}
                           >
+                            {pinnedTabs.has(tab) ? (
+                              <span className="editor-tab-pin" title="已固定" aria-hidden>
+                                📌
+                              </span>
+                            ) : null}
                             <span className="editor-tab-name">
                               {fileName(tab)}
                             </span>
@@ -602,31 +681,123 @@ export function App() {
                   {activeRoomId ? (
                     <RoomStage />
                   ) : (
-                    <ChatPanel onOpenSettings={() => setSettingsOpen(true)} />
+                    <ChatPanel
+                      onOpenSettings={() => setSettingsOpen(true)}
+                      onOpenFile={onOpenFile}
+                    />
                   )}
                 </div>
               )}
             </div>
             )}
           </main>
+          )}
 
           {layout.changesOpen ? (
             <>
               {settingsOpen ? null : (
-                <ResizeHandle
-                  axis="changes"
-                  size={layout.changesWidth}
-                  onResize={setChangesWidth}
+                <div
+                  className="resize-handle resize-handle-changes"
+                  role="separator"
+                  aria-orientation="vertical"
+                  tabIndex={-1}
+                  onPointerDown={(e) => {
+                    if (e.button !== 0) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const el = e.currentTarget;
+                    const row = el.parentElement as HTMLElement;
+                    const rowW = row.getBoundingClientRect().width || 1;
+                    const sidebarW = layout.sidebarOpen
+                      ? layout.sidebarWidth
+                      : 0;
+                    const avail = Math.max(320, rowW - sidebarW);
+                    // 会话栏最低 35%：变更栏软上限 = 65%
+                    const softMax = Math.max(220, Math.round(avail * 0.65));
+                    const wasFull = changesFull;
+                    const startX = e.clientX;
+                    const startSize = wasFull ? avail : layout.changesWidth;
+                    // 二次拉伸：上一次拖动停在软上限后，再次拖才允许全覆盖
+                    const allowFullCover =
+                      !wasFull &&
+                      changesArmedRef.current &&
+                      startSize >= softMax - 1;
+                    changesArmedRef.current = false;
+                    let reachedSoftMax = !wasFull && startSize >= softMax - 1;
+                    const pointerId = e.pointerId;
+                    try {
+                      el.setPointerCapture(pointerId);
+                    } catch {
+                      // ignore
+                    }
+                    document.body.classList.add("is-resizing-col");
+                    const onMove = (ev: PointerEvent) => {
+                      if (ev.pointerId !== pointerId) return;
+                      ev.preventDefault();
+                      // grip 在面板左侧：向左拖 → 变宽
+                      const raw = startSize + (startX - ev.clientX);
+                      if (wasFull) {
+                        // 全覆盖态：向右拖退出覆盖
+                        if (raw >= avail - 8) return;
+                        setChangesFull(false);
+                        setChangesWidth(Math.min(raw, avail - 48));
+                        return;
+                      }
+                      if (raw <= softMax) {
+                        reachedSoftMax = raw >= softMax - 1;
+                        setChangesWidth(raw);
+                        return;
+                      }
+                      reachedSoftMax = true;
+                      if (allowFullCover) {
+                        setChangesFull(true);
+                        changesArmedRef.current = false;
+                        cleanup();
+                        return;
+                      }
+                      // 第一次：停在软上限（松手后再拖才全覆盖）
+                      setChangesWidth(softMax);
+                    };
+                    const cleanup = () => {
+                      document.body.classList.remove("is-resizing-col");
+                      window.removeEventListener("pointermove", onMove);
+                      window.removeEventListener("pointerup", onUp);
+                      window.removeEventListener("pointercancel", onUp);
+                    };
+                    const onUp = (ev: PointerEvent) => {
+                      if (ev.pointerId !== pointerId) return;
+                      try {
+                        el.releasePointerCapture(pointerId);
+                      } catch {
+                        // ignore
+                      }
+                      if (!wasFull && reachedSoftMax) {
+                        changesArmedRef.current = true;
+                        setChangesWidth(softMax);
+                      }
+                      cleanup();
+                    };
+                    window.addEventListener("pointermove", onMove, {
+                      passive: false,
+                    });
+                    window.addEventListener("pointerup", onUp);
+                    window.addEventListener("pointercancel", onUp);
+                  }}
+                  onDragStart={(e) => e.preventDefault()}
                 />
               )}
               <aside
                 className="panel panel-changes"
-                style={{
-                  width: layout.changesWidth,
-                  flex: `0 0 ${layout.changesWidth}px`,
-                }}
+                style={
+                  changesFull
+                    ? { flex: "1 1 0", width: "auto" }
+                    : {
+                        width: layout.changesWidth,
+                        flex: `0 0 ${layout.changesWidth}px`,
+                      }
+                }
               >
-                <ChangesPanel />
+                <ChangesPanel onOpenFile={onOpenFile} />
               </aside>
             </>
           ) : null}
@@ -650,6 +821,82 @@ export function App() {
 
       <PermissionModal />
       <UserPromptModal />
+      {tabMenu
+        ? createPortal(
+            <div
+              className="tab-menu-overlay"
+              onClick={() => setTabMenu(null)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setTabMenu(null);
+              }}
+            >
+              <div
+                className="tab-menu"
+                role="menu"
+                style={{ left: tabMenu.x, top: tabMenu.y }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    togglePinTab(tabMenu.tab);
+                    setTabMenu(null);
+                  }}
+                >
+                  {pinnedTabs.has(tabMenu.tab) ? "取消固定" : "固定"}
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    closeRightTabs(tabMenu.tab);
+                    setTabMenu(null);
+                  }}
+                >
+                  关闭右侧标签
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    closeOtherTabs(tabMenu.tab);
+                    setTabMenu(null);
+                  }}
+                >
+                  关闭其他
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    closeAllUnpinnedTabs();
+                    setTabMenu(null);
+                  }}
+                >
+                  全部关闭
+                </button>
+                <div className="tab-menu-sep" />
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    if (projectPath) {
+                      void getDesktop().revealFile(
+                        `${projectPath.replace(/[\\/]+$/, "")}/${tabMenu.tab}`,
+                      );
+                    }
+                    setTabMenu(null);
+                  }}
+                >
+                  在文件管理器中显示
+                </button>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
       <OnboardingModal open={needsOnboarding} />
       <SettingsDrawer
         open={settingsOpen}

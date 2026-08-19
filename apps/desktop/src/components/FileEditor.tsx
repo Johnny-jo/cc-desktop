@@ -42,6 +42,11 @@ import { oneDark } from "@codemirror/theme-one-dark";
 import { tags as t } from "@lezer/highlight";
 import { getDesktop, hasDesktopApi } from "../lib/desktop-api";
 import {
+  diffDecoField,
+  lineMarksFromHunks,
+  setDiffMarks,
+} from "../lib/editor-diff-deco";
+import {
   languageForPath,
   languageLabelForPath,
 } from "../lib/editor-language";
@@ -174,6 +179,29 @@ export function FileEditor({
   const [encoding, setEncoding] = useState("utf-8");
   const [encMenuOpen, setEncMenuOpen] = useState(false);
   const fsChangeTick = useAppStore((s) => s.fsChangeTick);
+  const activeSessionId = useAppStore((s) => s.activeSessionId);
+  const changesBySession = useAppStore((s) => s.changesBySession);
+
+  // Session diff hunks for this file (Cursor/Trae-style inline decorations).
+  const changeHunks = useMemo(() => {
+    const changes = activeSessionId
+      ? (changesBySession[activeSessionId] ?? [])
+      : [];
+    if (!changes.length) return null;
+    const norm = (p: string) =>
+      p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+    const isAbs = (p: string) => /^[a-zA-Z]:\//.test(p) || p.startsWith("/");
+    const target = norm(
+      projectPath && !isAbs(norm(rel))
+        ? `${projectPath}/${rel}`
+        : rel,
+    );
+    const hit = changes.find((c) => {
+      const cp = norm(c.path);
+      return norm(isAbs(cp) || !projectPath ? cp : `${projectPath}/${cp}`) === target;
+    });
+    return hit?.hunks ?? null;
+  }, [activeSessionId, changesBySession, projectPath, rel]);
 
   const langLabel = useMemo(() => languageLabelForPath(rel), [rel]);
   const canWrite = hasDesktopApi("writeProjectFile");
@@ -294,6 +322,7 @@ export function FileEditor({
           highlightActiveLine(),
           history(),
           foldGutter(),
+          diffDecoField,
           drawSelection(),
           dropCursor(),
           EditorState.allowMultipleSelections.of(true),
@@ -400,6 +429,16 @@ export function FileEditor({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fsChangeTick]);
+
+  // Push session-change line marks into the editor; re-applied whenever the
+  // diff updates (diff:updated) or the tab (re)mounts.
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view || loading || error || missing) return;
+    view.dispatch({
+      effects: setDiffMarks.of(changeHunks ? lineMarksFromHunks(changeHunks) : null),
+    });
+  }, [changeHunks, loading, error, missing]);
 
   const changeEncoding = async (next: string) => {
     if (next === encoding) {

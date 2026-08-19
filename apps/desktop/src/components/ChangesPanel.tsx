@@ -18,6 +18,19 @@ function normPath(p: string): string {
   return p.replace(/\\/g, "/").replace(/^\.\//, "");
 }
 
+/** Convert a change path (absolute or relative) to a project-relative path
+ * for the in-app editor; null when it can't be resolved under the project. */
+function toProjectRel(projectPath: string | null, p: string): string | null {
+  if (!projectPath) return null;
+  const norm = (s: string) => s.replace(/\\/g, "/").replace(/\/+$/, "");
+  const root = norm(projectPath);
+  const abs = norm(resolvePath(projectPath, p));
+  if (abs.toLowerCase().startsWith(root.toLowerCase() + "/")) {
+    return abs.slice(root.length + 1);
+  }
+  return null;
+}
+
 function fileName(p: string): string {
   const n = p.replace(/\\/g, "/").split("/").pop();
   return n || p;
@@ -55,7 +68,12 @@ function opLabel(event: FileChangeEvent): string {
 const FILE_PAGE = 20;
 const OP_PAGE = 12;
 
-export function ChangesPanel() {
+export function ChangesPanel({
+  onOpenFile,
+}: {
+  /** Open the file in the in-app editor column (tab). */
+  onOpenFile?: (rel: string) => void;
+}) {
   const { t } = useI18n();
   const activeSessionId = useAppStore((s) => s.activeSessionId);
   const changesBySession = useAppStore((s) => s.changesBySession);
@@ -76,6 +94,9 @@ export function ChangesPanel() {
   const [fileLimit, setFileLimit] = useState(FILE_PAGE);
   const [opLimit, setOpLimit] = useState<Record<string, number>>({});
   const [openFiles, setOpenFiles] = useState<Set<string>>(() => new Set());
+  // 列表 / 详情 上下分栏比例（%）
+  const [listPct, setListPct] = useState(36);
+  const mainRef = useRef<HTMLDivElement | null>(null);
   const revealRequest = useAppStore((s) => s.revealChangeRequest);
   const flashRef = useRef<HTMLLIElement | null>(null);
 
@@ -262,6 +283,44 @@ export function ChangesPanel() {
     }
   }
 
+  /** 列表 / 详情分栏竖向拖拽（上下拉伸详情区）。 */
+  const onVSplitDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const el = e.currentTarget;
+    const host = mainRef.current;
+    if (!host) return;
+    const rect = host.getBoundingClientRect();
+    const pointerId = e.pointerId;
+    try {
+      el.setPointerCapture(pointerId);
+    } catch {
+      // ignore
+    }
+    document.body.classList.add("is-resizing-row");
+    const onMove = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointerId) return;
+      ev.preventDefault();
+      const pct = ((ev.clientY - rect.top) / (rect.height || 1)) * 100;
+      setListPct(Math.min(85, Math.max(12, pct)));
+    };
+    const onUp = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointerId) return;
+      try {
+        el.releasePointerCapture(pointerId);
+      } catch {
+        // ignore
+      }
+      document.body.classList.remove("is-resizing-row");
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+    window.addEventListener("pointermove", onMove, { passive: false });
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  };
+
   return (
     <div className="changes-panel">
       <div className="panel-title changes-panel-title">
@@ -290,8 +349,11 @@ export function ChangesPanel() {
       {groups.length === 0 ? (
         <p className="muted">No file changes yet.</p>
       ) : (
-        <>
-          <ul className="changes-list">
+        <div className="changes-main" ref={mainRef}>
+          <ul
+            className="changes-list"
+            style={fileView || selected ? { maxHeight: `${listPct}%` } : undefined}
+          >
             {visibleGroups.map((g) => {
               const open = openFiles.has(g.path);
               const shown = opLimit[g.path] ?? OP_PAGE;
@@ -335,15 +397,21 @@ export function ChangesPanel() {
                       <button
                         type="button"
                         className="btn btn-ghost btn-sm change-open"
-                        title="Open in editor"
-                        onClick={() =>
+                        title="在编辑栏打开"
+                        onClick={() => {
+                          const rel = toProjectRel(projectPath, g.path);
+                          if (rel && onOpenFile) {
+                            onOpenFile(rel);
+                            return;
+                          }
+                          // 项目外路径兜底：外部编辑器
                           void getDesktop()
                             .openInEditor(resolvePath(projectPath, g.path))
                             .then((res) => {
                               if (!res.ok) setNote(res.error ?? "Open failed");
                             })
-                            .catch(() => undefined)
-                        }
+                            .catch(() => undefined);
+                        }}
                       >
                         ↗
                       </button>
@@ -423,6 +491,14 @@ export function ChangesPanel() {
               </li>
             ) : null}
           </ul>
+          {fileView || selected ? (
+            <div
+              className="changes-vsplit"
+              role="separator"
+              aria-orientation="horizontal"
+              onPointerDown={onVSplitDown}
+            />
+          ) : null}
           {fileView ? (
             <DiffView
               change={fileView}
@@ -448,7 +524,7 @@ export function ChangesPanel() {
               }
             />
           ) : null}
-        </>
+        </div>
       )}
     </div>
   );

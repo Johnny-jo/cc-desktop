@@ -8,6 +8,20 @@ export type ChangelogEntry = {
 /** Newest first. Shown in the title-bar changelog panel. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.2.0",
+    date: "2026-08-19",
+    title: "房间玩法工坊（Mod）· 变更栏重做 @Johnny",
+    items: [
+      "房间 mod 机制（玩法工坊）上线：房主装载 mod 包，成员「同步下载并加入」一键入房，传输带文件校验。",
+      "mod 在独立 ModHost 进程中运行，崩溃自动重启；握手与信息隐藏（如狼人杀夜间视角）由权威进程控制。",
+      "hostApi 2 房间扩展内核：进程内 kernel 运行时、railway 消息管线、RoomKv 存储、共享记忆（memory MCP）。",
+      "内置官方示例包：狼人杀、投票、共享记忆。",
+      "房间新增 mod 管理器、群聊改名、房间设置弹窗；引用回复与断线重连打底。",
+      "变更栏重做：全文 diff 视图、从工具卡片跳转定位、已删除文件同步显示、搜索栏重做。",
+      "开源协议改为 Apache-2.0；卸载 / 升级保留 AppData 中的会话与设置。",
+    ],
+  },
+  {
     version: "0.1.11",
     date: "2026-08-14",
     title: "CLI 模式 · 会话落盘下沉 @Johnny",

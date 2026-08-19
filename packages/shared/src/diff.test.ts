@@ -5,6 +5,7 @@ import {
   buildWriteHunk,
   extractLineRangeSummary,
   findSnippetStartLine,
+  groupDiffDisplayRows,
   mergeFullTextWithHunks,
   parseHunkForDisplay,
   truncateFileChange,
@@ -55,6 +56,22 @@ describe("buildEditHunk", () => {
     expect(hunk).toMatch(/@@ -3,/);
     expect(hunk).toMatch(/lines −3–4/);
     expect(hunk).toMatch(/\+3–5/);
+  });
+
+  it("groups a contiguous changed run as a block (dels then adds)", () => {
+    const hunk = buildEditHunk({
+      path: "f.ts",
+      oldString: "a1\na2\na3\n",
+      newString: "b1\nb2\n",
+    });
+    const body = hunk
+      .split("\n")
+      .filter(
+        (l) =>
+          (l.startsWith("-") && !l.startsWith("---")) ||
+          (l.startsWith("+") && !l.startsWith("+++")),
+      );
+    expect(body).toEqual(["-a1", "-a2", "-a3", "+b1", "+b2"]);
   });
 
   it("findSnippetStartLine returns 1-based absolute line", () => {
@@ -274,5 +291,98 @@ describe("mergeFullTextWithHunks", () => {
     const meta = rows[rows.length - 1]!;
     expect(meta.kind).toBe("meta");
     expect(meta.text).toContain("capped");
+  });
+});
+
+describe("groupDiffDisplayRows", () => {
+  it("groups a replacement (dels then adds) as one change run", () => {
+    const hunk = [
+      "--- a/f.ts",
+      "+++ b/f.ts",
+      "@@ -1,3 +1,3 @@",
+      " a",
+      "-b1",
+      "+b2",
+      " c",
+    ].join("\n");
+    const groups = groupDiffDisplayRows(parseHunkForDisplay(hunk));
+    const change = groups.filter((g) => g.kind === "change");
+    expect(change).toHaveLength(1);
+    expect(change[0]).toMatchObject({
+      kind: "change",
+      dels: [{ kind: "del", text: "-b1" }],
+      adds: [{ kind: "add", text: "+b2" }],
+    });
+  });
+
+  it("splits two replacements when a context line sits between them", () => {
+    const hunk = [
+      "--- a/f.ts",
+      "+++ b/f.ts",
+      "@@ -1,5 +1,5 @@",
+      "-a",
+      "+A",
+      " keep",
+      "-b",
+      "+B",
+    ].join("\n");
+    const groups = groupDiffDisplayRows(parseHunkForDisplay(hunk));
+    const change = groups.filter((g) => g.kind === "change");
+    expect(change).toHaveLength(2);
+    expect(change[0]!.dels).toHaveLength(1);
+    expect(change[0]!.adds).toHaveLength(1);
+    expect(change[1]!.dels).toHaveLength(1);
+    expect(change[1]!.adds).toHaveLength(1);
+  });
+
+  it("keeps a pure-add run and a pure-del run as their own groups", () => {
+    const hunk = [
+      "--- a/f.ts",
+      "+++ b/f.ts",
+      "@@ -1,3 +1,4 @@",
+      " a",
+      "+added",
+      " b",
+      "-gone",
+      " c",
+    ].join("\n");
+    const groups = groupDiffDisplayRows(parseHunkForDisplay(hunk));
+    const change = groups.filter((g) => g.kind === "change");
+    expect(change).toHaveLength(2);
+    expect(change[0]).toMatchObject({ dels: [], adds: [{ text: "+added" }] });
+    expect(change[1]).toMatchObject({ dels: [{ text: "-gone" }], adds: [] });
+  });
+
+  it("groups consecutive same-kind lines into one run", () => {
+    const hunk = [
+      "--- /dev/null",
+      "+++ b/f.ts",
+      "@@ -0,0 +1,2 @@",
+      "+x",
+      "+y",
+    ].join("\n");
+    const groups = groupDiffDisplayRows(parseHunkForDisplay(hunk));
+    const change = groups.filter((g) => g.kind === "change");
+    expect(change).toHaveLength(1);
+    expect(change[0]!.adds.map((r) => r.text)).toEqual(["+x", "+y"]);
+    expect(change[0]!.dels).toEqual([]);
+  });
+
+  it("groups full-text merge the same way (del immediately before add)", () => {
+    const full = "a\nb2\nc";
+    const hunk = [
+      "--- a/f.ts",
+      "+++ b/f.ts",
+      "@@ -1,3 +1,3 @@",
+      " a",
+      "-b1",
+      "+b2",
+      " c",
+    ].join("\n");
+    const groups = groupDiffDisplayRows(mergeFullTextWithHunks(full, hunk));
+    const change = groups.filter((g) => g.kind === "change");
+    expect(change).toHaveLength(1);
+    expect(change[0]!.dels[0]!.text).toBe("-b1");
+    expect(change[0]!.adds[0]!.text).toBe("+b2");
   });
 });

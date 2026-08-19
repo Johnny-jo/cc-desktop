@@ -3,6 +3,7 @@ import type { FileChange } from "@claude-desktop/shared";
 import {
   DIFF_PREVIEW_ROWS,
   extractLineRangeSummary,
+  groupDiffDisplayRows,
   mergeFullTextWithHunks,
   parseHunkForDisplay,
   type DiffDisplayRow,
@@ -26,6 +27,20 @@ function rowClass(kind: DiffDisplayRow["kind"]): string {
 
 function fmtNo(n: number | null): string {
   return n == null ? "" : String(n);
+}
+
+function DiffRow({ row }: { row: DiffDisplayRow }) {
+  return (
+    <div className={rowClass(row.kind)}>
+      <span className="diff-gutter-col diff-no-old" title="旧文件行号">
+        {fmtNo(row.oldNo)}
+      </span>
+      <span className="diff-gutter-col diff-no-new" title="新文件行号">
+        {fmtNo(row.newNo)}
+      </span>
+      <span className="diff-line-text">{row.text || " "}</span>
+    </div>
+  );
 }
 
 const PAGE = DIFF_PREVIEW_ROWS;
@@ -94,6 +109,7 @@ export function DiffView({
     [mode, fullText, change.hunks],
   );
   const rows = fullRows ?? diffRows;
+  const groups = useMemo(() => groupDiffDisplayRows(rows), [rows]);
 
   const rangeSummary = useMemo(
     () => extractLineRangeSummary(change.hunks),
@@ -176,17 +192,20 @@ export function DiffView({
           <span className="diff-gutter-col">新</span>
           <span className="diff-gutter-spacer" />
         </div>
-        {rows.map((row, i) => (
-          <div key={i} className={rowClass(row.kind)}>
-            <span className="diff-gutter-col diff-no-old" title="旧文件行号">
-              {fmtNo(row.oldNo)}
-            </span>
-            <span className="diff-gutter-col diff-no-new" title="新文件行号">
-              {fmtNo(row.newNo)}
-            </span>
-            <span className="diff-line-text">{row.text || " "}</span>
-          </div>
-        ))}
+        {groups.map((g, i) =>
+          g.kind === "lead" ? (
+            <DiffRow key={i} row={g.row} />
+          ) : (
+            <div key={i} className="diff-change-run">
+              {g.dels.map((row, j) => (
+                <DiffRow key={`d${j}`} row={row} />
+              ))}
+              {g.adds.map((row, j) => (
+                <DiffRow key={`a${j}`} row={row} />
+              ))}
+            </div>
+          ),
+        )}
       </div>
       {mode === "diff" && (capped || rawLineCount > limit) ? (
         <div className="diff-more">

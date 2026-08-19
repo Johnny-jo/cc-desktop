@@ -65,6 +65,8 @@ export const IPC = {
   fileOpenInEditor: "file:open-in-editor",
   /** Reveal a file in the OS file manager */
   fileReveal: "file:reveal",
+  /** Renderer → Main: read an image file as a data URL (for chat thumbnails) */
+  fileImageData: "file:image-data",
   /** Git status for the current project (branch + changed paths) */
   projectGitStatus: "project:git-status",
   /**
@@ -334,6 +336,10 @@ export type IpcInvokeMap = {
   [IPC.fileReveal]: {
     args: [{ path: string }];
     result: { ok: boolean };
+  };
+  [IPC.fileImageData]: {
+    args: [{ path: string }];
+    result: { ok: boolean; dataUrl?: string; error?: string };
   };
   [IPC.projectGitStatus]: {
     args: [{ cwd: string }];

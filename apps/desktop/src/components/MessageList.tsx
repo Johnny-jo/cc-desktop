@@ -2,6 +2,7 @@ import React, { memo, useEffect, useRef, useState } from "react";
 import type { ChatItem } from "@claude-desktop/shared";
 import { ToolCard } from "./ToolCard";
 import { MarkdownBody } from "./MarkdownBody";
+import { AttachmentChips } from "./AttachmentChips";
 import { formatTurnUsageLine } from "../lib/format-usage";
 import {
   loadOlderMessages,
@@ -102,7 +103,17 @@ function RewindButton({ sdkMsgId }: { sdkMsgId: string }) {
   );
 }
 
-const MessageRow = memo(function MessageRow({ item }: { item: ChatItem }) {
+/** Trailing "[Attached: a, b]" marker embedded in display text by sendMessage;
+ * stripped when we render rich chips instead. */
+const ATTACHED_TAIL = /\n\n\[Attached: [^\]]*\]\s*$/;
+
+const MessageRow = memo(function MessageRow({
+  item,
+  onOpenFile,
+}: {
+  item: ChatItem;
+  onOpenFile?: (rel: string) => void;
+}) {
   if (item.kind === "tool") {
     return (
       <div className="message-row tool-row">
@@ -138,9 +149,14 @@ const MessageRow = memo(function MessageRow({ item }: { item: ChatItem }) {
     >
       {role === "user" ? (
         <div className="bubble bubble-user" title={item.text}>
-          {item.text}
+          {item.attachments?.length
+            ? item.text.replace(ATTACHED_TAIL, "")
+            : item.text}
           {item.streaming ? <span className="cursor">▍</span> : null}
           {item.sdkMsgId ? <RewindButton sdkMsgId={item.sdkMsgId} /> : null}
+          {item.attachments?.length ? (
+            <AttachmentChips attachments={item.attachments} onOpenFile={onOpenFile} />
+          ) : null}
         </div>
       ) : role === "system" ? (
         <div className="bubble bubble-system">{item.text}</div>
@@ -166,10 +182,13 @@ export function MessageList({
   items,
   sessionId,
   hasMore,
+  onOpenFile,
 }: {
   items: ChatItem[];
   sessionId: string | null;
   hasMore?: boolean;
+  /** Open a project-relative file in the in-app editor column. */
+  onOpenFile?: (rel: string) => void;
 }) {
   const { t } = useI18n();
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -256,7 +275,7 @@ export function MessageList({
         </button>
       ) : null}
       {visible.map((item) => (
-        <MessageRow key={item.id} item={item} />
+        <MessageRow key={item.id} item={item} onOpenFile={onOpenFile} />
       ))}
       <div ref={bottomRef} />
     </div>

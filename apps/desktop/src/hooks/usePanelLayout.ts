@@ -23,7 +23,11 @@ const DEFAULTS: PanelLayout = {
 const SIDEBAR_MIN = 180;
 const SIDEBAR_MAX = 420;
 const CHANGES_MIN = 220;
-const CHANGES_MAX = 560;
+/** Changes panel hard safety cap (detent / full-cover live in App.tsx). */
+function changesMaxLimit(): number {
+  if (typeof window === "undefined") return 560;
+  return Math.max(CHANGES_MIN, window.innerWidth - 48);
+}
 const TERMINAL_MIN = 100;
 /** Cap so the chat composer is never fully covered. */
 const TERMINAL_MAX = 260;
@@ -49,7 +53,7 @@ function load(): PanelLayout {
       changesWidth: clamp(
         Number(parsed.changesWidth) || DEFAULTS.changesWidth,
         CHANGES_MIN,
-        CHANGES_MAX,
+        changesMaxLimit(),
       ),
       terminalHeight: clamp(
         Number(parsed.terminalHeight) || DEFAULTS.terminalHeight,
@@ -99,7 +103,7 @@ export function usePanelLayout() {
   const setChangesWidth = useCallback((w: number) => {
     setLayout((prev) => ({
       ...prev,
-      changesWidth: clamp(w, CHANGES_MIN, CHANGES_MAX),
+      changesWidth: clamp(w, CHANGES_MIN, changesMaxLimit()),
     }));
   }, []);
 
@@ -121,7 +125,7 @@ export function usePanelLayout() {
   const adjustChangesWidth = useCallback((dx: number) => {
     setLayout((prev) => ({
       ...prev,
-      changesWidth: clamp(prev.changesWidth + dx, CHANGES_MIN, CHANGES_MAX),
+      changesWidth: clamp(prev.changesWidth + dx, CHANGES_MIN, changesMaxLimit()),
     }));
   }, []);
 
@@ -152,7 +156,9 @@ export function usePanelLayout() {
       SIDEBAR_MIN,
       SIDEBAR_MAX,
       CHANGES_MIN,
-      CHANGES_MAX,
+      get CHANGES_MAX() {
+        return changesMaxLimit();
+      },
       TERMINAL_MIN,
       TERMINAL_MAX,
     },

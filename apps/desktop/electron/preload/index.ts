@@ -154,6 +154,13 @@ const desktop = {
   /** Reveal a file in the OS file manager. */
   revealFile: (path: string) =>
     ipcRenderer.invoke(IPC.fileReveal, { path }) as Promise<{ ok: boolean }>,
+  /** Read an image file as a data URL (chat attachment thumbnails). */
+  readImageDataUrl: (path: string) =>
+    ipcRenderer.invoke(IPC.fileImageData, { path }) as Promise<{
+      ok: boolean;
+      dataUrl?: string;
+      error?: string;
+    }>,
 
   /** Git status of a project directory (branch + changed paths). */
   gitStatus: (cwd: string) =>

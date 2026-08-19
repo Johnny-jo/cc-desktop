@@ -22,9 +22,11 @@ const PERMISSION_MODES: PermissionMode[] = [
 
 export type ChatPanelProps = {
   onOpenSettings: () => void;
+  /** Open a project-relative file in the in-app editor column. */
+  onOpenFile?: (rel: string) => void;
 };
 
-export function ChatPanel({ onOpenSettings }: ChatPanelProps) {
+export function ChatPanel({ onOpenSettings, onOpenFile }: ChatPanelProps) {
   const { t } = useI18n();
   const activeSessionId = useAppStore((s) => s.activeSessionId);
   const itemsBySession = useAppStore((s) => s.itemsBySession);
@@ -122,6 +124,7 @@ export function ChatPanel({ onOpenSettings }: ChatPanelProps) {
               Boolean(activeSessionId) &&
               Boolean(hasMoreBySession[activeSessionId!])
             }
+            onOpenFile={onOpenFile}
           />
         </div>
       </div>

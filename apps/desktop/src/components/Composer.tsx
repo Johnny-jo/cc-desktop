@@ -13,6 +13,7 @@ import {
   dequeuePrompt,
   getState,
   newChat,
+  openProject,
   sendMessage,
   setModel,
   setPermissionMode,
@@ -128,6 +129,7 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
   const [atMatches, setAtMatches] = useState<string[]>([]);
   const [atTruncated, setAtTruncated] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const { t } = useI18n();
 
   const running = useAppStore((s) => s.running);
@@ -137,9 +139,7 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
   const slashBySession = useAppStore((s) => s.slashBySession);
   const queuedPrompts = useAppStore((s) => s.queuedPrompts);
 
-  const canSend =
-    (Boolean(text.trim()) || attachments.length > 0) &&
-    Boolean(projectPath || activeSessionId);
+  const canSend = Boolean(text.trim()) || attachments.length > 0;
 
   const models = settings?.models?.length
     ? settings.models
@@ -438,6 +438,14 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
     setAttachments([]);
   }, [allSlashCommands, attachments, runSlash, text]);
 
+  // Auto-grow the input with content (height capped by CSS max-height).
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 180)}px`;
+  }, [text]);
+
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // @-mention menu takes priority over slash (they are mutually exclusive:
     // slash only triggers at line start, @ only after whitespace/mid-text).
@@ -600,14 +608,13 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
         onDrop={onDrop}
       >
         <textarea
+          ref={textareaRef}
           className="composer-input"
           rows={2}
           placeholder={
-            projectPath
-              ? activeSessionId
-                ? t.chat.composerPlaceholder
-                : t.chat.composerPlaceholderNew
-              : t.chat.composerNoProject
+            activeSessionId
+              ? t.chat.composerPlaceholder
+              : t.chat.composerPlaceholderNew
           }
           value={text}
           onChange={(e) => {
@@ -616,7 +623,6 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
             setAtIndex(0);
           }}
           onKeyDown={onKeyDown}
-          disabled={!projectPath && !activeSessionId}
         />
         <div className="composer-bar">
           <div className="composer-left">
@@ -634,12 +640,43 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
             />
             <button
               type="button"
-              className="btn btn-ghost btn-icon"
+              className="composer-plus-btn"
               title="Attach files"
+              aria-label="Attach files"
               onClick={() => fileInputRef.current?.click()}
-              disabled={!projectPath && !activeSessionId}
             >
-              📎
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden>
+                <path
+                  d="M7 2.5v9M2.5 7h9"
+                  stroke="currentColor"
+                  strokeWidth="1.6"
+                  strokeLinecap="round"
+                />
+              </svg>
+            </button>
+            <button
+              type="button"
+              className="composer-project-chip"
+              title={projectPath ?? t.chat.pickProject}
+              onClick={() => void openProject()}
+            >
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden>
+                <path
+                  d="M1.5 4.5A1.5 1.5 0 0 1 3 3h3.2L7.7 5H13a1.5 1.5 0 0 1 1.5 1.5v5A1.5 1.5 0 0 1 13 13H3a1.5 1.5 0 0 1-1.5-1.5v-7Z"
+                  stroke="currentColor"
+                  strokeWidth="1.3"
+                  strokeLinejoin="round"
+                />
+              </svg>
+              <span>
+                {projectPath
+                  ? (projectPath
+                      .replace(/\\/g, "/")
+                      .split("/")
+                      .filter(Boolean)
+                      .pop() ?? projectPath)
+                  : t.chat.pickProject}
+              </span>
             </button>
             <label className="composer-model-field" title="Model">
               <span className="composer-model-prefix">✦</span>

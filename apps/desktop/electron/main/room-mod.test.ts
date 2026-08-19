@@ -573,6 +573,21 @@ describe("room mod handshake + play loop", () => {
     });
   });
 
+  it("carries quote through send into the timeline item", async () => {
+    const { rooms } = makeRooms();
+    const { room } = await createHost(rooms, "quote");
+    const seatId = room.seats[0]!.id;
+    const quote = { id: "m1", authorLabel: "Alice", text: "原消息" };
+    const res = await rooms.send(room.roomId, seatId, "引用回复", quote);
+    expect(res.ok).toBe(true);
+    await vi.waitFor(() => {
+      const item = rooms
+        .get(room.roomId)!
+        .items.find((i) => i.kind === "user" && i.text === "引用回复");
+      expect(item?.quote).toEqual(quote);
+    });
+  });
+
   it("rejects swapping play and kernel enable entry points", async () => {
     const { rooms } = makeRooms();
     const { room } = await createHost(rooms, "cross");

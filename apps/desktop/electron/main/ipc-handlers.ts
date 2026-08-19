@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import { access } from "node:fs/promises";
 import { execFile } from "node:child_process";
+import os from "node:os";
 import { app, dialog, ipcMain, shell, type BrowserWindow } from "electron";
 import iconv from "iconv-lite";
 import { IPC, validateMcpServers } from "@claude-desktop/shared";
@@ -320,8 +321,9 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
   ipcMain.handle(
     IPC.sessionStart,
     async (_e, { prompt, cwd }: { prompt: UserPrompt; cwd?: string }) => {
-      const project = cwd ?? ctx.settings.get().lastProjectPath;
-      if (!project) throw new Error("No project open");
+      // Project folder is optional: fall back to the last opened folder, then
+      // the user home dir so chat works without picking a project first.
+      const project = cwd ?? ctx.settings.get().lastProjectPath ?? os.homedir();
       // Note: SessionManager.start awaits the full turn before resolving.
       const sessionId = await ctx.sessions.start(prompt, project);
       return { sessionId };
@@ -533,6 +535,32 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
         shell.showItemInFolder(filePath);
       }
       return { ok: true };
+    },
+  );
+
+  ipcMain.handle(
+    IPC.fileImageData,
+    async (_e, { path: filePath }: { path: string }) => {
+      try {
+        if (!filePath || typeof filePath !== "string") {
+          return { ok: false, error: "path is required" };
+        }
+        const mime = guessMimeType(filePath);
+        if (!mime.startsWith("image/")) {
+          return { ok: false, error: "not an image" };
+        }
+        const stat = fs.statSync(filePath);
+        if (stat.size > 20 * 1024 * 1024) {
+          return { ok: false, error: "image too large" };
+        }
+        const buf = fs.readFileSync(filePath);
+        return {
+          ok: true,
+          dataUrl: `data:${mime};base64,${buf.toString("base64")}`,
+        };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
     },
   );
 

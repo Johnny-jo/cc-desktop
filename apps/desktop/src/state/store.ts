@@ -82,7 +82,7 @@ let bootstrapped = false;
 const unsubs: Array<() => void> = [];
 
 /** Pending user prompt for startSession before sessionId is known. */
-let pendingStartPrompt: string | null = null;
+let pendingStartPrompt: { text: string; attachments: Attachment[] } | null = null;
 /**
  * Queue of optimistically-appended user texts per session.
  * SDK often re-emits the same user turn after the agent finishes; we drop that echo.
@@ -165,13 +165,14 @@ function upsertSession(summary: SessionSummary): void {
 function appendUserMessage(
   sessionId: string,
   text: string,
-  opts?: { optimistic?: boolean },
+  opts?: { optimistic?: boolean; attachments?: Attachment[] },
 ): void {
   // CLI page owns its own `> text` echo; keep itemsBySession empty while frozen.
   if (state.cliMode) return;
   const next = appendUserItem(transcriptUi(sessionId), text, {
     nextId,
     optimistic: opts?.optimistic,
+    attachments: opts?.attachments,
   });
   writeTranscriptUi(sessionId, next);
 }
@@ -266,17 +267,22 @@ function subscribeDesktopEvents(): void {
       if (pendingStartPrompt && summary.status === "running") {
         if (state.cliMode) {
           pendingStartPrompt = null;
-        } else if (
-          !getItems(summary.id).some(
-            (i) =>
-              i.kind === "text" &&
-              i.role === "user" &&
-              i.text === pendingStartPrompt,
-          )
-        ) {
-          const text = pendingStartPrompt;
-          pendingStartPrompt = null;
-          appendUserMessage(summary.id, text, { optimistic: true });
+        } else {
+          const pending = pendingStartPrompt;
+          if (
+            !getItems(summary.id).some(
+              (i) =>
+                i.kind === "text" &&
+                i.role === "user" &&
+                i.text === pending.text,
+            )
+          ) {
+            pendingStartPrompt = null;
+            appendUserMessage(summary.id, pending.text, {
+              optimistic: true,
+              attachments: pending.attachments,
+            });
+          }
         }
       }
 
@@ -669,7 +675,10 @@ export function sendMessage(text: string, attachments: Attachment[] = []): void 
   setState({ running: true, lastError: null });
 
   if (activeSessionId) {
-    appendUserMessage(activeSessionId, displayText, { optimistic: true });
+    appendUserMessage(activeSessionId, displayText, {
+      optimistic: true,
+      attachments,
+    });
     // Optimistic running status for the active session.
     const sessions = state.sessions.map((s) =>
       s.id === activeSessionId
@@ -688,7 +697,7 @@ export function sendMessage(text: string, attachments: Attachment[] = []): void 
   // New session: show the user bubble on first session:updated (running).
   // startSession awaits the full turn, so appending only in .then() puts the
   // question after the assistant reply.
-  pendingStartPrompt = displayText;
+  pendingStartPrompt = { text: displayText, attachments };
   void desktop
     .startSession(prompt, state.projectPath ?? undefined)
     .then((res) => {
@@ -698,15 +707,20 @@ export function sendMessage(text: string, attachments: Attachment[] = []): void 
       }
       // Fallback if session:updated never carried the prompt (should be rare).
       if (pendingStartPrompt) {
-        const textToAdd = pendingStartPrompt;
+        const pending = pendingStartPrompt;
         pendingStartPrompt = null;
         if (
           !getItems(sessionId).some(
             (i) =>
-              i.kind === "text" && i.role === "user" && i.text === textToAdd,
+              i.kind === "text" &&
+              i.role === "user" &&
+              i.text === pending.text,
           )
         ) {
-          appendUserMessage(sessionId, textToAdd, { optimistic: true });
+          appendUserMessage(sessionId, pending.text, {
+            optimistic: true,
+            attachments: pending.attachments,
+          });
         }
       }
     })

@@ -64,29 +64,36 @@ function lineDiff(
   let oi = oldBase - 1;
   let ni = newBase - 1;
   // Pair by index (MVP). Full-file Write/Edit-with-file gives correct absolute nos.
+  // A contiguous changed run is grouped: all deletions first, then all
+  // additions — block display instead of per-line -/+ interleaving.
+  let pendDel: Row[] = [];
+  let pendAdd: Row[] = [];
+  const flush = () => {
+    if (pendDel.length) rows.push(...pendDel);
+    if (pendAdd.length) rows.push(...pendAdd);
+    pendDel = [];
+    pendAdd = [];
+  };
   for (let i = 0; i < max; i++) {
     const o = oldLines[i];
     const n = newLines[i];
-    if (o === n) {
-      if (o !== undefined) {
-        oi += 1;
-        ni += 1;
-        rows.push({ kind: "eq", o, oldNo: oi, newNo: ni });
-      } else if (n !== undefined) {
-        ni += 1;
-        rows.push({ kind: "add", n, newNo: ni });
-      }
-    } else {
-      if (o !== undefined) {
-        oi += 1;
-        rows.push({ kind: "del", o, oldNo: oi });
-      }
-      if (n !== undefined) {
-        ni += 1;
-        rows.push({ kind: "add", n, newNo: ni });
-      }
+    if (o === n && o !== undefined) {
+      flush();
+      oi += 1;
+      ni += 1;
+      rows.push({ kind: "eq", o, oldNo: oi, newNo: ni });
+      continue;
+    }
+    if (o !== undefined) {
+      oi += 1;
+      pendDel.push({ kind: "del", o, oldNo: oi });
+    }
+    if (n !== undefined) {
+      ni += 1;
+      pendAdd.push({ kind: "add", n, newNo: ni });
     }
   }
+  flush();
 
   if (!rows.some((r) => r.kind !== "eq")) {
     return "@@ -1,0 +1,0 @@\n# (no line changes)";
@@ -427,6 +434,41 @@ export type DiffDisplayRow = {
   /** 1-based line number in new file; null if not applicable */
   newNo: number | null;
 };
+
+/** One visual block: unchanged lead-in, or a contiguous −/+ change run. */
+export type DiffDisplayGroup =
+  | { kind: "lead"; row: DiffDisplayRow }
+  | { kind: "change"; dels: DiffDisplayRow[]; adds: DiffDisplayRow[] };
+
+/**
+ * Collapse adjacent del/add rows into change runs. A ctx / hunk / meta row
+ * always splits. Replacements (dels then adds, no ctx between) become one group.
+ */
+export function groupDiffDisplayRows(
+  rows: DiffDisplayRow[],
+): DiffDisplayGroup[] {
+  const out: DiffDisplayGroup[] = [];
+  let dels: DiffDisplayRow[] = [];
+  let adds: DiffDisplayRow[] = [];
+  const flush = () => {
+    if (!dels.length && !adds.length) return;
+    out.push({ kind: "change", dels, adds });
+    dels = [];
+    adds = [];
+  };
+  for (const row of rows) {
+    if (row.kind === "del") {
+      dels.push(row);
+    } else if (row.kind === "add") {
+      adds.push(row);
+    } else {
+      flush();
+      out.push({ kind: "lead", row });
+    }
+  }
+  flush();
+  return out;
+}
 
 export function parseHunkForDisplay(
   hunks: string,

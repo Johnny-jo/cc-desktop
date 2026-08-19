@@ -1,7 +1,6 @@
 import React, { useState } from "react";
 import {
   newChat,
-  openProject,
   selectSession,
   startCpa,
   useAppStore,
@@ -52,24 +51,10 @@ export function SessionList({
   const { t } = useI18n();
   const sessions = useAppStore((s) => s.sessions);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
-  const projectPath = useAppStore((s) => s.projectPath);
   const cpaStatus = useAppStore((s) => s.cpaStatus);
   const [sessionLimit, setSessionLimit] = useState(SESSION_PAGE);
   const visibleSessions = sessions.slice(0, sessionLimit);
   const hiddenSessions = Math.max(0, sessions.length - sessionLimit);
-
-  const onBrowse = async () => {
-    try {
-      await openProject();
-    } catch {
-      // lastError in store
-    }
-  };
-
-  const projectLabel = projectPath
-    ? projectPath.replace(/\\/g, "/").split("/").filter(Boolean).pop() ??
-      projectPath
-    : "No project";
 
   return (
     <div className="session-list">
@@ -160,17 +145,9 @@ export function SessionList({
         )}
       </ul>
 
-      {/* 文件栏：head 固定贴在文件夹上一格；body 在 head 上方生长，避免切换条跳动 */}
+      {/* 文件栏抽屉：收起时贴在底部（footer 上方）；展开时整栏顶到群聊下方，
+          文件树覆盖会话列表区域；再点收起回到原位 */}
       <div className={`sidebar-files${fileTreeOpen ? " open" : ""}`}>
-        {fileTreeOpen ? (
-          <div className="sidebar-files-body">
-            <FileTree
-              selected={selectedFile}
-              onSelectFile={onSelectFile}
-              onOpenFile={onOpenFile}
-            />
-          </div>
-        ) : null}
         <div className="sidebar-files-head">
           <button
             type="button"
@@ -214,18 +191,18 @@ export function SessionList({
             </button>
           ) : null}
         </div>
+        {fileTreeOpen ? (
+          <div className="sidebar-files-body">
+            <FileTree
+              selected={selectedFile}
+              onSelectFile={onSelectFile}
+              onOpenFile={onOpenFile}
+            />
+          </div>
+        ) : null}
       </div>
 
       <div className="sidebar-footer">
-        <button
-          type="button"
-          className="sidebar-footer-row"
-          onClick={() => void onBrowse()}
-          title={projectPath ?? "Open project folder"}
-        >
-          <span className="sidebar-footer-icon">📁</span>
-          <span className="sidebar-footer-text">{projectLabel}</span>
-        </button>
         <button
           type="button"
           className="sidebar-footer-row"
@@ -244,7 +221,7 @@ export function SessionList({
           onClick={onOpenSettings}
         >
           <span className="sidebar-footer-icon">⚙</span>
-          <span className="sidebar-footer-text">Settings</span>
+          <span className="sidebar-footer-text">{t.settings.title}</span>
         </button>
       </div>
     </div>

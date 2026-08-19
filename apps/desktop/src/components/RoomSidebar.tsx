@@ -28,10 +28,10 @@ import {
   fetchRoomMod,
   hasRoomMod,
   joinRoom,
-  leaveActiveRoom,
   listRoomMods,
   openRoomDialog,
   peekRoom,
+  rejoinRoom,
   selectRoom,
   useRoomStore,
 } from "../state/room-store";
@@ -67,6 +67,8 @@ export function RoomSidebar() {
   const [progress, setProgress] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
   const peekGen = useRef(0);
   const joinGen = useRef(0);
 
@@ -158,6 +160,25 @@ export function RoomSidebar() {
   useEffect(() => {
     if (dialog === "create") setCollections(loadModCollections());
   }, [dialog]);
+
+  // ⋮ 菜单：点击外部 / Esc 关闭
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [menuOpen]);
 
   const resetForms = () => {
     abortOps();
@@ -330,64 +351,74 @@ export function RoomSidebar() {
 
   return (
     <div className={`sidebar-rooms${open ? " open" : ""}`}>
-      <button
-        type="button"
-        className="sidebar-files-toggle"
-        aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
-      >
-        <span className={`sidebar-files-chevron${open ? " open" : ""}`}>
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-            <path
-              d="M4 6l4 4 4-4"
-              stroke="currentColor"
-              strokeWidth="1.8"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-        </span>
-        <span className="sidebar-files-label">群聊</span>
-        {rooms.some((r) => r.status === "open") ? (
-          <span className="room-dot on" />
-        ) : null}
-      </button>
+      <div className="sidebar-rooms-head">
+        <button
+          type="button"
+          className="sidebar-files-toggle"
+          aria-expanded={open}
+          onClick={() => setOpen((v) => !v)}
+        >
+          <span className={`sidebar-files-chevron${open ? " open" : ""}`}>
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+              <path
+                d="M4 6l4 4 4-4"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </span>
+          <span className="sidebar-files-label">群聊</span>
+          {rooms.some((r) => r.status === "open") ? (
+            <span className="room-dot on" />
+          ) : null}
+        </button>
+        <div className="sidebar-rooms-menu-wrap" ref={menuRef}>
+          <button
+            type="button"
+            className="sidebar-rooms-menu-btn"
+            aria-label="群聊操作"
+            aria-expanded={menuOpen}
+            onClick={() => setMenuOpen((v) => !v)}
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
+              <circle cx="8" cy="3" r="1.5" />
+              <circle cx="8" cy="8" r="1.5" />
+              <circle cx="8" cy="13" r="1.5" />
+            </svg>
+          </button>
+          {menuOpen ? (
+            <div className="sidebar-rooms-menu" role="menu">
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setMenuOpen(false);
+                  resetForms();
+                  openRoomDialog("create");
+                }}
+              >
+                创建群聊
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setMenuOpen(false);
+                  resetForms();
+                  openRoomDialog("join");
+                }}
+              >
+                加入群聊
+              </button>
+            </div>
+          ) : null}
+        </div>
+      </div>
 
       {open ? (
         <div className="sidebar-rooms-body">
-          <div className="sidebar-rooms-actions">
-            <button
-              type="button"
-              className="btn btn-ghost btn-sm"
-              onClick={() => {
-                resetForms();
-                openRoomDialog("create");
-              }}
-            >
-              + 创建群聊
-            </button>
-            <button
-              type="button"
-              className="btn btn-ghost btn-sm"
-              onClick={() => {
-                resetForms();
-                openRoomDialog("join");
-              }}
-            >
-              加入群聊
-            </button>
-            {activeRoomId ? (
-              <button
-                type="button"
-                className="btn btn-ghost btn-sm"
-                title="退出当前群聊"
-                onClick={() => void leaveActiveRoom()}
-              >
-                退出
-              </button>
-            ) : null}
-          </div>
-
           {reconnectNote ? (
             <p className="room-reconnect-note">{reconnectNote}</p>
           ) : null}
@@ -416,22 +447,26 @@ export function RoomSidebar() {
                   <span className="session-meta">
                     <span>
                       {r.memberCount} 人 ·{" "}
-                      {r.status === "open" ? "开着" : "已结束"}
+                      {r.offline
+                        ? t.room.offline
+                        : r.status === "open"
+                          ? "开着"
+                          : "已结束"}
                       {r.role === "host" ? " · 群主" : ""}
                     </span>
                   </span>
                 </button>
-                {r.roomId === activeRoomId ? (
+                {r.offline ? (
                   <button
                     type="button"
-                    className="btn btn-ghost btn-sm room-row-leave"
-                    title={r.role === "host" ? "解散群聊" : "退出群聊"}
+                    className="btn btn-ghost btn-sm room-row-rejoin"
+                    title={t.room.rejoin}
                     onClick={(e) => {
                       e.stopPropagation();
-                      void leaveActiveRoom();
+                      void rejoinRoom(r.roomId);
                     }}
                   >
-                    退出
+                    {t.room.rejoin}
                   </button>
                 ) : null}
               </div>

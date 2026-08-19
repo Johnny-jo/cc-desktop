@@ -1,4 +1,9 @@
-import type { ChatItem, SdkNormalizedEvent, ToolCardState } from "./models";
+import type {
+  Attachment,
+  ChatItem,
+  SdkNormalizedEvent,
+  ToolCardState,
+} from "./models";
 
 export type TranscriptState = {
   items: ChatItem[];
@@ -56,7 +61,10 @@ function consumeOptimistic(state: TranscriptState, text: string): TranscriptStat
 export function appendUserItem(
   state: TranscriptState,
   text: string,
-  opts: ApplySdkEventOptions & { optimistic?: boolean },
+  opts: ApplySdkEventOptions & {
+    optimistic?: boolean;
+    attachments?: Attachment[];
+  },
 ): TranscriptState {
   const last = state.items[state.items.length - 1];
   if (last?.kind === "text" && last.role === "user" && last.text === text) {
@@ -68,7 +76,15 @@ export function appendUserItem(
   }
   const items: ChatItem[] = [
     ...state.items,
-    { kind: "text", id: opts.nextId("user"), role: "user", text },
+    {
+      kind: "text",
+      id: opts.nextId("user"),
+      role: "user",
+      text,
+      ...(opts.attachments?.length
+        ? { attachments: opts.attachments }
+        : {}),
+    },
   ];
   return {
     items,

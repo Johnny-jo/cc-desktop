@@ -36,7 +36,7 @@ export const en = {
   chat: {
     composerPlaceholder: "Message…  (type / for commands, drop files)",
     composerPlaceholderNew: "Start a new session…  (type / for commands, drop files)",
-    composerNoProject: "Open a project first, then type a message…",
+    pickProject: "Pick folder",
     stop: "Stop",
     send: "Send",
     queue: "Queue",
@@ -134,6 +134,32 @@ export const en = {
     publicView: "Public",
     seatView: "Seat",
     modBadge: "Pack: {id}@{version} · {checksum}",
+    leaveConfirmTitle: "Leave group chat",
+    leaveConfirmTitleHost: "Leave and dissolve group chat",
+    leaveConfirmBody:
+      "After leaving “{name}”, local chat history is kept and you can rejoin with an invite code.",
+    leaveConfirmBodyHost:
+      "You are the host of “{name}”. Leaving dissolves the group chat and disconnects all members.",
+    leaveConfirmWarnHost:
+      "Chat history stays in the local archive, but a dissolved group chat cannot be reopened.",
+    leaveConfirmYes: "Leave",
+    leaveConfirmYesHost: "Leave and dissolve",
+    inviteTitle: "Invite to group chat",
+    inviteCopied: "Copied",
+    inviteFirewall:
+      "The guest pastes this code in Group chats → Join. Allow TCP {port} in the firewall.",
+    inviteNotListening:
+      "Warning: the host is not listening. Recreate the group chat.",
+    addSeatTitle: "Add agent seat",
+    addSeatName: "Seat name",
+    addSeatNamePh: "e.g. ArchitectAgent",
+    addSeatAgent: "Persona (custom agent)",
+    addSeatAgentNone: "No persona",
+    addSeatSubmit: "Add",
+    quoteAction: "Quote",
+    rejoin: "Reconnect",
+    offline: "Offline",
+    offlineBanner: "Connection lost. Chat history is kept locally.",
   },
   onboarding: {
     title: "Welcome",

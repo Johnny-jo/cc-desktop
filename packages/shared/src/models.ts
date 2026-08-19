@@ -160,6 +160,8 @@ export type ChatItem =
        * rewind (code checkpoint + conversation truncation).
        */
       sdkMsgId?: string;
+      /** Files/images attached via the composer (in-session rich display). */
+      attachments?: Attachment[];
     }
   | { kind: "tool"; id: string; tool: ToolCardState }
   | { kind: "usage"; id: string; usage: TurnUsage };

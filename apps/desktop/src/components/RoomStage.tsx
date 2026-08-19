@@ -1,9 +1,10 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
+import type { RoomQuoteRef } from "@claude-desktop/shared";
 import { useAppStore } from "../state/store";
 import {
-  addSeat,
   leaveActiveRoom,
   playRps,
+  rejoinRoom,
   returnSeat,
   rollDice,
   selectSeat,
@@ -12,9 +13,13 @@ import {
   useRoomStore,
 } from "../state/room-store";
 import { getDesktop, hasDesktopApi } from "../lib/desktop-api";
+import { parseTrailingAt } from "../lib/at-mention";
 import { formatModBadge } from "../lib/room-mod-ui";
 import { useI18n } from "../i18n/useI18n";
 import { ModPlayPanel } from "./ModPlayPanel";
+import { RoomAddSeatModal } from "./RoomAddSeatModal";
+import { RoomInviteModal } from "./RoomInviteModal";
+import { RoomLeaveConfirm } from "./RoomLeaveConfirm";
 import { RoomSettingsModal } from "./RoomSettingsModal";
 
 function SeatAvatar({ kind }: { kind: "human" | "agent" }) {
@@ -46,13 +51,19 @@ export function RoomStage() {
   const mod = useRoomStore((s) => s.mod);
   const settings = useAppStore((s) => s.settings);
   const [draft, setDraft] = useState("");
-  const [inviteOpen, setInviteOpen] = useState(false);
-  const [inviteText, setInviteText] = useState("");
+  const [invite, setInvite] = useState<{
+    code: string;
+    port?: number;
+    listening: boolean;
+  } | null>(null);
   const [addOpen, setAddOpen] = useState(false);
-  const [addName, setAddName] = useState("");
   const [err, setErr] = useState<string | null>(null);
   const [confirmLeave, setConfirmLeave] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [quote, setQuote] = useState<RoomQuoteRef | null>(null);
+  const [mentionIndex, setMentionIndex] = useState(0);
+  const [mentionClosed, setMentionClosed] = useState(false);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
   if (!room) {
     return (
@@ -79,6 +90,9 @@ export function RoomStage() {
 
   const selected = room.seats.find((s) => s.id === selectedSeatId) ?? null;
   const myRole = rooms.find((r) => r.roomId === room.roomId)?.role ?? "member";
+  const offline = Boolean(
+    rooms.find((r) => r.roomId === room.roomId)?.offline,
+  );
   const canHost = myRole === "host";
   const myUserId = room.localUserId;
   const modActive = Boolean(room.modChecksum);
@@ -94,16 +108,76 @@ export function RoomStage() {
     room.kernel?.mods.some((m) => m.id === "room-pulse" && m.state === "active"),
   );
 
+  // @提及：候选来自席位，弹层复用 .slash-menu 样式（纯渲染层，协议不改）
+  const mention = room.status === "open" ? parseTrailingAt(draft) : null;
+  const mentionMatches = mention
+    ? room.seats.filter((s) =>
+        s.name.toLowerCase().includes(mention.query.toLowerCase()),
+      )
+    : [];
+  const mentionOpen = Boolean(mention && !mentionClosed && mentionMatches.length);
+  const mentionSel = mentionMatches.length
+    ? mentionIndex % mentionMatches.length
+    : 0;
+
+  const pickMention = (name: string) => {
+    if (!mention) return;
+    setDraft(`${draft.slice(0, mention.start)}@${name} `);
+    setMentionIndex(0);
+    inputRef.current?.focus();
+  };
+
+  // 渲染层 @名字 高亮：按席位名匹配，@自己加底色
+  const seatNames = room.seats
+    .map((s) => s.name)
+    .sort((a, b) => b.length - a.length);
+  const mySeatName =
+    room.seats.find(
+      (s) => s.kind === "human" && s.occupantUserId === myUserId,
+    )?.name ?? null;
+  const mentionRe = seatNames.length
+    ? new RegExp(
+        `@(${seatNames.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`,
+        "g",
+      )
+    : null;
+
+  const renderText = (text: string): React.ReactNode => {
+    if (!mentionRe) return text;
+    const out: React.ReactNode[] = [];
+    let last = 0;
+    let k = 0;
+    for (const m of text.matchAll(mentionRe)) {
+      if (m.index > last) out.push(text.slice(last, m.index));
+      const name = m[1];
+      out.push(
+        <span
+          key={k++}
+          className={`room-mention${name === mySeatName ? " is-me" : ""}`}
+        >
+          @{name}
+        </span>,
+      );
+      last = m.index + m[0].length;
+    }
+    if (!out.length) return text;
+    if (last < text.length) out.push(text.slice(last));
+    return out;
+  };
+
   const onSend = async () => {
     const t = draft.trim();
     if (!t) return;
     setErr(null);
-    const res = await sendToSeat(t);
+    const res = await sendToSeat(t, quote ?? undefined);
     if (!res.ok) {
       setErr(res.error ?? "发送失败");
       return;
     }
     setDraft("");
+    setQuote(null);
+    setMentionIndex(0);
+    setMentionClosed(false);
   };
 
   const onDice = async () => {
@@ -118,7 +192,7 @@ export function RoomStage() {
     if (!res.ok) setErr(res.error ?? "出拳失败");
   };
 
-  const copyInvite = async () => {
+  const onInvite = async () => {
     if (!hasDesktopApi("getRoomInvite")) return;
     const inv = await getDesktop().getRoomInvite(room.roomId);
     if (!inv.ok) {
@@ -129,22 +203,11 @@ export function RoomStage() {
       setErr("生成邀请码失败，请重试");
       return;
     }
-    const text = inv.secret;
-    setInviteText(
-      [
-        `群聊邀请码（复制给对方）`,
-        text,
-        inv.listening === false
-          ? "警告：主机未在监听，请重新创建群聊"
-          : `对方在「群聊 → 加入群聊」粘贴即可；本机防火墙需放行 TCP ${inv.port}`,
-      ].join("\n"),
-    );
-    setInviteOpen(true);
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch {
-      // ignore
-    }
+    setInvite({
+      code: inv.secret,
+      port: inv.port,
+      listening: inv.listening !== false,
+    });
   };
 
   return (
@@ -181,44 +244,46 @@ export function RoomStage() {
             {t.room.settings}
           </button>
           {canHost && room.status === "open" ? (
-            <button type="button" className="btn btn-sm" onClick={() => void copyInvite()}>
+            <button type="button" className="btn btn-sm" onClick={() => void onInvite()}>
               邀请
             </button>
           ) : null}
-          {confirmLeave ? (
-            <span className="room-leave-confirm">
-              {canHost ? "退出并解散？" : "退出？"}
-              <button
-                type="button"
-                className="btn btn-sm"
-                onClick={() => {
-                  setConfirmLeave(false);
-                  void leaveActiveRoom();
-                }}
-              >
-                确定
-              </button>
-              <button
-                type="button"
-                className="btn btn-ghost btn-sm"
-                onClick={() => setConfirmLeave(false)}
-              >
-                取消
-              </button>
-            </span>
-          ) : (
-            <button
-              type="button"
-              className="btn btn-sm"
-              onClick={() => setConfirmLeave(true)}
-            >
-              {canHost ? "退出并解散" : "退出群聊"}
-            </button>
-          )}
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={() => setConfirmLeave(true)}
+          >
+            {canHost ? t.room.leaveConfirmYesHost : t.room.leaveConfirmYes}
+          </button>
         </div>
       </header>
 
+      {confirmLeave ? (
+        <RoomLeaveConfirm
+          isHost={canHost}
+          roomName={room.name}
+          onCancel={() => setConfirmLeave(false)}
+          onConfirm={() => {
+            setConfirmLeave(false);
+            void leaveActiveRoom();
+          }}
+        />
+      ) : null}
+
       {reconnectNote ? <div className="room-reconnect-banner">{reconnectNote}</div> : null}
+
+      {offline ? (
+        <div className="room-offline-banner">
+          <span>{t.room.offlineBanner}</span>
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={() => void rejoinRoom(room.roomId)}
+          >
+            {t.room.rejoin}
+          </button>
+        </div>
+      ) : null}
 
       {modActive ? (
         <ModPlayPanel
@@ -236,13 +301,13 @@ export function RoomStage() {
         />
       ) : null}
 
-      {inviteOpen ? (
-        <div className="room-invite-bar">
-          <pre>{inviteText || "已复制邀请信息"}</pre>
-          <button type="button" className="btn btn-ghost btn-sm" onClick={() => setInviteOpen(false)}>
-            ×
-          </button>
-        </div>
+      {invite ? (
+        <RoomInviteModal
+          code={invite.code}
+          port={invite.port}
+          listening={invite.listening}
+          onClose={() => setInvite(null)}
+        />
       ) : null}
 
       {/* ── Seats row ── */}
@@ -288,48 +353,17 @@ export function RoomStage() {
           );
         })}
         {room.status === "open" ? (
-          <button type="button" className="room-seat add" onClick={() => setAddOpen((v) => !v)}>
+          <button type="button" className="room-seat add" onClick={() => setAddOpen(true)}>
             + 席位
           </button>
         ) : null}
       </div>
 
       {addOpen ? (
-        <div className="room-add-seat">
-          <input
-            placeholder="席位名（如 架构Agent）"
-            value={addName}
-            onChange={(e) => setAddName(e.target.value)}
-          />
-          <select
-            className="select"
-            defaultValue=""
-            onChange={(e) => {
-              const v = e.target.value;
-              if (v) setAddName(v);
-            }}
-          >
-            <option value="">从自定义 Agent 选…</option>
-            {(settings?.agents ?? []).map((a) => (
-              <option key={a.name} value={a.name}>
-                {a.name}
-              </option>
-            ))}
-          </select>
-          <button
-            type="button"
-            className="btn btn-sm"
-            onClick={() => {
-              const n = addName.trim();
-              if (!n) return;
-              void addSeat("agent", n, n);
-              setAddName("");
-              setAddOpen(false);
-            }}
-          >
-            添加
-          </button>
-        </div>
+        <RoomAddSeatModal
+          agents={settings?.agents ?? []}
+          onClose={() => setAddOpen(false)}
+        />
       ) : null}
 
       {/* ── Timeline ── */}
@@ -363,14 +397,38 @@ export function RoomStage() {
                       })}
                     </span>
                   </div>
+                  {it.quote ? (
+                    <div className="room-msg-quote">
+                      <span className="room-msg-quote-author">
+                        {it.quote.authorLabel}
+                      </span>
+                      <span className="room-msg-quote-text">{it.quote.text}</span>
+                    </div>
+                  ) : null}
                   {it.kind === "game" && it.game ? (
                     <div className="room-msg-game">
                       <span className="room-game-icon">{it.game.value}</span>
                       <span>{it.text}</span>
                     </div>
                   ) : (
-                    <div className="room-msg-text">{it.text}</div>
+                    <div className="room-msg-text">{renderText(it.text)}</div>
                   )}
+                  {it.kind === "user" || it.kind === "assistant" ? (
+                    <button
+                      type="button"
+                      className="room-msg-quote-btn"
+                      title={t.room.quoteAction}
+                      onClick={() =>
+                        setQuote({
+                          id: it.id,
+                          authorLabel: it.authorLabel,
+                          text: it.text.slice(0, 120),
+                        })
+                      }
+                    >
+                      {t.room.quoteAction}
+                    </button>
+                  ) : null}
                 </div>
               </div>
             );
@@ -382,71 +440,138 @@ export function RoomStage() {
 
       {/* ── Composer ── */}
       <div className="room-composer">
-        <textarea
-          className="room-input"
-          rows={2}
-          placeholder={
-            selected
-              ? `发给「${selected.name}」…  Enter 发送，Shift+Enter 换行`
-              : "先在上方点一个席位再输入"
-          }
-          value={draft}
-          disabled={room.status !== "open"}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              void onSend();
+        {mentionOpen ? (
+          <ul className="slash-menu at-menu" role="listbox" aria-label="提及席位">
+            {mentionMatches.map((s, i) => (
+              <li key={s.id}>
+                <button
+                  type="button"
+                  className={i === mentionSel ? "slash-item active" : "slash-item"}
+                  onMouseEnter={() => setMentionIndex(i)}
+                  onClick={() => pickMention(s.name)}
+                >
+                  <span className="slash-name at-name">@{s.name}</span>
+                  <span className="slash-desc">
+                    {s.kind === "agent" ? "Agent" : "成员"}
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        <div className="room-composer-box">
+          {quote ? (
+            <div className="room-quote-bar">
+              <span className="room-quote-bar-author">{quote.authorLabel}</span>
+              <span className="room-quote-bar-text" title={quote.text}>
+                {quote.text}
+              </span>
+              <button
+                type="button"
+                className="room-quote-bar-x"
+                aria-label={t.common.cancel}
+                onClick={() => setQuote(null)}
+              >
+                ×
+              </button>
+            </div>
+          ) : null}
+          <textarea
+            ref={inputRef}
+            className="room-input"
+            rows={2}
+            placeholder={
+              selected
+                ? `发给「${selected.name}」…  @ 提及，Enter 发送，Shift+Enter 换行`
+                : "先在上方点一个席位再输入"
             }
-          }}
-        />
-        <div className="room-composer-actions">
-          <div className="room-game-row">
+            value={draft}
+            disabled={room.status !== "open" || offline}
+            onChange={(e) => {
+              setDraft(e.target.value);
+              setMentionIndex(0);
+              setMentionClosed(false);
+            }}
+            onKeyDown={(e) => {
+              if (mentionOpen) {
+                if (e.key === "ArrowDown") {
+                  e.preventDefault();
+                  setMentionIndex((i) => (i + 1) % mentionMatches.length);
+                  return;
+                }
+                if (e.key === "ArrowUp") {
+                  e.preventDefault();
+                  setMentionIndex(
+                    (i) => (i - 1 + mentionMatches.length) % mentionMatches.length,
+                  );
+                  return;
+                }
+                if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
+                  e.preventDefault();
+                  const pick = mentionMatches[mentionSel];
+                  if (pick) pickMention(pick.name);
+                  return;
+                }
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  setMentionClosed(true);
+                  return;
+                }
+              }
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                void onSend();
+              }
+            }}
+          />
+          <div className="room-composer-bar">
+            <div className="room-game-row">
+              <button
+                type="button"
+                className="room-game-btn"
+                disabled={room.status !== "open" || offline || !selected}
+                title="掷骰子"
+                onClick={() => void onDice()}
+              >
+                🎲
+              </button>
+              <button
+                type="button"
+                className="room-game-btn"
+                disabled={room.status !== "open" || offline || !selected}
+                title="石头"
+                onClick={() => void onRps("rock")}
+              >
+                ✊
+              </button>
+              <button
+                type="button"
+                className="room-game-btn"
+                disabled={room.status !== "open" || offline || !selected}
+                title="剪刀"
+                onClick={() => void onRps("scissors")}
+              >
+                ✌️
+              </button>
+              <button
+                type="button"
+                className="room-game-btn"
+                disabled={room.status !== "open" || offline || !selected}
+                title="布"
+                onClick={() => void onRps("paper")}
+              >
+                ✋
+              </button>
+            </div>
             <button
               type="button"
-              className="room-game-btn"
-              disabled={room.status !== "open" || !selected}
-              title="掷骰子"
-              onClick={() => void onDice()}
+              className="btn btn-sm room-send-btn"
+              disabled={room.status !== "open" || offline || !draft.trim() || !selected}
+              onClick={() => void onSend()}
             >
-              🎲
-            </button>
-            <button
-              type="button"
-              className="room-game-btn"
-              disabled={room.status !== "open" || !selected}
-              title="石头"
-              onClick={() => void onRps("rock")}
-            >
-              ✊
-            </button>
-            <button
-              type="button"
-              className="room-game-btn"
-              disabled={room.status !== "open" || !selected}
-              title="剪刀"
-              onClick={() => void onRps("scissors")}
-            >
-              ✌️
-            </button>
-            <button
-              type="button"
-              className="room-game-btn"
-              disabled={room.status !== "open" || !selected}
-              title="布"
-              onClick={() => void onRps("paper")}
-            >
-              ✋
+              发送
             </button>
           </div>
-          <button
-            type="button"
-            className="btn btn-sm room-send-btn"
-            disabled={room.status !== "open" || !draft.trim() || !selected}
-            onClick={() => void onSend()}
-          >
-            发送
-          </button>
         </div>
       </div>
     </div>
