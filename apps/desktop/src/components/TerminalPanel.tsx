@@ -105,7 +105,7 @@ function XtermView({
       fontSize: 13,
       lineHeight: 1.25,
       cursorBlink: true,
-      scrollback: 5000,
+      scrollback: 2000,
       allowProposedApi: true,
     });
     const fit = new FitAddon();

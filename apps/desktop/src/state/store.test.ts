@@ -7,6 +7,9 @@ import {
   enterCliMode,
   exitCliMode,
   getState,
+  loadNewerMessages,
+  loadOlderMessages,
+  RENDERER_TRANSCRIPT_CAP,
   selectSession,
   sendMessage,
 } from "./store";
@@ -45,6 +48,23 @@ describe("prompt queue", () => {
     const q = getState().queuedPrompts;
     expect(q).toHaveLength(1);
     expect(q[0].text).toBe("second question");
+  });
+
+  it("caps live renderer transcript and marks hasMore so older rows stay on disk", () => {
+    runningSession("s1");
+    for (let i = 0; i < 100; i++) {
+      __applySessionEventForTests({
+        type: "text_done",
+        sessionId: "s1",
+        text: `msg-${i}`,
+      });
+    }
+    const items = getState().itemsBySession.s1 ?? [];
+    expect(items.length).toBe(RENDERER_TRANSCRIPT_CAP);
+    expect(getState().hasMoreBySession.s1).toBe(true);
+    expect(items[0]).toMatchObject({ text: "msg-20" });
+    expect(items[items.length - 1]).toMatchObject({ text: "msg-99" });
+    expect(getState().hasNewerBySession.s1).toBe(false);
   });
 
   it("dequeuePrompt removes a queued message", () => {
@@ -220,5 +240,276 @@ describe("cli mode", () => {
     expect(getState().itemsBySession).toEqual({});
     sendMessage("hello from cli");
     expect(getState().itemsBySession).toEqual({});
+  });
+});
+
+function textItem(id: string, text: string): {
+  kind: "text";
+  id: string;
+  role: "assistant";
+  text: string;
+} {
+  return { kind: "text", id, role: "assistant", text };
+}
+
+describe("sliding transcript window", () => {
+  let desktop: {
+    loadOlderMessages: ReturnType<typeof vi.fn>;
+    loadNewerMessages: ReturnType<typeof vi.fn>;
+    continueSession: () => Promise<{ sessionId: string }>;
+    startSession: () => Promise<{ sessionId: string }>;
+  };
+
+  beforeEach(() => {
+    __resetStoreForTests();
+    desktop = {
+      loadOlderMessages: vi.fn(),
+      loadNewerMessages: vi.fn(),
+      continueSession: async () => ({ sessionId: "s1" }),
+      startSession: async () => ({ sessionId: "s1" }),
+    };
+    const g = globalThis as unknown as { window?: { desktop?: unknown } };
+    g.window = g.window ?? {};
+    g.window.desktop = desktop;
+  });
+
+  function fillLiveTail(n = RENDERER_TRANSCRIPT_CAP): void {
+    runningSession("s1");
+    for (let i = 0; i < n; i++) {
+      __applySessionEventForTests({
+        type: "text_done",
+        sessionId: "s1",
+        text: `msg-${i}`,
+      });
+    }
+  }
+
+  it("loadOlder prepends a page and prunes the newer tail so the window stays capped", async () => {
+    fillLiveTail();
+    const before = getState().itemsBySession.s1 ?? [];
+    expect(before).toHaveLength(RENDERER_TRANSCRIPT_CAP);
+
+    const older = Array.from({ length: 40 }, (_, i) => textItem(`old-${i}`, `old-${i}`));
+    desktop.loadOlderMessages.mockResolvedValue({
+      items: older,
+      total: 200,
+      hasMore: true,
+      hasNewer: true,
+    });
+
+    await loadOlderMessages("s1");
+
+    const after = getState().itemsBySession.s1 ?? [];
+    expect(after).toHaveLength(RENDERER_TRANSCRIPT_CAP);
+    expect(after[0]).toMatchObject({ id: "old-0" });
+    expect(after[39]).toMatchObject({ id: "old-39" });
+    expect(after[40]).toMatchObject({ text: "msg-0" });
+    expect(after.at(-1)).toMatchObject({ text: "msg-39" });
+    expect(after.some((i) => i.kind === "text" && i.text === "msg-79")).toBe(false);
+    expect(getState().hasMoreBySession.s1).toBe(true);
+    expect(getState().hasNewerBySession.s1).toBe(true);
+  });
+
+  it("loadNewer appends a page and prunes the older head so the window stays capped", async () => {
+    fillLiveTail();
+    const prunedTail = (getState().itemsBySession.s1 ?? []).slice(40);
+
+    desktop.loadOlderMessages.mockResolvedValue({
+      items: Array.from({ length: 40 }, (_, i) => textItem(`old-${i}`, `old-${i}`)),
+      total: 200,
+      hasMore: true,
+      hasNewer: true,
+    });
+    await loadOlderMessages("s1");
+    expect(getState().hasNewerBySession.s1).toBe(true);
+
+    desktop.loadNewerMessages.mockResolvedValue({
+      items: prunedTail,
+      total: 200,
+      hasMore: true,
+      hasNewer: false,
+    });
+    await loadNewerMessages("s1");
+
+    const after = getState().itemsBySession.s1 ?? [];
+    expect(after).toHaveLength(RENDERER_TRANSCRIPT_CAP);
+    expect(after[0]).toMatchObject({ text: "msg-0" });
+    expect(after.at(-1)).toMatchObject({ text: "msg-79" });
+    expect(after.some((i) => i.kind === "text" && i.id === "old-0")).toBe(false);
+    expect(getState().hasMoreBySession.s1).toBe(true);
+    expect(getState().hasNewerBySession.s1).toBe(false);
+  });
+
+  it("does not apply live stream items while the window is scrolled into history", async () => {
+    fillLiveTail();
+    desktop.loadOlderMessages.mockResolvedValue({
+      items: Array.from({ length: 40 }, (_, i) => textItem(`old-${i}`, `old-${i}`)),
+      total: 200,
+      hasMore: true,
+      hasNewer: true,
+    });
+    await loadOlderMessages("s1");
+    const snapshot = (getState().itemsBySession.s1 ?? []).map((i) => i.id);
+
+    __applySessionEventForTests({
+      type: "text_done",
+      sessionId: "s1",
+      text: "should-not-land",
+    });
+    __applySessionEventForTests({
+      type: "result",
+      sessionId: "s1",
+      ok: true,
+    });
+
+    expect((getState().itemsBySession.s1 ?? []).map((i) => i.id)).toEqual(snapshot);
+    expect(getState().itemsBySession.s1.some((i) => i.kind === "text" && i.text === "should-not-land")).toBe(
+      false,
+    );
+  });
+
+  it("sendMessage while scrolled into history snaps the window back to the new tail", async () => {
+    fillLiveTail();
+    desktop.loadOlderMessages.mockResolvedValue({
+      items: Array.from({ length: 40 }, (_, i) => textItem(`old-${i}`, `old-${i}`)),
+      total: 200,
+      hasMore: true,
+      hasNewer: true,
+    });
+    await loadOlderMessages("s1");
+    expect(getState().hasNewerBySession.s1).toBe(true);
+
+    __upsertSessionForTests({
+      id: "s1",
+      title: "t",
+      cwd: "D:/p",
+      updatedAt: Date.now(),
+      status: "idle",
+    });
+
+    sendMessage("new question");
+
+    const items = getState().itemsBySession.s1 ?? [];
+    expect(getState().hasNewerBySession.s1).toBe(false);
+    expect(items.some((i) => i.kind === "text" && i.text === "new question")).toBe(true);
+    expect(items.some((i) => i.kind === "text" && i.id === "old-0")).toBe(false);
+  });
+});
+
+describe("renderer session cache pruning", () => {
+  beforeEach(() => {
+    __resetStoreForTests();
+  });
+
+  function stubSelect(
+    sessionId: string,
+    extra?: { items?: unknown[]; changes?: unknown[] },
+  ): void {
+    const g = globalThis as unknown as { window?: { desktop?: Record<string, unknown> } };
+    g.window = g.window ?? {};
+    g.window.desktop = {
+      ...(g.window.desktop as object),
+      selectSession: vi.fn().mockResolvedValue({
+        sessionId,
+        cwd: "D:/p",
+        items: extra?.items ?? [
+          { kind: "text", id: `${sessionId}-x`, role: "user", text: "loaded" },
+        ],
+        total: 1,
+        hasMore: false,
+        hasNewer: false,
+        changes: extra?.changes ?? [],
+      }),
+      continueSession: async () => ({ sessionId }),
+      startSession: async () => ({ sessionId }),
+    };
+  }
+
+  it("drops an idle session transcript when switching away", async () => {
+    runningSession("s1");
+    __applySessionEventForTests({
+      type: "text_done",
+      sessionId: "s1",
+      text: "keep-me-on-disk-only",
+    });
+    expect(getState().itemsBySession.s1.length).toBeGreaterThan(0);
+
+    __upsertSessionForTests({
+      id: "s1",
+      title: "t",
+      cwd: "D:/p",
+      updatedAt: Date.now(),
+      status: "idle",
+    });
+    __upsertSessionForTests({
+      id: "s2",
+      title: "two",
+      cwd: "D:/p",
+      updatedAt: Date.now(),
+      status: "idle",
+    });
+    stubSelect("s2");
+    await selectSession("s2");
+
+    expect(getState().itemsBySession.s1).toBeUndefined();
+    expect(getState().itemsBySession.s2).toHaveLength(1);
+    expect(getState().hasMoreBySession.s1).toBeUndefined();
+    expect(getState().hasNewerBySession.s1).toBeUndefined();
+  });
+
+  it("keeps a running session cache while viewing another", async () => {
+    runningSession("s1");
+    __applySessionEventForTests({
+      type: "text_done",
+      sessionId: "s1",
+      text: "live",
+    });
+    __upsertSessionForTests({
+      id: "s2",
+      title: "two",
+      cwd: "D:/p",
+      updatedAt: Date.now(),
+      status: "idle",
+    });
+    stubSelect("s2");
+    await selectSession("s2");
+
+    expect(getState().itemsBySession.s1.some((i) => i.kind === "text" && i.text === "live")).toBe(
+      true,
+    );
+    expect(getState().itemsBySession.s2).toHaveLength(1);
+  });
+
+  it("does not rebuild a parked idle session from live events", async () => {
+    runningSession("s1");
+    __applySessionEventForTests({
+      type: "text_done",
+      sessionId: "s1",
+      text: "old",
+    });
+    __upsertSessionForTests({
+      id: "s1",
+      title: "t",
+      cwd: "D:/p",
+      updatedAt: Date.now(),
+      status: "idle",
+    });
+    __upsertSessionForTests({
+      id: "s2",
+      title: "two",
+      cwd: "D:/p",
+      updatedAt: Date.now(),
+      status: "idle",
+    });
+    stubSelect("s2");
+    await selectSession("s2");
+    expect(getState().itemsBySession.s1).toBeUndefined();
+
+    __applySessionEventForTests({
+      type: "text_done",
+      sessionId: "s1",
+      text: "should-not-rebuild",
+    });
+    expect(getState().itemsBySession.s1).toBeUndefined();
   });
 });

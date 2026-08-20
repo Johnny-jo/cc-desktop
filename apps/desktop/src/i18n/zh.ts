@@ -34,6 +34,14 @@ export const zh: Messages = {
     openFolder: "打开文件夹",
     files: "文件",
     showMore: "显示更多",
+    pin: "置顶对话",
+    unpin: "取消置顶",
+    rename: "编辑标题",
+    more: "更多操作",
+    releaseToDetach: "松开在新窗口打开",
+    deleteChat: "删除对话",
+    deleteConfirm: "删除该会话？此操作不可恢复。",
+    renamePlaceholder: "会话标题",
   },
   chat: {
     composerPlaceholder: "发消息…  （/ 命令，可拖文件）",
@@ -44,6 +52,7 @@ export const zh: Messages = {
     queue: "排队",
     empty: "选一个会话或新建一个",
     loadOlder: "加载更早的消息",
+    loadNewer: "加载更新的消息",
   },
   changes: {
     title: "变更",

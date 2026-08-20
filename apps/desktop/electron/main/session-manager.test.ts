@@ -902,6 +902,54 @@ describe("SessionManager", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("pin, rename and delete a session (persisted via archive)", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sess-pin-"));
+    const archive = new SessionArchive(dir);
+    const ctx = makeDeps();
+    const manager = new SessionManager({
+      queryFn: ctx.queryFn,
+      permissionBroker: ctx.permissionBroker,
+      diffTracker: ctx.diffTracker,
+      cpa: ctx.cpa as never,
+      settings: ctx.settings,
+      archive,
+      emit: ctx.emit,
+      emitSession: ctx.emitSession,
+      emitDiff: ctx.emitDiff,
+    });
+    const a = await manager.start({ text: "first", attachments: [] }, "D:/proj");
+    const b = await manager.start({ text: "second", attachments: [] }, "D:/proj");
+
+    // Newer first by default.
+    expect(manager.list().map((s) => s.id)).toEqual([b, a]);
+
+    // Pin the older one → jumps to top, persisted.
+    const pinned = manager.setPinned(a, true);
+    expect(pinned?.pinned).toBe(true);
+    expect(manager.list().map((s) => s.id)).toEqual([a, b]);
+    expect(archive.loadIndex().find((s) => s.id === a)?.pinned).toBe(true);
+
+    // Rename → trimmed, updated, persisted; empty title rejected.
+    const renamed = manager.rename(a, "  重要会话  ");
+    expect(renamed?.title).toBe("重要会话");
+    expect(archive.loadIndex().find((s) => s.id === a)?.title).toBe("重要会话");
+    expect(manager.rename(a, "   ")).toBeUndefined();
+
+    // Unpin → flag gone.
+    manager.setPinned(a, false);
+    expect(manager.getSummary(a)?.pinned).toBeUndefined();
+
+    // Delete → gone from list, index and transcript files.
+    expect(manager.delete(b)).toBe(true);
+    expect(manager.list().map((s) => s.id)).toEqual([a]);
+    expect(manager.getSummary(b)).toBeUndefined();
+    expect(archive.loadIndex().map((s) => s.id)).toEqual([a]);
+    expect(fs.existsSync(path.join(dir, "sessions", `${b}.json`))).toBe(false);
+    expect(manager.delete("missing")).toBe(false);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("continue appends the next user turn onto hydrated disk items", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sess-cont-"));
     const archive = new SessionArchive(dir);

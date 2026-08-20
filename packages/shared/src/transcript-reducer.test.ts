@@ -66,6 +66,29 @@ describe("applySdkEvent", () => {
     expect(next.items).toHaveLength(1);
   });
 
+  it("shows a thinking placeholder then replaces it with the first text_delta", () => {
+    let s = apply(emptyTranscript(), {
+      type: "thinking_delta",
+      sessionId: "s",
+      text: "",
+    });
+    expect(s.items[0]).toMatchObject({
+      role: "assistant",
+      thinking: true,
+      streaming: true,
+      text: "",
+    });
+    s = apply(s, { type: "thinking_delta", sessionId: "s", text: "more" });
+    expect(s.items).toHaveLength(1);
+    s = apply(s, { type: "text_delta", sessionId: "s", text: "Hi" });
+    expect(s.items[0]).toMatchObject({
+      role: "assistant",
+      text: "Hi",
+      streaming: true,
+    });
+    expect(s.items[0]).not.toHaveProperty("thinking", true);
+  });
+
   it("streams text_delta then settles on text_done", () => {
     let s = apply(emptyTranscript(), {
       type: "text_delta",

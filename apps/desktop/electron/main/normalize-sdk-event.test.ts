@@ -17,6 +17,33 @@ describe("normalizeSdkEvent", () => {
     ]);
   });
 
+  it("maps thinking block start and thinking_delta so UI can show first-byte activity", () => {
+    expect(
+      normalizeSdkEvent(
+        {
+          type: "stream_event",
+          event: {
+            type: "content_block_start",
+            content_block: { type: "thinking" },
+          },
+        },
+        sessionId,
+      ),
+    ).toEqual([{ type: "thinking_delta", sessionId, text: "" }]);
+    expect(
+      normalizeSdkEvent(
+        {
+          type: "stream_event",
+          event: {
+            type: "content_block_delta",
+            delta: { type: "thinking_delta", thinking: "plan" },
+          },
+        },
+        sessionId,
+      ),
+    ).toEqual([{ type: "thinking_delta", sessionId, text: "plan" }]);
+  });
+
   it("maps tool_progress to tool_progress event", () => {
     const msg = {
       type: "tool_progress",

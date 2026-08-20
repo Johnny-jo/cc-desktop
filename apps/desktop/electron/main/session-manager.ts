@@ -17,8 +17,8 @@ import type { CpaSupervisor } from "./cpa-supervisor";
 import type { SettingsStore } from "./settings-store";
 import type { UserPromptBroker } from "./user-prompt-broker";
 import {
-  TRANSCRIPT_PAGE,
   mergeTranscriptItems,
+  pageTranscriptItems,
   type SessionArchive,
   type StoredSession,
   type TranscriptPage,
@@ -259,23 +259,13 @@ function displayPrompt(prompt: UserPrompt): string {
 /** Page slice matching SessionArchive.loadItemsPage (no disk I/O). */
 function pageChatItems(
   all: ChatItem[],
-  opts?: { beforeId?: string; limit?: number },
+  opts?: { beforeId?: string; afterId?: string; limit?: number },
 ): TranscriptPage {
-  const limit = opts?.limit && opts.limit > 0 ? opts.limit : TRANSCRIPT_PAGE;
-  let end = all.length;
-  if (opts?.beforeId) {
-    const idx = all.findIndex((i) => i.id === opts.beforeId);
-    if (idx < 0) {
-      return { items: [], total: all.length, hasMore: all.length > 0 };
-    }
-    end = idx;
-  }
-  const start = Math.max(0, end - limit);
+  const page = pageTranscriptItems(all, opts);
   // Shallow-copy items (same as getTranscript) so callers cannot mutate entry.items.
   return {
-    items: all.slice(start, end).map((i) => ({ ...i })),
-    total: all.length,
-    hasMore: start > 0,
+    ...page,
+    items: page.items.map((i) => ({ ...i })),
   };
 }
 
@@ -393,6 +383,7 @@ export class SessionManager {
               ? { contextUsage: stored.contextUsage }
               : {}),
             ...(stored.hiddenFromList ? { hiddenFromList: true } : {}),
+            ...(stored.pinned ? { pinned: true } : {}),
           },
           abortController: null,
           sdkSessionId: stored.sdkSessionId,
@@ -416,12 +407,56 @@ export class SessionManager {
     return [...this.sessions.values()]
       .filter((e) => !e.summary.hiddenFromList)
       .map((e) => ({ ...e.summary }))
-      .sort((a, b) => b.updatedAt - a.updatedAt);
+      .sort(
+        (a, b) =>
+          Number(b.pinned ?? 0) - Number(a.pinned ?? 0) ||
+          b.updatedAt - a.updatedAt,
+      );
   }
 
   getSummary(sessionId: string): SessionSummary | undefined {
     const e = this.sessions.get(sessionId);
     return e ? { ...e.summary } : undefined;
+  }
+
+  /** Pin / unpin a session to the top of the sidebar list. */
+  setPinned(sessionId: string, pinned: boolean): SessionSummary | undefined {
+    const entry = this.sessions.get(sessionId);
+    if (!entry) return undefined;
+    const next = { ...entry.summary };
+    if (pinned) next.pinned = true;
+    else delete next.pinned;
+    entry.summary = next;
+    this.persistSummary(entry);
+    if (!entry.summary.hiddenFromList) this.emitSession({ ...entry.summary });
+    return { ...entry.summary };
+  }
+
+  /** Rename a session title. */
+  rename(sessionId: string, title: string): SessionSummary | undefined {
+    const entry = this.sessions.get(sessionId);
+    if (!entry) return undefined;
+    const trimmed = title.trim();
+    if (!trimmed) return undefined;
+    entry.summary = { ...entry.summary, title: trimmed };
+    this.persistSummary(entry);
+    if (!entry.summary.hiddenFromList) this.emitSession({ ...entry.summary });
+    return { ...entry.summary };
+  }
+
+  /** Delete a session: abort any live turn, drop it, remove its files. */
+  delete(sessionId: string): boolean {
+    const entry = this.sessions.get(sessionId);
+    if (!entry) return false;
+    // Hide first so abort()'s session:updated broadcast can't resurrect it
+    // in renderer lists mid-delete.
+    entry.summary = { ...entry.summary, hiddenFromList: true };
+    if (entry.turnActive || entry.summary.status === "running") {
+      this.abort(sessionId);
+    }
+    this.sessions.delete(sessionId);
+    this.archive?.remove(sessionId);
+    return true;
   }
 
   /**
@@ -470,10 +505,10 @@ export class SessionManager {
     return this.archive?.loadItems(sessionId) ?? [];
   }
 
-  /** Incremental UI restore — tail or the page ending before `beforeId`. */
+  /** Incremental UI restore — tail, before `beforeId`, or after `afterId`. */
   getTranscriptPage(
     sessionId: string,
-    opts?: { beforeId?: string; limit?: number },
+    opts?: { beforeId?: string; afterId?: string; limit?: number },
   ) {
     const entry = this.sessions.get(sessionId);
     if (entry) {
@@ -485,6 +520,7 @@ export class SessionManager {
         items: [],
         total: 0,
         hasMore: false,
+        hasNewer: false,
       }
     );
   }
@@ -526,8 +562,9 @@ export class SessionManager {
     entry.items = items;
     entry.itemsHydrated = true;
     if (!opts.persist || !this.archive) return;
-    if (opts.replace) this.archive.saveItems(entry.summary.id, items);
-    else this.archive.mergeSaveItems(entry.summary.id, items);
+    // Main holds the full transcript — write it directly. mergeSaveItems
+    // re-parses the whole file and was freezing 100+ turn sessions.
+    this.archive.saveItems(entry.summary.id, items);
   }
 
   private applyAndMaybePersist(
@@ -1041,7 +1078,7 @@ export class SessionManager {
         status: "idle",
         updatedAt: Date.now(),
       };
-      this.emitSession({ ...entry.summary });
+      if (!entry.summary.hiddenFromList) this.emitSession({ ...entry.summary });
       this.persistSummary(entry);
     }
 
@@ -1637,10 +1674,16 @@ export class SessionManager {
       // Kick off consumer before first push so we don't miss early messages.
       entry.consumer = this.consumeQuery(sessionId, q, settings.defaultModel);
 
-      // Refresh slash/skills list (control request; streaming mode only).
-      void this.refreshSlashCommands(sessionId);
-
       input.push(content, entry.sdkSessionId);
+
+      // Control request on the same CLI competes with the first model call
+      // on cold start — wait until after first-byte activity.
+      const gen = myGen;
+      setTimeout(() => {
+        const cur = this.sessions.get(sessionId);
+        if (!cur || cur.streamGen !== gen) return;
+        void this.refreshSlashCommands(sessionId);
+      }, 2500);
       await this.waitForTurnIdle(sessionId);
     } catch (err) {
       const raw = err instanceof Error ? err.message : String(err);

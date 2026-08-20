@@ -37,6 +37,7 @@ import {
 } from "./lib/theme";
 import {
   bootstrapStore,
+  detachedWindowSessionId,
   flushAllTranscripts,
   selectSession,
   setTheme,
@@ -339,6 +340,41 @@ export function App() {
       ? `${layout.terminalHeight}px`
       : "0px",
   } as React.CSSProperties;
+
+  // Detached window (browser-style drag-out): chat-only shell, no sidebar /
+  // changes / terminal. SessionManager lives in the shared main process, so
+  // both windows see the same live session.
+  if (detachedWindowSessionId()) {
+    return (
+      <div className="app app-detached">
+        <div className="app-titlebar">
+          <div className="titlebar-drag" aria-hidden />
+          <ThemeToggle
+            isLight={effectiveTheme(settings?.theme) === "light"}
+            onToggle={() => void setTheme(nextTheme(settings?.theme))}
+          />
+          <div className="titlebar-caption-space" aria-hidden />
+        </div>
+        <ErrorBanner />
+
+        <div className="workspace" style={workspaceStyle}>
+          <div className="main-row">
+            <main className="panel panel-chat">
+              <ChatPanel onOpenSettings={() => setSettingsOpen(true)} />
+            </main>
+          </div>
+        </div>
+
+        <PermissionModal />
+        <UserPromptModal />
+        <OnboardingModal open={needsOnboarding} />
+        <SettingsDrawer
+          open={settingsOpen}
+          onClose={() => setSettingsOpen(false)}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="app">

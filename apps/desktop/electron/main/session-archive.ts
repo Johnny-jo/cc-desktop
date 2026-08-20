@@ -23,8 +23,51 @@ export const TRANSCRIPT_PAGE = 40;
 export type TranscriptPage = {
   items: ChatItem[];
   total: number;
+  /** Older rows exist before this page. */
   hasMore: boolean;
+  /** Newer rows exist after this page. */
+  hasNewer: boolean;
 };
+
+/** Slice a transcript for the renderer sliding window. */
+export function pageTranscriptItems(
+  all: ChatItem[],
+  opts?: { beforeId?: string; afterId?: string; limit?: number },
+): TranscriptPage {
+  const limit = opts?.limit && opts.limit > 0 ? opts.limit : TRANSCRIPT_PAGE;
+  const total = all.length;
+
+  if (opts?.afterId) {
+    const idx = all.findIndex((i) => i.id === opts.afterId);
+    if (idx < 0) {
+      return { items: [], total, hasMore: total > 0, hasNewer: total > 0 };
+    }
+    const start = idx + 1;
+    const end = Math.min(total, start + limit);
+    return {
+      items: all.slice(start, end),
+      total,
+      hasMore: start > 0,
+      hasNewer: end < total,
+    };
+  }
+
+  let end = total;
+  if (opts?.beforeId) {
+    const idx = all.findIndex((i) => i.id === opts.beforeId);
+    if (idx < 0) {
+      return { items: [], total, hasMore: total > 0, hasNewer: false };
+    }
+    end = idx;
+  }
+  const start = Math.max(0, end - limit);
+  return {
+    items: all.slice(start, end),
+    total,
+    hasMore: start > 0,
+    hasNewer: end < total,
+  };
+}
 
 function stripStreaming(item: ChatItem): ChatItem {
   if (item.kind === "text") {
@@ -125,6 +168,7 @@ export class SessionArchive {
             }
           : {}),
         ...(s.hiddenFromList ? { hiddenFromList: true } : {}),
+        ...(s.pinned ? { pinned: true } : {}),
       }));
     } catch {
       return [];
@@ -145,11 +189,25 @@ export class SessionArchive {
           ...(s.usage ? { usage: s.usage } : {}),
           ...(s.contextUsage ? { contextUsage: s.contextUsage } : {}),
           ...(s.hiddenFromList ? { hiddenFromList: true } : {}),
+          ...(s.pinned ? { pinned: true } : {}),
         }))
-        .sort((a, b) => b.updatedAt - a.updatedAt),
+        .sort((a, b) => Number(b.pinned ?? 0) - Number(a.pinned ?? 0) || b.updatedAt - a.updatedAt),
     };
     fs.mkdirSync(this.root, { recursive: true });
     fs.writeFileSync(this.indexPath, JSON.stringify(payload, null, 2), "utf8");
+  }
+
+  /** Remove a session from the index and delete its transcript / changes files. */
+  remove(sessionId: string): void {
+    const list = this.loadIndex().filter((s) => s.id !== sessionId);
+    this.saveIndex(list);
+    for (const file of [this.transcriptPath(sessionId), this.changesPath(sessionId)]) {
+      try {
+        fs.rmSync(file, { force: true });
+      } catch {
+        // best effort
+      }
+    }
   }
 
   upsertSummary(summary: StoredSession): void {
@@ -184,24 +242,9 @@ export class SessionArchive {
    */
   loadItemsPage(
     sessionId: string,
-    opts?: { beforeId?: string; limit?: number },
+    opts?: { beforeId?: string; afterId?: string; limit?: number },
   ): TranscriptPage {
-    const all = this.loadItems(sessionId);
-    const limit = opts?.limit && opts.limit > 0 ? opts.limit : TRANSCRIPT_PAGE;
-    let end = all.length;
-    if (opts?.beforeId) {
-      const idx = all.findIndex((i) => i.id === opts.beforeId);
-      if (idx < 0) {
-        return { items: [], total: all.length, hasMore: all.length > 0 };
-      }
-      end = idx;
-    }
-    const start = Math.max(0, end - limit);
-    return {
-      items: all.slice(start, end),
-      total: all.length,
-      hasMore: start > 0,
-    };
+    return pageTranscriptItems(this.loadItems(sessionId), opts);
   }
 
   saveItems(sessionId: string, items: ChatItem[]): void {
@@ -212,7 +255,7 @@ export class SessionArchive {
       items: items.map(stripStreaming),
     };
     fs.mkdirSync(this.root, { recursive: true });
-    fs.writeFileSync(file, JSON.stringify(payload, null, 2), "utf8");
+    fs.writeFileSync(file, JSON.stringify(payload), "utf8");
   }
 
   /** Persist a renderer window / live tail without wiping older disk rows. */

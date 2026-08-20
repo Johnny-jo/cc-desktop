@@ -73,7 +73,8 @@ describe("SessionArchive", () => {
   });
 
   it("persists transcript items", () => {
-    const arch = new SessionArchive(tmpDir());
+    const dir = tmpDir();
+    const arch = new SessionArchive(dir);
     const items: ChatItem[] = [
       { kind: "text", id: "u1", role: "user", text: "hi", streaming: true },
       { kind: "text", id: "a1", role: "assistant", text: "hello" },
@@ -88,6 +89,8 @@ describe("SessionArchive", () => {
       streaming: false,
     });
     expect(loaded[1]).toMatchObject({ role: "assistant", text: "hello" });
+    const raw = fs.readFileSync(path.join(dir, "sessions", "s1.json"), "utf8");
+    expect(raw.includes("\n  ")).toBe(false);
   });
 
   it("returns empty for missing transcript", () => {
@@ -109,14 +112,41 @@ describe("SessionArchive", () => {
     expect(tail.items.map((i) => i.id)).toEqual(["m3", "m4"]);
     expect(tail.total).toBe(5);
     expect(tail.hasMore).toBe(true);
+    expect(tail.hasNewer).toBe(false);
 
     const older = arch.loadItemsPage("s1", { beforeId: "m3", limit: 2 });
     expect(older.items.map((i) => i.id)).toEqual(["m1", "m2"]);
     expect(older.hasMore).toBe(true);
+    expect(older.hasNewer).toBe(true);
 
     const rest = arch.loadItemsPage("s1", { beforeId: "m1", limit: 2 });
     expect(rest.items.map((i) => i.id)).toEqual(["m0"]);
     expect(rest.hasMore).toBe(false);
+    expect(rest.hasNewer).toBe(true);
+  });
+
+  it("pages newer slices after afterId without dropping disk history", () => {
+    const arch = new SessionArchive(tmpDir());
+    const items: ChatItem[] = Array.from({ length: 5 }, (_, i) => ({
+      kind: "text",
+      id: `m${i}`,
+      role: i % 2 === 0 ? "user" : "assistant",
+      text: String(i),
+    }));
+    arch.saveItems("s1", items);
+
+    const newer = arch.loadItemsPage("s1", { afterId: "m1", limit: 2 });
+    expect(newer.items.map((i) => i.id)).toEqual(["m2", "m3"]);
+    expect(newer.hasMore).toBe(true);
+    expect(newer.hasNewer).toBe(true);
+
+    const last = arch.loadItemsPage("s1", { afterId: "m3", limit: 2 });
+    expect(last.items.map((i) => i.id)).toEqual(["m4"]);
+    expect(last.hasMore).toBe(true);
+    expect(last.hasNewer).toBe(false);
+
+    const miss = arch.loadItemsPage("s1", { afterId: "nope", limit: 2 });
+    expect(miss.items).toEqual([]);
   });
 
   it("mergeSaveItems updates the tail without wiping unread history", () => {
@@ -163,5 +193,59 @@ describe("SessionArchive", () => {
       status: "A",
     });
     expect(loaded[1].events[0]?.tool).toBe("Bash");
+  });
+
+  it("persists pinned and sorts pinned sessions first", () => {
+    const arch = new SessionArchive(tmpDir());
+    arch.upsertSummary({
+      id: "old-pinned",
+      title: "pinned",
+      cwd: "D:/proj",
+      updatedAt: 100,
+      status: "idle",
+      pinned: true,
+    });
+    arch.upsertSummary({
+      id: "newer",
+      title: "newer",
+      cwd: "D:/proj",
+      updatedAt: 200,
+      status: "idle",
+    });
+    const list = arch.loadIndex();
+    expect(list[0].id).toBe("old-pinned"); // pinned beats recency
+    expect(list[0].pinned).toBe(true);
+    expect(list.find((s) => s.id === "newer")?.pinned).toBeUndefined();
+  });
+
+  it("remove drops the session from the index and deletes its files", () => {
+    const dir = tmpDir();
+    const arch = new SessionArchive(dir);
+    arch.upsertSummary({
+      id: "s1",
+      title: "gone",
+      cwd: "D:/proj",
+      updatedAt: 100,
+      status: "idle",
+    });
+    arch.upsertSummary({
+      id: "s2",
+      title: "kept",
+      cwd: "D:/proj",
+      updatedAt: 200,
+      status: "idle",
+    });
+    arch.saveItems("s1", [{ kind: "text", id: "m1", role: "user", text: "hi" }]);
+    arch.saveChanges("s1", [
+      { path: "a.ts", status: "M", hunks: "+x", updatedAt: 1, events: [] },
+    ]);
+    const sessDir = path.join(dir, "sessions");
+    expect(fs.existsSync(path.join(sessDir, "s1.json"))).toBe(true);
+
+    arch.remove("s1");
+    expect(arch.loadIndex().map((s) => s.id)).toEqual(["s2"]);
+    expect(fs.existsSync(path.join(sessDir, "s1.json"))).toBe(false);
+    expect(fs.existsSync(path.join(sessDir, "s1.changes.json"))).toBe(false);
+    expect(fs.existsSync(path.join(sessDir, "s2.json"))).toBe(false);
   });
 });

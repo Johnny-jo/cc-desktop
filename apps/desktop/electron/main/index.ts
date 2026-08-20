@@ -3,6 +3,7 @@ import path from "node:path";
 import {
   app,
   BrowserWindow,
+  ipcMain,
   Menu,
   nativeTheme,
   Notification,
@@ -55,22 +56,26 @@ const TITLE_SYMBOL_DARK = "#e8e8e8";
 const TITLE_SYMBOL_LIGHT = "#1c1c1e";
 
 let mainWindow: BrowserWindow | null = null;
-/** False while the page is reloading / closed — blocks webContents.send storms. */
-let rendererReady = false;
+/**
+ * Ready webContents ids (main + detached session windows). A window is
+ * removed while its page reloads / closes — blocks webContents.send storms.
+ */
+const readyRenderers = new Set<number>();
 
 /** Sync frameless window chrome (titleBarOverlay) with the UI theme. */
 function applyWindowTheme(theme: "dark" | "light"): void {
-  const win = getMainWindow();
-  if (!win || win.isDestroyed()) return;
-  try {
-    win.setTitleBarOverlay({
-      color: theme === "light" ? APP_BG_LIGHT : APP_BG,
-      symbolColor: theme === "light" ? TITLE_SYMBOL_LIGHT : TITLE_SYMBOL_DARK,
-      height: 36,
-    });
-    win.setBackgroundColor(theme === "light" ? APP_BG_LIGHT : APP_BG);
-  } catch {
-    // older Electron without setTitleBarOverlay — ignore
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed()) continue;
+    try {
+      win.setTitleBarOverlay({
+        color: theme === "light" ? APP_BG_LIGHT : APP_BG,
+        symbolColor: theme === "light" ? TITLE_SYMBOL_LIGHT : TITLE_SYMBOL_DARK,
+        height: 36,
+      });
+      win.setBackgroundColor(theme === "light" ? APP_BG_LIGHT : APP_BG);
+    } catch {
+      // older Electron without setTitleBarOverlay — ignore
+    }
   }
 }
 
@@ -79,30 +84,30 @@ function getMainWindow(): BrowserWindow | null {
 }
 
 /**
- * Safe IPC push to the renderer.
- * During Vite HMR / reload / close the BrowserWindow may still exist while the
- * render frame is already gone. Unconditional webContents.send then throws
- * (sometimes async): "Render frame was disposed before WebFrameMain could be
- * accessed" and floods the console while SessionManager is still streaming.
+ * Safe IPC push to every live renderer (main window + detached session
+ * windows). During Vite HMR / reload / close the BrowserWindow may still
+ * exist while the render frame is already gone. Unconditional
+ * webContents.send then throws (sometimes async): "Render frame was disposed
+ * before WebFrameMain could be accessed" and floods the console while
+ * SessionManager is still streaming.
  */
 function sendToRenderer(channel: string, payload: unknown): void {
-  if (!rendererReady) return;
-  const win = getMainWindow();
-  if (!win || win.isDestroyed()) return;
-  const wc = win.webContents;
-  if (!wc || wc.isDestroyed()) return;
-  try {
-    // No live renderer process (crashed / not yet spawned).
-    if (typeof wc.getOSProcessId === "function" && wc.getOSProcessId() <= 0) {
-      return;
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed()) continue;
+    const wc = win.webContents;
+    if (!wc || wc.isDestroyed() || !readyRenderers.has(wc.id)) continue;
+    try {
+      if (typeof wc.getOSProcessId === "function" && wc.getOSProcessId() <= 0) {
+        continue;
+      }
+    } catch {
+      continue;
     }
-  } catch {
-    return;
-  }
-  try {
-    wc.send(channel, payload);
-  } catch {
-    rendererReady = false;
+    try {
+      wc.send(channel, payload);
+    } catch {
+      readyRenderers.delete(wc.id);
+    }
   }
 }
 
@@ -138,14 +143,44 @@ function createTokenCrypto(): {
   };
 }
 
-function createWindow() {
-  // Dark chrome to match the in-app charcoal UI (title bar / window frame).
-  nativeTheme.themeSource = "dark";
+/** Per-window renderer readiness gate (HMR reload / crash / close). */
+function wireRendererGate(win: BrowserWindow): void {
+  const id = win.webContents.id;
+  readyRenderers.delete(id);
+  win.webContents.on("did-start-loading", () => readyRenderers.delete(id));
+  win.webContents.on("did-finish-load", () => readyRenderers.add(id));
+  win.webContents.on("dom-ready", () => readyRenderers.add(id));
+  win.webContents.on("render-process-gone", () => readyRenderers.delete(id));
+  win.webContents.on("destroyed", () => readyRenderers.delete(id));
+}
 
-  mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 800,
+function loadRenderer(
+  win: BrowserWindow,
+  query?: Record<string, string>,
+): void {
+  if (process.env.ELECTRON_RENDERER_URL) {
+    const url = new URL(process.env.ELECTRON_RENDERER_URL);
+    if (query) {
+      for (const [k, v] of Object.entries(query)) url.searchParams.set(k, v);
+    }
+    void win.loadURL(url.toString());
+  } else {
+    void win.loadFile(
+      path.join(__dirname, "../renderer/index.html"),
+      query ? { query } : undefined,
+    );
+  }
+}
+
+/** Loose PNG for the window / taskbar icon in dev; packaged builds bake it into the exe. */
+const WINDOW_ICON = path.join(__dirname, "../../build/icon.png");
+
+function buildWindow(width: number, height: number): BrowserWindow {
+  const win = new BrowserWindow({
+    width,
+    height,
     backgroundColor: APP_BG,
+    ...(fs.existsSync(WINDOW_ICON) ? { icon: WINDOW_ICON } : {}),
     // No File/Edit/View menu bar — this is a desktop chat app, not an editor.
     autoHideMenuBar: true,
     // Hide OS title (icon + app name); keep only dark min/max/close.
@@ -161,33 +196,20 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
+  wireRendererGate(win);
+  return win;
+}
+
+function createWindow() {
+  // Dark chrome to match the in-app charcoal UI (title bar / window frame).
+  nativeTheme.themeSource = "dark";
+
+  mainWindow = buildWindow(1280, 800);
 
   // Fully remove the default application menu (File / Edit / View / …).
   Menu.setApplicationMenu(null);
 
-  // Gate IPC while the page is loading / reloading (HMR).
-  rendererReady = false;
-  mainWindow.webContents.on("did-start-loading", () => {
-    rendererReady = false;
-  });
-  mainWindow.webContents.on("did-finish-load", () => {
-    rendererReady = true;
-  });
-  mainWindow.webContents.on("dom-ready", () => {
-    rendererReady = true;
-  });
-  mainWindow.webContents.on("render-process-gone", () => {
-    rendererReady = false;
-  });
-  mainWindow.webContents.on("destroyed", () => {
-    rendererReady = false;
-  });
-
-  if (process.env.ELECTRON_RENDERER_URL) {
-    void mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
-  } else {
-    void mainWindow.loadFile(path.join(__dirname, "../renderer/index.html"));
-  }
+  loadRenderer(mainWindow);
 
   // DevTools access (menu bar is removed, so bind it explicitly):
   // - F12 / Ctrl+Shift+I toggles DevTools
@@ -212,9 +234,14 @@ function createWindow() {
   }
 
   mainWindow.on("closed", () => {
-    rendererReady = false;
     mainWindow = null;
   });
+}
+
+/** Browser-style drag-out: a chat-only window bound to one session. */
+function createSessionWindow(sessionId: string) {
+  const win = buildWindow(960, 720);
+  loadRenderer(win, { detached: "1", session: sessionId });
 }
 
 function bootstrap() {
@@ -433,6 +460,18 @@ function bootstrap() {
   });
 
   const stopClaudeSettingsWatch = watchClaudeCodeModel(applyCliModelToDesktop);
+
+  // Browser-style drag-out: open a session in its own chat-only window.
+  ipcMain.handle(
+    IPC.windowOpenSession,
+    async (_e, { sessionId }: { sessionId: string }) => {
+      if (!sessions.getSummary(sessionId)) {
+        return { ok: false, error: `Unknown session: ${sessionId}` };
+      }
+      createSessionWindow(sessionId);
+      return { ok: true };
+    },
+  );
 
   createWindow();
   // Hot updates replace app binaries only — never AppData / CPA config.

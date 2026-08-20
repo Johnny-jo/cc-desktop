@@ -94,7 +94,7 @@ export function CliModePage() {
       fontSize: 13,
       lineHeight: 1.25,
       cursorBlink: true,
-      scrollback: 8000,
+      scrollback: 2000,
       allowProposedApi: true,
     });
     const fit = new FitAddon();

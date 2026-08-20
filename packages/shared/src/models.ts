@@ -154,6 +154,8 @@ export type ChatItem =
       role: ChatRole;
       text: string;
       streaming?: boolean;
+      /** True while the model is producing a thinking/reasoning block (not answer text). */
+      thinking?: boolean;
       /**
        * SDK-persisted user message uuid (real user turns only). Bound by
        * ordinal matching against SDK user messages; enables message-level
@@ -208,6 +210,8 @@ export type SessionSummary = {
   contextUsage?: ContextUsage;
   /** Room-mod / seat sessions — omitted from the main session list */
   hiddenFromList?: boolean;
+  /** Pinned to the top of the sidebar list */
+  pinned?: boolean;
 };
 
 export type PermissionRequest = {
@@ -303,6 +307,7 @@ export type PublicSettings = Omit<AppSettings, never> & {
 
 export type SdkNormalizedEvent =
   | { type: "text_delta"; sessionId: string; text: string }
+  | { type: "thinking_delta"; sessionId: string; text: string }
   | { type: "text_done"; sessionId: string; text: string }
   | { type: "tool_start"; sessionId: string; tool: ToolCardState }
   | { type: "tool_end"; sessionId: string; tool: ToolCardState }

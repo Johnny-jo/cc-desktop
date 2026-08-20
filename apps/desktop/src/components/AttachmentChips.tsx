@@ -3,16 +3,17 @@ import { createPortal } from "react-dom";
 import type { Attachment } from "@claude-desktop/shared";
 import { getDesktop, hasDesktopApi } from "../lib/desktop-api";
 import { languageForPath } from "../lib/editor-language";
+import { createLru } from "../lib/lru";
 import { useAppStore } from "../state/store";
 
-/** data URL cache: path → dataUrl (null = failed/loading) */
-const imageCache = new Map<string, string | null>();
+/** data URLs are large; cap so old previews can GC. */
+const imageCache = createLru<string, string | null>(12);
 
 function useImageDataUrl(path: string): string | null {
   const [url, setUrl] = useState<string | null>(imageCache.get(path) ?? null);
   useEffect(() => {
     const cached = imageCache.get(path);
-    if (cached != null) {
+    if (cached !== undefined) {
       setUrl(cached);
       return;
     }

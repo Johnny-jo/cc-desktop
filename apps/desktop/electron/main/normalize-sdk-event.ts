@@ -219,10 +219,22 @@ function normalizeStreamEvent(
   const event = isRecord(msg.event) ? msg.event : null;
   if (!event) return [];
 
+  if (event.type === "content_block_start" && isRecord(event.content_block)) {
+    const kind = event.content_block.type;
+    if (kind === "thinking" || kind === "redacted_thinking") {
+      return [{ type: "thinking_delta", sessionId, text: "" }];
+    }
+  }
+
   if (event.type === "content_block_delta" && isRecord(event.delta)) {
     const delta = event.delta;
     if (delta.type === "text_delta" && typeof delta.text === "string") {
       return [{ type: "text_delta", sessionId, text: delta.text }];
+    }
+    if (delta.type === "thinking_delta") {
+      const thinking =
+        typeof delta.thinking === "string" ? delta.thinking : "";
+      return [{ type: "thinking_delta", sessionId, text: thinking }];
     }
   }
   return [];

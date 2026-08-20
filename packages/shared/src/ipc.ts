@@ -30,8 +30,15 @@ export const IPC = {
   sessionList: "session:list",
   sessionSelect: "session:select",
   sessionLoadOlder: "session:load-older",
+  sessionLoadNewer: "session:load-newer",
   sessionSaveTranscript: "session:save-transcript",
   sessionCompress: "session:compress",
+  /** Pin / unpin a session to the top of the sidebar list */
+  sessionSetPinned: "session:set-pinned",
+  /** Rename a session title */
+  sessionRename: "session:rename",
+  /** Delete a session and its transcript/changes files */
+  sessionDelete: "session:delete",
   permissionRespond: "permission:respond",
   userPromptRespond: "user-prompt:respond",
   settingsGet: "settings:get",
@@ -98,6 +105,8 @@ export const IPC = {
   terminalKill: "terminal:kill",
   /** Renderer → Main: resize PTY to match xterm grid */
   terminalResize: "terminal:resize",
+  /** Open a session in its own detached window (browser-style drag-out) */
+  windowOpenSession: "window:open-session",
   // main → renderer (webContents.send)
   sessionEvent: "session:event",
   permissionRequest: "permission:request",
@@ -204,6 +213,7 @@ export type IpcInvokeMap = {
       items: import("./models").ChatItem[];
       total: number;
       hasMore: boolean;
+      hasNewer: boolean;
       changes: FileChange[];
     };
   };
@@ -213,6 +223,16 @@ export type IpcInvokeMap = {
       items: import("./models").ChatItem[];
       total: number;
       hasMore: boolean;
+      hasNewer: boolean;
+    };
+  };
+  [IPC.sessionLoadNewer]: {
+    args: [{ sessionId: string; afterId: string; limit?: number }];
+    result: {
+      items: import("./models").ChatItem[];
+      total: number;
+      hasMore: boolean;
+      hasNewer: boolean;
     };
   };
   /** Persist renderer transcript for a session (debounced by UI) */
@@ -240,6 +260,22 @@ export type IpcInvokeMap = {
       },
     ];
     result: { ok: boolean; message?: string };
+  };
+  [IPC.sessionSetPinned]: {
+    args: [{ sessionId: string; pinned: boolean }];
+    result: { ok: boolean; session?: SessionSummary; error?: string };
+  };
+  [IPC.sessionRename]: {
+    args: [{ sessionId: string; title: string }];
+    result: { ok: boolean; session?: SessionSummary; error?: string };
+  };
+  [IPC.sessionDelete]: {
+    args: [{ sessionId: string }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.windowOpenSession]: {
+    args: [{ sessionId: string }];
+    result: { ok: boolean; error?: string };
   };
   [IPC.permissionRespond]: {
     args: [{ requestId: string; decision: PermissionDecision }];

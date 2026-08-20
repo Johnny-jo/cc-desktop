@@ -134,10 +134,27 @@ export function applySdkEvent(
       }
       return appendUserItem(state, event.text, opts);
     }
+    case "thinking_delta": {
+      const last = items[items.length - 1];
+      if (last?.kind === "text" && last.role === "assistant" && last.streaming) {
+        return state;
+      }
+      items.push({
+        kind: "text",
+        id: opts.nextId("asst"),
+        role: "assistant",
+        text: "",
+        streaming: true,
+        thinking: true,
+      });
+      return { ...state, items };
+    }
     case "text_delta": {
       const last = items[items.length - 1];
       if (last?.kind === "text" && last.role === "assistant" && last.streaming) {
-        items[items.length - 1] = { ...last, text: last.text + event.text };
+        items[items.length - 1] = last.thinking
+          ? { ...last, thinking: undefined, text: event.text }
+          : { ...last, text: last.text + event.text };
       } else {
         items.push({
           kind: "text",
@@ -247,7 +264,15 @@ export function applySdkEvent(
     case "result": {
       const last = items[items.length - 1];
       if (last?.kind === "text" && last.role === "assistant" && last.streaming) {
-        items[items.length - 1] = { ...last, streaming: false };
+        if (last.thinking && !last.text) {
+          items.pop();
+        } else {
+          items[items.length - 1] = {
+            ...last,
+            streaming: false,
+            thinking: undefined,
+          };
+        }
       }
       if (!event.ok && event.error) {
         items.push({

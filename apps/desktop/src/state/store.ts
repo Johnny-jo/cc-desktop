@@ -39,8 +39,12 @@ export type AppState = {
   lastError: string | null;
   /** Disk still has older bubbles not yet in itemsBySession. */
   hasMoreBySession: Record<string, boolean>;
+  /** Disk / live tail still has newer bubbles past the current window. */
+  hasNewerBySession: Record<string, boolean>;
   /** Lightweight CLI page; drops renderer transcript cache while active. */
   cliMode: boolean;
+  /** Session whose transcript is being loaded from disk (skeleton screen). */
+  loadingSessionId: string | null;
   /**
    * Cross-component request: chat tool card asks the changes panel to
    * reveal one change record. nonce forces re-fire for repeated clicks.
@@ -72,7 +76,9 @@ let state: AppState = {
   queuedPrompts: [],
   lastError: null,
   hasMoreBySession: {},
+  hasNewerBySession: {},
   cliMode: false,
+  loadingSessionId: null,
   revealChangeRequest: null,
   fsChangeTick: 0,
 };
@@ -80,6 +86,19 @@ let state: AppState = {
 const listeners = new Set<Listener>();
 let bootstrapped = false;
 const unsubs: Array<() => void> = [];
+
+/**
+ * Renderer transcript cache: at most this many sessions keep their chat /
+ * changes in memory (stack semantics — least recently viewed is evicted).
+ * The active session and any running turn are always retained on top.
+ */
+export const SESSION_CACHE_CAP = 6;
+/** Most-recently-viewed first. */
+let sessionCacheLru: string[] = [];
+
+function touchSessionCache(sessionId: string): void {
+  sessionCacheLru = [sessionId, ...sessionCacheLru.filter((id) => id !== sessionId)];
+}
 
 /** Pending user prompt for startSession before sessionId is known. */
 let pendingStartPrompt: { text: string; attachments: Attachment[] } | null = null;
@@ -108,6 +127,81 @@ function setState(partial: Partial<AppState> | ((prev: AppState) => AppState)): 
 
 function getItems(sessionId: string): ChatItem[] {
   return state.itemsBySession[sessionId] ?? [];
+}
+
+/**
+ * Active session plus any still-running turn are always kept; the remaining
+ * slots (up to SESSION_CACHE_CAP total) go to recently viewed sessions.
+ * Everything else is on disk and reloads (with a skeleton) when clicked.
+ */
+function retainedSessionIds(activeId: string | null = state.activeSessionId): Set<string> {
+  const keep = new Set<string>();
+  if (activeId) keep.add(activeId);
+  for (const s of state.sessions) {
+    if (s.status === "running") keep.add(s.id);
+  }
+  for (const id of sessionCacheLru) {
+    if (keep.size >= SESSION_CACHE_CAP) break;
+    keep.add(id);
+  }
+  return keep;
+}
+
+function shouldCacheSession(sessionId: string): boolean {
+  return retainedSessionIds().has(sessionId);
+}
+
+function pickRecord<T>(rec: Record<string, T>, keep: Set<string>): Record<string, T> {
+  const out: Record<string, T> = {};
+  for (const id of keep) {
+    if (Object.prototype.hasOwnProperty.call(rec, id)) out[id] = rec[id];
+  }
+  return out;
+}
+
+function pruneSideMaps(keep: Set<string>): void {
+  for (const id of [...optimisticUserTexts.keys()]) {
+    if (!keep.has(id)) optimisticUserTexts.delete(id);
+  }
+  for (const id of [...sdkUserMsgIds.keys()]) {
+    if (!keep.has(id)) sdkUserMsgIds.delete(id);
+  }
+}
+
+function prunedSessionCaches(
+  keep: Set<string>,
+  overlay?: Partial<
+    Pick<
+      AppState,
+      | "itemsBySession"
+      | "changesBySession"
+      | "slashBySession"
+      | "hasMoreBySession"
+      | "hasNewerBySession"
+    >
+  >,
+): Pick<
+  AppState,
+  | "itemsBySession"
+  | "changesBySession"
+  | "slashBySession"
+  | "hasMoreBySession"
+  | "hasNewerBySession"
+> {
+  pruneSideMaps(keep);
+  return {
+    itemsBySession: pickRecord(overlay?.itemsBySession ?? state.itemsBySession, keep),
+    changesBySession: pickRecord(
+      overlay?.changesBySession ?? state.changesBySession,
+      keep,
+    ),
+    slashBySession: pickRecord(overlay?.slashBySession ?? state.slashBySession, keep),
+    hasMoreBySession: pickRecord(overlay?.hasMoreBySession ?? state.hasMoreBySession, keep),
+    hasNewerBySession: pickRecord(
+      overlay?.hasNewerBySession ?? state.hasNewerBySession,
+      keep,
+    ),
+  };
 }
 
 /** Flush all debounced transcript writes (call on quit). */
@@ -139,7 +233,17 @@ function writeTranscriptUi(sessionId: string, t: TranscriptState): void {
   } else {
     optimisticUserTexts.delete(sessionId);
   }
-  setItems(sessionId, t.items);
+  let items = t.items;
+  if (items.length > RENDERER_TRANSCRIPT_CAP) {
+    items = items.slice(items.length - RENDERER_TRANSCRIPT_CAP);
+    setState({
+      itemsBySession: { ...state.itemsBySession, [sessionId]: items },
+      hasMoreBySession: { ...state.hasMoreBySession, [sessionId]: true },
+      hasNewerBySession: { ...state.hasNewerBySession, [sessionId]: false },
+    });
+    return;
+  }
+  setItems(sessionId, items);
 }
 
 function upsertSession(summary: SessionSummary): void {
@@ -147,7 +251,10 @@ function upsertSession(summary: SessionSummary): void {
   const idx = sessions.findIndex((s) => s.id === summary.id);
   if (idx >= 0) sessions[idx] = summary;
   else sessions.unshift(summary);
-  sessions.sort((a, b) => b.updatedAt - a.updatedAt);
+  sessions.sort(
+    (a, b) =>
+      Number(b.pinned ?? 0) - Number(a.pinned ?? 0) || b.updatedAt - a.updatedAt,
+  );
 
   const running =
     summary.status === "running" ||
@@ -198,6 +305,24 @@ function applySessionEvent(event: SdkNormalizedEvent): void {
     return;
   }
 
+  // Parked idle sessions live on disk; don't rebuild a renderer cache for them.
+  if (!shouldCacheSession(sessionId)) {
+    if (event.type === "result") {
+      setState({
+        running: state.sessions.some(
+          (s) => s.id !== sessionId && s.status === "running",
+        ),
+        lastError: event.ok ? state.lastError : (event.error ?? "Turn failed"),
+      });
+      if (!state.running && state.queuedPrompts.length > 0) {
+        const summary = state.sessions.find((s) => s.id === sessionId);
+        const ratio = summary?.contextUsage?.ratio ?? 0;
+        if (ratio < AUTO_COMPRESS_RATIO) setTimeout(flushQueuedPrompt, 0);
+      }
+    }
+    return;
+  }
+
   const prev = transcriptUi(sessionId);
   if (event.type === "user_msg_ids") {
     sdkUserMsgIds.set(sessionId, event.uuids);
@@ -205,20 +330,26 @@ function applySessionEvent(event: SdkNormalizedEvent): void {
     if (bound !== getItems(sessionId)) setItems(sessionId, bound);
     return;
   }
-  const next = applySdkEvent(prev, event, { nextId });
-  writeTranscriptUi(sessionId, next);
 
-  if (event.type === "result") {
+  if (event.type === "items_replaced") {
+    const next = applySdkEvent(prev, event, { nextId });
+    writeTranscriptUi(sessionId, next);
+    sdkUserMsgIds.delete(sessionId);
+    setState({
+      hasMoreBySession: { ...state.hasMoreBySession, [sessionId]: false },
+      hasNewerBySession: { ...state.hasNewerBySession, [sessionId]: false },
+    });
+    return;
+  }
+
+  const applyResultFlags = (): void => {
+    if (event.type !== "result") return;
     setState({
       running: state.sessions.some(
         (s) => s.id !== sessionId && s.status === "running",
       ),
       lastError: event.ok ? state.lastError : (event.error ?? "Turn failed"),
     });
-    // Auto-compress is scheduled from session:updated (has fresh contextUsage).
-    // Send the next queued message (Claude Code-style type-ahead) once the
-    // turn is fully done — but not when auto-compress is about to run, since
-    // compression replaces the transcript first.
     if (!state.running && state.queuedPrompts.length > 0) {
       const summary = state.sessions.find((s) => s.id === sessionId);
       const ratio = summary?.contextUsage?.ratio ?? 0;
@@ -226,18 +357,17 @@ function applySessionEvent(event: SdkNormalizedEvent): void {
         setTimeout(flushQueuedPrompt, 0);
       }
     }
+  };
+
+  // Window is parked on older history — keep live tail on disk/main only.
+  if (state.hasNewerBySession[sessionId]) {
+    applyResultFlags();
+    return;
   }
-  if (event.type === "items_replaced") {
-    // Main finished compression — replace UI transcript with summary + recent.
-    // A fresh SDK session starts afterwards, so rewind uuid bindings reset.
-    sdkUserMsgIds.delete(sessionId);
-    setState({
-      hasMoreBySession: {
-        ...state.hasMoreBySession,
-        [sessionId]: false,
-      },
-    });
-  }
+
+  const next = applySdkEvent(prev, event, { nextId });
+  writeTranscriptUi(sessionId, next);
+  applyResultFlags();
 }
 
 function subscribeDesktopEvents(): void {
@@ -295,6 +425,10 @@ function subscribeDesktopEvents(): void {
       ) {
         maybeAutoCompressAfterResult(summary.id);
       }
+
+      if (summary.status !== "running" && summary.id !== state.activeSessionId) {
+        setState(prunedSessionCaches(retainedSessionIds()));
+      }
     }),
   );
 
@@ -305,10 +439,14 @@ function subscribeDesktopEvents(): void {
         changes: FileChange[];
       };
       setState({
-        changesBySession: {
-          ...state.changesBySession,
-          [sessionId]: changes,
-        },
+        ...(shouldCacheSession(sessionId)
+          ? {
+              changesBySession: {
+                ...state.changesBySession,
+                [sessionId]: changes,
+              },
+            }
+          : {}),
         fsChangeTick: state.fsChangeTick + 1,
       });
     }),
@@ -332,6 +470,7 @@ function subscribeDesktopEvents(): void {
         sessionId: string;
         commands: SlashCommandItem[];
       };
+      if (!shouldCacheSession(sessionId)) return;
       setState({
         slashBySession: {
           ...state.slashBySession,
@@ -394,15 +533,32 @@ export async function bootstrapStore(): Promise<void> {
     }));
 
     // After restart, auto-open the most recent session (restores chat + cwd).
+    // Detached windows open the session they were spawned for instead.
     if (list.length > 0 && !getState().activeSessionId) {
-      const latest = [...list].sort((a, b) => b.updatedAt - a.updatedAt)[0];
-      if (latest) {
-        void selectSession(latest.id);
+      const detachedId = detachedWindowSessionId();
+      const target =
+        (detachedId ? list.find((s) => s.id === detachedId) : undefined) ??
+        [...list].sort((a, b) => b.updatedAt - a.updatedAt)[0];
+      if (target) {
+        void selectSession(target.id);
       }
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     setState({ lastError: message });
+  }
+}
+
+/**
+ * Session id when this window was spawned as a detached chat window
+ * (`?detached=1&session=<id>`), else null for the main window.
+ */
+export function detachedWindowSessionId(): string | null {
+  try {
+    const q = new URLSearchParams(window.location.search);
+    return q.get("detached") === "1" ? q.get("session") : null;
+  } catch {
+    return null;
   }
 }
 
@@ -428,7 +584,12 @@ export function useAppStore<T>(selector: (s: AppState) => T): T {
 // --- actions ---
 
 export function enterCliMode(): void {
-  setState({ cliMode: true, itemsBySession: {}, hasMoreBySession: {} });
+  setState({
+    cliMode: true,
+    itemsBySession: {},
+    hasMoreBySession: {},
+    hasNewerBySession: {},
+  });
 }
 
 export function exitCliMode(): void {
@@ -524,24 +685,114 @@ export function newChat(): void {
   setState({ activeSessionId: null });
 }
 
-const SELECT_PAGE = 40;
+/** Pin / unpin a session at the top of the sidebar list (persisted in main). */
+export async function toggleSessionPinned(sessionId: string): Promise<void> {
+  const current = state.sessions.find((s) => s.id === sessionId);
+  if (!current) return;
+  try {
+    const res = await getDesktop().setSessionPinned(sessionId, !current.pinned);
+    if (res.ok && res.session) upsertSession(res.session);
+    else if (!res.ok) setState({ lastError: res.error ?? "Pin failed" });
+  } catch (err) {
+    setState({ lastError: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+/** Rename a session title (persisted in main). Returns false when rejected. */
+export async function renameSession(
+  sessionId: string,
+  title: string,
+): Promise<boolean> {
+  try {
+    const res = await getDesktop().renameSession(sessionId, title);
+    if (res.ok && res.session) {
+      upsertSession(res.session);
+      return true;
+    }
+    if (!res.ok) setState({ lastError: res.error ?? "Rename failed" });
+  } catch (err) {
+    setState({ lastError: err instanceof Error ? err.message : String(err) });
+  }
+  return false;
+}
+
+/** Delete a session: main aborts any live turn and removes its files. */
+export async function deleteSession(sessionId: string): Promise<void> {
+  try {
+    const res = await getDesktop().deleteSession(sessionId);
+    if (!res.ok) {
+      setState({ lastError: res.error ?? "Delete failed" });
+      return;
+    }
+  } catch (err) {
+    setState({ lastError: err instanceof Error ? err.message : String(err) });
+    return;
+  }
+  sessionCacheLru = sessionCacheLru.filter((id) => id !== sessionId);
+  const sessions = state.sessions.filter((s) => s.id !== sessionId);
+  const drop = <T>(rec: Record<string, T>): Record<string, T> => {
+    if (!Object.prototype.hasOwnProperty.call(rec, sessionId)) return rec;
+    const out = { ...rec };
+    delete out[sessionId];
+    return out;
+  };
+  pruneSideMaps(new Set(sessions.map((s) => s.id)));
+  setState({
+    sessions,
+    running: sessions.some((s) => s.status === "running"),
+    activeSessionId:
+      state.activeSessionId === sessionId ? null : state.activeSessionId,
+    loadingSessionId:
+      state.loadingSessionId === sessionId ? null : state.loadingSessionId,
+    itemsBySession: drop(state.itemsBySession),
+    changesBySession: drop(state.changesBySession),
+    slashBySession: drop(state.slashBySession),
+    hasMoreBySession: drop(state.hasMoreBySession),
+    hasNewerBySession: drop(state.hasNewerBySession),
+  });
+}
+
+/** Renderer sliding window. Initial select and live cap share this length. */
+export const RENDERER_TRANSCRIPT_CAP = 80;
+const SELECT_PAGE = RENDERER_TRANSCRIPT_CAP;
 
 export async function selectSession(sessionId: string): Promise<void> {
-  setState({ activeSessionId: sessionId });
+  touchSessionCache(sessionId);
+
+  // Cache hit (LRU stack): show the in-memory window instantly, no disk read.
+  const cacheHit =
+    !state.cliMode &&
+    Object.prototype.hasOwnProperty.call(state.itemsBySession, sessionId);
+  if (cacheHit) {
+    const cwd = state.sessions.find((s) => s.id === sessionId)?.cwd;
+    setState({
+      activeSessionId: sessionId,
+      projectPath: cwd || state.projectPath,
+      loadingSessionId: null,
+      ...prunedSessionCaches(retainedSessionIds(sessionId)),
+      lastError: null,
+    });
+    return;
+  }
+
+  // Cache miss: skeleton screen while the disk page loads.
+  setState({ activeSessionId: sessionId, loadingSessionId: sessionId });
   const desktop = getDesktop();
   try {
     const res = await desktop.selectSession(sessionId, SELECT_PAGE);
 
     if (state.cliMode) {
       const cwd = res.cwd || state.sessions.find((s) => s.id === sessionId)?.cwd;
+      const keep = retainedSessionIds(sessionId);
+      pruneSideMaps(keep);
       setState({
         activeSessionId: sessionId,
         projectPath: cwd || state.projectPath,
         itemsBySession: {},
-        changesBySession: {
-          ...state.changesBySession,
-          [sessionId]: res.changes ?? [],
-        },
+        changesBySession: pickRecord(
+          { ...state.changesBySession, [sessionId]: res.changes ?? [] },
+          keep,
+        ),
         lastError: null,
       });
       return;
@@ -558,24 +809,33 @@ export async function selectSession(sessionId: string): Promise<void> {
 
     // Switch project path to this session's workspace folder.
     const cwd = res.cwd || state.sessions.find((s) => s.id === sessionId)?.cwd;
+    const keep = retainedSessionIds(sessionId);
 
     setState({
       activeSessionId: sessionId,
       projectPath: cwd || state.projectPath,
-      itemsBySession: {
-        ...state.itemsBySession,
-        [sessionId]: restoredItems,
-      },
-      changesBySession: {
-        ...state.changesBySession,
-        [sessionId]: res.changes ?? [],
-      },
-      hasMoreBySession: {
-        ...state.hasMoreBySession,
-        [sessionId]: localHasStream
-          ? (state.hasMoreBySession[sessionId] ?? false)
-          : Boolean(res.hasMore),
-      },
+      ...prunedSessionCaches(keep, {
+        itemsBySession: {
+          ...state.itemsBySession,
+          [sessionId]: restoredItems,
+        },
+        changesBySession: {
+          ...state.changesBySession,
+          [sessionId]: res.changes ?? [],
+        },
+        hasMoreBySession: {
+          ...state.hasMoreBySession,
+          [sessionId]: localHasStream
+            ? (state.hasMoreBySession[sessionId] ?? false)
+            : Boolean(res.hasMore),
+        },
+        hasNewerBySession: {
+          ...state.hasNewerBySession,
+          [sessionId]: localHasStream
+            ? (state.hasNewerBySession[sessionId] ?? false)
+            : Boolean(res.hasNewer),
+        },
+      }),
       lastError: null,
     });
 
@@ -589,10 +849,14 @@ export async function selectSession(sessionId: string): Promise<void> {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     setState({ lastError: message });
+  } finally {
+    if (state.loadingSessionId === sessionId) {
+      setState({ loadingSessionId: null });
+    }
   }
 }
 
-/** Prepend the next older disk page. Does not rewrite the on-disk transcript. */
+/** Prepend the next older disk page and prune the newer tail. */
 export async function loadOlderMessages(
   sessionId: string,
 ): Promise<{ ok: boolean }> {
@@ -611,14 +875,63 @@ export async function loadOlderMessages(
     }
     const seen = new Set(items.map((i) => i.id));
     const older = page.items.filter((i) => !seen.has(i.id));
+    const merged = bindSdkUserMsgIds(sessionId, [...older, ...items]);
+    const pruned = merged.length > RENDERER_TRANSCRIPT_CAP;
+    const next = pruned ? merged.slice(0, RENDERER_TRANSCRIPT_CAP) : merged;
     setState({
       itemsBySession: {
         ...state.itemsBySession,
-        [sessionId]: bindSdkUserMsgIds(sessionId, [...older, ...items]),
+        [sessionId]: next,
       },
       hasMoreBySession: {
         ...state.hasMoreBySession,
         [sessionId]: Boolean(page.hasMore),
+      },
+      hasNewerBySession: {
+        ...state.hasNewerBySession,
+        [sessionId]: pruned || Boolean(state.hasNewerBySession[sessionId]),
+      },
+    });
+    return { ok: true };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/** Append the next newer disk page and prune the older head. */
+export async function loadNewerMessages(
+  sessionId: string,
+): Promise<{ ok: boolean }> {
+  const items = getItems(sessionId);
+  const afterId = items[items.length - 1]?.id;
+  if (!afterId || !hasDesktopApiSafe("loadNewerMessages")) {
+    return { ok: false };
+  }
+  try {
+    const page = await getDesktop().loadNewerMessages(sessionId, afterId);
+    if (!page.items.length) {
+      setState({
+        hasNewerBySession: { ...state.hasNewerBySession, [sessionId]: false },
+      });
+      return { ok: true };
+    }
+    const seen = new Set(items.map((i) => i.id));
+    const newer = page.items.filter((i) => !seen.has(i.id));
+    const merged = bindSdkUserMsgIds(sessionId, [...items, ...newer]);
+    const pruned = merged.length > RENDERER_TRANSCRIPT_CAP;
+    const next = pruned ? merged.slice(merged.length - RENDERER_TRANSCRIPT_CAP) : merged;
+    setState({
+      itemsBySession: {
+        ...state.itemsBySession,
+        [sessionId]: next,
+      },
+      hasMoreBySession: {
+        ...state.hasMoreBySession,
+        [sessionId]: pruned || Boolean(state.hasMoreBySession[sessionId]),
+      },
+      hasNewerBySession: {
+        ...state.hasNewerBySession,
+        [sessionId]: Boolean(page.hasNewer),
       },
     });
     return { ok: true };
@@ -675,6 +988,19 @@ export function sendMessage(text: string, attachments: Attachment[] = []): void 
   setState({ running: true, lastError: null });
 
   if (activeSessionId) {
+    if (state.hasNewerBySession[activeSessionId]) {
+      setState({
+        itemsBySession: { ...state.itemsBySession, [activeSessionId]: [] },
+        hasNewerBySession: {
+          ...state.hasNewerBySession,
+          [activeSessionId]: false,
+        },
+        hasMoreBySession: {
+          ...state.hasMoreBySession,
+          [activeSessionId]: true,
+        },
+      });
+    }
     appendUserMessage(activeSessionId, displayText, {
       optimistic: true,
       attachments,
@@ -988,11 +1314,14 @@ export function __resetStoreForTests(): void {
     queuedPrompts: [],
     lastError: null,
     hasMoreBySession: {},
+    hasNewerBySession: {},
     cliMode: false,
+    loadingSessionId: null,
     revealChangeRequest: null,
     fsChangeTick: 0,
   };
   pendingStartPrompt = null;
+  sessionCacheLru = [];
   autoCompressedAt.clear();
   bootstrapped = false;
   for (const u of unsubs) u();

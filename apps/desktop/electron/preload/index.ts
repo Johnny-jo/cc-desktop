@@ -34,6 +34,33 @@ const desktop = {
 
   listSessions: () => ipcRenderer.invoke(IPC.sessionList),
 
+  setSessionPinned: (sessionId: string, pinned: boolean) =>
+    ipcRenderer.invoke(IPC.sessionSetPinned, { sessionId, pinned }) as Promise<{
+      ok: boolean;
+      session?: import("@claude-desktop/shared").SessionSummary;
+      error?: string;
+    }>,
+
+  renameSession: (sessionId: string, title: string) =>
+    ipcRenderer.invoke(IPC.sessionRename, { sessionId, title }) as Promise<{
+      ok: boolean;
+      session?: import("@claude-desktop/shared").SessionSummary;
+      error?: string;
+    }>,
+
+  deleteSession: (sessionId: string) =>
+    ipcRenderer.invoke(IPC.sessionDelete, { sessionId }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+
+  /** Browser-style drag-out: open this session in its own window. */
+  openSessionWindow: (sessionId: string) =>
+    ipcRenderer.invoke(IPC.windowOpenSession, { sessionId }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+
   selectSession: (sessionId: string, limit?: number) =>
     ipcRenderer.invoke(IPC.sessionSelect, { sessionId, limit }) as Promise<{
       sessionId: string;
@@ -41,6 +68,7 @@ const desktop = {
       items: ChatItem[];
       total: number;
       hasMore: boolean;
+      hasNewer: boolean;
       changes: import("@claude-desktop/shared").FileChange[];
     }>,
 
@@ -53,6 +81,19 @@ const desktop = {
       items: ChatItem[];
       total: number;
       hasMore: boolean;
+      hasNewer: boolean;
+    }>,
+
+  loadNewerMessages: (sessionId: string, afterId: string, limit?: number) =>
+    ipcRenderer.invoke(IPC.sessionLoadNewer, {
+      sessionId,
+      afterId,
+      limit,
+    }) as Promise<{
+      items: ChatItem[];
+      total: number;
+      hasMore: boolean;
+      hasNewer: boolean;
     }>,
 
   saveSessionTranscript: (

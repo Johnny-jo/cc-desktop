@@ -1332,6 +1332,10 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
               <option value="medium">medium</option>
               <option value="high">high</option>
             </select>
+            <p className="settings-hint">
+              high 会先做较长推理再出字，首次响应更慢；要更快出字用 medium / low
+              或「模型默认」。
+            </p>
           </label>
 
           <label className="settings-field">

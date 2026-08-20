@@ -32,6 +32,14 @@ export const en = {
     openFolder: "Open folder",
     files: "Files",
     showMore: "Show more",
+    pin: "Pin chat",
+    unpin: "Unpin",
+    rename: "Rename",
+    more: "More actions",
+    releaseToDetach: "Release to open in new window",
+    deleteChat: "Delete chat",
+    deleteConfirm: "Delete this chat? This cannot be undone.",
+    renamePlaceholder: "Session title",
   },
   chat: {
     composerPlaceholder: "Message…  (type / for commands, drop files)",
@@ -42,6 +50,7 @@ export const en = {
     queue: "Queue",
     empty: "Select a session or start a new one",
     loadOlder: "Load older messages",
+    loadNewer: "Load newer messages",
   },
   changes: {
     title: "Changes",

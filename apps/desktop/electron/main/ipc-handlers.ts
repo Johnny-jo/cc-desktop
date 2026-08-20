@@ -350,6 +350,33 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
   ipcMain.handle(IPC.sessionList, async () => ctx.sessions.list());
 
   ipcMain.handle(
+    IPC.sessionSetPinned,
+    async (_e, { sessionId, pinned }: { sessionId: string; pinned: boolean }) => {
+      const session = ctx.sessions.setPinned(sessionId, pinned);
+      if (!session) return { ok: false, error: `Unknown session: ${sessionId}` };
+      return { ok: true, session };
+    },
+  );
+
+  ipcMain.handle(
+    IPC.sessionRename,
+    async (_e, { sessionId, title }: { sessionId: string; title: string }) => {
+      const session = ctx.sessions.rename(sessionId, title);
+      if (!session) return { ok: false, error: `Unknown session: ${sessionId}` };
+      return { ok: true, session };
+    },
+  );
+
+  ipcMain.handle(
+    IPC.sessionDelete,
+    async (_e, { sessionId }: { sessionId: string }) => {
+      const ok = ctx.sessions.delete(sessionId);
+      if (!ok) return { ok: false, error: `Unknown session: ${sessionId}` };
+      return { ok: true };
+    },
+  );
+
+  ipcMain.handle(
     IPC.sessionSelect,
     async (
       _e,
@@ -370,6 +397,7 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
         items: page.items,
         total: page.total,
         hasMore: page.hasMore,
+        hasNewer: page.hasNewer,
         changes: ctx.sessions.getChangesForSelect(sessionId),
       };
     },
@@ -386,6 +414,20 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
       }: { sessionId: string; beforeId: string; limit?: number },
     ) => {
       return ctx.sessions.getTranscriptPage(sessionId, { beforeId, limit });
+    },
+  );
+
+  ipcMain.handle(
+    IPC.sessionLoadNewer,
+    async (
+      _e,
+      {
+        sessionId,
+        afterId,
+        limit,
+      }: { sessionId: string; afterId: string; limit?: number },
+    ) => {
+      return ctx.sessions.getTranscriptPage(sessionId, { afterId, limit });
     },
   );
 

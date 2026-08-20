@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import type { PermissionMode } from "@claude-desktop/shared";
+import type { ChatItem, PermissionMode } from "@claude-desktop/shared";
 import { MessageList } from "./MessageList";
 import { Composer } from "./Composer";
 import { ThemedSelect } from "./Select";
@@ -20,6 +20,8 @@ const PERMISSION_MODES: PermissionMode[] = [
   "auto",
 ];
 
+const EMPTY_ITEMS: ChatItem[] = [];
+
 export type ChatPanelProps = {
   onOpenSettings: () => void;
   /** Open a project-relative file in the in-app editor column. */
@@ -29,8 +31,18 @@ export type ChatPanelProps = {
 export function ChatPanel({ onOpenSettings, onOpenFile }: ChatPanelProps) {
   const { t } = useI18n();
   const activeSessionId = useAppStore((s) => s.activeSessionId);
-  const itemsBySession = useAppStore((s) => s.itemsBySession);
-  const hasMoreBySession = useAppStore((s) => s.hasMoreBySession);
+  const items = useAppStore((s) =>
+    s.activeSessionId ? (s.itemsBySession[s.activeSessionId] ?? EMPTY_ITEMS) : EMPTY_ITEMS,
+  );
+  const hasMore = useAppStore((s) =>
+    s.activeSessionId ? Boolean(s.hasMoreBySession[s.activeSessionId]) : false,
+  );
+  const hasNewer = useAppStore((s) =>
+    s.activeSessionId ? Boolean(s.hasNewerBySession[s.activeSessionId]) : false,
+  );
+  const transcriptLoading = useAppStore(
+    (s) => s.loadingSessionId !== null && s.loadingSessionId === s.activeSessionId,
+  );
   const sessions = useAppStore((s) => s.sessions);
   const running = useAppStore((s) => s.running);
   const settings = useAppStore((s) => s.settings);
@@ -39,7 +51,6 @@ export function ChatPanel({ onOpenSettings, onOpenFile }: ChatPanelProps) {
     {},
   );
 
-  const items = activeSessionId ? (itemsBySession[activeSessionId] ?? []) : [];
   const active = sessions.find((s) => s.id === activeSessionId);
   const ctx = active?.contextUsage;
   const level = ctx ? contextLevel(ctx.ratio) : "ok";
@@ -120,10 +131,9 @@ export function ChatPanel({ onOpenSettings, onOpenFile }: ChatPanelProps) {
           <MessageList
             items={items}
             sessionId={activeSessionId}
-            hasMore={
-              Boolean(activeSessionId) &&
-              Boolean(hasMoreBySession[activeSessionId!])
-            }
+            hasMore={hasMore}
+            hasNewer={hasNewer}
+            loading={transcriptLoading}
             onOpenFile={onOpenFile}
           />
         </div>

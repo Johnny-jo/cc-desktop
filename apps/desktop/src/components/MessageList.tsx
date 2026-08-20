@@ -5,6 +5,7 @@ import { MarkdownBody } from "./MarkdownBody";
 import { AttachmentChips } from "./AttachmentChips";
 import { formatTurnUsageLine } from "../lib/format-usage";
 import {
+  loadNewerMessages,
   loadOlderMessages,
   rewindToMessage,
   useAppStore,
@@ -116,7 +117,7 @@ const MessageRow = memo(function MessageRow({
 }) {
   if (item.kind === "tool") {
     return (
-      <div className="message-row tool-row">
+      <div className="message-row tool-row" data-item-id={item.id}>
         <ToolCard tool={item.tool} />
       </div>
     );
@@ -124,7 +125,7 @@ const MessageRow = memo(function MessageRow({
 
   if (item.kind === "usage") {
     return (
-      <div className="message-row usage-row">
+      <div className="message-row usage-row" data-item-id={item.id}>
         <div className="usage-chip" title="This turn">
           {formatTurnUsageLine(item.usage)}
         </div>
@@ -137,7 +138,7 @@ const MessageRow = memo(function MessageRow({
   // Skill / long injected text → collapsible card (never dump open).
   if (role === "assistant" && !item.streaming && looksLikeSkillDump(item.text)) {
     return (
-      <div className="message-row skill-row">
+      <div className="message-row skill-row" data-item-id={item.id}>
         <CollapsedTextCard text={item.text} />
       </div>
     );
@@ -146,6 +147,7 @@ const MessageRow = memo(function MessageRow({
   return (
     <div
       className={`message-row role-${role}${item.streaming ? " streaming" : ""}`}
+      data-item-id={item.id}
     >
       {role === "user" ? (
         <div className="bubble bubble-user" title={item.text}>
@@ -162,7 +164,11 @@ const MessageRow = memo(function MessageRow({
         <div className="bubble bubble-system">{item.text}</div>
       ) : (
         <div className="bubble bubble-assistant">
-          <MarkdownBody text={item.text} streaming={item.streaming} />
+          {item.thinking && item.streaming && !item.text ? (
+            <span className="thinking-indicator">思考中…</span>
+          ) : (
+            <MarkdownBody text={item.text} streaming={item.streaming} />
+          )}
         </div>
       )}
     </div>
@@ -174,41 +180,144 @@ function lastItemStreaming(items: ChatItem[]): boolean {
   return Boolean(last && last.kind === "text" && last.streaming);
 }
 
-/** Mounted tail. Extra pages come from store first, then disk. */
-const WINDOW_TAIL = 40;
-const WINDOW_STEP = 40;
+const SCROLL_LOAD_PX = 80;
+
+function itemTop(list: HTMLElement, id: string): number | null {
+  const node = list.querySelector(`[data-item-id="${CSS.escape(id)}"]`);
+  if (!(node instanceof HTMLElement)) return null;
+  return node.getBoundingClientRect().top;
+}
+
+/** Skeleton bubbles shown while a session transcript loads from disk. */
+function TranscriptSkeleton() {
+  return (
+    <div className="message-list skeleton" aria-busy="true">
+      {["a", "u", "a", "u", "a"].map((role, i) => (
+        <div
+          key={i}
+          className={`skeleton-row ${role === "u" ? "skeleton-user" : "skeleton-assistant"}`}
+        >
+          <div className="skeleton-bubble">
+            <span className="skeleton-line w-90" />
+            <span className="skeleton-line w-70" />
+            {role === "a" ? <span className="skeleton-line w-40" /> : null}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 export function MessageList({
   items,
   sessionId,
   hasMore,
+  hasNewer,
+  loading,
   onOpenFile,
 }: {
   items: ChatItem[];
   sessionId: string | null;
   hasMore?: boolean;
+  hasNewer?: boolean;
+  /** Disk page in flight — show the skeleton instead of the empty hero. */
+  loading?: boolean;
   /** Open a project-relative file in the in-app editor column. */
   onOpenFile?: (rel: string) => void;
 }) {
   const { t } = useI18n();
   const listRef = useRef<HTMLDivElement | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
-  const [extra, setExtra] = useState(0);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  const [loadingNewer, setLoadingNewer] = useState(false);
+  const loadingRef = useRef(false);
+
+  const last = items[items.length - 1];
+  const pinKey = last
+    ? `${last.id}:${last.kind === "text" ? `${last.text.length}:${last.streaming ? 1 : 0}` : last.kind}`
+    : "0";
 
   useEffect(() => {
-    setExtra(0);
-  }, [sessionId]);
-
-  useEffect(() => {
+    if (hasNewer) return;
     const list = listRef.current;
     if (!list) return;
     if (lastItemStreaming(items)) {
       list.scrollTop = list.scrollHeight;
       return;
     }
-    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [items]);
+    bottomRef.current?.scrollIntoView({ block: "end" });
+    // pinKey already encodes last-item id / length / streaming.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pinKey, sessionId, hasNewer]);
+
+  const restoreAnchor = (anchorId: string, prevTop: number) => {
+    requestAnimationFrame(() => {
+      const el = listRef.current;
+      if (!el) return;
+      const nextTop = itemTop(el, anchorId);
+      if (nextTop == null) return;
+      el.scrollTop += nextTop - prevTop;
+    });
+  };
+
+  const onLoadOlder = async () => {
+    if (!hasMore || !sessionId || loadingRef.current) return;
+    const list = listRef.current;
+    const anchorId = items[0]?.id;
+    const prevTop = list && anchorId ? itemTop(list, anchorId) : null;
+    loadingRef.current = true;
+    setLoadingOlder(true);
+    try {
+      await loadOlderMessages(sessionId);
+    } finally {
+      loadingRef.current = false;
+      setLoadingOlder(false);
+    }
+    if (anchorId && prevTop != null) restoreAnchor(anchorId, prevTop);
+  };
+
+  const onLoadNewer = async () => {
+    if (!hasNewer || !sessionId || loadingRef.current) return;
+    const list = listRef.current;
+    const anchorId = items[items.length - 1]?.id;
+    const prevTop = list && anchorId ? itemTop(list, anchorId) : null;
+    loadingRef.current = true;
+    setLoadingNewer(true);
+    try {
+      await loadNewerMessages(sessionId);
+    } finally {
+      loadingRef.current = false;
+      setLoadingNewer(false);
+    }
+    if (anchorId && prevTop != null) restoreAnchor(anchorId, prevTop);
+  };
+
+  useEffect(() => {
+    const list = listRef.current;
+    if (!list) return;
+    const onScroll = () => {
+      if (loadingRef.current) return;
+      // Don't auto-page when the window fits on screen (opening a short tail
+      // would otherwise fire both edges at scrollTop 0).
+      if (list.scrollHeight <= list.clientHeight + SCROLL_LOAD_PX) return;
+      if (hasMore && list.scrollTop <= SCROLL_LOAD_PX) {
+        void onLoadOlder();
+        return;
+      }
+      const distBottom = list.scrollHeight - list.scrollTop - list.clientHeight;
+      if (hasNewer && distBottom <= SCROLL_LOAD_PX) {
+        void onLoadNewer();
+      }
+    };
+    list.addEventListener("scroll", onScroll, { passive: true });
+    return () => list.removeEventListener("scroll", onScroll);
+    // Intentionally close over the latest loaders / flags.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, hasMore, hasNewer, items[0]?.id, items[items.length - 1]?.id]);
+
+  if (loading && items.length === 0) {
+    return <TranscriptSkeleton />;
+  }
 
   if (items.length === 0) {
     return (
@@ -223,60 +332,31 @@ export function MessageList({
     );
   }
 
-  const hiddenInStore = Math.max(0, items.length - WINDOW_TAIL - extra);
-  const visible = hiddenInStore > 0 ? items.slice(hiddenInStore) : items;
-  const canRevealStore = hiddenInStore > 0;
-  const canFetchDisk = Boolean(hasMore && sessionId && !canRevealStore);
-
-  const onLoadOlder = async () => {
-    const list = listRef.current;
-    const prevHeight = list?.scrollHeight ?? 0;
-    const prevTop = list?.scrollTop ?? 0;
-
-    if (canRevealStore) {
-      setExtra((n) => n + WINDOW_STEP);
-    } else if (canFetchDisk && sessionId) {
-      setLoadingOlder(true);
-      try {
-        await loadOlderMessages(sessionId);
-        setExtra((n) => n + WINDOW_STEP);
-      } finally {
-        setLoadingOlder(false);
-      }
-    }
-
-    requestAnimationFrame(() => {
-      const el = listRef.current;
-      if (!el) return;
-      el.scrollTop = prevTop + (el.scrollHeight - prevHeight);
-    });
-  };
-
-  const remainingHint = canRevealStore
-    ? hiddenInStore
-    : hasMore
-      ? t.chat.loadOlder
-      : 0;
-
   return (
     <div className="message-list" ref={listRef}>
-      {canRevealStore || canFetchDisk ? (
+      {hasMore && sessionId ? (
         <button
           type="button"
           className="message-load-older"
           disabled={loadingOlder}
           onClick={() => void onLoadOlder()}
         >
-          {loadingOlder
-            ? t.common.loading
-            : canRevealStore
-              ? `${t.chat.loadOlder}（${Math.min(WINDOW_STEP, hiddenInStore)}）`
-              : t.chat.loadOlder}
+          {loadingOlder ? t.common.loading : t.chat.loadOlder}
         </button>
       ) : null}
-      {visible.map((item) => (
+      {items.map((item) => (
         <MessageRow key={item.id} item={item} onOpenFile={onOpenFile} />
       ))}
+      {hasNewer && sessionId ? (
+        <button
+          type="button"
+          className="message-load-newer"
+          disabled={loadingNewer}
+          onClick={() => void onLoadNewer()}
+        >
+          {loadingNewer ? t.common.loading : t.chat.loadNewer}
+        </button>
+      ) : null}
       <div ref={bottomRef} />
     </div>
   );

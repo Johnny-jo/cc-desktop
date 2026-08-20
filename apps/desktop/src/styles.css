@@ -2303,6 +2303,215 @@ body.is-resizing-row * {
   /* Keep each row at its natural height; the list scrolls instead of
      squashing items when sessions outgrow the sidebar. */
   flex-shrink: 0;
+  position: relative;
+}
+
+/* The ⋯ menu must escape the row's overflow clip. */
+.session-list-item:has(.session-menu) {
+  overflow: visible;
+  z-index: 20;
+}
+
+.session-item-more {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  right: 6px;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity 0.12s ease,
+    background 0.12s ease;
+}
+
+/* Reserve the ⋯ button's space so a long title never runs underneath it. */
+.session-list-item .session-item {
+  padding-right: 38px;
+}
+
+.session-list-item:hover .session-item-more,
+.session-item-more:focus-visible,
+.session-list-item:has(.session-menu) .session-item-more {
+  opacity: 1;
+}
+
+.session-item-more:hover {
+  background: var(--bg-active);
+  color: var(--text);
+}
+
+.session-pin-icon {
+  display: inline-block;
+  vertical-align: -1px;
+  margin-right: 5px;
+  color: var(--accent);
+}
+
+.session-menu {
+  position: absolute;
+  top: calc(100% - 4px);
+  right: 6px;
+  z-index: 300;
+  min-width: 128px;
+  display: flex;
+  flex-direction: column;
+  padding: 5px;
+  background: color-mix(in srgb, var(--bg-elevated) 70%, transparent);
+  backdrop-filter: blur(24px) saturate(1.5);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+  animation: select-menu-in 130ms ease;
+}
+
+.session-menu button {
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-size: 0.923rem;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.session-menu button:hover {
+  background: var(--bg-hover);
+}
+
+.session-menu .session-menu-danger {
+  color: var(--danger);
+}
+
+/* Drag-out ghost chip (browser-style detach to a new window) */
+body.session-detaching {
+  user-select: none !important;
+  cursor: grabbing;
+}
+
+.session-drag-ghost {
+  position: fixed;
+  z-index: 1000;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-width: 240px;
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-strong);
+  background: color-mix(in srgb, var(--bg-elevated) 88%, transparent);
+  box-shadow: var(--shadow-2);
+  opacity: 0.92;
+}
+
+.session-drag-ghost.detach {
+  border-color: var(--accent);
+}
+
+.session-drag-ghost-title {
+  font-size: 0.923rem;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-drag-ghost-hint {
+  font-size: 0.769rem;
+  color: var(--accent);
+}
+
+.session-rename-input {
+  width: 100%;
+  box-sizing: border-box;
+  font-size: 1rem;
+  font-weight: 500;
+  color: var(--text);
+  background: var(--bg-elevated);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-md);
+  padding: 9px 12px;
+  outline: none;
+}
+
+/* Transcript skeleton (鱼骨 loading) while a session page loads from disk */
+.message-list.skeleton {
+  gap: 18px;
+  pointer-events: none;
+}
+
+.skeleton-row {
+  display: flex;
+  width: 100%;
+}
+
+.skeleton-row.skeleton-user {
+  justify-content: flex-end;
+}
+
+.skeleton-row.skeleton-assistant {
+  justify-content: flex-start;
+}
+
+.skeleton-bubble {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(46%, 520px);
+  padding: 14px 16px;
+  border-radius: var(--radius-lg, 12px);
+  background: var(--bg-elevated);
+}
+
+.skeleton-user .skeleton-bubble {
+  width: min(34%, 380px);
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg-elevated));
+}
+
+.skeleton-line {
+  display: block;
+  height: 10px;
+  border-radius: 5px;
+  background: linear-gradient(
+    90deg,
+    var(--bg-hover) 25%,
+    var(--bg-active) 50%,
+    var(--bg-hover) 75%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.2s ease-in-out infinite;
+}
+
+.skeleton-line.w-90 {
+  width: 90%;
+}
+
+.skeleton-line.w-70 {
+  width: 70%;
+}
+
+.skeleton-line.w-40 {
+  width: 40%;
+}
+
+@keyframes skeleton-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
 }
 
 .session-empty {
@@ -2695,7 +2904,8 @@ body.is-resizing-row * {
   justify-content: center;
 }
 
-.message-load-older {
+.message-load-older,
+.message-load-newer {
   align-self: center;
   margin: 0 0 4px;
   border: 1px solid var(--border);
@@ -2707,12 +2917,18 @@ body.is-resizing-row * {
   cursor: pointer;
 }
 
-.message-load-older:hover {
+.message-load-newer {
+  margin: 4px 0 0;
+}
+
+.message-load-older:hover,
+.message-load-newer:hover {
   color: var(--text);
   background: var(--bg-hover);
 }
 
-.message-load-older:active {
+.message-load-older:active,
+.message-load-newer:active {
   transform: scale(0.97);
 }
 
@@ -2740,6 +2956,8 @@ body.is-resizing-row * {
   display: flex;
   width: 100%;
   min-width: 0;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 72px;
 }
 
 .message-row.role-user {
@@ -2863,6 +3081,23 @@ body.is-resizing-row * {
   max-width: 100%;
   /* Markdown owns spacing; plain pre-wrap not needed */
   white-space: normal;
+}
+
+.thinking-indicator {
+  color: var(--text-muted);
+  font-size: 0.92em;
+  letter-spacing: 0.02em;
+  animation: thinking-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes thinking-pulse {
+  0%,
+  100% {
+    opacity: 0.4;
+  }
+  50% {
+    opacity: 1;
+  }
 }
 
 /* ---- Markdown (assistant replies) ---- */
@@ -5656,7 +5891,9 @@ body.is-resizing-row * {
 
 .settings-field input,
 .settings-field textarea,
-.settings-field select {
+.settings-field select,
+.mods-coll-new input,
+.mods-coll-detail-head input {
   background: var(--bg-input);
   /* Always visible frame — fields must not require a click to be seen */
   border: 1px solid var(--border);
@@ -5668,13 +5905,17 @@ body.is-resizing-row * {
 
 .settings-field input:hover,
 .settings-field textarea:hover,
-.settings-field select:hover {
+.settings-field select:hover,
+.mods-coll-new input:hover,
+.mods-coll-detail-head input:hover {
   border-color: var(--border-strong);
 }
 
 .settings-field input:focus-visible,
 .settings-field textarea:focus-visible,
-.settings-field select:focus-visible {
+.settings-field select:focus-visible,
+.mods-coll-new input:focus-visible,
+.mods-coll-detail-head input:focus-visible {
   outline: none;
   border-color: var(--accent);
   box-shadow: var(--focus-ring);
