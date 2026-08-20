@@ -28,13 +28,13 @@ import {
   ensureSkillsDir,
   listSkills,
 } from "./skill-store";
-import path from "node:path";
 import {
   resolveEffectiveCpaPaths,
   writeCpaConfigWithApiKey,
   type RuntimePathEnv,
 } from "./runtime-paths";
 import type { TerminalHost } from "./terminal-host";
+import { resolveInside } from "./project-path";
 
 export type IpcHandlerContext = {
   window: () => BrowserWindow | null;
@@ -153,14 +153,6 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
       if (s.cwd) allowed.add(s.cwd);
     }
     return allowed;
-  }
-
-  /** Resolve rel inside cwd; null when it escapes. */
-  function resolveInside(cwd: string, rel: string): string | null {
-    const base = path.resolve(cwd);
-    const target = path.resolve(base, rel || ".");
-    if (target !== base && !target.startsWith(base + path.sep)) return null;
-    return target;
   }
 
   const TREE_IGNORED = new Set([

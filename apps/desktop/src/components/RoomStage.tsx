@@ -1,4 +1,4 @@
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import type { RoomQuoteRef } from "@claude-desktop/shared";
 import { useAppStore } from "../state/store";
 import {
@@ -64,6 +64,21 @@ export function RoomStage() {
   const [mentionIndex, setMentionIndex] = useState(0);
   const [mentionClosed, setMentionClosed] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const timelineRef = useRef<HTMLDivElement | null>(null);
+  const lastItem = room?.items[room.items.length - 1];
+  const timelinePinKey = lastItem
+    ? `${lastItem.id}:${lastItem.text?.length ?? 0}`
+    : "0";
+
+  useEffect(() => {
+    const el = timelineRef.current;
+    if (!el) return;
+    const pin = () => {
+      el.scrollTop = el.scrollHeight;
+    };
+    pin();
+    requestAnimationFrame(pin);
+  }, [room?.roomId, timelinePinKey]);
 
   if (!room) {
     return (
@@ -367,7 +382,7 @@ export function RoomStage() {
       ) : null}
 
       {/* ── Timeline ── */}
-      <div className="room-timeline">
+      <div className="room-timeline" ref={timelineRef}>
         {room.items.length === 0 ? (
           <p className="room-stage-empty">还没有消息，选一个席位开始</p>
         ) : (

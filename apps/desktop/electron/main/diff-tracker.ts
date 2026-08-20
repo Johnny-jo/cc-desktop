@@ -10,6 +10,7 @@ import {
   upsertFileChange,
   type FileChange,
 } from "@claude-desktop/shared";
+import { resolveInside } from "./project-path";
 
 export type DiffTrackerDeps = {
   /** Optional DI to read previous file content for Write; throw/fail → status A */
@@ -668,6 +669,8 @@ export class DiffTracker {
 
 function resolveUnderCwd(cwd: string | undefined, raw: string): string {
   if (!cwd) return raw;
+  const inside = resolveInside(cwd, raw);
+  if (inside) return inside;
   if (path.isAbsolute(raw)) return path.normalize(raw);
   return path.resolve(cwd, raw);
 }

@@ -5,30 +5,11 @@ import { getDesktop } from "../lib/desktop-api";
 import { clearRevealChange, useAppStore } from "../state/store";
 import { useI18n } from "../i18n/useI18n";
 import { DiffView } from "./DiffView";
-
-/** Join possibly-relative change path against the project root. */
-function resolvePath(projectPath: string | null, p: string): string {
-  if (!projectPath) return p;
-  if (/^[a-zA-Z]:[\\/]/.test(p) || p.startsWith("/")) return p;
-  return `${projectPath.replace(/[\\/]+$/, "")}/${p}`;
-}
+import { resolvePath, toProjectRel } from "../lib/project-path";
 
 /** basename for git-status matching (git reports repo-relative / paths) */
 function normPath(p: string): string {
   return p.replace(/\\/g, "/").replace(/^\.\//, "");
-}
-
-/** Convert a change path (absolute or relative) to a project-relative path
- * for the in-app editor; null when it can't be resolved under the project. */
-function toProjectRel(projectPath: string | null, p: string): string | null {
-  if (!projectPath) return null;
-  const norm = (s: string) => s.replace(/\\/g, "/").replace(/\/+$/, "");
-  const root = norm(projectPath);
-  const abs = norm(resolvePath(projectPath, p));
-  if (abs.toLowerCase().startsWith(root.toLowerCase() + "/")) {
-    return abs.slice(root.length + 1);
-  }
-  return null;
 }
 
 function fileName(p: string): string {
@@ -228,10 +209,10 @@ export function ChangesPanel({
   const loadFullText = async (path: string): Promise<string | null> => {
     if (!projectPath) return null;
     try {
-      // path.resolve(cwd, rel) on the main side accepts absolute paths too.
+      const rel = toProjectRel(projectPath, path) ?? path;
       const res = await getDesktop().readProjectFile(
         projectPath,
-        resolvePath(projectPath, path),
+        rel,
         512 * 1024,
         "utf-8",
       );

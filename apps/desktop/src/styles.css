@@ -2871,8 +2871,17 @@ body.session-detaching {
 
 .chat-body {
   flex: 1 1 0;
-  overflow: auto;
+  overflow: hidden;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-body > .chat-inner {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .chat-composer {
@@ -2888,10 +2897,12 @@ body.session-detaching {
   z-index: 2;
 }
 
-/* Messages */
+/* Messages — this is the transcript scroller (not .chat-body). */
 .message-list {
   display: flex;
   flex-direction: column;
+  flex: 1 1 0;
+  overflow: auto;
   gap: var(--space-4);
   padding: var(--space-5) 0 var(--space-6);
   min-height: 0;
