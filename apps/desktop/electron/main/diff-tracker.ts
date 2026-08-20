@@ -125,7 +125,7 @@ export class DiffTracker {
     opts?: { cwd?: string; toolUseId?: string },
   ): void {
     if (toolName === "Edit" || toolName === "Write") {
-      this.onEditOrWrite(sessionId, toolName, input, opts?.toolUseId);
+      this.onEditOrWrite(sessionId, toolName, input, opts?.toolUseId, opts?.cwd);
       return;
     }
     if (toolName === "Bash") {
@@ -171,8 +171,9 @@ export class DiffTracker {
     toolName: "Edit" | "Write",
     input: Record<string, unknown>,
     toolUseId?: string,
+    cwd?: string,
   ): void {
-    const path = String(input.file_path ?? input.path ?? "");
+    const path = resolveUnderCwd(cwd, String(input.file_path ?? input.path ?? ""));
     if (!path) return;
 
     const at = this.now();
@@ -535,22 +536,25 @@ export class DiffTracker {
 
   /**
    * Sync file-existence state: tracked paths that vanished from disk become
-   * status "D" (deleted); a "D" path that reappears flips back to "M".
-   * Called before diff emit so the UI never offers to open a missing file.
+   * status "D" (deleted); a "D" path that reappears flips back to "M"
+   * (or "A" if this session only ever added it).
+   * Status "A" is left alone while the file is missing — Write records the
+   * change at tool_use time, before the bytes land on disk.
    * Returns true when any status changed.
    */
-  markDeleted(sessionId: string): boolean {
+  markDeleted(sessionId: string, cwd?: string): boolean {
     const map = this.sessions.get(sessionId);
     if (!map) return false;
     let next: Map<string, FileChange> | null = null;
     for (const [filePath, change] of map) {
       let exists = true;
       try {
-        exists = this.fileExists(filePath);
+        exists = this.fileExists(resolveUnderCwd(cwd, filePath));
       } catch {
         exists = true; // check failed — keep previous status
       }
       if (!exists && change.status !== "D") {
+        if (change.status === "A") continue;
         next = next ?? new Map(map);
         next.set(filePath, {
           ...change,
@@ -558,10 +562,11 @@ export class DiffTracker {
           updatedAt: this.now(),
         });
       } else if (exists && change.status === "D") {
+        const wasAdded = change.events.some((e) => e.tool === "Write" || e.tool === "Bash");
         next = next ?? new Map(map);
         next.set(filePath, {
           ...change,
-          status: "M",
+          status: wasAdded && change.events.every((e) => e.tool !== "Edit") ? "A" : "M",
           updatedAt: this.now(),
         });
       }

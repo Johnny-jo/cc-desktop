@@ -135,6 +135,40 @@ describe("DiffTracker", () => {
     expect(changes[0].hunks).toContain("+new");
   });
 
+  it("does not mark a pending Write (status A) as deleted before the file exists", () => {
+    const tracker = new DiffTracker({
+      fileExists: () => false,
+      readFile: () => {
+        throw new Error("ENOENT");
+      },
+    });
+    tracker.onToolUse("s1", "Write", {
+      file_path: "src/new.ts",
+      content: "hello\n",
+    });
+    expect(tracker.list("s1")[0].status).toBe("A");
+    expect(tracker.markDeleted("s1")).toBe(false);
+    expect(tracker.list("s1")[0].status).toBe("A");
+  });
+
+  it("resolves Write paths under session cwd so existence checks hit the project", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "diff-cwd-"));
+    fs.writeFileSync(path.join(dir, "gen.ts"), "hi\n");
+    const tracker = new DiffTracker();
+    tracker.onToolUse(
+      "s1",
+      "Write",
+      { file_path: "gen.ts", content: "hi\n" },
+      { cwd: dir },
+    );
+    expect(tracker.markDeleted("s1", dir)).toBe(false);
+    const change = tracker.list("s1")[0];
+    expect(change.status).toBe("A");
+    expect(path.isAbsolute(change.path)).toBe(true);
+    expect(fs.existsSync(change.path)).toBe(true);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("falls back to status A when readFile fails", () => {
     const readFile = vi.fn().mockImplementation(() => {
       throw new Error("ENOENT");

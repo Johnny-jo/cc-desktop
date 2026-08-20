@@ -227,7 +227,6 @@ export function MessageList({
 }) {
   const { t } = useI18n();
   const listRef = useRef<HTMLDivElement | null>(null);
-  const bottomRef = useRef<HTMLDivElement | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [loadingNewer, setLoadingNewer] = useState(false);
   const loadingRef = useRef(false);
@@ -241,11 +240,11 @@ export function MessageList({
     if (hasNewer) return;
     const list = listRef.current;
     if (!list) return;
-    if (lastItemStreaming(items)) {
+    const pin = () => {
       list.scrollTop = list.scrollHeight;
-      return;
-    }
-    bottomRef.current?.scrollIntoView({ block: "end" });
+    };
+    pin();
+    requestAnimationFrame(pin);
     // pinKey already encodes last-item id / length / streaming.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pinKey, sessionId, hasNewer]);
@@ -357,7 +356,6 @@ export function MessageList({
           {loadingNewer ? t.common.loading : t.chat.loadNewer}
         </button>
       ) : null}
-      <div ref={bottomRef} />
     </div>
   );
 }

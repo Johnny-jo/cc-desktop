@@ -604,6 +604,8 @@ export class SessionManager {
 
   /** Transcript + changes for IPC session:select (with canRestore flags). */
   getChangesForSelect(sessionId: string): FileChange[] {
+    const cwd = this.sessions.get(sessionId)?.summary.cwd;
+    this.diffTracker.markDeleted(sessionId, cwd);
     return this.listChanges(sessionId);
   }
 
@@ -706,7 +708,8 @@ export class SessionManager {
 
   private emitDiffAndPersist(sessionId: string): void {
     // Sync deleted/reappeared files before pushing to the renderer.
-    this.diffTracker.markDeleted(sessionId);
+    const cwd = this.sessions.get(sessionId)?.summary.cwd;
+    this.diffTracker.markDeleted(sessionId, cwd);
     const list = this.listChanges(sessionId);
     this.emitDiff(sessionId, list);
     this.persistChanges(sessionId);

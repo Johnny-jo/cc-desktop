@@ -1,5 +1,9 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { getDesktop } from "../lib/desktop-api";
+import {
+  createDebouncedLatest,
+  FILE_TREE_REFRESH_MS,
+} from "../lib/debounce-latest";
 import { useAppStore } from "../state/store";
 
 type DirEntry = { name: string; rel: string; kind: "dir" | "file" };
@@ -26,32 +30,35 @@ function TreeNode({
 }: TreeNodeProps) {
   const [expanded, setExpanded] = useState(false);
   const [children, setChildren] = useState<DirEntry[] | null>(null);
+  const loaderRef = useRef(createDebouncedLatest<DirEntry[]>(FILE_TREE_REFRESH_MS));
+  const wasExpanded = useRef(false);
 
-  const fetchChildren = useCallback(async () => {
-    try {
-      const res = await getDesktop().listProjectDir(cwd, entry.rel);
-      setChildren(res.entries);
-    } catch {
-      setChildren([]);
-    }
-  }, [cwd, entry.rel]);
+  useEffect(() => () => loaderRef.current.cancel(), []);
 
-  const toggle = async () => {
+  const toggle = () => {
     if (entry.kind !== "dir") return;
-    const next = !expanded;
-    setExpanded(next);
-    if (next && children === null) {
-      await fetchChildren();
-    }
+    setExpanded((v) => !v);
   };
 
-  // Sync expanded dirs with filesystem changes (file added/deleted/renamed).
+  // Load (and refresh) children when expanded. Debounced so a tool_use tick
+  // cannot overwrite the later listing after the file lands.
   useEffect(() => {
-    if (entry.kind === "dir" && expanded) {
-      void fetchChildren();
+    if (entry.kind !== "dir" || !expanded) {
+      wasExpanded.current = false;
+      return;
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [refreshKey]);
+    const delay = wasExpanded.current ? FILE_TREE_REFRESH_MS : 0;
+    wasExpanded.current = true;
+    loaderRef.current.schedule(
+      async () => {
+        const res = await getDesktop().listProjectDir(cwd, entry.rel);
+        return res.entries;
+      },
+      setChildren,
+      () => setChildren([]),
+      delay,
+    );
+  }, [refreshKey, expanded, cwd, entry.rel, entry.kind]);
 
   if (entry.kind === "file") {
     return (
@@ -131,30 +138,38 @@ export function FileTree({
   const refreshKey = useAppStore((s) => s.fsChangeTick);
   const [roots, setRoots] = useState<DirEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const loaderRef = useRef(
+    createDebouncedLatest<{ entries: DirEntry[] }>(FILE_TREE_REFRESH_MS),
+  );
 
-  const load = useCallback(async () => {
+  useEffect(() => () => loaderRef.current.cancel(), []);
+
+  const load = (delay: number) => {
     if (!projectPath) {
       setRoots(null);
       return;
     }
     setError(null);
-    try {
-      const res = await getDesktop().listProjectDir(projectPath, "");
-      setRoots(res.entries);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-      setRoots([]);
-    }
-  }, [projectPath]);
+    loaderRef.current.schedule(
+      () => getDesktop().listProjectDir(projectPath, ""),
+      (res) => setRoots(res.entries),
+      () => {
+        setError("加载失败");
+        setRoots([]);
+      },
+      delay,
+    );
+  };
 
   useEffect(() => {
     setRoots(null);
-    void load();
-  }, [load]);
+    load(0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectPath]);
 
-  // Refresh root listing on filesystem changes (keeps children via refreshKey).
   useEffect(() => {
-    void load();
+    if (refreshKey === 0) return;
+    load(FILE_TREE_REFRESH_MS);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshKey]);
 
@@ -165,7 +180,7 @@ export function FileTree({
     return (
       <p className="ft-hint">
         加载失败：{error}{" "}
-        <button type="button" className="btn btn-ghost btn-sm" onClick={() => void load()}>
+        <button type="button" className="btn btn-ghost btn-sm" onClick={() => load(0)}>
           重试
         </button>
       </p>

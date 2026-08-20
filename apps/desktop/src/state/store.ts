@@ -762,7 +762,8 @@ export async function selectSession(sessionId: string): Promise<void> {
   // Cache hit (LRU stack): show the in-memory window instantly, no disk read.
   const cacheHit =
     !state.cliMode &&
-    Object.prototype.hasOwnProperty.call(state.itemsBySession, sessionId);
+    Object.prototype.hasOwnProperty.call(state.itemsBySession, sessionId) &&
+    !state.hasNewerBySession[sessionId];
   if (cacheHit) {
     const cwd = state.sessions.find((s) => s.id === sessionId)?.cwd;
     setState({

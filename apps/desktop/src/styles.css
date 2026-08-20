@@ -2956,8 +2956,6 @@ body.session-detaching {
   display: flex;
   width: 100%;
   min-width: 0;
-  content-visibility: auto;
-  contain-intrinsic-size: auto 72px;
 }
 
 .message-row.role-user {

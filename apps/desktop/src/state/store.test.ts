@@ -512,4 +512,57 @@ describe("renderer session cache pruning", () => {
     });
     expect(getState().itemsBySession.s1).toBeUndefined();
   });
+
+  it("reloads the tail when switching back to a session scrolled into history", async () => {
+    __upsertSessionForTests({
+      id: "s1",
+      title: "one",
+      cwd: "D:/p",
+      updatedAt: Date.now(),
+      status: "idle",
+    });
+    __upsertSessionForTests({
+      id: "s2",
+      title: "two",
+      cwd: "D:/p",
+      updatedAt: Date.now(),
+      status: "idle",
+    });
+    stubSelect("s1", {
+      items: Array.from({ length: RENDERER_TRANSCRIPT_CAP }, (_, i) =>
+        textItem(`s1-${i}`, `msg-${i}`),
+      ),
+    });
+    await selectSession("s1");
+    expect(getState().itemsBySession.s1).toHaveLength(RENDERER_TRANSCRIPT_CAP);
+
+    const g = globalThis as unknown as { window?: { desktop?: Record<string, unknown> } };
+    const desktop = g.window!.desktop as {
+      loadOlderMessages: ReturnType<typeof vi.fn>;
+      selectSession: ReturnType<typeof vi.fn>;
+    };
+    desktop.loadOlderMessages = vi.fn().mockResolvedValue({
+      items: Array.from({ length: 8 }, (_, i) => textItem(`old-${i}`, `old-${i}`)),
+      total: 40,
+      hasMore: true,
+      hasNewer: true,
+    });
+    await loadOlderMessages("s1");
+    expect(getState().hasNewerBySession.s1).toBe(true);
+
+    stubSelect("s2");
+    await selectSession("s2");
+
+    stubSelect("s1", {
+      items: Array.from({ length: 8 }, (_, i) =>
+        textItem(`tail-${i}`, `tail-${i}`),
+      ),
+    });
+    await selectSession("s1");
+
+    const again = g.window!.desktop as { selectSession: ReturnType<typeof vi.fn> };
+    expect(again.selectSession).toHaveBeenCalled();
+    expect(getState().hasNewerBySession.s1).toBe(false);
+    expect(getState().itemsBySession.s1[0]).toMatchObject({ id: "tail-0" });
+  });
 });
