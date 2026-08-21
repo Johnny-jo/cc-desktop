@@ -13,6 +13,7 @@ import {
 } from "./room-tunnel";
 import { resolveCloudflared } from "./runtime-paths";
 import { RoomService } from "./room-service";
+import { RoomMetrics } from "./room-metrics";
 import type { SessionManager } from "./session-manager";
 import type { SettingsStore } from "./settings-store";
 
@@ -273,6 +274,8 @@ function makeRooms(cloudflaredPath?: string): RoomService {
     userDataDir,
     archive: null,
     ...(cloudflaredPath ? { cloudflaredPath } : {}),
+    // Keep the [room-metrics] console.info lines out of the test output.
+    metrics: new RoomMetrics(() => {}),
   });
   services.push(rooms);
   return rooms;

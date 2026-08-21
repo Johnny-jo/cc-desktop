@@ -176,6 +176,8 @@ export const IPC = {
   roomKick: "room:kick",
   /** Host: list devices waiting for approval */
   roomPending: "room:pending",
+  /** Debug: current process room transport counters (task 12) */
+  roomMetrics: "room:metrics",
   /** Mod pack management (outside a live room) */
   modsDelete: "mods:delete",
   modsOpenDir: "mods:open-dir",
@@ -781,6 +783,10 @@ export type IpcInvokeMap = {
     args: [{ roomId: string }];
     result: { ok: boolean; pending: Array<{ fp: string; name: string }> };
   };
+  [IPC.roomMetrics]: {
+    args: [];
+    result: { ok: boolean; snapshot?: RoomMetricsSnapshot };
+  };
   [IPC.modsDelete]: {
     args: [{ packDir: string }];
     result: { ok: boolean; error?: string };
@@ -793,6 +799,18 @@ export type IpcInvokeMap = {
     args: [{ id: string; name: string }];
     result: { ok: boolean; packDir?: string; error?: string };
   };
+};
+
+/**
+ * Room transport counters (task 12): per-path connect results, handshake
+ * outcomes by reason, guest reconnect latency P50 (ms), host fan-out bytes.
+ * Emitted by the debug `roomMetrics` channel; S1 has no metrics UI.
+ */
+export type RoomMetricsSnapshot = {
+  connect: Record<import("./room-protocol").RoomPath, { ok: number; fail: number }>;
+  handshake: Record<"ok" | import("./room-handshake").HandshakeReject, number>;
+  reconnectMsP50: number;
+  fanoutBytes: number;
 };
 
 /** Mirrors main auto-updater status (kept in shared so renderer can type it). */

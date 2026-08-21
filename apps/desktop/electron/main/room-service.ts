@@ -74,6 +74,7 @@ import { hashModFiles } from "@claude-desktop/shared/mod-hash";
 import { RoomConnection } from "./room-connection";
 import { loadOrCreateDeviceKeys } from "./room-device-store";
 import { HandshakeWatchdog } from "./room-limits";
+import { isHandshakeReason, RoomMetrics } from "./room-metrics";
 import { startRoomTunnel } from "./room-tunnel";
 import {
   getKernelCacheDir,
@@ -341,6 +342,11 @@ export class RoomService {
    * guests always verify the relay certificate against the system CA.
    */
   private wssRejectUnauthorized?: boolean;
+  /**
+   * Process-wide room transport counters (task 12). Public readonly so the
+   * debug IPC can snapshot them; tests inject a quiet instance.
+   */
+  readonly metrics: RoomMetrics;
 
   constructor(opts: {
     getWindow: () => BrowserWindow | null;
@@ -351,6 +357,8 @@ export class RoomService {
     isPackaged?: boolean;
     resourcesPath?: string;
     cloudflaredPath?: string;
+    /** Injectable transport counters (tests pass a silent logger). */
+    metrics?: RoomMetrics;
   }) {
     this.getWindow = opts.getWindow;
     this.sessions = opts.sessions;
@@ -362,6 +370,7 @@ export class RoomService {
     this.cloudflaredPath = opts.cloudflaredPath;
     this.deviceKeys = loadOrCreateDeviceKeys(this.userDataDir);
     this.deviceFp = fingerprintPublic(this.deviceKeys.publicRaw);
+    this.metrics = opts.metrics ?? new RoomMetrics();
     this.hydrateFromArchive();
   }
 
@@ -1373,6 +1382,14 @@ export function activate(ctx) {
       (url) =>
         new Promise<{ ws: WebSocket; url: string; path: RoomPath }>(
           (resolveAtt, rejectAtt) => {
+            const path = pathForCandidateUrl(url);
+            // One connect metric per candidate attempt (task 12).
+            let recorded = false;
+            const recordConnect = (ok: boolean) => {
+              if (recorded) return;
+              recorded = true;
+              this.metrics.record({ type: "connect", path, ok });
+            };
             let ws: WebSocket;
             try {
               ws = new WebSocket(url, {
@@ -1383,11 +1400,13 @@ export function activate(ctx) {
                   : {}),
               });
             } catch (err) {
+              recordConnect(false);
               rejectAtt(err);
               return;
             }
             sockets.add(ws);
             const timer = setTimeout(() => {
+              recordConnect(false);
               try {
                 ws.terminate();
               } catch {
@@ -1397,10 +1416,12 @@ export function activate(ctx) {
             }, timeoutMs);
             ws.on("open", () => {
               clearTimeout(timer);
-              resolveAtt({ ws, url, path: pathForCandidateUrl(url) });
+              recordConnect(true);
+              resolveAtt({ ws, url, path });
             });
             ws.on("error", (err) => {
               clearTimeout(timer);
+              recordConnect(false);
               rejectAtt(err);
             });
           },
@@ -1518,11 +1539,18 @@ export function activate(ctx) {
     password?: string,
     modChecksum?: string,
   ): Promise<boolean> {
+    const startedAt = Date.now();
     return new Promise((resolve) => {
       let settled = false;
       const done = (v: boolean) => {
         if (settled) return;
         settled = true;
+        // Task 12: one reconnect latency sample per attempt.
+        this.metrics.record({
+          type: "reconnect",
+          ms: Date.now() - startedAt,
+          ok: v,
+        });
         resolve(v);
       };
       let ws: WebSocket;
@@ -2671,6 +2699,10 @@ export function activate(ctx) {
       };
       const fp = String(p.fp ?? "");
       if (fp && r.blacklist.has(fp)) {
+        this.metrics.record({
+          type: "handshake",
+          reason: HandshakeReject.blacklist,
+        });
         ws.send(
           JSON.stringify(
             makeHandshake("reject", { reason: HandshakeReject.blacklist }),
@@ -2733,6 +2765,10 @@ export function activate(ctx) {
         proof: String(p.proof ?? ""),
       });
       if (!ok) {
+        this.metrics.record({
+          type: "handshake",
+          reason: HandshakeReject.password,
+        });
         ws.send(
           JSON.stringify(
             makeHandshake("reject", { reason: HandshakeReject.password }),
@@ -2754,6 +2790,10 @@ export function activate(ctx) {
           const name = state.guestName ?? "guest";
           const timer = setTimeout(() => {
             if (!r.pendingByFp.delete(fp)) return;
+            this.metrics.record({
+              type: "handshake",
+              reason: HandshakeReject.timeout,
+            });
             try {
               ws.send(
                 JSON.stringify(
@@ -2809,6 +2849,7 @@ export function activate(ctx) {
       });
       r.connections.set(ws, conn);
       conn.onFrame((frame) => this.handleGuestFrame(r, ws, frame));
+      this.metrics.record({ type: "handshake", reason: "ok" });
       ws.send(
         JSON.stringify(makeHandshake("ok", { kid, encrypt: r.encrypt })),
       );
@@ -2857,6 +2898,7 @@ export function activate(ctx) {
     });
     rec.connections.set(entry.ws, conn);
     conn.onFrame((frame) => this.handleGuestFrame(rec, entry.ws, frame));
+    this.metrics.record({ type: "handshake", reason: "ok" });
     entry.ws.send(
       JSON.stringify(makeHandshake("ok", { kid, encrypt: rec.encrypt })),
     );
@@ -2877,6 +2919,7 @@ export function activate(ctx) {
     if (!entry) return { ok: false, error: "该设备不在待审批列表中" };
     clearTimeout(entry.timer);
     rec.pendingByFp.delete(fingerprint);
+    this.metrics.record({ type: "handshake", reason: HandshakeReject.denied });
     try {
       entry.ws.send(
         JSON.stringify(
@@ -3034,7 +3077,13 @@ export function activate(ctx) {
         resolve(v);
       };
       let timer = setTimeout(
-        () => finish({ ok: false, error: "握手超时" }),
+        () => {
+          this.metrics.record({
+            type: "handshake",
+            reason: HandshakeReject.timeout,
+          });
+          finish({ ok: false, error: "握手超时" });
+        },
         ROOM_HANDSHAKE_TIMEOUT_MS,
       );
       const onMsg = (data: RawData) => {
@@ -3099,6 +3148,7 @@ export function activate(ctx) {
             peerFp: pending.hostFp,
             encrypt: p.encrypt !== false,
           });
+          this.metrics.record({ type: "handshake", reason: "ok" });
           finish({
             ok: true,
             conn,
@@ -3109,6 +3159,9 @@ export function activate(ctx) {
         }
         if (hs.type === "reject") {
           const reason = (hs.payload as { reason?: string })?.reason;
+          if (isHandshakeReason(reason)) {
+            this.metrics.record({ type: "handshake", reason });
+          }
           finish({ ok: false, error: handshakeRejectMessage(reason) });
           return;
         }
@@ -3116,11 +3169,16 @@ export function activate(ctx) {
           // Host is holding us for approval — wait up to 60s for hs.ok.
           clearTimeout(timer);
           timer = setTimeout(
-            () =>
+            () => {
+              this.metrics.record({
+                type: "handshake",
+                reason: HandshakeReject.timeout,
+              });
               finish({
                 ok: false,
                 error: "等待群主审批超时（60 秒），请稍后再试",
-              }),
+              });
+            },
             60_000,
           );
           return;
@@ -3516,14 +3574,28 @@ export function activate(ctx) {
   private broadcast(r: RoomRecord, type: RoomFrame["type"], payload: unknown) {
     r.seq += 1;
     const frame = makeRoomFrame(r.roomId, r.seq, type, payload);
+    // Fan-out byte counter (task 12): cleartext frame size × recipients; the
+    // AEAD envelope overhead per send is not counted.
+    const raw = JSON.stringify(frame);
+    let sent = 0;
     for (const g of r.guests) {
       const conn = r.connections.get(g);
       if (conn) {
         conn.sendFrame(frame);
+        sent += 1;
         continue;
       }
       // No connection: only possible for legacy plaintext (skip-encrypt) guests.
-      if (g.readyState === WebSocket.OPEN) g.send(JSON.stringify(frame));
+      if (g.readyState === WebSocket.OPEN) {
+        g.send(raw);
+        sent += 1;
+      }
+    }
+    if (sent > 0) {
+      this.metrics.record({
+        type: "fanout",
+        bytes: Buffer.byteLength(raw) * sent,
+      });
     }
   }
 

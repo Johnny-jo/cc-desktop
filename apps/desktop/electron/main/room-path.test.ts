@@ -6,6 +6,7 @@ import tls from "node:tls";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { decodeRoomInvite, type RoomSnapshot } from "@claude-desktop/shared";
 import { RoomService } from "./room-service";
+import { RoomMetrics } from "./room-metrics";
 import type { SessionManager } from "./session-manager";
 import type { SettingsStore } from "./settings-store";
 
@@ -133,6 +134,8 @@ function makeRooms(
     settings: mockSettings(userDataDir),
     userDataDir,
     archive: null,
+    // Keep the [room-metrics] console.info lines out of the test output.
+    metrics: new RoomMetrics(() => {}),
   });
   services.push(rooms);
   return rooms;

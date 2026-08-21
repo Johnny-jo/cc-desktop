@@ -498,6 +498,12 @@ const desktop = {
       ok: boolean;
       pending: Array<{ fp: string; name: string }>;
     }>,
+  /** Debug: current process room transport counters (read-only). */
+  getRoomMetrics: () =>
+    ipcRenderer.invoke(IPC.roomMetrics) as Promise<{
+      ok: boolean;
+      snapshot?: import("@claude-desktop/shared").RoomMetricsSnapshot;
+    }>,
   roomDice: (roomId: string, seatId: string) =>
     ipcRenderer.invoke(IPC.roomDice, { roomId, seatId }) as Promise<{
       ok: boolean;

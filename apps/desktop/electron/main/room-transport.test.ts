@@ -20,6 +20,7 @@ import {
   type RoomSnapshot,
 } from "@claude-desktop/shared";
 import { RoomService } from "./room-service";
+import { RoomMetrics } from "./room-metrics";
 import type { SessionManager } from "./session-manager";
 import type { SettingsStore } from "./settings-store";
 
@@ -88,6 +89,8 @@ function makeRooms(
     settings: mockSettings(userDataDir),
     userDataDir,
     archive: null,
+    // Keep the [room-metrics] console.info lines out of the test output.
+    metrics: new RoomMetrics(() => {}),
   });
   services.push(rooms);
   return rooms;
@@ -362,6 +365,41 @@ describe("room transport: handshake + encrypted frames", () => {
     const welcome = await welcomePending;
     expect(welcome?.type).toBe("welcome");
     ws.close();
+  });
+
+  it("slots a T0 connect ok and a password handshake failure separately (task 12)", async () => {
+    const host = makeRooms();
+    const { room, port } = await createHost(host, { password: "pw" });
+
+    // Wrong password: host counts a password handshake failure; the guest
+    // counts its T0 connect ok plus the same reject from its own side.
+    const badGuest = makeRooms();
+    const bad = await badGuest.join({
+      host: "127.0.0.1",
+      port,
+      password: "nope",
+      hostFingerprint: room.hostFingerprint,
+    });
+    expect(bad.ok).toBe(false);
+    expect(host.metrics.snapshot().handshake.password).toBe(1);
+    expect(host.metrics.snapshot().handshake.ok).toBe(0);
+    expect(badGuest.metrics.snapshot().connect.T0).toEqual({ ok: 1, fail: 0 });
+    expect(badGuest.metrics.snapshot().handshake.password).toBe(1);
+
+    // Right password: both sides count handshake ok; host fan-out flows.
+    const guest = makeRooms();
+    const ok = await guest.join({
+      host: "127.0.0.1",
+      port,
+      password: "pw",
+      hostFingerprint: room.hostFingerprint,
+    });
+    expect(ok.ok).toBe(true);
+    expect(guest.metrics.snapshot().connect.T0).toEqual({ ok: 1, fail: 0 });
+    expect(guest.metrics.snapshot().handshake.ok).toBe(1);
+    const hostSnap = host.metrics.snapshot();
+    expect(hostSnap.handshake.ok).toBe(1);
+    expect(hostSnap.fanoutBytes).toBeGreaterThan(0);
   });
 });
 

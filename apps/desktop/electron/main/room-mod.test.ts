@@ -12,6 +12,7 @@ import {
   type RoomSnapshot,
 } from "@claude-desktop/shared";
 import { RoomService, ROOM_MOD_BUNDLE_CHUNK } from "./room-service";
+import { RoomMetrics } from "./room-metrics";
 import { loadModCache } from "./mod-package";
 import { parseKernelManifest } from "./mod-kernel";
 import { getKernelCacheDir } from "./runtime-paths";
@@ -173,6 +174,8 @@ function makeRooms(opts?: {
     settings: mockSettings(userDataDir),
     userDataDir,
     archive: opts?.archive ?? null,
+    // Keep the [room-metrics] console.info lines out of the test output.
+    metrics: new RoomMetrics(() => {}),
   });
   services.push(rooms);
   return { rooms, sessions, userDataDir };
