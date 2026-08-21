@@ -69,7 +69,7 @@ export function sealEnvelope(opts: {
   const cipher = createCipheriv("chacha20-poly1305", opts.key, nonce, {
     authTagLength: TAG_LEN,
   });
-  cipher.setAAD(ad);
+  cipher.setAAD(ad, { plaintextLength: opts.plain.length });
   const ct = Buffer.concat([cipher.update(opts.plain), cipher.final(), cipher.getAuthTag()]);
   return {
     tv: ROOM_TRANSPORT_VERSION,
@@ -104,7 +104,7 @@ export function openEnvelope(opts: {
   const decipher = createDecipheriv("chacha20-poly1305", opts.key, nonce, {
     authTagLength: TAG_LEN,
   });
-  decipher.setAAD(ad);
+  decipher.setAAD(ad, { plaintextLength: data.length });
   decipher.setAuthTag(tag);
   try {
     const plain = Buffer.concat([decipher.update(data), decipher.final()]);
