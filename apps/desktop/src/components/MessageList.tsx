@@ -58,7 +58,11 @@ function CollapsedTextCard({ text }: { text: string }) {
 /** Rewind affordance on user bubbles that carry an SDK checkpoint id. */
 function RewindButton({ sdkMsgId }: { sdkMsgId: string }) {
   const activeSessionId = useAppStore((s) => s.activeSessionId);
-  const running = useAppStore((s) => s.running);
+  const running = useAppStore((s) =>
+    s.activeSessionId
+      ? s.sessions.some((x) => x.id === s.activeSessionId && x.status === "running")
+      : false,
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 

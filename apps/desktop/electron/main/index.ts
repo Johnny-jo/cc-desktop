@@ -8,6 +8,7 @@ import {
   nativeTheme,
   Notification,
   safeStorage,
+  Tray,
 } from "electron";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { IPC } from "@claude-desktop/shared";
@@ -56,6 +57,9 @@ const TITLE_SYMBOL_DARK = "#e8e8e8";
 const TITLE_SYMBOL_LIGHT = "#1c1c1e";
 
 let mainWindow: BrowserWindow | null = null;
+let tray: Tray | null = null;
+/** True after tray Quit / app.quit — main window close should destroy, not hide. */
+let isQuitting = false;
 /**
  * Ready webContents ids (main + detached session windows). A window is
  * removed while its page reloads / closes — blocks webContents.send storms.
@@ -81,6 +85,37 @@ function applyWindowTheme(theme: "dark" | "light"): void {
 
 function getMainWindow(): BrowserWindow | null {
   return mainWindow;
+}
+
+function showMainWindow(): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+    return;
+  }
+  createWindow();
+}
+
+function createTray(): void {
+  if (tray && !tray.isDestroyed()) return;
+  if (!fs.existsSync(WINDOW_ICON)) return;
+  tray = new Tray(WINDOW_ICON);
+  tray.setToolTip("CC Desktop");
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: "打开主窗口", click: () => showMainWindow() },
+      { type: "separator" },
+      {
+        label: "退出",
+        click: () => {
+          isQuitting = true;
+          app.quit();
+        },
+      },
+    ]),
+  );
+  tray.on("click", () => showMainWindow());
 }
 
 /**
@@ -233,6 +268,11 @@ function createWindow() {
     mainWindow.webContents.openDevTools({ mode: "detach" });
   }
 
+  mainWindow.on("close", (e) => {
+    if (isQuitting || !tray || tray.isDestroyed()) return;
+    e.preventDefault();
+    mainWindow?.hide();
+  });
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
@@ -474,10 +514,12 @@ function bootstrap() {
   );
 
   createWindow();
+  createTray();
   // Hot updates replace app binaries only — never AppData / CPA config.
   autoUpdater.start();
 
   app.on("before-quit", () => {
+    isQuitting = true;
     stopClaudeSettingsWatch();
     // stopIfManaged is a no-op unless this app spawned CPA.
     // Always call it so managed children are not orphaned on quit.
@@ -498,9 +540,11 @@ function bootstrap() {
 app.whenReady().then(bootstrap);
 
 app.on("window-all-closed", () => {
+  // Tray keeps the process alive so the main window can be restored.
+  if (tray && !tray.isDestroyed()) return;
   if (process.platform !== "darwin") app.quit();
 });
 
 app.on("activate", () => {
-  if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  showMainWindow();
 });

@@ -105,6 +105,51 @@ describe("applySdkEvent", () => {
     expect(s.items[0]).toMatchObject({ text: "Hello", streaming: false });
   });
 
+  it("result settles a streaming assistant left behind after tools", () => {
+    let s = apply(emptyTranscript(), {
+      type: "text_delta",
+      sessionId: "s",
+      text: "**hello**",
+    });
+    s = apply(s, {
+      type: "tool_start",
+      sessionId: "s",
+      tool: {
+        id: "t1",
+        name: "Read",
+        summary: "a.ts",
+        status: "running",
+      },
+    });
+    expect(s.items[0]).toMatchObject({ streaming: true, text: "**hello**" });
+    s = apply(s, { type: "result", sessionId: "s", ok: true });
+    expect(s.items[0]).toMatchObject({ streaming: false, text: "**hello**" });
+    expect(s.items[0]).not.toHaveProperty("thinking", true);
+  });
+
+  it("result drops an empty thinking placeholder that is no longer last", () => {
+    let s = apply(emptyTranscript(), {
+      type: "thinking_delta",
+      sessionId: "s",
+      text: "",
+    });
+    s = apply(s, {
+      type: "tool_start",
+      sessionId: "s",
+      tool: {
+        id: "t1",
+        name: "Bash",
+        summary: "ls",
+        status: "running",
+      },
+    });
+    expect(s.items[0]).toMatchObject({ thinking: true, streaming: true, text: "" });
+    s = apply(s, { type: "result", sessionId: "s", ok: true });
+    expect(s.items.some((i) => i.kind === "text" && i.role === "assistant")).toBe(
+      false,
+    );
+  });
+
   it("text_done prefers the longer streamed text", () => {
     let s = apply(emptyTranscript(), {
       type: "text_delta",

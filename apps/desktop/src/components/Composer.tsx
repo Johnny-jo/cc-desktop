@@ -132,7 +132,11 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const { t } = useI18n();
 
-  const running = useAppStore((s) => s.running);
+  const running = useAppStore((s) =>
+    s.activeSessionId
+      ? s.sessions.some((x) => x.id === s.activeSessionId && x.status === "running")
+      : false,
+  );
   const projectPath = useAppStore((s) => s.projectPath);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
   const settings = useAppStore((s) => s.settings);

@@ -44,7 +44,11 @@ export function ChatPanel({ onOpenSettings, onOpenFile }: ChatPanelProps) {
     (s) => s.loadingSessionId !== null && s.loadingSessionId === s.activeSessionId,
   );
   const sessions = useAppStore((s) => s.sessions);
-  const running = useAppStore((s) => s.running);
+  const running = useAppStore((s) =>
+    s.activeSessionId
+      ? s.sessions.some((x) => x.id === s.activeSessionId && x.status === "running")
+      : false,
+  );
   const settings = useAppStore((s) => s.settings);
 
   const [bannerDismissed, setBannerDismissed] = useState<Record<string, true>>(

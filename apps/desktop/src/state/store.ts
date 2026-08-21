@@ -284,16 +284,24 @@ function appendUserMessage(
   writeTranscriptUi(sessionId, next);
 }
 
+function finishSessionTurn(sessionId: string): SessionSummary[] {
+  return state.sessions.map((s) =>
+    s.id === sessionId && s.status === "running"
+      ? { ...s, status: "idle" as const, updatedAt: Date.now() }
+      : s,
+  );
+}
+
 function applySessionEvent(event: SdkNormalizedEvent): void {
   const { sessionId } = event;
 
   // CLI mode: keep running/queue state alive, but do not accumulate chat items.
   if (state.cliMode) {
     if (event.type === "result") {
+      const sessions = finishSessionTurn(sessionId);
       setState({
-        running: state.sessions.some(
-          (s) => s.id !== sessionId && s.status === "running",
-        ),
+        sessions,
+        running: sessions.some((s) => s.status === "running"),
         lastError: event.ok ? state.lastError : (event.error ?? "Turn failed"),
       });
       if (!state.running && state.queuedPrompts.length > 0) {
@@ -308,10 +316,10 @@ function applySessionEvent(event: SdkNormalizedEvent): void {
   // Parked idle sessions live on disk; don't rebuild a renderer cache for them.
   if (!shouldCacheSession(sessionId)) {
     if (event.type === "result") {
+      const sessions = finishSessionTurn(sessionId);
       setState({
-        running: state.sessions.some(
-          (s) => s.id !== sessionId && s.status === "running",
-        ),
+        sessions,
+        running: sessions.some((s) => s.status === "running"),
         lastError: event.ok ? state.lastError : (event.error ?? "Turn failed"),
       });
       if (!state.running && state.queuedPrompts.length > 0) {
@@ -344,10 +352,10 @@ function applySessionEvent(event: SdkNormalizedEvent): void {
 
   const applyResultFlags = (): void => {
     if (event.type !== "result") return;
+    const sessions = finishSessionTurn(sessionId);
     setState({
-      running: state.sessions.some(
-        (s) => s.id !== sessionId && s.status === "running",
-      ),
+      sessions,
+      running: sessions.some((s) => s.status === "running"),
       lastError: event.ok ? state.lastError : (event.error ?? "Turn failed"),
     });
     if (!state.running && state.queuedPrompts.length > 0) {
@@ -964,9 +972,13 @@ export function sendMessage(text: string, attachments: Attachment[] = []): void 
   const prompt: UserPrompt = { text: promptText, attachments };
   if (!promptText && attachments.length === 0) return;
 
-  // While a turn is running, queue instead of racing the live stream —
-  // Claude Code style: typed messages send automatically when the turn ends.
-  if (state.running && state.activeSessionId) {
+  const activeSessionId = state.activeSessionId;
+  // Queue only when THIS session is mid-turn. A detached window running
+  // another session must not block send on the idle one.
+  const activeBusy =
+    Boolean(activeSessionId) &&
+    state.sessions.some((s) => s.id === activeSessionId && s.status === "running");
+  if (activeBusy) {
     setState({
       queuedPrompts: [
         ...state.queuedPrompts,
@@ -984,8 +996,6 @@ export function sendMessage(text: string, attachments: Attachment[] = []): void 
     setState({ lastError: message });
     return;
   }
-
-  const activeSessionId = state.activeSessionId;
   setState({ running: true, lastError: null });
 
   if (activeSessionId) {

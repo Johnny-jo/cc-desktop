@@ -262,18 +262,24 @@ export function applySdkEvent(
       return state;
     }
     case "result": {
-      const last = items[items.length - 1];
-      if (last?.kind === "text" && last.role === "assistant" && last.streaming) {
-        if (last.thinking && !last.text) {
-          items.pop();
+      // Tools can push after a streaming assistant, so the bubble is no
+      // longer last — still settle every in-flight assistant so markdown
+      // mounts and "思考中…" does not stick after the turn ends.
+      const settled: typeof items = [];
+      for (const item of items) {
+        if (
+          item.kind === "text" &&
+          item.role === "assistant" &&
+          item.streaming
+        ) {
+          if (item.thinking && !item.text) continue;
+          settled.push({ ...item, streaming: false, thinking: undefined });
         } else {
-          items[items.length - 1] = {
-            ...last,
-            streaming: false,
-            thinking: undefined,
-          };
+          settled.push(item);
         }
       }
+      items.length = 0;
+      items.push(...settled);
       if (!event.ok && event.error) {
         items.push({
           kind: "text",

@@ -50,6 +50,43 @@ describe("prompt queue", () => {
     expect(q[0].text).toBe("second question");
   });
 
+  it("does not queue a send on an idle session while another session is running", async () => {
+    runningSession("s1");
+    __upsertSessionForTests({
+      id: "s2",
+      title: "two",
+      cwd: "D:/p",
+      updatedAt: Date.now(),
+      status: "idle",
+    });
+    const continueSession = vi.fn().mockResolvedValue({ sessionId: "s2" });
+    const g = globalThis as unknown as { window?: { desktop?: Record<string, unknown> } };
+    g.window = g.window ?? {};
+    g.window.desktop = {
+      ...(g.window.desktop as object),
+      continueSession,
+      selectSession: vi.fn().mockResolvedValue({
+        sessionId: "s2",
+        cwd: "D:/p",
+        items: [],
+        total: 0,
+        hasMore: false,
+        hasNewer: false,
+        changes: [],
+      }),
+    };
+    await selectSession("s2");
+    expect(getState().activeSessionId).toBe("s2");
+    expect(getState().running).toBe(true);
+
+    sendMessage("on idle session");
+    expect(getState().queuedPrompts).toHaveLength(0);
+    expect(continueSession).toHaveBeenCalledWith(
+      "s2",
+      expect.objectContaining({ text: "on idle session" }),
+    );
+  });
+
   it("caps live renderer transcript and marks hasMore so older rows stay on disk", () => {
     runningSession("s1");
     for (let i = 0; i < 100; i++) {
