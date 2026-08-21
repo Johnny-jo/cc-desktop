@@ -185,7 +185,7 @@ async function createHost(
   let last = "";
   for (let i = 0; i < 10; i++) {
     const port = 21000 + Math.floor(Math.random() * 20000);
-    const res = await rooms.create({ name, port });
+    const res = await rooms.create({ name, port, encrypt: false, autoApprove: true });
     if (res.ok && res.room) return { room: res.room, port };
     last = res.error ?? "create failed";
   }

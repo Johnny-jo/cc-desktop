@@ -246,12 +246,14 @@ export function RoomSidebar() {
     port: number;
     password?: string;
     checksum?: string;
+    fingerprint?: string;
     candidates: string[];
   } | { error: string } => {
     let h = host.trim();
     let p = Number(joinPort) || ROOM_DEFAULT_PORT;
     let pwd = joinPassword || undefined;
     let checksum: string | undefined;
+    let fingerprint: string | undefined;
     let hosts = inviteHosts;
 
     const secretRaw = secret.trim() || host.trim();
@@ -260,12 +262,11 @@ export function RoomSidebar() {
         const inv = decodeRoomInvite(secretRaw);
         h = inv.host;
         p = inv.port;
-        pwd = inv.password || pwd;
         checksum = inv.modChecksum || undefined;
+        fingerprint = inv.hostFingerprint || undefined;
         hosts = inv.hosts ?? [];
         setHost(inv.host);
         setJoinPort(String(inv.port));
-        if (inv.password) setJoinPassword(inv.password);
       } catch (e) {
         return { error: e instanceof Error ? e.message : "邀请码无效" };
       }
@@ -281,7 +282,7 @@ export function RoomSidebar() {
     if (!h) return { error: "请粘贴邀请码，或填写群主 IP" };
     if (!checksum) checksum = offer?.checksum || undefined;
     const candidates = [h, ...hosts.filter((x) => x && x !== h)];
-    return { host: h, port: p, password: pwd, checksum, candidates };
+    return { host: h, port: p, password: pwd, checksum, fingerprint, candidates };
   };
 
   const onJoin = async () => {
@@ -318,6 +319,8 @@ export function RoomSidebar() {
           host: candidate,
           port: target.port,
           checksum,
+          password: target.password,
+          hostFingerprint: target.fingerprint,
         });
         if (gen !== joinGen.current) return;
         if (!fetched.ok) {
@@ -333,6 +336,7 @@ export function RoomSidebar() {
         password: target.password,
         modChecksum: checksum,
         hosts: target.candidates,
+        hostFingerprint: target.fingerprint,
       });
       if (gen !== joinGen.current) return;
       if (res.ok) {
@@ -555,7 +559,7 @@ export function RoomSidebar() {
                 <label className="settings-field">
                   邀请码
                   <input
-                    placeholder="粘贴 CDR1.… 邀请码"
+                    placeholder="粘贴 CDR2.… 邀请码"
                     value={secret}
                     spellCheck={false}
                     autoFocus
@@ -567,7 +571,6 @@ export function RoomSidebar() {
                           const inv = decodeRoomInvite(v);
                           setHost(inv.host);
                           setJoinPort(String(inv.port));
-                          if (inv.password) setJoinPassword(inv.password);
                           setInviteHosts(inv.hosts ?? []);
                           setInviteChecksum(inv.modChecksum ?? "");
                           setOffer(null);

@@ -21,6 +21,7 @@ export type StoredRoom = {
     password?: string;
     modChecksum?: string;
     secret?: string;
+    hostFingerprint?: string;
   };
   memberCount: number;
   updatedAt: number;
@@ -34,6 +35,10 @@ export type StoredRoom = {
   members?: RoomSnapshot["members"];
   autoApprove?: boolean;
   hasPassword?: boolean;
+  /** Whether room frames were AEAD-encrypted (transport posture at persist time). */
+  encrypt?: boolean;
+  /** Host device fingerprint learned at join / hosting time. */
+  hostFingerprint?: string;
   requireMods?: boolean;
   modChecksum?: string;
   hostLabel?: string;
@@ -148,6 +153,8 @@ export class RoomArchive {
       ...(r.members ? { members: r.members } : {}),
       ...(r.autoApprove != null ? { autoApprove: r.autoApprove } : {}),
       ...(r.hasPassword != null ? { hasPassword: r.hasPassword } : {}),
+      ...(r.encrypt != null ? { encrypt: r.encrypt } : {}),
+      ...(r.hostFingerprint ? { hostFingerprint: r.hostFingerprint } : {}),
       ...(r.requireMods != null ? { requireMods: r.requireMods } : {}),
       ...(r.modChecksum ? { modChecksum: r.modChecksum } : {}),
       ...(r.hostLabel ? { hostLabel: r.hostLabel } : {}),

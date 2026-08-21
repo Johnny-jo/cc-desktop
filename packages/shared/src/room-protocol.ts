@@ -161,6 +161,10 @@ export type RoomSnapshot = {
   members: RoomMember[];
   seats: RoomSeat[];
   items: RoomTimelineItem[];
+  /** Whether room frames are AEAD-encrypted after the HMAC handshake. */
+  encrypt: boolean;
+  /** Host device fingerprint (64-hex); guests learn it from the handshake. */
+  hostFingerprint?: string;
   /** This client's user id (so UI can pick our own human seat). */
   localUserId?: string;
   /** Read-only kernel projection. Never includes source or KV. */

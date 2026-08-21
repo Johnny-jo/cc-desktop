@@ -262,6 +262,8 @@ export async function joinRoom(opts: {
   name?: string;
   modChecksum?: string;
   hosts?: string[];
+  wss?: string[];
+  hostFingerprint?: string;
 }): Promise<{ ok: boolean; error?: string }> {
   if (!hasDesktopApi("joinRoom")) {
     return { ok: false, error: "请完全重启应用后再使用群聊" };
@@ -384,6 +386,8 @@ export async function fetchRoomMod(opts: {
   host: string;
   port: number;
   checksum: string;
+  password?: string;
+  hostFingerprint?: string;
 }): Promise<{
   ok: boolean;
   checksum?: string;

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -6,6 +6,8 @@ import { WebSocket, WebSocketServer, type RawData } from "ws";
 import type { BrowserWindow } from "electron";
 import { IPC, MOD_BUNDLE_MAX_BYTES } from "@claude-desktop/shared";
 import type {
+  DeviceKeys,
+  Handshake,
   ModOfferPayload,
   RoomListItem,
   RoomMember,
@@ -17,11 +19,19 @@ import type {
   RoomFrame,
 } from "@claude-desktop/shared";
 import {
+  HandshakeReject,
   ROOM_DEFAULT_PORT,
+  ROOM_HANDSHAKE_TIMEOUT_MS,
   ROOM_PROTOCOL_VERSION,
+  deriveSessionKey,
   encodeRoomInvite,
+  fingerprintPublic,
+  makeHandshake,
   makeRoomFrame,
+  parsePdu,
   parseRoomFrame,
+  provePassword,
+  verifyPassword,
 } from "@claude-desktop/shared";
 import type { SessionManager, SessionRunOpts } from "./session-manager";
 import type { SettingsStore } from "./settings-store";
@@ -60,6 +70,9 @@ import {
   type KernelAutonomy,
 } from "./mod-kernel-improve";
 import { hashModFiles } from "@claude-desktop/shared/mod-hash";
+import { RoomConnection } from "./room-connection";
+import { loadOrCreateDeviceKeys } from "./room-device-store";
+import { HandshakeWatchdog } from "./room-limits";
 import {
   getKernelCacheDir,
   getKernelImprovePath,
@@ -90,6 +103,15 @@ export const ROOM_MOD_BUNDLE_CHUNK = 48 * 1024;
 
 type GuestWs = WebSocket & { userId?: string; fetching?: boolean };
 
+/** Per-socket handshake scratch state (host side), pre hs.ok. */
+type GuestHandshakeState = {
+  guestFp?: string;
+  guestName?: string;
+  guestPub?: Buffer;
+  nonce?: Buffer;
+  key?: Buffer;
+};
+
 type RoomRecord = {
   roomId: string;
   name: string;
@@ -97,6 +119,23 @@ type RoomRecord = {
   port: number;
   requireMods: boolean;
   autoApprove: boolean;
+  /** AEAD-encrypt room frames after the HMAC handshake (default true). */
+  encrypt: boolean;
+  /** Host device fingerprint (64-hex). For host records: our own device fp. */
+  hostFingerprint: string;
+  /** Process-level X25519 device identity (shared by all rooms). */
+  deviceKeys: DeviceKeys;
+  /** Post-handshake connections (host: one per guest ws; guest: the client ws). */
+  connections: Map<WebSocket, RoomConnection>;
+  /** Devices that proved the password but await host approval (task 8). */
+  pendingByFp: Map<
+    string,
+    { ws: WebSocket; name: string; nonce: Buffer; guestPub: Buffer }
+  >;
+  /** Kicked device fingerprints — rejected on hs.hello. */
+  blacklist: Set<string>;
+  /** Devices approved before (TOFU memory; keyed by fingerprint). */
+  knownDevices: Map<string, { fp: string; name: string; userId?: string }>;
   modChecksum: string;
   status: "open" | "ended";
   hostUserId: string;
@@ -118,6 +157,7 @@ type RoomRecord = {
     password?: string;
     modChecksum?: string;
     secret?: string;
+    hostFingerprint?: string;
   };
   reconnecting?: boolean;
   /** Guest dropped (reconnect exhausted) — room + history kept, can rejoin */
@@ -234,6 +274,9 @@ export class RoomService {
   private readonly userDataDir: string;
   private readonly isPackaged: boolean;
   private readonly resourcesPath?: string;
+  /** Process-level room device identity (persisted under userData). */
+  private readonly deviceKeys: DeviceKeys;
+  private readonly deviceFp: string;
 
   constructor(opts: {
     getWindow: () => BrowserWindow | null;
@@ -251,6 +294,8 @@ export class RoomService {
     this.userDataDir = opts.userDataDir ?? os.tmpdir();
     this.isPackaged = opts.isPackaged ?? false;
     this.resourcesPath = opts.resourcesPath;
+    this.deviceKeys = loadOrCreateDeviceKeys(this.userDataDir);
+    this.deviceFp = fingerprintPublic(this.deviceKeys.publicRaw);
     this.hydrateFromArchive();
   }
 
@@ -354,6 +399,14 @@ export function activate(ctx) {
         port: stored.port,
         requireMods: Boolean(stored.requireMods),
         autoApprove: Boolean(stored.autoApprove),
+        encrypt: stored.encrypt ?? true,
+        hostFingerprint:
+          stored.hostFingerprint ?? stored.join?.hostFingerprint ?? "",
+        deviceKeys: this.deviceKeys,
+        connections: new Map(),
+        pendingByFp: new Map(),
+        blacklist: new Set(),
+        knownDevices: new Map(),
         modChecksum: stored.modChecksum ?? "",
         status,
         hostUserId: "",
@@ -377,6 +430,7 @@ export function activate(ctx) {
                 password: stored.join.password,
                 modChecksum: stored.join.modChecksum,
                 secret: stored.join.secret,
+                hostFingerprint: stored.join.hostFingerprint,
               },
             }
           : {}),
@@ -423,6 +477,8 @@ export function activate(ctx) {
       modChecksum: stored.modChecksum ?? "",
       autoApprove: Boolean(stored.autoApprove),
       hasPassword: Boolean(stored.hasPassword),
+      encrypt: stored.encrypt ?? true,
+      hostFingerprint: stored.hostFingerprint ?? stored.join?.hostFingerprint,
       members: stored.members ?? [],
       seats: stored.seats ?? [],
       items: stored.items ?? [],
@@ -438,11 +494,12 @@ export function activate(ctx) {
     const host = hosts[0] ?? "127.0.0.1";
     let secret: string | undefined;
     try {
+      // CDR2: host/port/fingerprint only — the password never goes in here.
       secret = encodeRoomInvite({
         host,
         hosts,
         port: r.port,
-        password: r.password || undefined,
+        hostFingerprint: r.hostFingerprint,
         modChecksum: r.modChecksum || undefined,
         roomName: r.name,
       });
@@ -454,8 +511,10 @@ export function activate(ctx) {
       host,
       hosts,
       port: r.port,
+      // Shown to the host only; guests must type it themselves.
       password: r.password || undefined,
       modChecksum: r.modChecksum || undefined,
+      hostFingerprint: r.hostFingerprint,
       listening: Boolean(r.server),
       secret,
     };
@@ -491,6 +550,8 @@ export function activate(ctx) {
     host: string;
     port: number;
     checksum: string;
+    password?: string;
+    hostFingerprint?: string;
   }): Promise<{
     ok: boolean;
     checksum?: string;
@@ -525,9 +586,20 @@ export function activate(ctx) {
       if (offer.checksum !== checksum) {
         return { ok: false, error: "模组校验码不一致", offer };
       }
-      const collecting = collectBundles(ws, checksum, offer.size, 30_000);
-      this.sendRaw(ws, "pending", 2, "mod.fetch", { checksum });
+      // mod.fetch is gated behind hs.ok — run the handshake on this short
+      // connection first, then pull the bundle over the RoomConnection.
+      const hs = await this.handshakeAsGuest(ws, {
+        password: opts.password ?? "",
+        name: displayName(),
+        hostFingerprint: opts.hostFingerprint,
+      });
+      if (!hs.ok) {
+        return { ok: false, error: hs.error, offer };
+      }
+      const collecting = collectBundles(ws, hs.conn, checksum, offer.size, 30_000);
+      hs.conn.sendFrame(makeRoomFrame("pending", 2, "mod.fetch", { checksum }));
       const collected = await collecting;
+      hs.conn.close();
       if (!collected.ok) {
         return { ok: false, error: collected.error, offer };
       }
@@ -756,10 +828,16 @@ export function activate(ctx) {
     port?: number;
     requireMods?: boolean;
     autoApprove?: boolean;
+    /** Default true; false keeps the legacy plaintext transport. */
+    encrypt?: boolean;
+    /** wss:// relay endpoints (T1/T2) — forces encryption on. */
+    wss?: string[];
   }): Promise<{ ok: boolean; room?: RoomSnapshot; error?: string }> {
     const name = opts.name.trim();
     if (!name) return { ok: false, error: "请填写群聊名" };
     const port = opts.port && opts.port > 0 ? opts.port : ROOM_DEFAULT_PORT;
+    // Relayed (public) rooms must never go plaintext.
+    const encrypt = opts.encrypt !== false || (opts.wss?.length ?? 0) > 0;
 
     // Refuse if we already host an open room on this port
     for (const existing of this.rooms.values()) {
@@ -788,6 +866,13 @@ export function activate(ctx) {
       port,
       requireMods: Boolean(opts.requireMods),
       autoApprove: Boolean(opts.autoApprove),
+      encrypt,
+      hostFingerprint: this.deviceFp,
+      deviceKeys: this.deviceKeys,
+      connections: new Map(),
+      pendingByFp: new Map(),
+      blacklist: new Set(),
+      knownDevices: new Map(),
       modChecksum: "",
       status: "open",
       hostUserId,
@@ -920,6 +1005,10 @@ export function activate(ctx) {
     name?: string;
     modChecksum?: string;
     hosts?: string[];
+    /** wss:// relay endpoints from the CDR2 invite (T1/T2; unused in S1 LAN). */
+    wss?: string[];
+    /** Expected host device fingerprint from the CDR2 invite (TOFU pin). */
+    hostFingerprint?: string;
     /** Rejoin: reuse the previous member identity so the host keeps seats */
     userId?: string;
   }): Promise<{ ok: boolean; room?: RoomSnapshot; error?: string }> {
@@ -996,100 +1085,113 @@ export function activate(ctx) {
         // can show a clearer message. Node ws often emits error then close.
       });
 
-      ws.on("open", () => {
-        const frame = makeRoomFrame("pending", 1, "join", {
-          userId,
-          name,
-          password: opts.password ?? "",
-          protocol: ROOM_PROTOCOL_VERSION,
-          modChecksum: checksum,
-        });
-        try {
-          ws.send(JSON.stringify(frame));
-        } catch (err) {
-          clearTimeout(timer);
-          done({
-            ok: false,
-            error: `已连接但发送失败：${err instanceof Error ? err.message : String(err)}`,
-          });
-        }
-      });
-
       let rec: RoomRecord | null = null;
-      ws.on("message", (data) => {
-        if (settled && rec) return;
-        const raw = typeof data === "string" ? data : data.toString("utf8");
-        const frame = parseRoomFrame(raw);
-        if (!frame) return;
 
-        if (frame.type === "error") {
-          clearTimeout(timer);
-          const msg =
-            (frame.payload as { message?: string })?.message ?? "加入失败";
-          try {
-            ws.close();
-          } catch {
-            // ignore
-          }
-          done({ ok: false, error: msg });
-          return;
-        }
-
-        if (frame.type === "welcome" || frame.type === "state.snapshot") {
-          if (rec?.closing) return;
-          const snap = frame.payload as RoomSnapshot;
-          if (!rec) {
+      ws.on("open", () => {
+        void this.handshakeAsGuest(ws, {
+          password: opts.password ?? "",
+          name,
+          hostFingerprint: opts.hostFingerprint,
+        }).then((hs) => {
+          if (settled) return;
+          if (!hs.ok) {
             clearTimeout(timer);
-            rec = {
-              roomId: snap.roomId,
-              name: snap.name,
-              password: opts.password ?? "",
-              port,
-              requireMods: snap.requireMods,
-              autoApprove: snap.autoApprove,
-              modChecksum: snap.modChecksum,
-              status: snap.status,
-              hostUserId:
-                snap.members.find((m) => m.role === "host")?.userId ?? "",
-              hostLabel: snap.hostLabel,
-              localUserId: userId,
-              localRole: "member",
-              members: snap.members,
-              seats: snap.seats,
-              items: snap.items,
-              seq: frame.seq,
-              server: null,
-              guests: new Set(),
-              client: ws,
-              kernelProjection: snap.kernel,
-              joinInfo: {
-                host,
-                hosts: [
-                  host,
-                  ...(opts.hosts ?? []).filter((h) => h && h !== host),
-                ],
-                port,
-                password: opts.password,
-                modChecksum: checksum,
-              },
-            };
-            this.rooms.set(snap.roomId, rec);
-            this.bindGuestSocket(rec, ws);
-            this.persist(rec);
-            this.emit(rec);
-            done({ ok: true, room: this.snapshot(rec) });
+            try {
+              ws.close();
+            } catch {
+              // ignore
+            }
+            done({ ok: false, error: hs.error });
             return;
           }
-          // Later snapshots are handled by bindGuestSocket.
-        }
-
-        if (frame.type === "room.closed" && rec) {
-          this.dismissGuest(
-            rec,
-            (frame.payload as { message?: string })?.message ??
-              "群主已解散群聊",
+          const conn = hs.conn;
+          conn.onFrame((frame) => {
+            if (settled && rec) return;
+            if (frame.type === "error") {
+              clearTimeout(timer);
+              const msg =
+                (frame.payload as { message?: string })?.message ?? "加入失败";
+              try {
+                ws.close();
+              } catch {
+                // ignore
+              }
+              done({ ok: false, error: msg });
+              return;
+            }
+            if (frame.type === "welcome" || frame.type === "state.snapshot") {
+              if (rec?.closing) return;
+              const snap = frame.payload as RoomSnapshot;
+              if (!rec) {
+                clearTimeout(timer);
+                rec = {
+                  roomId: snap.roomId,
+                  name: snap.name,
+                  password: opts.password ?? "",
+                  port,
+                  requireMods: snap.requireMods,
+                  autoApprove: snap.autoApprove,
+                  encrypt: hs.encrypt,
+                  hostFingerprint: hs.hostFp,
+                  deviceKeys: this.deviceKeys,
+                  connections: new Map([[ws, conn]]),
+                  pendingByFp: new Map(),
+                  blacklist: new Set(),
+                  knownDevices: new Map(),
+                  modChecksum: snap.modChecksum,
+                  status: snap.status,
+                  hostUserId:
+                    snap.members.find((m) => m.role === "host")?.userId ?? "",
+                  hostLabel: snap.hostLabel,
+                  localUserId: userId,
+                  localRole: "member",
+                  members: snap.members,
+                  seats: snap.seats,
+                  items: snap.items,
+                  seq: frame.seq,
+                  server: null,
+                  guests: new Set(),
+                  client: ws,
+                  kernelProjection: snap.kernel,
+                  joinInfo: {
+                    host,
+                    hosts: [
+                      host,
+                      ...(opts.hosts ?? []).filter((h) => h && h !== host),
+                    ],
+                    port,
+                    password: opts.password,
+                    modChecksum: checksum,
+                    hostFingerprint: hs.hostFp,
+                  },
+                };
+                this.rooms.set(snap.roomId, rec);
+                this.bindGuestSocket(rec, ws);
+                this.persist(rec);
+                this.emit(rec);
+                done({ ok: true, room: this.snapshot(rec) });
+                return;
+              }
+              // Later snapshots are handled by bindGuestSocket.
+            }
+            if (frame.type === "room.closed" && rec) {
+              this.dismissGuest(
+                rec,
+                (frame.payload as { message?: string })?.message ??
+                  "群主已解散群聊",
+              );
+            }
+          });
+          // Password already proven by the handshake — never inside join.
+          conn.sendFrame(
+            makeRoomFrame("pending", 1, "join", {
+              userId,
+              name,
+              protocol: ROOM_PROTOCOL_VERSION,
+              modChecksum: checksum,
+            }),
           );
-        }
+        });
       });
 
       ws.on("close", () => {
@@ -1216,60 +1318,73 @@ export function activate(ctx) {
         /* wait for close */
       });
       ws.on("open", () => {
-        const frame = makeRoomFrame(r.roomId, 1, "join", {
-          userId: r.localUserId || randomUUID(),
-          name: displayName(),
+        void this.handshakeAsGuest(ws, {
           password: password ?? "",
-          protocol: ROOM_PROTOCOL_VERSION,
-          modChecksum: (modChecksum ?? "").trim(),
-        });
-        try {
-          ws.send(JSON.stringify(frame));
-        } catch {
-          clearTimeout(timer);
-          done(false);
-        }
-      });
-      ws.on("message", (data) => {
-        if (settled) return;
-        const frame = parseRoomFrame(
-          typeof data === "string" ? data : data.toString("utf8"),
-        );
-        if (!frame) return;
-        if (frame.type === "room.closed") {
-          clearTimeout(timer);
-          this.dismissGuest(
-            r,
-            (frame.payload as { message?: string })?.message ??
-              "群主已解散群聊",
+          name: displayName(),
+          hostFingerprint: r.hostFingerprint || undefined,
+        }).then((hs) => {
+          if (settled) return;
+          if (!hs.ok) {
+            clearTimeout(timer);
+            try {
+              ws.close();
+            } catch {
+              // ignore
+            }
+            done(false);
+            return;
+          }
+          const conn = hs.conn;
+          conn.onFrame((frame) => {
+            if (settled) return;
+            if (frame.type === "room.closed") {
+              clearTimeout(timer);
+              this.dismissGuest(
+                r,
+                (frame.payload as { message?: string })?.message ??
+                  "群主已解散群聊",
+              );
+              try {
+                ws.close();
+              } catch {
+                // ignore
+              }
+              done(false);
+              return;
+            }
+            if (frame.type === "error") {
+              clearTimeout(timer);
+              try {
+                ws.close();
+              } catch {
+                // ignore
+              }
+              done(false);
+              return;
+            }
+            if (frame.type === "welcome" || frame.type === "state.snapshot") {
+              clearTimeout(timer);
+              const snap = frame.payload as RoomSnapshot;
+              r.client = ws;
+              r.connections.clear();
+              r.connections.set(ws, conn);
+              r.encrypt = hs.encrypt;
+              r.hostFingerprint = hs.hostFp;
+              r.seq = frame.seq;
+              this.applyGuestSnapshot(r, snap);
+              this.bindGuestSocket(r, ws);
+              done(true);
+            }
+          });
+          conn.sendFrame(
+            makeRoomFrame(r.roomId, 1, "join", {
+              userId: r.localUserId || randomUUID(),
+              name: displayName(),
+              protocol: ROOM_PROTOCOL_VERSION,
+              modChecksum: (modChecksum ?? "").trim(),
+            }),
           );
-          try {
-            ws.close();
-          } catch {
-            // ignore
-          }
-          done(false);
-          return;
-        }
-        if (frame.type === "error") {
-          clearTimeout(timer);
-          try {
-            ws.close();
-          } catch {
-            // ignore
-          }
-          done(false);
-          return;
-        }
-        if (frame.type === "welcome" || frame.type === "state.snapshot") {
-          clearTimeout(timer);
-          const snap = frame.payload as RoomSnapshot;
-          r.client = ws;
-          r.seq = frame.seq;
-          this.applyGuestSnapshot(r, snap);
-          this.bindGuestSocket(r, ws);
-          done(true);
-        }
+        });
       });
       ws.on("close", () => {
         if (!settled) {
@@ -1329,6 +1444,7 @@ export function activate(ctx) {
       port: info.port,
       password: info.password,
       modChecksum: info.modChecksum,
+      hostFingerprint: info.hostFingerprint,
       userId,
     });
     if (!res.ok) {
@@ -1366,12 +1482,8 @@ export function activate(ctx) {
 
   /** Ongoing guest socket after join / successful reconnect. */
   private bindGuestSocket(r: RoomRecord, ws: WebSocket): void {
-    ws.on("message", (data) => {
+    const handle = (frame: RoomFrame) => {
       if (r.closing || r.client !== ws) return;
-      const frame = parseRoomFrame(
-        typeof data === "string" ? data : data.toString("utf8"),
-      );
-      if (!frame) return;
       if (frame.type === "state.snapshot") {
         if (r.status !== "open") return;
         const snap = frame.payload as RoomSnapshot;
@@ -1433,7 +1545,20 @@ export function activate(ctx) {
             (frame.payload as { message?: string })?.message ?? "操作失败",
         });
       }
-    });
+    };
+    const conn = r.connections.get(ws);
+    if (conn) {
+      conn.onFrame(handle);
+    } else {
+      // Fallback for sockets without a RoomConnection (should not happen
+      // post-handshake; kept for safety).
+      ws.on("message", (data) => {
+        const frame = parseRoomFrame(
+          typeof data === "string" ? data : data.toString("utf8"),
+        );
+        if (frame) handle(frame);
+      });
+    }
     ws.on("close", () => {
       if (r.client === ws) r.client = null;
       if (
@@ -2127,6 +2252,14 @@ export function activate(ctx) {
       this.cancelGuestReconnect(r);
       this.disposeModHost(r);
       this.disposeKernel(r, false);
+      for (const conn of r.connections.values()) {
+        try {
+          conn.close();
+        } catch {
+          // ignore
+        }
+      }
+      r.connections.clear();
       try {
         r.client?.close();
         r.server?.close();
@@ -2197,13 +2330,294 @@ export function activate(ctx) {
   }
 
   private onGuest(r: RoomRecord, ws: WebSocket) {
-    ws.on("message", (data: RawData) => {
-      const frame = parseRoomFrame(String(data));
-      if (!frame) return;
-      this.handleGuestFrame(r, ws, frame);
+    // Half-open watchdog: sockets that never finish the handshake (or never
+    // send a legacy plaintext join on skip-encrypt rooms) get closed.
+    const watchdog = new HandshakeWatchdog(ROOM_HANDSHAKE_TIMEOUT_MS, () => {
+      try {
+        ws.close();
+      } catch {
+        // ignore
+      }
     });
+    watchdog.start();
+    const hsState: GuestHandshakeState = {};
+    const onMsg = (data: RawData) => {
+      const pdu = parsePdu(String(data));
+      if (!pdu) return;
+      if (pdu.kind === "hs") {
+        this.handleGuestHandshake(r, ws, pdu.hs, hsState, () => {
+          watchdog.cancel();
+          ws.off("message", onMsg);
+        });
+        return;
+      }
+      if (pdu.kind === "frame") {
+        const frame = pdu.frame;
+        // Peek stays unauthenticated: hello → mod.offer, same as before.
+        if (frame.type === "hello") {
+          this.reply(ws, r, "mod.offer", this.buildOffer(r));
+          return;
+        }
+        // Skip-encrypt rooms keep the legacy plaintext path. Encrypted rooms
+        // accept only hs frames until hs.ok (mod.fetch included).
+        if (!r.encrypt) {
+          if (frame.type === "join") watchdog.cancel();
+          this.handleGuestFrame(r, ws, frame);
+        }
+        return;
+      }
+      // env / ack before the handshake completes: drop.
+    };
+    ws.on("message", onMsg);
     ws.on("close", () => {
+      watchdog.cancel();
       r.guests.delete(ws);
+      const conn = r.connections.get(ws);
+      if (conn) {
+        conn.close();
+        r.connections.delete(ws);
+      }
+    });
+  }
+
+  /**
+   * Host side of the HMAC handshake. On success the socket is wrapped in a
+   * RoomConnection and `upgrade` retires the pre-handshake listener.
+   */
+  private handleGuestHandshake(
+    r: RoomRecord,
+    ws: WebSocket,
+    hs: Handshake,
+    state: GuestHandshakeState,
+    upgrade: () => void,
+  ): void {
+    if (hs.type === "hello") {
+      const p = hs.payload as { pub?: string; fp?: string; name?: string };
+      const fp = String(p.fp ?? "");
+      if (fp && r.blacklist.has(fp)) {
+        ws.send(
+          JSON.stringify(
+            makeHandshake("reject", { reason: HandshakeReject.blacklist }),
+          ),
+        );
+        try {
+          ws.close();
+        } catch {
+          // ignore
+        }
+        return;
+      }
+      let guestPub: Buffer;
+      try {
+        guestPub = Buffer.from(String(p.pub ?? ""), "base64url");
+        if (guestPub.length !== 32) throw new Error("bad pub");
+      } catch {
+        return; // malformed hello — watchdog will reap the socket
+      }
+      state.guestFp = fp;
+      state.guestName = String(p.name ?? "guest");
+      state.guestPub = guestPub;
+      state.key = deriveSessionKey(r.deviceKeys, guestPub);
+      state.nonce = randomBytes(16);
+      ws.send(
+        JSON.stringify(
+          makeHandshake("challenge", {
+            pub: r.deviceKeys.publicRaw.toString("base64url"),
+            fp: r.hostFingerprint,
+            nonce: state.nonce.toString("base64url"),
+            encrypt: r.encrypt,
+          }),
+        ),
+      );
+      return;
+    }
+    if (hs.type === "prove") {
+      if (!state.nonce || !state.key || !state.guestFp || !state.guestPub) {
+        return;
+      }
+      const p = hs.payload as { proof?: string };
+      const ok = verifyPassword({
+        password: r.password,
+        nonce: state.nonce,
+        hostFp: r.hostFingerprint,
+        guestFp: state.guestFp,
+        ecdhSs: state.key,
+        proof: String(p.proof ?? ""),
+      });
+      if (!ok) {
+        ws.send(
+          JSON.stringify(
+            makeHandshake("reject", { reason: HandshakeReject.password }),
+          ),
+        );
+        try {
+          ws.close();
+        } catch {
+          // ignore
+        }
+        return;
+      }
+      const fp = state.guestFp;
+      if (!r.knownDevices.has(fp)) {
+        if (!r.autoApprove) {
+          // New device, no auto-approve: hold for host approval (task 8).
+          r.pendingByFp.set(fp, {
+            ws,
+            name: state.guestName ?? "guest",
+            nonce: state.nonce,
+            guestPub: state.guestPub,
+          });
+          ws.send(JSON.stringify(makeHandshake("pending", { fp })));
+          return;
+        }
+        r.knownDevices.set(fp, { fp, name: state.guestName ?? "guest" });
+      }
+      const kid = randomBytes(8).toString("base64url");
+      const conn = new RoomConnection({
+        ws,
+        kid,
+        key: state.key,
+        selfFp: r.hostFingerprint,
+        peerFp: fp,
+        encrypt: r.encrypt,
+      });
+      r.connections.set(ws, conn);
+      conn.onFrame((frame) => this.handleGuestFrame(r, ws, frame));
+      ws.send(
+        JSON.stringify(makeHandshake("ok", { kid, encrypt: r.encrypt })),
+      );
+      upgrade();
+      return;
+    }
+  }
+
+  /**
+   * Guest side of the HMAC handshake: hello → challenge → prove → ok.
+   * On ok the socket is already wrapped in a RoomConnection (handed back to
+   * the caller, which then sends the join frame through it).
+   */
+  private handshakeAsGuest(
+    ws: WebSocket,
+    opts: { password: string; name: string; hostFingerprint?: string },
+  ): Promise<
+    | { ok: true; conn: RoomConnection; hostFp: string; encrypt: boolean }
+    | { ok: false; error: string }
+  > {
+    return new Promise((resolve) => {
+      let settled = false;
+      let pending: { key: Buffer; hostFp: string } | null = null;
+      const finish = (
+        v:
+          | { ok: true; conn: RoomConnection; hostFp: string; encrypt: boolean }
+          | { ok: false; error: string },
+      ) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        ws.off("message", onMsg);
+        ws.off("close", onClose);
+        resolve(v);
+      };
+      const timer = setTimeout(
+        () => finish({ ok: false, error: "握手超时" }),
+        ROOM_HANDSHAKE_TIMEOUT_MS,
+      );
+      const onMsg = (data: RawData) => {
+        const pdu = parsePdu(String(data));
+        if (!pdu || pdu.kind !== "hs") return;
+        const hs = pdu.hs;
+        if (hs.type === "challenge") {
+          const p = hs.payload as {
+            pub?: string;
+            fp?: string;
+            nonce?: string;
+            encrypt?: boolean;
+          };
+          const hostFp = String(p.fp ?? "");
+          if (
+            opts.hostFingerprint &&
+            hostFp &&
+            opts.hostFingerprint !== hostFp
+          ) {
+            finish({
+              ok: false,
+              error: "主机指纹与邀请码不匹配，可能连到了错误的主机",
+            });
+            return;
+          }
+          let key: Buffer;
+          try {
+            key = deriveSessionKey(
+              this.deviceKeys,
+              Buffer.from(String(p.pub ?? ""), "base64url"),
+            );
+          } catch {
+            finish({ ok: false, error: "握手失败：主机公钥无效" });
+            return;
+          }
+          pending = { key, hostFp };
+          const proof = provePassword({
+            password: opts.password,
+            nonce: Buffer.from(String(p.nonce ?? ""), "base64url"),
+            hostFp,
+            guestFp: this.deviceFp,
+            ecdhSs: key,
+          });
+          try {
+            ws.send(JSON.stringify(makeHandshake("prove", { proof })));
+          } catch {
+            finish({ ok: false, error: "握手失败：无法发送证明" });
+          }
+          return;
+        }
+        if (hs.type === "ok") {
+          const p = hs.payload as { kid?: string; encrypt?: boolean };
+          if (!pending || !p.kid) {
+            finish({ ok: false, error: "握手时序错误" });
+            return;
+          }
+          const conn = new RoomConnection({
+            ws,
+            kid: p.kid,
+            key: pending.key,
+            selfFp: this.deviceFp,
+            peerFp: pending.hostFp,
+            encrypt: p.encrypt !== false,
+          });
+          finish({
+            ok: true,
+            conn,
+            hostFp: pending.hostFp,
+            encrypt: p.encrypt !== false,
+          });
+          return;
+        }
+        if (hs.type === "reject") {
+          const reason = (hs.payload as { reason?: string })?.reason;
+          finish({ ok: false, error: handshakeRejectMessage(reason) });
+          return;
+        }
+        // hs.pending: keep waiting (approval flow lands in task 8).
+      };
+      const onClose = () => finish({ ok: false, error: "连接被关闭" });
+      ws.on("message", onMsg);
+      ws.on("close", onClose);
+      try {
+        ws.send(
+          JSON.stringify(
+            makeHandshake("hello", {
+              pub: this.deviceKeys.publicRaw.toString("base64url"),
+              fp: this.deviceFp,
+              name: opts.name,
+            }),
+          ),
+        );
+      } catch (err) {
+        finish({
+          ok: false,
+          error: `握手失败：${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
     });
   }
 
@@ -2224,7 +2638,6 @@ export function activate(ctx) {
       const p = frame.payload as {
         userId?: string;
         name?: string;
-        password?: string;
         protocol?: number;
         modChecksum?: string;
       };
@@ -2233,11 +2646,8 @@ export function activate(ctx) {
         ws.close();
         return;
       }
-      if (r.password && p.password !== r.password) {
-        this.reply(ws, r, "error", { message: "密码错误" });
-        ws.close();
-        return;
-      }
+      // The password is proven by the HMAC handshake (hs.prove), never by
+      // the join payload.
       if (r.modChecksum && p.modChecksum !== r.modChecksum) {
         this.reply(ws, r, "error", { message: "模组校验码不一致" });
         ws.close();
@@ -2499,6 +2909,8 @@ export function activate(ctx) {
         members: r.members,
         autoApprove: r.autoApprove,
         hasPassword: Boolean(r.password),
+        encrypt: r.encrypt,
+        hostFingerprint: r.hostFingerprint || undefined,
         requireMods: r.requireMods,
         modChecksum: r.modChecksum,
         hostLabel: r.hostLabel,
@@ -2513,6 +2925,7 @@ export function activate(ctx) {
                 password: r.joinInfo.password,
                 modChecksum: r.joinInfo.modChecksum,
                 secret: r.joinInfo.secret,
+                hostFingerprint: r.joinInfo.hostFingerprint,
               },
             }
           : {}),
@@ -2540,6 +2953,8 @@ export function activate(ctx) {
       modChecksum: r.modChecksum,
       autoApprove: r.autoApprove,
       hasPassword: Boolean(r.password),
+      encrypt: r.encrypt,
+      hostFingerprint: r.hostFingerprint || undefined,
       members: r.members,
       seats: r.seats,
       items: r.items,
@@ -2571,9 +2986,15 @@ export function activate(ctx) {
 
   private broadcast(r: RoomRecord, type: RoomFrame["type"], payload: unknown) {
     r.seq += 1;
-    const raw = JSON.stringify(makeRoomFrame(r.roomId, r.seq, type, payload));
+    const frame = makeRoomFrame(r.roomId, r.seq, type, payload);
     for (const g of r.guests) {
-      if (g.readyState === WebSocket.OPEN) g.send(raw);
+      const conn = r.connections.get(g);
+      if (conn) {
+        conn.sendFrame(frame);
+        continue;
+      }
+      // No connection: only possible for legacy plaintext (skip-encrypt) guests.
+      if (g.readyState === WebSocket.OPEN) g.send(JSON.stringify(frame));
     }
   }
 
@@ -2584,15 +3005,28 @@ export function activate(ctx) {
     payload: unknown,
   ) {
     r.seq += 1;
+    const frame = makeRoomFrame(r.roomId, r.seq, type, payload);
+    const conn = r.connections.get(ws);
+    if (conn) {
+      conn.sendFrame(frame);
+      return;
+    }
+    // No connection (peek / legacy plaintext): answer in cleartext.
     if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(makeRoomFrame(r.roomId, r.seq, type, payload)));
+      ws.send(JSON.stringify(frame));
     }
   }
 
   private sendClient(r: RoomRecord, type: RoomFrame["type"], payload: unknown) {
     if (!r.client || r.client.readyState !== WebSocket.OPEN) return;
     r.seq += 1;
-    r.client.send(JSON.stringify(makeRoomFrame(r.roomId, r.seq, type, payload)));
+    const frame = makeRoomFrame(r.roomId, r.seq, type, payload);
+    const conn = r.connections.get(r.client);
+    if (conn) {
+      conn.sendFrame(frame);
+      return;
+    }
+    r.client.send(JSON.stringify(frame));
   }
 
   private emit(r: RoomRecord) {
@@ -3340,6 +3774,23 @@ export function activate(ctx) {
   }
 }
 
+function handshakeRejectMessage(reason: string | undefined): string {
+  switch (reason) {
+    case HandshakeReject.password:
+      return "密码错误";
+    case HandshakeReject.blacklist:
+      return "该设备已被群主拉黑";
+    case HandshakeReject.fingerprint:
+      return "设备指纹验证失败";
+    case HandshakeReject.denied:
+      return "群主拒绝了加入请求";
+    case HandshakeReject.timeout:
+      return "握手超时";
+    default:
+      return "握手被拒绝";
+  }
+}
+
 function toModSeats(seats: RoomSeat[]): ModSeat[] {
   return seats.map((s) => ({
     id: s.id,
@@ -3364,6 +3815,7 @@ function assembleChunks(chunks: Map<number, Buffer>): Buffer {
 
 function collectBundles(
   ws: WebSocket,
+  conn: RoomConnection,
   checksum: string,
   size: number,
   timeoutMs: number,
@@ -3377,13 +3829,10 @@ function collectBundles(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      ws.off("message", onMsg);
       ws.off("close", onClose);
       resolve(result);
     };
-    const onMsg = (data: RawData) => {
-      const frame = parseRoomFrame(String(data));
-      if (!frame) return;
+    const onFrame = (frame: RoomFrame) => {
       if (frame.type === "error") {
         finish({
           ok: false,
@@ -3406,12 +3855,12 @@ function collectBundles(
         finish({ ok: true, bytes: assembleChunks(chunks) });
       }
     };
+    conn.onFrame(onFrame);
     const onClose = () => finish({ ok: false, error: "模组下载不完整" });
     const timer = setTimeout(
       () => finish({ ok: false, error: "模组下载不完整" }),
       timeoutMs,
     );
-    ws.on("message", onMsg);
     ws.on("close", onClose);
   });
 }

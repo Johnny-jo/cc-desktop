@@ -513,6 +513,8 @@ export type IpcInvokeMap = {
         port?: number;
         requireMods?: boolean;
         autoApprove?: boolean;
+        /** Default true; false keeps the legacy plaintext transport. */
+        encrypt?: boolean;
       },
     ];
     result: { ok: boolean; room?: import("./room-protocol").RoomSnapshot; error?: string };
@@ -526,6 +528,10 @@ export type IpcInvokeMap = {
         name?: string;
         modChecksum?: string;
         hosts?: string[];
+        /** wss:// relay endpoints from the CDR2 invite (T1/T2). */
+        wss?: string[];
+        /** Expected host device fingerprint from the CDR2 invite (TOFU pin). */
+        hostFingerprint?: string;
       },
     ];
     result: { ok: boolean; room?: import("./room-protocol").RoomSnapshot; error?: string };
@@ -591,10 +597,12 @@ export type IpcInvokeMap = {
       host?: string;
       hosts?: string[];
       port?: number;
+      /** Room password — shown to the host only; never inside the CDR2 secret. */
       password?: string;
       modChecksum?: string;
+      hostFingerprint?: string;
       listening?: boolean;
-      /** Single-line secret key (CDR1.…); guest pastes this to join */
+      /** Single-line secret key (CDR2.…); guest pastes this to join */
       secret?: string;
       error?: string;
     };
@@ -612,7 +620,16 @@ export type IpcInvokeMap = {
     };
   };
   [IPC.roomFetchMod]: {
-    args: [{ host: string; port: number; checksum: string }];
+    args: [
+      {
+        host: string;
+        port: number;
+        checksum: string;
+        /** Room password — needed for the handshake proof before mod.fetch. */
+        password?: string;
+        hostFingerprint?: string;
+      },
+    ];
     result: {
       ok: boolean;
       checksum?: string;

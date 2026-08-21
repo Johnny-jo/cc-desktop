@@ -392,6 +392,7 @@ const desktop = {
     port?: number;
     requireMods?: boolean;
     autoApprove?: boolean;
+    encrypt?: boolean;
   }) =>
     ipcRenderer.invoke(IPC.roomCreate, opts) as Promise<{
       ok: boolean;
@@ -405,6 +406,8 @@ const desktop = {
     name?: string;
     modChecksum?: string;
     hosts?: string[];
+    wss?: string[];
+    hostFingerprint?: string;
   }) =>
     ipcRenderer.invoke(IPC.roomJoin, opts) as Promise<{
       ok: boolean;
@@ -489,6 +492,7 @@ const desktop = {
       port?: number;
       password?: string;
       modChecksum?: string;
+      hostFingerprint?: string;
       listening?: boolean;
       secret?: string;
       error?: string;
@@ -504,7 +508,13 @@ const desktop = {
       offer?: import("@claude-desktop/shared").ModOfferPayload;
       error?: string;
     }>,
-  fetchRoomMod: (opts: { host: string; port: number; checksum: string }) =>
+  fetchRoomMod: (opts: {
+    host: string;
+    port: number;
+    checksum: string;
+    password?: string;
+    hostFingerprint?: string;
+  }) =>
     ipcRenderer.invoke(IPC.roomFetchMod, opts) as Promise<{
       ok: boolean;
       checksum?: string;
