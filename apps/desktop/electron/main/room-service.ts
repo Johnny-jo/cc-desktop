@@ -18,6 +18,7 @@ import type {
   RoomSnapshot,
   RoomTimelineItem,
   RoomFrame,
+  RoomFrameType,
 } from "@claude-desktop/shared";
 import {
   HandshakeReject,
@@ -73,7 +74,7 @@ import {
 import { hashModFiles } from "@claude-desktop/shared/mod-hash";
 import { RoomConnection } from "./room-connection";
 import { loadOrCreateDeviceKeys } from "./room-device-store";
-import { HandshakeWatchdog } from "./room-limits";
+import { frameLimit, HandshakeWatchdog, TokenBucket } from "./room-limits";
 import { isHandshakeReason, RoomMetrics } from "./room-metrics";
 import { startRoomTunnel } from "./room-tunnel";
 import {
@@ -105,8 +106,67 @@ const MOD_CHECKSUM_RE = /^[0-9a-f]{64}$/;
 export const ROOM_MOD_BUNDLE_CHUNK = 48 * 1024;
 /** Guest reconnect: 5 attempts, exponential backoff 1s/2s/4s/8s/8s (task 9). */
 const RECONNECT_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 8_000] as const;
+/** Per-connection inbound abuse bucket (spec §9): 30 msg/s sustained, 60 burst. */
+const ROOM_CONN_RATE_PER_SEC = 30;
+const ROOM_CONN_BURST = 60;
+/** Consecutive oversized messages before the socket is dropped (task 14). */
+const ROOM_OVERSIZED_MAX_STREAK = 5;
+/**
+ * Runtime mirror of the RoomFrameType union (task 14 unknown-type guard).
+ * parseRoomFrame accepts any string as `type`, so this set is the only way to
+ * tell a forged/unknown frame type apart at runtime. Keep in sync with
+ * packages/shared/src/room-protocol.ts.
+ */
+const KNOWN_ROOM_FRAME_TYPES: ReadonlySet<string> = new Set<RoomFrameType>([
+  "hello",
+  "welcome",
+  "error",
+  "join",
+  "leave",
+  "kick",
+  "seat.claim",
+  "seat.release",
+  "seat.takeover",
+  "seat.return",
+  "seat.add",
+  "chat.user",
+  "chat.event",
+  "game.dice",
+  "game.rps",
+  "state.snapshot",
+  "room.closed",
+  "perm.ask",
+  "perm.decide",
+  "mod.offer",
+  "mod.fetch",
+  "mod.bundle",
+  "mod.intent",
+  "mod.patch",
+  "mod.priv",
+  "mod.fail",
+]);
 
-type GuestWs = WebSocket & { userId?: string; fetching?: boolean };
+type GuestWs = WebSocket & {
+  userId?: string;
+  fetching?: boolean;
+  guard?: ConnGuard;
+};
+
+/** Per-connection abuse guard (task 14), attached in onGuest. */
+type ConnGuard = {
+  bucket: TokenBucket;
+  /** Consecutive over-limit messages; the socket dies at the streak cap. */
+  oversized: number;
+  /** Abuse charges so far (oversized / unknown type / forged roomId). */
+  abused: number;
+};
+
+/** Charge one abuse event to the connection's token bucket (spec §9). */
+function chargeAbuse(guard: ConnGuard | undefined): void {
+  if (!guard) return;
+  guard.bucket.take();
+  guard.abused += 1;
+}
 
 /** Per-socket handshake scratch state (host side), pre hs.ok. */
 type GuestHandshakeState = {
@@ -336,6 +396,8 @@ export class RoomService {
   /** Injectable backoff sleep for guest reconnect (tests make it instant). */
   private reconnectSleep: (ms: number) => Promise<void> = (ms) =>
     new Promise((resolve) => setTimeout(resolve, ms));
+  /** Injectable half-open handshake timeout (tests shrink it to ms). */
+  private handshakeTimeoutMs: number = ROOM_HANDSHAKE_TIMEOUT_MS;
   /**
    * Test-only hook: when false, wss:// join candidates skip TLS CA checks so
    * self-signed local test certs pass. Never set outside tests — production
@@ -668,8 +730,10 @@ export function activate(ctx) {
       if (offer.checksum !== checksum) {
         return { ok: false, error: "模组校验码不一致", offer };
       }
-      // mod.fetch is gated behind hs.ok — run the handshake on this short
-      // connection first, then pull the bundle over the RoomConnection.
+      // Run the handshake on this short connection first, then pull the
+      // bundle over the authenticated RoomConnection (encrypted on
+      // encrypt:true rooms; the host also serves pre-hs.ok mod.fetch in
+      // cleartext, but fetching encrypted leaks nothing on the wire).
       const hs = await this.handshakeAsGuest(ws, {
         password: opts.password ?? "",
         name: displayName(),
@@ -2616,9 +2680,44 @@ export function activate(ctx) {
   }
 
   private onGuest(r: RoomRecord, ws: WebSocket) {
+    // Per-connection abuse guard (task 14): token bucket + oversized streak.
+    const guard: ConnGuard = {
+      bucket: new TokenBucket({
+        ratePerSec: ROOM_CONN_RATE_PER_SEC,
+        burst: ROOM_CONN_BURST,
+      }),
+      oversized: 0,
+      abused: 0,
+    };
+    (ws as GuestWs).guard = guard;
+    const chargeOversized = () => {
+      chargeAbuse(guard);
+      guard.oversized += 1;
+      if (guard.oversized >= ROOM_OVERSIZED_MAX_STREAK) {
+        try {
+          ws.close();
+        } catch {
+          // ignore
+        }
+      }
+    };
     // Half-open watchdog: sockets that never finish the handshake (or never
-    // send a legacy plaintext join on skip-encrypt rooms) get closed.
-    const watchdog = new HandshakeWatchdog(ROOM_HANDSHAKE_TIMEOUT_MS, () => {
+    // send a legacy plaintext join on skip-encrypt rooms) get an
+    // hs.reject { reason: "timeout" } and are closed.
+    const watchdog = new HandshakeWatchdog(this.handshakeTimeoutMs, () => {
+      this.metrics.record({
+        type: "handshake",
+        reason: HandshakeReject.timeout,
+      });
+      try {
+        ws.send(
+          JSON.stringify(
+            makeHandshake("reject", { reason: HandshakeReject.timeout }),
+          ),
+        );
+      } catch {
+        // ignore
+      }
       try {
         ws.close();
       } catch {
@@ -2628,8 +2727,29 @@ export function activate(ctx) {
     watchdog.start();
     const hsState: GuestHandshakeState = {};
     const onMsg = (data: RawData) => {
-      const pdu = parsePdu(String(data));
+      const raw = String(data);
+      const bytes = Buffer.byteLength(raw);
+      // Absolute ceiling first (catches unparseable junk without JSON.parse),
+      // then the per-kind cap once the PDU shape is known.
+      if (bytes > frameLimit("envelope")) {
+        chargeOversized();
+        return;
+      }
+      const pdu = parsePdu(raw);
       if (!pdu) return;
+      const limitKind =
+        pdu.kind === "hs"
+          ? "handshake"
+          : pdu.kind === "env"
+            ? "envelope"
+            : pdu.kind === "frame"
+              ? pdu.frame.type
+              : "default";
+      if (bytes > frameLimit(limitKind)) {
+        chargeOversized();
+        return;
+      }
+      guard.oversized = 0;
       if (pdu.kind === "hs") {
         this.handleGuestHandshake(r, ws, pdu.hs, hsState, {
           cancelWatchdog: () => watchdog.cancel(),
@@ -2647,8 +2767,14 @@ export function activate(ctx) {
           this.reply(ws, r, "mod.offer", this.buildOffer(r));
           return;
         }
+        // mod.fetch is also allowed before hs.ok (task 14): the bundle is
+        // gated by its checksum, which is already public via the invite.
+        if (frame.type === "mod.fetch") {
+          void this.serveModBundle(r, ws as GuestWs, frame);
+          return;
+        }
         // Skip-encrypt rooms keep the legacy plaintext path. Encrypted rooms
-        // accept only hs frames until hs.ok (mod.fetch included).
+        // ignore everything else until hs.ok (no state.snapshot / seat frames).
         if (!r.encrypt) {
           if (frame.type === "join") watchdog.cancel();
           this.handleGuestFrame(r, ws, frame);
@@ -3084,7 +3210,7 @@ export function activate(ctx) {
           });
           finish({ ok: false, error: "握手超时" });
         },
-        ROOM_HANDSHAKE_TIMEOUT_MS,
+        this.handshakeTimeoutMs,
       );
       const onMsg = (data: RawData) => {
         const pdu = parsePdu(String(data));
@@ -3208,6 +3334,25 @@ export function activate(ctx) {
   }
 
   private handleGuestFrame(r: RoomRecord, ws: WebSocket, frame: RoomFrame) {
+    // Task 14 abuse guards, charged to the connection's bucket (spec §9).
+    // parseRoomFrame does not validate `type` against the union, so a
+    // hand-crafted frame can carry any string here — ignore unknown types
+    // without touching room state.
+    if (!KNOWN_ROOM_FRAME_TYPES.has(frame.type)) {
+      chargeAbuse((ws as GuestWs).guard);
+      return;
+    }
+    // join / hello / mod.fetch legitimately carry roomId "pending" before the
+    // guest knows the real id; every other frame must name this room.
+    if (
+      frame.type !== "join" &&
+      frame.type !== "hello" &&
+      frame.type !== "mod.fetch" &&
+      frame.roomId !== r.roomId
+    ) {
+      chargeAbuse((ws as GuestWs).guard);
+      return;
+    }
     if (r.status !== "open") {
       this.reply(ws, r, "error", { message: "群聊已结束" });
       return;

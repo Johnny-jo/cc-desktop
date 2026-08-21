@@ -17,6 +17,7 @@ import {
   provePassword,
   sealEnvelope,
   type Handshake,
+  type RoomFrame,
   type RoomSnapshot,
 } from "@claude-desktop/shared";
 import { RoomService } from "./room-service";
@@ -178,6 +179,43 @@ function waitClose(ws: WebSocket, ms = 2000): Promise<void> {
       clearTimeout(t);
       resolve();
     });
+  });
+}
+
+/** Resolve with the next AEAD-decrypted frame of the given type (acks/other types skipped). */
+function waitEncryptedFrame(
+  ws: WebSocket,
+  key: Buffer,
+  kid: string,
+  type: string,
+  ms = 5000,
+): Promise<RoomFrame> {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(
+      () => reject(new Error(`timeout waiting encrypted ${type}`)),
+      ms,
+    );
+    const onMsg = (data: RawData) => {
+      const pdu = parsePdu(String(data));
+      if (pdu?.kind !== "env") return;
+      let frame: RoomFrame | null = null;
+      try {
+        const opened = openEnvelope({
+          key,
+          env: pdu.env,
+          expectKid: kid,
+          seenNonces: new Set(),
+        });
+        frame = parseRoomFrame(opened.plain.toString("utf8"));
+      } catch {
+        return;
+      }
+      if (!frame || frame.type !== type) return;
+      clearTimeout(t);
+      ws.off("message", onMsg);
+      resolve(frame);
+    };
+    ws.on("message", onMsg);
   });
 }
 
@@ -664,5 +702,146 @@ describe("room transport: approval, TOFU, kick", () => {
     expect(host.approveDevice(room.roomId, pend.pending[0].fp).ok).toBe(true);
     const res2 = await join2;
     expect(res2.ok).toBe(true);
+  });
+});
+
+describe("room transport: abuse limits (task 14)", () => {
+  it("drops oversized handshake", async () => {
+    const host = makeRooms();
+    const { port } = await createHost(host, { password: "pw" });
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+    await waitOpen(ws);
+    const received: string[] = [];
+    ws.on("message", (d) => received.push(String(d)));
+    let closed = false;
+    ws.once("close", () => {
+      closed = true;
+    });
+
+    // An hs.hello padded past the 8 KiB handshake limit.
+    const keys = generateDeviceKeys();
+    const oversized = JSON.stringify(
+      makeHandshake("hello", {
+        pub: keys.publicRaw.toString("base64url"),
+        fp: fingerprintPublic(keys.publicRaw),
+        name: "x".repeat(16 * 1024),
+      }),
+    );
+    expect(Buffer.byteLength(oversized)).toBeGreaterThan(8 * 1024);
+
+    ws.send(oversized);
+    await sleep(300);
+    // Dropped: no hs.challenge comes back; streak 1 < 5 keeps the socket open.
+    expect(received).toHaveLength(0);
+    expect(closed).toBe(false);
+
+    // Four more consecutive oversized messages hit the 5-streak disconnect.
+    for (let i = 0; i < 4; i++) ws.send(oversized);
+    await waitClose(ws, 2000);
+    expect(closed).toBe(true);
+  });
+
+  it("ignores unknown frame types after join", async () => {
+    const host = makeRooms();
+    const { room, port } = await createHost(host, { password: "pw" });
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+    await waitOpen(ws);
+    const hs = await rawHandshake(ws, "pw");
+
+    const sendEnv = (seq: bigint, frame: unknown) => {
+      const env = sealEnvelope({
+        key: hs.key,
+        kid: hs.kid,
+        sendSeq: seq,
+        fromFp: hs.guestFp,
+        plain: Buffer.from(JSON.stringify(frame), "utf8"),
+      });
+      ws.send(JSON.stringify(env));
+    };
+
+    // Join (encrypted) and learn our auto-assigned seat from the welcome.
+    sendEnv(
+      1n,
+      makeRoomFrame("pending", 1, "join", {
+        userId: "raw-abuser",
+        name: "abuser",
+        protocol: ROOM_PROTOCOL_VERSION,
+        modChecksum: "",
+      }),
+    );
+    const welcome = await waitEncryptedFrame(ws, hs.key, hs.kid, "welcome");
+    const snap = welcome.payload as RoomSnapshot;
+    const mySeat = snap.seats.find((s) => s.occupantUserId === "raw-abuser");
+    expect(mySeat).toBeTruthy();
+
+    // Host-side view of this connection's abuse guard.
+    const hostRec = (
+      host as unknown as { rooms: Map<string, { guests: Set<WebSocket> }> }
+    ).rooms.get(room.roomId)!;
+    const gws = [...hostRec.guests][0];
+    const guard = (gws as unknown as { guard?: { abused: number } }).guard;
+
+    const itemsBefore = host.get(room.roomId)?.items.length ?? -1;
+    const abusedBefore = guard?.abused ?? -1;
+
+    // Unknown types: ignored, no room-state change, still bucket-charged.
+    sendEnv(2n, {
+      v: 1,
+      roomId: room.roomId,
+      seq: 2,
+      type: "bogus.frame",
+      payload: {},
+    });
+    sendEnv(3n, {
+      v: 1,
+      roomId: room.roomId,
+      seq: 3,
+      type: "state.snapsh0t",
+      payload: {},
+    });
+    // Forged roomId on an otherwise valid chat frame: ignored + charged.
+    sendEnv(
+      4n,
+      makeRoomFrame("not-this-room", 4, "chat.user", {
+        seatId: mySeat!.id,
+        text: "forged",
+      }),
+    );
+    await sleep(250);
+
+    expect(host.get(room.roomId)?.items.length).toBe(itemsBefore);
+    expect(host.get(room.roomId)?.members).toHaveLength(2);
+    expect(guard?.abused).toBe(abusedBefore + 3);
+
+    // The connection stays functional: hello still earns a mod.offer.
+    sendEnv(
+      5n,
+      makeRoomFrame(room.roomId, 5, "hello", {
+        protocol: ROOM_PROTOCOL_VERSION,
+      }),
+    );
+    const offer = await waitEncryptedFrame(ws, hs.key, hs.kid, "mod.offer");
+    expect(offer.type).toBe("mod.offer");
+    ws.close();
+  });
+
+  it("times out a silent socket", async () => {
+    const host = makeRooms();
+    const { port } = await createHost(host, { password: "pw" });
+    // Shrink the half-open watchdog so the test doesn't wait the real 10s.
+    (host as unknown as { handshakeTimeoutMs: number }).handshakeTimeoutMs = 50;
+
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+    await waitOpen(ws);
+    let closed = false;
+    ws.once("close", () => {
+      closed = true;
+    });
+
+    // No hello at all → hs.reject { reason: "timeout" }, then the socket dies.
+    const reject = await waitHs(ws, "reject", 2000);
+    expect((reject.payload as { reason: string }).reason).toBe("timeout");
+    await waitClose(ws, 2000);
+    expect(closed).toBe(true);
   });
 });
