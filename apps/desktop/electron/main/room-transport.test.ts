@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket, type RawData } from "ws";
 import {
+  IPC,
   ROOM_PROTOCOL_VERSION,
   deriveSessionKey,
   fingerprintPublic,
@@ -50,13 +51,13 @@ function tmp(): string {
   return d;
 }
 
-function mockWindow() {
+function mockWindow(onSend?: (channel: string, payload: unknown) => void) {
   return () =>
     ({
       isDestroyed: () => false,
       webContents: {
         isDestroyed: () => false,
-        send: () => undefined,
+        send: (channel: string, payload: unknown) => onSend?.(channel, payload),
       },
     }) as never;
 }
@@ -77,10 +78,12 @@ function mockSettings(project: string) {
   } as unknown as SettingsStore;
 }
 
-function makeRooms(): RoomService {
+function makeRooms(
+  onSend?: (channel: string, payload: unknown) => void,
+): RoomService {
   const userDataDir = tmp();
   const rooms = new RoomService({
-    getWindow: mockWindow(),
+    getWindow: mockWindow(onSend),
     sessions: mockSessions(),
     settings: mockSettings(userDataDir),
     userDataDir,
@@ -92,7 +95,12 @@ function makeRooms(): RoomService {
 
 async function createHost(
   rooms: RoomService,
-  opts?: { name?: string; password?: string; encrypt?: boolean },
+  opts?: {
+    name?: string;
+    password?: string;
+    encrypt?: boolean;
+    autoApprove?: boolean;
+  },
 ): Promise<{ room: RoomSnapshot; port: number }> {
   let last = "";
   for (let i = 0; i < 10; i++) {
@@ -102,12 +110,16 @@ async function createHost(
       port,
       password: opts?.password,
       encrypt: opts?.encrypt,
-      autoApprove: true,
+      autoApprove: opts?.autoApprove ?? true,
     });
     if (res.ok && res.room) return { room: res.room, port };
     last = res.error ?? "create failed";
   }
   throw new Error(last);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function waitOpen(ws: WebSocket, ms = 5000): Promise<void> {
@@ -350,5 +362,127 @@ describe("room transport: handshake + encrypted frames", () => {
     const welcome = await welcomePending;
     expect(welcome?.type).toBe("welcome");
     ws.close();
+  });
+});
+
+describe("room transport: approval, TOFU, kick", () => {
+  it("pending device does not receive snapshot until approved", async () => {
+    const events: Array<{ pending?: Array<{ fp: string; name: string }> }> = [];
+    const host = makeRooms((ch, p) => {
+      if (ch === IPC.roomEvent) {
+        events.push(p as (typeof events)[number]);
+      }
+    });
+    const { room, port } = await createHost(host, {
+      password: "pw",
+      autoApprove: false,
+    });
+    const guest = makeRooms();
+
+    const joinP = guest.join({
+      host: "127.0.0.1",
+      port,
+      password: "pw",
+      hostFingerprint: room.hostFingerprint,
+    });
+
+    // 待审批期间：join() 阻塞、本地不建 RoomRecord 席位、收不到快照
+    await sleep(150);
+    const pend = host.pendingDevices(room.roomId);
+    expect(pend.ok).toBe(true);
+    expect(pend.pending).toHaveLength(1);
+    expect(guest.list()).toHaveLength(0);
+    expect(events.some((e) => (e.pending?.length ?? 0) > 0)).toBe(true);
+
+    // 房主 100ms 后批准 → 客人完成加入
+    const fp = pend.pending[0].fp;
+    setTimeout(() => {
+      host.approveDevice(room.roomId, fp);
+    }, 100);
+    const res = await joinP;
+    expect(res.ok).toBe(true);
+    expect(res.room?.roomId).toBe(room.roomId);
+    expect(host.pendingDevices(room.roomId).pending).toHaveLength(0);
+  });
+
+  it("blacklisted fingerprint is rejected after kick", async () => {
+    const host = makeRooms();
+    const { room, port } = await createHost(host, { password: "pw" });
+    const guest = makeRooms();
+    const res = await guest.join({
+      host: "127.0.0.1",
+      port,
+      password: "pw",
+      hostFingerprint: room.hostFingerprint,
+    });
+    expect(res.ok).toBe(true);
+
+    const member = host
+      .get(room.roomId)
+      ?.members.find((m) => m.role === "member");
+    expect(member).toBeTruthy();
+    expect(host.kick(room.roomId, member!.userId).ok).toBe(true);
+
+    // 客人被踢：连接断，本地解散（不自动重连）
+    await sleep(300);
+    expect(guest.get(room.roomId)?.status).toBe("ended");
+
+    // 同一设备指纹持旧邀请码重连 → hs.reject { reason: "blacklist" }
+    const re = await guest.join({
+      host: "127.0.0.1",
+      port,
+      password: "pw",
+      hostFingerprint: room.hostFingerprint,
+    });
+    expect(re.ok).toBe(false);
+    expect(re.error).toMatch(/拉黑/);
+  });
+
+  it("fingerprint change requires re-approval", async () => {
+    const events: Array<{
+      fingerprintChanged?: boolean;
+      pending?: Array<{ fp: string; name: string }>;
+    }> = [];
+    const host = makeRooms((ch, p) => {
+      if (ch === IPC.roomEvent) {
+        events.push(p as (typeof events)[number]);
+      }
+    });
+    // autoApprove 开着：新设备本来会放行
+    const { room, port } = await createHost(host, { password: "pw" });
+    const guest1 = makeRooms();
+    const res1 = await guest1.join({
+      host: "127.0.0.1",
+      port,
+      password: "pw",
+      hostFingerprint: room.hostFingerprint,
+      userId: "user-x",
+    });
+    expect(res1.ok).toBe(true);
+
+    // 同一 userId 换设备钥（新指纹）再来：告警 + 重新审批，不自动 ok
+    const guest2 = makeRooms();
+    let settled = false;
+    const join2 = guest2
+      .join({
+        host: "127.0.0.1",
+        port,
+        password: "pw",
+        hostFingerprint: room.hostFingerprint,
+        userId: "user-x",
+      })
+      .then((r) => {
+        settled = true;
+        return r;
+      });
+    await sleep(150);
+    expect(settled).toBe(false);
+    const pend = host.pendingDevices(room.roomId);
+    expect(pend.pending).toHaveLength(1);
+    expect(events.some((e) => e.fingerprintChanged)).toBe(true);
+
+    expect(host.approveDevice(room.roomId, pend.pending[0].fp).ok).toBe(true);
+    const res2 = await join2;
+    expect(res2.ok).toBe(true);
   });
 });

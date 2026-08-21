@@ -12,7 +12,7 @@ export const HandshakeReject = {
 export type HandshakeReject = (typeof HandshakeReject)[keyof typeof HandshakeReject];
 
 export type HandshakePayloads = {
-  hello: { pub: string; fp: string; name: string };
+  hello: { pub: string; fp: string; name: string; userId?: string };
   challenge: { pub: string; fp: string; nonce: string; encrypt: boolean };
   prove: { proof: string };
   pending: { fp: string };

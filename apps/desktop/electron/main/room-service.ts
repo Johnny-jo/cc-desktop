@@ -108,6 +108,9 @@ type GuestHandshakeState = {
   guestFp?: string;
   guestName?: string;
   guestPub?: Buffer;
+  userId?: string;
+  /** Known userId arrived with a new fingerprint — re-approval required. */
+  fpChanged?: boolean;
   nonce?: Buffer;
   key?: Buffer;
 };
@@ -130,7 +133,17 @@ type RoomRecord = {
   /** Devices that proved the password but await host approval (task 8). */
   pendingByFp: Map<
     string,
-    { ws: WebSocket; name: string; nonce: Buffer; guestPub: Buffer }
+    {
+      ws: WebSocket;
+      name: string;
+      nonce: Buffer;
+      guestPub: Buffer;
+      key: Buffer;
+      userId?: string;
+      fpChanged?: boolean;
+      upgrade: () => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
   >;
   /** Kicked device fingerprints — rejected on hs.hello. */
   blacklist: Set<string>;
@@ -1061,7 +1074,7 @@ export function activate(ctx) {
         return;
       }
 
-      const timer = setTimeout(() => {
+      let timer = setTimeout(() => {
         try {
           ws.terminate();
         } catch {
@@ -1088,10 +1101,14 @@ export function activate(ctx) {
       let rec: RoomRecord | null = null;
 
       ws.on("open", () => {
+        // TCP connect done — from here the handshake owns its own timeout
+        // (10s, extended to 60s while the host holds us in approval).
+        clearTimeout(timer);
         void this.handshakeAsGuest(ws, {
           password: opts.password ?? "",
           name,
           hostFingerprint: opts.hostFingerprint,
+          userId,
         }).then((hs) => {
           if (settled) return;
           if (!hs.ok) {
@@ -1104,6 +1121,15 @@ export function activate(ctx) {
             done({ ok: false, error: hs.error });
             return;
           }
+          // Guard the post-handshake join → welcome phase.
+          timer = setTimeout(() => {
+            try {
+              ws.close();
+            } catch {
+              // ignore
+            }
+            done({ ok: false, error: "加入超时：主机未返回房间快照" });
+          }, 12_000);
           const conn = hs.conn;
           conn.onFrame((frame) => {
             if (settled && rec) return;
@@ -1322,6 +1348,7 @@ export function activate(ctx) {
           password: password ?? "",
           name: displayName(),
           hostFingerprint: r.hostFingerprint || undefined,
+          userId: r.localUserId || undefined,
         }).then((hs) => {
           if (settled) return;
           if (!hs.ok) {
@@ -1537,6 +1564,15 @@ export function activate(ctx) {
         );
         return;
       }
+      if (frame.type === "kick") {
+        // Host kicked us: drop locally, do not reconnect (fp is blacklisted).
+        this.dismissGuest(
+          r,
+          (frame.payload as { message?: string })?.message ??
+            "你已被群主移出群聊",
+        );
+        return;
+      }
       if (frame.type === "error") {
         this.safeSend(IPC.roomEvent, {
           roomId: r.roomId,
@@ -1600,6 +1636,7 @@ export function activate(ctx) {
       }
     }
     r.guests.clear();
+    this.denyAllPending(r);
     this.disposeModHost(r);
     this.disposeKernel(r, shouldDelete);
     try {
@@ -2252,6 +2289,7 @@ export function activate(ctx) {
       this.cancelGuestReconnect(r);
       this.disposeModHost(r);
       this.disposeKernel(r, false);
+      this.denyAllPending(r);
       for (const conn of r.connections.values()) {
         try {
           conn.close();
@@ -2345,9 +2383,12 @@ export function activate(ctx) {
       const pdu = parsePdu(String(data));
       if (!pdu) return;
       if (pdu.kind === "hs") {
-        this.handleGuestHandshake(r, ws, pdu.hs, hsState, () => {
-          watchdog.cancel();
-          ws.off("message", onMsg);
+        this.handleGuestHandshake(r, ws, pdu.hs, hsState, {
+          cancelWatchdog: () => watchdog.cancel(),
+          upgrade: () => {
+            watchdog.cancel();
+            ws.off("message", onMsg);
+          },
         });
         return;
       }
@@ -2377,22 +2418,37 @@ export function activate(ctx) {
         conn.close();
         r.connections.delete(ws);
       }
+      // A pending device that hung up leaves the approval list.
+      for (const [fp, entry] of r.pendingByFp) {
+        if (entry.ws === ws) {
+          clearTimeout(entry.timer);
+          r.pendingByFp.delete(fp);
+          this.emitPending(r);
+        }
+      }
     });
   }
 
   /**
    * Host side of the HMAC handshake. On success the socket is wrapped in a
-   * RoomConnection and `upgrade` retires the pre-handshake listener.
+   * RoomConnection and `ctl.upgrade` retires the pre-handshake listener.
+   * New devices (and known users whose fingerprint changed) are held in
+   * `r.pendingByFp` until the host approves / denies them (task 8).
    */
   private handleGuestHandshake(
     r: RoomRecord,
     ws: WebSocket,
     hs: Handshake,
     state: GuestHandshakeState,
-    upgrade: () => void,
+    ctl: { cancelWatchdog: () => void; upgrade: () => void },
   ): void {
     if (hs.type === "hello") {
-      const p = hs.payload as { pub?: string; fp?: string; name?: string };
+      const p = hs.payload as {
+        pub?: string;
+        fp?: string;
+        name?: string;
+        userId?: string;
+      };
       const fp = String(p.fp ?? "");
       if (fp && r.blacklist.has(fp)) {
         ws.send(
@@ -2417,6 +2473,18 @@ export function activate(ctx) {
       state.guestFp = fp;
       state.guestName = String(p.name ?? "guest");
       state.guestPub = guestPub;
+      state.userId = String(p.userId ?? "") || undefined;
+      // TOFU: a known userId showing up with a different fingerprint must be
+      // re-approved by the host, even on autoApprove rooms.
+      state.fpChanged = false;
+      if (state.userId) {
+        for (const d of r.knownDevices.values()) {
+          if (d.userId === state.userId && d.fp !== fp) {
+            state.fpChanged = true;
+            break;
+          }
+        }
+      }
       state.key = deriveSessionKey(r.deviceKeys, guestPub);
       state.nonce = randomBytes(16);
       ws.send(
@@ -2459,18 +2527,56 @@ export function activate(ctx) {
       }
       const fp = state.guestFp;
       if (!r.knownDevices.has(fp)) {
-        if (!r.autoApprove) {
-          // New device, no auto-approve: hold for host approval (task 8).
+        if (!r.autoApprove || state.fpChanged) {
+          // New device (or fingerprint change): hold for host approval.
+          // The handshake socket stays open until approve / deny / 60s.
+          ctl.cancelWatchdog();
+          const name = state.guestName ?? "guest";
+          const timer = setTimeout(() => {
+            if (!r.pendingByFp.delete(fp)) return;
+            try {
+              ws.send(
+                JSON.stringify(
+                  makeHandshake("reject", { reason: HandshakeReject.timeout }),
+                ),
+              );
+            } catch {
+              // ignore
+            }
+            try {
+              ws.close();
+            } catch {
+              // ignore
+            }
+            this.emitPending(r);
+          }, 60_000);
           r.pendingByFp.set(fp, {
             ws,
-            name: state.guestName ?? "guest",
+            name,
             nonce: state.nonce,
             guestPub: state.guestPub,
+            key: state.key,
+            ...(state.userId ? { userId: state.userId } : {}),
+            ...(state.fpChanged ? { fpChanged: true } : {}),
+            upgrade: ctl.upgrade,
+            timer,
           });
           ws.send(JSON.stringify(makeHandshake("pending", { fp })));
+          this.append(r, {
+            kind: "system",
+            text: state.fpChanged
+              ? `设备「${name}」指纹已变化，等待重新审批`
+              : `新设备「${name}」等待群主审批`,
+            authorLabel: "系统",
+          });
+          this.emitPending(r, state.fpChanged === true);
           return;
         }
-        r.knownDevices.set(fp, { fp, name: state.guestName ?? "guest" });
+        r.knownDevices.set(fp, {
+          fp,
+          name: state.guestName ?? "guest",
+          ...(state.userId ? { userId: state.userId } : {}),
+        });
       }
       const kid = randomBytes(8).toString("base64url");
       const conn = new RoomConnection({
@@ -2486,19 +2592,208 @@ export function activate(ctx) {
       ws.send(
         JSON.stringify(makeHandshake("ok", { kid, encrypt: r.encrypt })),
       );
-      upgrade();
+      ctl.upgrade();
       return;
     }
+  }
+
+  /** Host approves a pending device: completes the handshake on its socket. */
+  approveDevice(
+    roomId: string,
+    fingerprint: string,
+  ): { ok: boolean; error?: string } {
+    const r = this.hostRoom(roomId);
+    if (!r.ok) return r;
+    const rec = r.room;
+    const entry = rec.pendingByFp.get(fingerprint);
+    if (!entry) return { ok: false, error: "该设备不在待审批列表中" };
+    clearTimeout(entry.timer);
+    rec.pendingByFp.delete(fingerprint);
+    if (entry.ws.readyState !== WebSocket.OPEN) {
+      this.emitPending(rec);
+      return { ok: false, error: "该设备已断开连接" };
+    }
+    // Fingerprint change: replace the user's previous device record.
+    if (entry.userId) {
+      for (const [oldFp, d] of rec.knownDevices) {
+        if (d.userId === entry.userId && oldFp !== fingerprint) {
+          rec.knownDevices.delete(oldFp);
+        }
+      }
+    }
+    rec.knownDevices.set(fingerprint, {
+      fp: fingerprint,
+      name: entry.name,
+      ...(entry.userId ? { userId: entry.userId } : {}),
+    });
+    const kid = randomBytes(8).toString("base64url");
+    const conn = new RoomConnection({
+      ws: entry.ws,
+      kid,
+      key: entry.key,
+      selfFp: rec.hostFingerprint,
+      peerFp: fingerprint,
+      encrypt: rec.encrypt,
+    });
+    rec.connections.set(entry.ws, conn);
+    conn.onFrame((frame) => this.handleGuestFrame(rec, entry.ws, frame));
+    entry.ws.send(
+      JSON.stringify(makeHandshake("ok", { kid, encrypt: rec.encrypt })),
+    );
+    entry.upgrade();
+    this.emitPending(rec);
+    return { ok: true };
+  }
+
+  /** Host denies a pending device: hs.reject denied + close. */
+  denyDevice(
+    roomId: string,
+    fingerprint: string,
+  ): { ok: boolean; error?: string } {
+    const r = this.hostRoom(roomId);
+    if (!r.ok) return r;
+    const rec = r.room;
+    const entry = rec.pendingByFp.get(fingerprint);
+    if (!entry) return { ok: false, error: "该设备不在待审批列表中" };
+    clearTimeout(entry.timer);
+    rec.pendingByFp.delete(fingerprint);
+    try {
+      entry.ws.send(
+        JSON.stringify(
+          makeHandshake("reject", { reason: HandshakeReject.denied }),
+        ),
+      );
+    } catch {
+      // ignore
+    }
+    try {
+      entry.ws.close();
+    } catch {
+      // ignore
+    }
+    this.emitPending(rec);
+    return { ok: true };
+  }
+
+  /**
+   * Host kicks a member: send kick frame, drop the connection (session key
+   * dies with it), blacklist the device fingerprint. Reconnecting with the
+   * old invite gets hs.reject { reason: "blacklist" }.
+   */
+  kick(roomId: string, userId: string): { ok: boolean; error?: string } {
+    const r = this.hostRoom(roomId);
+    if (!r.ok) return r;
+    const rec = r.room;
+    if (userId === rec.hostUserId) {
+      return { ok: false, error: "不能踢出群主" };
+    }
+    let target: WebSocket | null = null;
+    for (const g of rec.guests) {
+      if ((g as GuestWs).userId === userId) {
+        target = g;
+        break;
+      }
+    }
+    if (!target) return { ok: false, error: "成员不在线" };
+    const conn = rec.connections.get(target);
+    const fp = conn?.peerFp;
+    if (fp) {
+      rec.blacklist.add(fp);
+      rec.knownDevices.delete(fp);
+      const pending = rec.pendingByFp.get(fp);
+      if (pending) {
+        clearTimeout(pending.timer);
+        rec.pendingByFp.delete(fp);
+      }
+    }
+    rec.guests.delete(target);
+    rec.connections.delete(target);
+    if (conn) {
+      conn.sendFrame(
+        makeRoomFrame(rec.roomId, ++rec.seq, "kick", {
+          userId,
+          message: "你已被群主移出群聊",
+        }),
+      );
+      conn.close();
+    } else {
+      try {
+        target.close();
+      } catch {
+        // ignore
+      }
+    }
+    const name =
+      rec.members.find((m) => m.userId === userId)?.name ?? userId;
+    this.append(rec, {
+      kind: "system",
+      text: `${name} 已被群主移出并拉黑`,
+      authorLabel: "系统",
+    });
+    this.pushState(rec);
+    return { ok: true };
+  }
+
+  /** Host: devices waiting for approval. */
+  pendingDevices(roomId: string): {
+    ok: boolean;
+    pending: Array<{ fp: string; name: string }>;
+  } {
+    const r = this.hostRoom(roomId);
+    if (!r.ok) return { ok: false, pending: [] };
+    return {
+      ok: true,
+      pending: [...r.room.pendingByFp.entries()].map(([fp, e]) => ({
+        fp,
+        name: e.name,
+      })),
+    };
+  }
+
+  /** Push the approval queue to the renderer (host side only). */
+  private emitPending(r: RoomRecord, fingerprintChanged?: boolean): void {
+    if (r.localRole !== "host") return;
+    this.safeSend(IPC.roomEvent, {
+      roomId: r.roomId,
+      pending: [...r.pendingByFp.entries()].map(([fp, e]) => ({
+        fp,
+        name: e.name,
+      })),
+      ...(fingerprintChanged ? { fingerprintChanged: true } : {}),
+    });
+  }
+
+  /** Reject and close every pending handshake socket (room end / dispose). */
+  private denyAllPending(r: RoomRecord): void {
+    for (const entry of r.pendingByFp.values()) {
+      clearTimeout(entry.timer);
+      try {
+        entry.ws.send(
+          JSON.stringify(
+            makeHandshake("reject", { reason: HandshakeReject.denied }),
+          ),
+        );
+      } catch {
+        // ignore
+      }
+      try {
+        entry.ws.close();
+      } catch {
+        // ignore
+      }
+    }
+    r.pendingByFp.clear();
   }
 
   /**
    * Guest side of the HMAC handshake: hello → challenge → prove → ok.
    * On ok the socket is already wrapped in a RoomConnection (handed back to
    * the caller, which then sends the join frame through it).
+   * hs.pending (host approval) extends the wait to 60s (task 8).
    */
   private handshakeAsGuest(
     ws: WebSocket,
-    opts: { password: string; name: string; hostFingerprint?: string },
+    opts: { password: string; name: string; hostFingerprint?: string; userId?: string },
   ): Promise<
     | { ok: true; conn: RoomConnection; hostFp: string; encrypt: boolean }
     | { ok: false; error: string }
@@ -2518,7 +2813,7 @@ export function activate(ctx) {
         ws.off("close", onClose);
         resolve(v);
       };
-      const timer = setTimeout(
+      let timer = setTimeout(
         () => finish({ ok: false, error: "握手超时" }),
         ROOM_HANDSHAKE_TIMEOUT_MS,
       );
@@ -2597,7 +2892,19 @@ export function activate(ctx) {
           finish({ ok: false, error: handshakeRejectMessage(reason) });
           return;
         }
-        // hs.pending: keep waiting (approval flow lands in task 8).
+        if (hs.type === "pending") {
+          // Host is holding us for approval — wait up to 60s for hs.ok.
+          clearTimeout(timer);
+          timer = setTimeout(
+            () =>
+              finish({
+                ok: false,
+                error: "等待群主审批超时（60 秒），请稍后再试",
+              }),
+            60_000,
+          );
+          return;
+        }
       };
       const onClose = () => finish({ ok: false, error: "连接被关闭" });
       ws.on("message", onMsg);
@@ -2609,6 +2916,7 @@ export function activate(ctx) {
               pub: this.deviceKeys.publicRaw.toString("base64url"),
               fp: this.deviceFp,
               name: opts.name,
+              ...(opts.userId ? { userId: opts.userId } : {}),
             }),
           ),
         );

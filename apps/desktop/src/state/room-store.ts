@@ -372,6 +372,49 @@ export async function rejoinRoom(
   return { ok: true };
 }
 
+/** Host: approve a pending device fingerprint. */
+export async function approveRoomDevice(
+  roomId: string,
+  fingerprint: string,
+): Promise<{ ok: boolean; error?: string }> {
+  if (!hasDesktopApi("approveRoomDevice")) {
+    return { ok: false, error: "请完全重启应用后再使用群聊" };
+  }
+  return getDesktop().approveRoomDevice(roomId, fingerprint);
+}
+
+/** Host: deny a pending device fingerprint. */
+export async function denyRoomDevice(
+  roomId: string,
+  fingerprint: string,
+): Promise<{ ok: boolean; error?: string }> {
+  if (!hasDesktopApi("denyRoomDevice")) {
+    return { ok: false, error: "请完全重启应用后再使用群聊" };
+  }
+  return getDesktop().denyRoomDevice(roomId, fingerprint);
+}
+
+/** Host: kick a member (connection dropped, device blacklisted). */
+export async function kickRoomMember(
+  roomId: string,
+  userId: string,
+): Promise<{ ok: boolean; error?: string }> {
+  if (!hasDesktopApi("kickRoomMember")) {
+    return { ok: false, error: "请完全重启应用后再使用群聊" };
+  }
+  return getDesktop().kickRoomMember(roomId, userId);
+}
+
+/** Host: list devices waiting for approval. */
+export async function listRoomPending(
+  roomId: string,
+): Promise<{ ok: boolean; pending: Array<{ fp: string; name: string }> }> {
+  if (!hasDesktopApi("listRoomPending")) {
+    return { ok: false, pending: [] };
+  }
+  return getDesktop().listRoomPending(roomId);
+}
+
 export async function peekRoom(opts: {
   host: string;
   port: number;

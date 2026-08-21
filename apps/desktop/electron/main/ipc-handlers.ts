@@ -929,6 +929,22 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
     if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.rejoin(roomId);
   });
+  ipcMain.handle(IPC.roomApproveDevice, async (_e, { roomId, fingerprint }) => {
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
+    return ctx.rooms.approveDevice(roomId, fingerprint);
+  });
+  ipcMain.handle(IPC.roomDenyDevice, async (_e, { roomId, fingerprint }) => {
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
+    return ctx.rooms.denyDevice(roomId, fingerprint);
+  });
+  ipcMain.handle(IPC.roomKick, async (_e, { roomId, userId }) => {
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
+    return ctx.rooms.kick(roomId, userId);
+  });
+  ipcMain.handle(IPC.roomPending, async (_e, { roomId }) => {
+    if (!ctx.rooms) return { ok: false, pending: [] };
+    return ctx.rooms.pendingDevices(roomId);
+  });
   ipcMain.handle(IPC.roomDice, async (_e, { roomId, seatId }) => {
     if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.rollDice(roomId, seatId);

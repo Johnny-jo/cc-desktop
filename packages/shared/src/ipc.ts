@@ -169,6 +169,13 @@ export const IPC = {
   roomEvent: "room:event",
   /** Rejoin a room the guest dropped from (uses stored join info) */
   roomRejoin: "room:rejoin",
+  /** Host approval flow (task 8): approve / deny a pending device */
+  roomApproveDevice: "room:approve-device",
+  roomDenyDevice: "room:deny-device",
+  /** Host kicks a member: drop connection, blacklist device fingerprint */
+  roomKick: "room:kick",
+  /** Host: list devices waiting for approval */
+  roomPending: "room:pending",
   /** Mod pack management (outside a live room) */
   modsDelete: "mods:delete",
   modsOpenDir: "mods:open-dir",
@@ -747,6 +754,22 @@ export type IpcInvokeMap = {
     args: [{ roomId: string }];
     result: { ok: boolean; room?: import("./room-protocol").RoomSnapshot; error?: string };
   };
+  [IPC.roomApproveDevice]: {
+    args: [{ roomId: string; fingerprint: string }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.roomDenyDevice]: {
+    args: [{ roomId: string; fingerprint: string }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.roomKick]: {
+    args: [{ roomId: string; userId: string }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.roomPending]: {
+    args: [{ roomId: string }];
+    result: { ok: boolean; pending: Array<{ fp: string; name: string }> };
+  };
   [IPC.modsDelete]: {
     args: [{ packDir: string }];
     result: { ok: boolean; error?: string };
@@ -804,6 +827,10 @@ export type IpcEventMap = {
     /** guest reconnecting */
     reconnecting?: boolean;
     reconnectAttempt?: number;
+    /** host: devices waiting for approval (changed) */
+    pending?: Array<{ fp: string; name: string }>;
+    /** host: a known user's device fingerprint changed — re-approval required */
+    fingerprintChanged?: boolean;
     /** host rejected a guest action (send / takeover) */
     error?: boolean;
     message?: string;

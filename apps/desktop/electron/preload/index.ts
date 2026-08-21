@@ -474,6 +474,26 @@ const desktop = {
       room?: import("@claude-desktop/shared").RoomSnapshot;
       error?: string;
     }>,
+  approveRoomDevice: (roomId: string, fingerprint: string) =>
+    ipcRenderer.invoke(IPC.roomApproveDevice, { roomId, fingerprint }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+  denyRoomDevice: (roomId: string, fingerprint: string) =>
+    ipcRenderer.invoke(IPC.roomDenyDevice, { roomId, fingerprint }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+  kickRoomMember: (roomId: string, userId: string) =>
+    ipcRenderer.invoke(IPC.roomKick, { roomId, userId }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+  listRoomPending: (roomId: string) =>
+    ipcRenderer.invoke(IPC.roomPending, { roomId }) as Promise<{
+      ok: boolean;
+      pending: Array<{ fp: string; name: string }>;
+    }>,
   roomDice: (roomId: string, seatId: string) =>
     ipcRenderer.invoke(IPC.roomDice, { roomId, seatId }) as Promise<{
       ok: boolean;
