@@ -397,6 +397,10 @@ const desktop = {
     publicWss?: string;
     /** Cloudflare tunnel (T2) — forces encrypt; failure keeps the LAN room. */
     tunnel?: boolean;
+    /** Self-hosted relay (ws:// or wss://) — forces encrypt; failure keeps the LAN room. */
+    relay?: string;
+    /** Optional auth token matching the relay's --token. */
+    relayToken?: string;
   }) =>
     ipcRenderer.invoke(IPC.roomCreate, opts) as Promise<{
       ok: boolean;

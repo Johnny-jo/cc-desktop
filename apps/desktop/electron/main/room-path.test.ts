@@ -5,7 +5,7 @@ import path from "node:path";
 import tls from "node:tls";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { decodeRoomInvite, type RoomSnapshot } from "@claude-desktop/shared";
-import { RoomService } from "./room-service";
+import { pathForCandidateUrl, RoomService } from "./room-service";
 import { RoomMetrics } from "./room-metrics";
 import type { SessionManager } from "./session-manager";
 import type { SettingsStore } from "./settings-store";
@@ -260,5 +260,33 @@ describe("room path racing (T0 LAN / T1 wss)", () => {
     expect(inv.ok).toBe(true);
     const payload = decodeRoomInvite(inv.secret ?? "");
     expect(payload.wss).toEqual(["wss://room.example.com"]);
+  });
+});
+
+describe("pathForCandidateUrl", () => {
+  it("classifies public ws as T1 and private/loopback ws as T0", () => {
+    // Public ws:// (self-hosted relay on a VPS) races as T1.
+    expect(pathForCandidateUrl("ws://203.0.113.9:7600/r/0123456789ab")).toBe(
+      "T1",
+    );
+    expect(pathForCandidateUrl("ws://relay.example.com:7600/r/x")).toBe("T1");
+    expect(pathForCandidateUrl("ws://172.32.0.1:7600")).toBe("T1");
+    // Private / loopback / link-local ws:// stays T0.
+    expect(pathForCandidateUrl("ws://192.168.1.5:18765")).toBe("T0");
+    expect(pathForCandidateUrl("ws://10.0.0.2:18765")).toBe("T0");
+    expect(pathForCandidateUrl("ws://172.16.0.1:18765")).toBe("T0");
+    expect(pathForCandidateUrl("ws://172.31.255.1:18765")).toBe("T0");
+    expect(pathForCandidateUrl("ws://127.0.0.1:18765")).toBe("T0");
+    expect(pathForCandidateUrl("ws://169.254.1.1:18765")).toBe("T0");
+    expect(pathForCandidateUrl("ws://[::1]:18765")).toBe("T0");
+    expect(pathForCandidateUrl("ws://[fe80::1]:18765")).toBe("T0");
+    expect(pathForCandidateUrl("ws://localhost:18765")).toBe("T0");
+  });
+
+  it("keeps wss classification: CF tunnel T2, other wss T1", () => {
+    expect(pathForCandidateUrl("wss://abc-def.trycloudflare.com")).toBe("T2");
+    expect(pathForCandidateUrl("wss://x.cfargotunnel.com")).toBe("T2");
+    expect(pathForCandidateUrl("wss://room.example.com")).toBe("T1");
+    expect(pathForCandidateUrl("wss://127.0.0.1:8443")).toBe("T1");
   });
 });

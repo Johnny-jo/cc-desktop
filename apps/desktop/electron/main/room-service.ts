@@ -77,6 +77,7 @@ import { RoomConnection } from "./room-connection";
 import { loadOrCreateDeviceKeys } from "./room-device-store";
 import { frameLimit, HandshakeWatchdog, TokenBucket } from "./room-limits";
 import { isHandshakeReason, RoomMetrics } from "./room-metrics";
+import { startRoomRelay } from "./room-relay";
 import { startRoomTunnel } from "./room-tunnel";
 import {
   getKernelCacheDir,
@@ -199,6 +200,8 @@ type RoomRecord = {
   publicWss?: string;
   /** Live cloudflared child + its public wss URL while the T2 tunnel is up. */
   tunnel?: { wss: string; kill: () => void };
+  /** Live self-hosted relay handle + its public join URL while connected. */
+  relay?: { url: string; kill: () => void };
   /** Process-level X25519 device identity (shared by all rooms). */
   deviceKeys: DeviceKeys;
   /** Post-handshake connections (host: one per guest ws; guest: the client ws). */
@@ -314,18 +317,49 @@ function lanWsUrl(host: string, port: number): string {
   return bare.includes(":") ? `ws://[${bare}]:${port}` : `ws://${bare}:${port}`;
 }
 
-/** T0 = LAN ws; T2 = wss through a Cloudflare tunnel; T1 = any other wss. */
-function pathForCandidateUrl(url: string): RoomPath {
-  if (!/^wss:\/\//i.test(url)) return "T0";
+/**
+ * Candidate classification: T0 = LAN/loopback ws; T2 = wss through a
+ * Cloudflare tunnel; T1 = any other public endpoint (other wss, or a ws://
+ * self-hosted relay on a public VPS).
+ */
+export function pathForCandidateUrl(url: string): RoomPath {
+  let u: URL;
   try {
-    const hostname = new URL(url).hostname.toLowerCase();
-    if (hostname.includes("trycloudflare") || hostname.includes("cfargotunnel")) {
+    u = new URL(url);
+  } catch {
+    return "T0";
+  }
+  const proto = u.protocol.toLowerCase();
+  const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (proto === "ws:") return isPrivateOrLoopbackHost(host) ? "T0" : "T1";
+  if (proto === "wss:") {
+    if (host.includes("trycloudflare") || host.includes("cfargotunnel")) {
       return "T2";
     }
-  } catch {
-    // fall through
+    return "T1";
   }
-  return "T1";
+  return "T0";
+}
+
+/** RFC1918 / loopback / link-local check for ws:// candidates (T0 vs T1). */
+function isPrivateOrLoopbackHost(host: string): boolean {
+  if (!host || host === "localhost") return true;
+  if (host.includes(":")) {
+    // IPv6 literals: ::1 loopback, fe80::/10 link-local.
+    const h = host.toLowerCase();
+    return h === "::1" || h === "0:0:0:0:0:0:0:1" || h.startsWith("fe80:");
+  }
+  const m = /^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/.exec(host);
+  if (!m) return false; // a hostname, not an IP literal — treat as public
+  const a = Number(m[1]);
+  const b = Number(m[2]);
+  return (
+    a === 10 ||
+    a === 127 ||
+    (a === 192 && b === 168) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 169 && b === 254)
+  );
 }
 
 function lanAddress(): string {
@@ -633,7 +667,7 @@ export function activate(ctx) {
     }
     const hosts = lanAddresses();
     const host = hosts[0] ?? "127.0.0.1";
-    const wssList = [r.publicWss, r.tunnel?.wss].filter(
+    const wssList = [r.publicWss, r.tunnel?.wss, r.relay?.url].filter(
       (u): u is string => Boolean(u),
     );
     let secret: string | undefined;
@@ -991,6 +1025,14 @@ export function activate(ctx) {
      * degrade to a LAN-only room instead of failing create.
      */
     tunnel?: boolean;
+    /**
+     * Self-hosted relay (ws:// or wss://, scripts/room-relay-server.mjs on a
+     * VPS). The host dials out; the public join URL goes into the invite's u
+     * array; forces encryption on. Relay failures degrade to a LAN-only room.
+     */
+    relay?: string;
+    /** Optional auth token matching the relay's --token. */
+    relayToken?: string;
   }): Promise<{ ok: boolean; room?: RoomSnapshot; error?: string }> {
     const name = opts.name.trim();
     if (!name) return { ok: false, error: "请填写群聊名" };
@@ -998,13 +1040,19 @@ export function activate(ctx) {
     if (publicWss && !/^wss:\/\//i.test(publicWss)) {
       return { ok: false, error: "公网地址须以 wss:// 开头" };
     }
+    const relay = (opts.relay ?? "").trim();
+    if (relay && !/^wss?:\/\//i.test(relay)) {
+      return { ok: false, error: "中继地址须以 ws:// 或 wss:// 开头" };
+    }
+    const relayToken = (opts.relayToken ?? "").trim();
     const port = opts.port && opts.port > 0 ? opts.port : ROOM_DEFAULT_PORT;
     // Relayed (public) rooms must never go plaintext.
     const encrypt =
       opts.encrypt !== false ||
       (opts.wss?.length ?? 0) > 0 ||
       Boolean(publicWss) ||
-      Boolean(opts.tunnel);
+      Boolean(opts.tunnel) ||
+      Boolean(relay);
 
     // Refuse if we already host an open room on this port
     for (const existing of this.rooms.values()) {
@@ -1148,6 +1196,31 @@ export function activate(ctx) {
         this.append(rec, {
           kind: "system",
           text: `Cloudflare 隧道不可用：${t.error}（房间仍可通过局域网加入）`,
+          authorLabel: "系统",
+        });
+      }
+    }
+
+    if (relay) {
+      // Self-hosted relay: the host dials out, guests join via the relay URL.
+      // Failures degrade to a LAN-only room — create never fails on this.
+      const res = await startRoomRelay({
+        relay,
+        ...(relayToken ? { token: relayToken } : {}),
+        roomId: randomBytes(6).toString("hex"),
+        localPort: port,
+      });
+      if (res.ok) {
+        rec.relay = { url: res.url, kill: res.kill };
+        this.append(rec, {
+          kind: "system",
+          text: `中继服务器已连接：${res.url}`,
+          authorLabel: "系统",
+        });
+      } else {
+        this.append(rec, {
+          kind: "system",
+          text: `中继不可用：${res.error}（房间仍可通过局域网加入）`,
           authorLabel: "系统",
         });
       }
@@ -1402,7 +1475,8 @@ export function activate(ctx) {
 
   /**
    * Candidate URLs for join: every LAN host from the invite as ws:// (IPv6
-   * literals bracketed), then every wss:// relay. Raced by raceCandidates.
+   * literals bracketed), then every relay endpoint — wss://, or ws:// for a
+   * self-hosted VPS relay. Raced by raceCandidates.
    */
   private joinCandidateUrls(
     host: string,
@@ -1423,7 +1497,7 @@ export function activate(ctx) {
     }
     for (const u of wss ?? []) {
       const url = (u ?? "").trim();
-      if (!/^wss:\/\//i.test(url)) continue;
+      if (!/^wss?:\/\//i.test(url)) continue;
       if (!seen.has(url)) {
         seen.add(url);
         urls.push(url);
@@ -1946,6 +2020,12 @@ export function activate(ctx) {
       // ignore
     }
     r.tunnel = undefined;
+    try {
+      r.relay?.kill();
+    } catch {
+      // ignore
+    }
+    r.relay = undefined;
     try {
       r.server?.close();
     } catch {
@@ -2603,6 +2683,12 @@ export function activate(ctx) {
         // ignore
       }
       r.tunnel = undefined;
+      try {
+        r.relay?.kill();
+      } catch {
+        // ignore
+      }
+      r.relay = undefined;
       for (const conn of r.connections.values()) {
         try {
           conn.close();

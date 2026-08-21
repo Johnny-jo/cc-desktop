@@ -535,6 +535,14 @@ export type IpcInvokeMap = {
          * encryption on. Tunnel failure degrades to a LAN-only room.
          */
         tunnel?: boolean;
+        /**
+         * Self-hosted relay (ws:// or wss://) — the host dials out and the
+         * public join URL goes into the invite; forces encryption on.
+         * Relay failure degrades to a LAN-only room.
+         */
+        relay?: string;
+        /** Optional auth token matching the relay's --token. */
+        relayToken?: string;
       },
     ];
     result: { ok: boolean; room?: import("./room-protocol").RoomSnapshot; error?: string };

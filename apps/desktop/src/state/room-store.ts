@@ -282,6 +282,8 @@ export async function createRoom(opts: {
   encrypt?: boolean;
   publicWss?: string;
   tunnel?: boolean;
+  relay?: string;
+  relayToken?: string;
 }): Promise<{ ok: boolean; error?: string; roomId?: string }> {
   if (!hasDesktopApi("createRoom")) {
     return { ok: false, error: "请完全重启应用后再使用群聊" };

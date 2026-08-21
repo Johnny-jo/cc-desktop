@@ -55,6 +55,9 @@ export function RoomSidebar() {
   const [publicOn, setPublicOn] = useState(false);
   const [publicWss, setPublicWss] = useState("");
   const [tunnel, setTunnel] = useState(false);
+  const [relayOn, setRelayOn] = useState(false);
+  const [relay, setRelay] = useState("");
+  const [relayToken, setRelayToken] = useState("");
   // Mod 选集（创建时一键套用）
   const [collections, setCollections] = useState<ModCollection[]>([]);
   const [collectionId, setCollectionId] = useState<string>(() =>
@@ -196,6 +199,9 @@ export function RoomSidebar() {
     setPublicOn(false);
     setPublicWss("");
     setTunnel(false);
+    setRelayOn(false);
+    setRelay("");
+    setRelayToken("");
     setSecret("");
     setHost("");
     setJoinPassword("");
@@ -213,8 +219,8 @@ export function RoomSidebar() {
     setErr(null);
     const p = Number(port) || ROOM_DEFAULT_PORT;
     const roomName = name.trim() || `群聊-${p}`;
-    // 公网 / 隧道房间强制加密：忽略「跳过加密」（表单里有对应提示）
-    const skip = skipEncrypt && !publicOn && !tunnel;
+    // 公网 / 隧道 / 中继房间强制加密：忽略「跳过加密」（表单里有对应提示）
+    const skip = skipEncrypt && !publicOn && !tunnel && !relayOn;
     const res = await createRoom({
       name: roomName,
       password: password || undefined,
@@ -223,6 +229,9 @@ export function RoomSidebar() {
       autoApprove: autoApprove || undefined,
       publicWss: publicOn && publicWss.trim() ? publicWss.trim() : undefined,
       tunnel: tunnel || undefined,
+      relay: relayOn && relay.trim() ? relay.trim() : undefined,
+      relayToken:
+        relayOn && relayToken.trim() ? relayToken.trim() : undefined,
     });
     if (gen !== joinGen.current) return;
     if (!res.ok) {
@@ -565,7 +574,9 @@ export function RoomSidebar() {
                 {skipEncrypt ? (
                   <p
                     className={
-                      publicOn || tunnel ? "room-leave-warn" : "settings-hint"
+                      publicOn || tunnel || relayOn
+                        ? "room-leave-warn"
+                        : "settings-hint"
                     }
                   >
                     {t.room.skipEncryptHint}
@@ -605,6 +616,35 @@ export function RoomSidebar() {
                   />
                   {t.room.tunnel}
                 </label>
+                <label className="room-check">
+                  <input
+                    type="checkbox"
+                    checked={relayOn}
+                    onChange={(e) => setRelayOn(e.target.checked)}
+                  />
+                  {t.room.relay}
+                </label>
+                {relayOn ? (
+                  <>
+                    <label className="settings-field">
+                      <input
+                        placeholder="ws://vps-ip:7600"
+                        aria-label={t.room.relayAddress}
+                        value={relay}
+                        spellCheck={false}
+                        onChange={(e) => setRelay(e.target.value)}
+                      />
+                    </label>
+                    <label className="settings-field">
+                      <input
+                        placeholder={t.room.relayToken}
+                        value={relayToken}
+                        spellCheck={false}
+                        onChange={(e) => setRelayToken(e.target.value)}
+                      />
+                    </label>
+                  </>
+                ) : null}
                 <label className="settings-field">
                   Mod 选集
                   <select
