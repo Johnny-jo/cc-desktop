@@ -11,6 +11,7 @@ import type {
   ModOfferPayload,
   RoomListItem,
   RoomMember,
+  RoomPath,
   RoomQuoteRef,
   RoomSeat,
   RoomSeatKind,
@@ -128,6 +129,11 @@ type RoomRecord = {
   encrypt: boolean;
   /** Host device fingerprint (64-hex). For host records: our own device fp. */
   hostFingerprint: string;
+  /**
+   * Public wss:// endpoint (reverse proxy / tunnel) written into the invite's
+   * u array. TLS is terminated outside this process — S1 never does it here.
+   */
+  publicWss?: string;
   /** Process-level X25519 device identity (shared by all rooms). */
   deviceKeys: DeviceKeys;
   /** Post-handshake connections (host: one per guest ws; guest: the client ws). */
@@ -175,6 +181,8 @@ type RoomRecord = {
     hostFingerprint?: string;
     /** wss:// relay endpoints from the CDR2 invite (T1/T2). */
     wss?: string[];
+    /** Path that won the join race (T0/T1/T2) — feeds room metrics (task 12). */
+    path?: RoomPath;
   };
   reconnecting?: boolean;
   /** Guest dropped (reconnect exhausted) — room + history kept, can rejoin */
@@ -209,18 +217,23 @@ function lanAddresses(): string[] {
   const out: string[] = [];
   for (const list of Object.values(ifs)) {
     for (const n of list ?? []) {
-      // Node may report family as 4 or "IPv4" depending on version
+      // Node may report family as 4/6 or "IPv4"/"IPv6" depending on version
       const fam = n.family as string | number;
       if (n.internal) continue;
-      if (fam !== "IPv4" && fam !== 4) continue;
-      if (n.address.startsWith("127.")) continue;
+      const v4 = fam === "IPv4" || fam === 4;
+      const v6 = fam === "IPv6" || fam === 6;
+      if (!v4 && !v6) continue;
+      if (v4 && n.address.startsWith("127.")) continue;
+      // Skip IPv6 link-local (fe80::/10) — not routable beyond the segment.
+      if (v6 && n.address.toLowerCase().startsWith("fe80:")) continue;
       if (!out.includes(n.address)) out.push(n.address);
     }
   }
-  // Prefer non-APIPA (169.254.x) and non-virtual-looking first
+  // Prefer non-APIPA (169.254.x) and non-virtual-looking first; IPv6 last.
   out.sort((a, b) => {
     const score = (ip: string) => {
       if (ip.startsWith("169.254.")) return 3;
+      if (ip.includes(":")) return 2;
       if (ip.startsWith("192.168.") || ip.startsWith("10.")) return 0;
       if (ip.startsWith("172.")) return 1;
       return 2;
@@ -228,6 +241,26 @@ function lanAddresses(): string[] {
     return score(a) - score(b);
   });
   return out.length ? out : ["127.0.0.1"];
+}
+
+/** ws URL for a LAN host — IPv6 literals need brackets: ws://[2001:db8::1]:18765 */
+function lanWsUrl(host: string, port: number): string {
+  const bare = host.trim().replace(/^\[|\]$/g, "");
+  return bare.includes(":") ? `ws://[${bare}]:${port}` : `ws://${bare}:${port}`;
+}
+
+/** T0 = LAN ws; T2 = wss through a Cloudflare tunnel; T1 = any other wss. */
+function pathForCandidateUrl(url: string): RoomPath {
+  if (!/^wss:\/\//i.test(url)) return "T0";
+  try {
+    const hostname = new URL(url).hostname.toLowerCase();
+    if (hostname.includes("trycloudflare") || hostname.includes("cfargotunnel")) {
+      return "T2";
+    }
+  } catch {
+    // fall through
+  }
+  return "T1";
 }
 
 function lanAddress(): string {
@@ -297,6 +330,12 @@ export class RoomService {
   /** Injectable backoff sleep for guest reconnect (tests make it instant). */
   private reconnectSleep: (ms: number) => Promise<void> = (ms) =>
     new Promise((resolve) => setTimeout(resolve, ms));
+  /**
+   * Test-only hook: when false, wss:// join candidates skip TLS CA checks so
+   * self-signed local test certs pass. Never set outside tests — production
+   * guests always verify the relay certificate against the system CA.
+   */
+  private wssRejectUnauthorized?: boolean;
 
   constructor(opts: {
     getWindow: () => BrowserWindow | null;
@@ -452,6 +491,7 @@ export function activate(ctx) {
                 secret: stored.join.secret,
                 hostFingerprint: stored.join.hostFingerprint,
                 wss: stored.join.wss,
+                path: stored.join.path,
               },
             }
           : {}),
@@ -523,6 +563,7 @@ export function activate(ctx) {
         hostFingerprint: r.hostFingerprint,
         modChecksum: r.modChecksum || undefined,
         roomName: r.name,
+        ...(r.publicWss ? { wss: [r.publicWss] } : {}),
       });
     } catch {
       secret = undefined;
@@ -851,14 +892,25 @@ export function activate(ctx) {
     autoApprove?: boolean;
     /** Default true; false keeps the legacy plaintext transport. */
     encrypt?: boolean;
+    /**
+     * Public wss:// endpoint terminated outside this process (T1/T2, e.g.
+     * wss://home.example.com:443). Written into the invite's u array;
+     * forces encryption on.
+     */
+    publicWss?: string;
     /** wss:// relay endpoints (T1/T2) — forces encryption on. */
     wss?: string[];
   }): Promise<{ ok: boolean; room?: RoomSnapshot; error?: string }> {
     const name = opts.name.trim();
     if (!name) return { ok: false, error: "请填写群聊名" };
+    const publicWss = (opts.publicWss ?? "").trim();
+    if (publicWss && !/^wss:\/\//i.test(publicWss)) {
+      return { ok: false, error: "公网地址须以 wss:// 开头" };
+    }
     const port = opts.port && opts.port > 0 ? opts.port : ROOM_DEFAULT_PORT;
     // Relayed (public) rooms must never go plaintext.
-    const encrypt = opts.encrypt !== false || (opts.wss?.length ?? 0) > 0;
+    const encrypt =
+      opts.encrypt !== false || (opts.wss?.length ?? 0) > 0 || Boolean(publicWss);
 
     // Refuse if we already host an open room on this port
     for (const existing of this.rooms.values()) {
@@ -889,6 +941,7 @@ export function activate(ctx) {
       autoApprove: Boolean(opts.autoApprove),
       encrypt,
       hostFingerprint: this.deviceFp,
+      ...(publicWss ? { publicWss } : {}),
       deviceKeys: this.deviceKeys,
       connections: new Map(),
       pendingByFp: new Map(),
@@ -1026,7 +1079,7 @@ export function activate(ctx) {
     name?: string;
     modChecksum?: string;
     hosts?: string[];
-    /** wss:// relay endpoints from the CDR2 invite (T1/T2; unused in S1 LAN). */
+    /** wss:// relay endpoints from the CDR2 invite (T1/T2). */
     wss?: string[];
     /** Expected host device fingerprint from the CDR2 invite (TOFU pin). */
     hostFingerprint?: string;
@@ -1059,6 +1112,9 @@ export function activate(ctx) {
     const userId = opts.userId ?? randomUUID();
     const name = (opts.name ?? displayName()).trim() || displayName();
     const checksum = (opts.modChecksum ?? "").trim();
+    // Race every candidate (LAN ws:// + wss://) in parallel; the first
+    // socket to open wins and the rest are closed (2s per candidate).
+    const candidates = this.joinCandidateUrls(host, opts.hosts, port, opts.wss);
 
     return new Promise((resolve) => {
       let settled = false;
@@ -1069,49 +1125,34 @@ export function activate(ctx) {
         resolve(v);
       };
 
-      let ws: WebSocket;
-      try {
-        ws = new WebSocket(`ws://${host}:${port}`, {
-          handshakeTimeout: 10_000,
-        });
-      } catch (err) {
-        done({
-          ok: false,
-          error: `无法创建连接：${err instanceof Error ? err.message : String(err)}`,
-        });
-        return;
-      }
-
-      let timer = setTimeout(() => {
-        try {
-          ws.terminate();
-        } catch {
-          // ignore
+      void this.raceCandidates(candidates).then((winner) => {
+        if (settled) return;
+        if (!winner) {
+          done({
+            ok: false,
+            error:
+              `无法连接主机（已尝试 ${candidates.length} 条路径）\n` +
+              `请确认：① 群主已点「创建并打开」且群聊显示「开着」` +
+              ` ② 群主 Windows 防火墙放行 TCP ${port} 入站` +
+              ` ③ IP 是否正确（群主点「邀请」复制）` +
+              ` ④ 本机自测可先填 127.0.0.1`,
+          });
+          return;
         }
-        done({
-          ok: false,
-          error:
-            `连接超时 ${host}:${port}\n` +
-            `请确认：① 群主已点「创建并打开」且群聊显示「开着」` +
-            ` ② 群主 Windows 防火墙放行 TCP ${port} 入站` +
-            ` ③ IP 是否正确（群主点「邀请」复制）` +
-            ` ④ 本机自测可先填 127.0.0.1` +
-            (lastErr ? `\n底层：${lastErr}` : ""),
+        const ws = winner.ws;
+        const winPath = winner.path;
+        ws.on("error", (err) => {
+          lastErr = err.message;
+          // Don't settle immediately on error — wait for close/timeout so we
+          // can show a clearer message. Node ws often emits error then close.
         });
-      }, 12_000);
 
-      ws.on("error", (err) => {
-        lastErr = err.message;
-        // Don't settle immediately on error — wait for close/timeout so we
-        // can show a clearer message. Node ws often emits error then close.
-      });
+        let rec: RoomRecord | null = null;
+        // Armed after hs.ok — guards the post-handshake join → welcome phase.
+        let timer: ReturnType<typeof setTimeout> | undefined;
 
-      let rec: RoomRecord | null = null;
-
-      ws.on("open", () => {
-        // TCP connect done — from here the handshake owns its own timeout
-        // (10s, extended to 60s while the host holds us in approval).
-        clearTimeout(timer);
+        // The socket is already open — from here the handshake owns its own
+        // timeout (10s, extended to 60s while the host holds us in approval).
         void this.handshakeAsGuest(ws, {
           password: opts.password ?? "",
           name,
@@ -1120,7 +1161,7 @@ export function activate(ctx) {
         }).then((hs) => {
           if (settled) return;
           if (!hs.ok) {
-            clearTimeout(timer);
+            if (timer) clearTimeout(timer);
             try {
               ws.close();
             } catch {
@@ -1198,6 +1239,7 @@ export function activate(ctx) {
                     modChecksum: checksum,
                     hostFingerprint: hs.hostFp,
                     wss: opts.wss,
+                    path: winPath,
                   },
                 };
                 this.rooms.set(snap.roomId, rec);
@@ -1227,21 +1269,123 @@ export function activate(ctx) {
             }),
           );
         });
-      });
 
-      ws.on("close", () => {
-        if (!settled) {
-          clearTimeout(timer);
-          done({
-            ok: false,
-            error: lastErr
-              ? `连接被关闭 ${host}:${port}（${lastErr}）\n若是 ECONNREFUSED：群主未监听该端口；若超时：多半是防火墙`
-              : `连接被关闭 ${host}:${port}`,
-          });
-        }
-        // After join, bindGuestSocket owns reconnect.
+        ws.on("close", () => {
+          if (!settled) {
+            if (timer) clearTimeout(timer);
+            done({
+              ok: false,
+              error: lastErr
+                ? `连接被关闭 ${host}:${port}（${lastErr}）\n若是 ECONNREFUSED：群主未监听该端口；若超时：多半是防火墙`
+                : `连接被关闭 ${host}:${port}`,
+            });
+          }
+          // After join, bindGuestSocket owns reconnect.
+        });
       });
     });
+  }
+
+  /**
+   * Candidate URLs for join: every LAN host from the invite as ws:// (IPv6
+   * literals bracketed), then every wss:// relay. Raced by raceCandidates.
+   */
+  private joinCandidateUrls(
+    host: string,
+    hosts: string[] | undefined,
+    port: number,
+    wss: string[] | undefined,
+  ): string[] {
+    const urls: string[] = [];
+    const seen = new Set<string>();
+    for (const h of [host, ...(hosts ?? [])]) {
+      const bare = (h ?? "").trim();
+      if (!bare) continue;
+      const url = lanWsUrl(bare, port);
+      if (!seen.has(url)) {
+        seen.add(url);
+        urls.push(url);
+      }
+    }
+    for (const u of wss ?? []) {
+      const url = (u ?? "").trim();
+      if (!/^wss:\/\//i.test(url)) continue;
+      if (!seen.has(url)) {
+        seen.add(url);
+        urls.push(url);
+      }
+    }
+    return urls;
+  }
+
+  /**
+   * Path racing: all candidates connect in parallel with a 2s budget each;
+   * Promise.any picks the first socket to open, the rest are closed. Returns
+   * null when every candidate fails. wss TLS is verified against the system
+   * CA — only tests may bypass that via the wssRejectUnauthorized hook.
+   */
+  private raceCandidates(
+    urls: string[],
+    timeoutMs = 2_000,
+  ): Promise<{ ws: WebSocket; url: string; path: RoomPath } | null> {
+    const sockets = new Set<WebSocket>();
+    const attempts = urls.map(
+      (url) =>
+        new Promise<{ ws: WebSocket; url: string; path: RoomPath }>(
+          (resolveAtt, rejectAtt) => {
+            let ws: WebSocket;
+            try {
+              ws = new WebSocket(url, {
+                handshakeTimeout: timeoutMs,
+                ...(this.wssRejectUnauthorized === false &&
+                url.startsWith("wss://")
+                  ? { rejectUnauthorized: false }
+                  : {}),
+              });
+            } catch (err) {
+              rejectAtt(err);
+              return;
+            }
+            sockets.add(ws);
+            const timer = setTimeout(() => {
+              try {
+                ws.terminate();
+              } catch {
+                // ignore
+              }
+              rejectAtt(new Error(`候选路径超时 ${url}`));
+            }, timeoutMs);
+            ws.on("open", () => {
+              clearTimeout(timer);
+              resolveAtt({ ws, url, path: pathForCandidateUrl(url) });
+            });
+            ws.on("error", (err) => {
+              clearTimeout(timer);
+              rejectAtt(err);
+            });
+          },
+        ),
+    );
+    const closeLosers = (keep?: WebSocket) => {
+      for (const ws of sockets) {
+        if (ws === keep) continue;
+        try {
+          ws.close();
+        } catch {
+          // ignore
+        }
+      }
+    };
+    return Promise.any(attempts).then(
+      (winner) => {
+        closeLosers(winner.ws);
+        return winner;
+      },
+      () => {
+        closeLosers();
+        return null;
+      },
+    );
   }
 
   /**

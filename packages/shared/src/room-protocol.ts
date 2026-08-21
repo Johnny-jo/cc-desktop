@@ -21,6 +21,9 @@ export type RoomRole = "host" | "member";
 export type RoomSeatKind = "human" | "agent";
 export type RoomStatus = "open" | "ended";
 
+/** Path that won the join race: T0 = LAN ws, T1 = public wss, T2 = cf tunnel. */
+export type RoomPath = "T0" | "T1" | "T2";
+
 export type RoomFrameType =
   | "hello"
   | "welcome"

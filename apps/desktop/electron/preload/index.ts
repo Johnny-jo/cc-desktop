@@ -393,6 +393,8 @@ const desktop = {
     requireMods?: boolean;
     autoApprove?: boolean;
     encrypt?: boolean;
+    /** Public wss:// endpoint (T1/T2) — goes into the invite; forces encrypt. */
+    publicWss?: string;
   }) =>
     ipcRenderer.invoke(IPC.roomCreate, opts) as Promise<{
       ok: boolean;

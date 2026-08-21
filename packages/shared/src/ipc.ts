@@ -522,6 +522,11 @@ export type IpcInvokeMap = {
         autoApprove?: boolean;
         /** Default true; false keeps the legacy plaintext transport. */
         encrypt?: boolean;
+        /**
+         * Public wss:// endpoint terminated outside this process (T1/T2) —
+         * written into the invite's u array; forces encryption on.
+         */
+        publicWss?: string;
       },
     ];
     result: { ok: boolean; room?: import("./room-protocol").RoomSnapshot; error?: string };

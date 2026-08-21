@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type {
   RoomListItem,
+  RoomPath,
   RoomSnapshot,
   RoomTimelineItem,
 } from "@claude-desktop/shared";
@@ -24,6 +25,8 @@ export type StoredRoom = {
     hostFingerprint?: string;
     /** wss:// relay endpoints from the CDR2 invite (T1/T2). */
     wss?: string[];
+    /** Path that won the join race (T0/T1/T2) — feeds room metrics. */
+    path?: RoomPath;
   };
   memberCount: number;
   updatedAt: number;
