@@ -27,6 +27,8 @@ export type RoomModPack = {
   hostApi?: 1 | 2;
 };
 
+export type RoomPendingDevice = { fp: string; name: string };
+
 type RoomUiState = {
   rooms: RoomListItem[];
   activeRoomId: string | null;
@@ -38,6 +40,10 @@ type RoomUiState = {
   /** Banner while guest reconnects */
   reconnectNote: string | null;
   mod: RoomModState | null;
+  /** Host side: devices waiting for approval in the active room */
+  pendingDevices: RoomPendingDevice[];
+  /** Host side: a known device came back with a new fingerprint */
+  fingerprintChanged: boolean;
 };
 
 const state: RoomUiState = {
@@ -49,9 +55,15 @@ const state: RoomUiState = {
   dialog: null,
   reconnectNote: null,
   mod: null,
+  pendingDevices: [],
+  fingerprintChanged: false,
 };
 
 const modsByRoom = new Map<string, RoomModState>();
+const pendingByRoom = new Map<
+  string,
+  { devices: RoomPendingDevice[]; fingerprintChanged: boolean }
+>();
 
 const listeners = new Set<() => void>();
 
@@ -102,12 +114,15 @@ function pickDefaultSeat(room: RoomSnapshot | null | undefined): string | null {
 
 export function selectRoom(roomId: string | null): void {
   if (roomId) clearActiveSession();
+  const pending = roomId ? pendingByRoom.get(roomId) : undefined;
   set({
     activeRoomId: roomId,
     selectedSeatId: null,
     reconnectNote: null,
     lastError: null,
     mod: roomId ? (modsByRoom.get(roomId) ?? null) : null,
+    pendingDevices: pending?.devices ?? [],
+    fingerprintChanged: pending?.fingerprintChanged ?? false,
   });
   if (roomId && hasDesktopApi("getRoom")) {
     void getDesktop()
@@ -128,6 +143,23 @@ export function selectRoom(roomId: string | null): void {
 
 export function selectSeat(seatId: string | null): void {
   set({ selectedSeatId: seatId });
+}
+
+/** Host side: replace the approval queue for a room (IPC event or poll). */
+export function setRoomPending(
+  roomId: string,
+  devices: RoomPendingDevice[],
+  fingerprintChanged = false,
+): void {
+  if (!devices.length && !fingerprintChanged) pendingByRoom.delete(roomId);
+  else pendingByRoom.set(roomId, { devices, fingerprintChanged });
+  if (state.activeRoomId === roomId) {
+    const cur = pendingByRoom.get(roomId);
+    set({
+      pendingDevices: cur?.devices ?? [],
+      fingerprintChanged: cur?.fingerprintChanged ?? false,
+    });
+  }
 }
 
 export async function refreshRooms(): Promise<void> {
@@ -163,8 +195,15 @@ export function bindRoomEvents(): () => void {
       error?: boolean;
       message?: string;
       mod?: RoomModState;
+      pending?: RoomPendingDevice[];
+      fingerprintChanged?: boolean;
     };
     if (!ev?.roomId) return;
+
+    // Host approval queue pushes arrive without a snapshot.
+    if (ev.pending) {
+      setRoomPending(ev.roomId, ev.pending, ev.fingerprintChanged === true);
+    }
 
     // Guest: host left / reconnect exhausted — room + history are kept in main;
     // refresh the list so it shows ended / offline instead of disappearing.
@@ -240,6 +279,9 @@ export async function createRoom(opts: {
   port?: number;
   requireMods?: boolean;
   autoApprove?: boolean;
+  encrypt?: boolean;
+  publicWss?: string;
+  tunnel?: boolean;
 }): Promise<{ ok: boolean; error?: string; roomId?: string }> {
   if (!hasDesktopApi("createRoom")) {
     return { ok: false, error: "请完全重启应用后再使用群聊" };

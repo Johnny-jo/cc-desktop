@@ -169,6 +169,24 @@ export const en = {
     rejoin: "Reconnect",
     offline: "Offline",
     offlineBanner: "Connection lost. Chat history is kept locally.",
+    legacyInvite:
+      "This invite was made by an old version and is not safe. Ask the host to create a new one.",
+    passwordHint:
+      "Guests type this when joining. It is not stored in the invite code.",
+    skipEncrypt: "Skip encryption (LAN only)",
+    skipEncryptHint:
+      "Everyone can see this setting. Public / tunnel rooms cannot skip.",
+    publicWss: "Public wss:// URL (optional)",
+    tunnel: "Cloudflare tunnel",
+    fingerprint: "Host fingerprint {fp}",
+    encryptedOn: "Encrypted channel on",
+    encryptedOff: "Unencrypted LAN room",
+    pendingTitle: "Devices waiting",
+    approve: "Approve",
+    deny: "Deny",
+    kick: "Remove",
+    fingerprintChanged:
+      "This device fingerprint changed. Re-approve to continue.",
   },
   onboarding: {
     title: "Welcome",

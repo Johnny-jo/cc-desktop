@@ -10,6 +10,7 @@ import {
   enableRoomMod,
   endRoomMod,
   getRoomKernelImprove,
+  kickRoomMember,
   listRoomKernelMemory,
   listRoomMods,
   proposeRoomKernelImprove,
@@ -221,6 +222,14 @@ export function RoomSettingsModal({ room, canHost, onClose }: Props) {
     await refreshImprove();
   };
 
+  const kickMember = async (userId: string) => {
+    setBusyId(`kick:${userId}`);
+    setErr(null);
+    const res = await kickRoomMember(room.roomId, userId);
+    setBusyId(null);
+    if (!res.ok) setErr(res.error ?? t.common.error);
+  };
+
   const loadedIds = new Set((room.kernel?.mods ?? []).map((m) => m.id));
   const enabledKernel = kernelPacks.filter((p) => loadedIds.has(p.id));
   const pending = (improve?.proposals ?? []).filter((p) => p.status === "pending");
@@ -270,6 +279,29 @@ export function RoomSettingsModal({ room, canHost, onClose }: Props) {
                 {room.name} · {room.memberCount} ·{" "}
                 {t.room.settingsPort.replace("{port}", String(room.port))}
               </p>
+              <ul className="room-member-list">
+                {room.members.map((m) => (
+                  <li key={m.userId} className="room-member-row">
+                    <span className="room-member-name">
+                      {m.name}
+                      {m.role === "host" ? " · 群主" : ""}
+                    </span>
+                    {canHost &&
+                    room.status === "open" &&
+                    m.role !== "host" &&
+                    m.userId !== room.localUserId ? (
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-sm"
+                        disabled={busyId === `kick:${m.userId}`}
+                        onClick={() => void kickMember(m.userId)}
+                      >
+                        {t.room.kick}
+                      </button>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
             </section>
           ) : null}
 

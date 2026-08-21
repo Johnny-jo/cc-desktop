@@ -1,17 +1,23 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { fillTemplate } from "../lib/room-mod-ui";
+import { shortFingerprint } from "../lib/room-invite-ui";
 import { useI18n } from "../i18n/useI18n";
 
 export function RoomInviteModal({
   code,
   port,
   listening,
+  encrypt,
+  hostFingerprint,
   onClose,
 }: {
   code: string;
   port?: number;
   listening: boolean;
+  /** Snapshot transport flags — shown so guests know what they will get. */
+  encrypt: boolean;
+  hostFingerprint?: string;
   onClose: () => void;
 }) {
   const { t } = useI18n();
@@ -70,6 +76,17 @@ export function RoomInviteModal({
               {copied ? t.room.inviteCopied : t.common.copy}
             </button>
           </div>
+          <p className="room-invite-encrypt">
+            {encrypt
+              ? `${t.room.encryptedOn}${
+                  hostFingerprint
+                    ? ` · ${fillTemplate(t.room.fingerprint, {
+                        fp: shortFingerprint(hostFingerprint),
+                      })}`
+                    : ""
+                }`
+              : t.room.encryptedOff}
+          </p>
           {listening ? (
             <p className="settings-hint">
               {fillTemplate(t.room.inviteFirewall, { port: String(port ?? "") })}

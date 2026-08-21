@@ -20,6 +20,7 @@ import { ModPlayPanel } from "./ModPlayPanel";
 import { RoomAddSeatModal } from "./RoomAddSeatModal";
 import { RoomInviteModal } from "./RoomInviteModal";
 import { RoomLeaveConfirm } from "./RoomLeaveConfirm";
+import { RoomPendingBanner } from "./RoomPendingBanner";
 import { RoomSettingsModal } from "./RoomSettingsModal";
 
 function SeatAvatar({ kind }: { kind: "human" | "agent" }) {
@@ -300,6 +301,10 @@ export function RoomStage() {
         </div>
       ) : null}
 
+      {room.status === "open" ? (
+        <RoomPendingBanner roomId={room.roomId} canHost={canHost} />
+      ) : null}
+
       {modActive ? (
         <ModPlayPanel
           role={myRole}
@@ -321,6 +326,8 @@ export function RoomStage() {
           code={invite.code}
           port={invite.port}
           listening={invite.listening}
+          encrypt={room.encrypt}
+          hostFingerprint={room.hostFingerprint}
           onClose={() => setInvite(null)}
         />
       ) : null}

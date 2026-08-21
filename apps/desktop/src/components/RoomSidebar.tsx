@@ -13,6 +13,7 @@ import {
   joinPrimaryAction,
   offerHasMod,
 } from "../lib/room-mod-ui";
+import { joinErrorForInvite } from "../lib/room-invite-ui";
 import { useI18n } from "../i18n/useI18n";
 import {
   loadLastCollectionId,
@@ -49,6 +50,11 @@ export function RoomSidebar() {
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
   const [port, setPort] = useState(String(ROOM_DEFAULT_PORT));
+  const [skipEncrypt, setSkipEncrypt] = useState(false);
+  const [autoApprove, setAutoApprove] = useState(false);
+  const [publicOn, setPublicOn] = useState(false);
+  const [publicWss, setPublicWss] = useState("");
+  const [tunnel, setTunnel] = useState(false);
   // Mod 选集（创建时一键套用）
   const [collections, setCollections] = useState<ModCollection[]>([]);
   const [collectionId, setCollectionId] = useState<string>(() =>
@@ -185,6 +191,11 @@ export function RoomSidebar() {
     setName("");
     setPassword("");
     setPort(String(ROOM_DEFAULT_PORT));
+    setSkipEncrypt(false);
+    setAutoApprove(false);
+    setPublicOn(false);
+    setPublicWss("");
+    setTunnel(false);
     setSecret("");
     setHost("");
     setJoinPassword("");
@@ -202,10 +213,16 @@ export function RoomSidebar() {
     setErr(null);
     const p = Number(port) || ROOM_DEFAULT_PORT;
     const roomName = name.trim() || `群聊-${p}`;
+    // 公网 / 隧道房间强制加密：忽略「跳过加密」（表单里有对应提示）
+    const skip = skipEncrypt && !publicOn && !tunnel;
     const res = await createRoom({
       name: roomName,
       password: password || undefined,
       port: p,
+      encrypt: skip ? false : undefined,
+      autoApprove: autoApprove || undefined,
+      publicWss: publicOn && publicWss.trim() ? publicWss.trim() : undefined,
+      tunnel: tunnel || undefined,
     });
     if (gen !== joinGen.current) return;
     if (!res.ok) {
@@ -247,6 +264,7 @@ export function RoomSidebar() {
     password?: string;
     checksum?: string;
     fingerprint?: string;
+    wss: string[];
     candidates: string[];
   } | { error: string } => {
     let h = host.trim();
@@ -255,6 +273,7 @@ export function RoomSidebar() {
     let checksum: string | undefined;
     let fingerprint: string | undefined;
     let hosts = inviteHosts;
+    let wss: string[] = [];
 
     const secretRaw = secret.trim() || host.trim();
     if (looksLikeRoomInvite(secretRaw)) {
@@ -265,6 +284,7 @@ export function RoomSidebar() {
         checksum = inv.modChecksum || undefined;
         fingerprint = inv.hostFingerprint || undefined;
         hosts = inv.hosts ?? [];
+        wss = inv.wss ?? [];
         setHost(inv.host);
         setJoinPort(String(inv.port));
       } catch (e) {
@@ -282,7 +302,7 @@ export function RoomSidebar() {
     if (!h) return { error: "请粘贴邀请码，或填写群主 IP" };
     if (!checksum) checksum = offer?.checksum || undefined;
     const candidates = [h, ...hosts.filter((x) => x && x !== h)];
-    return { host: h, port: p, password: pwd, checksum, fingerprint, candidates };
+    return { host: h, port: p, password: pwd, checksum, fingerprint, wss, candidates };
   };
 
   const onJoin = async () => {
@@ -336,6 +356,7 @@ export function RoomSidebar() {
         password: target.password,
         modChecksum: checksum,
         hosts: target.candidates,
+        wss: target.wss.length ? target.wss : undefined,
         hostFingerprint: target.fingerprint,
       });
       if (gen !== joinGen.current) return;
@@ -524,6 +545,7 @@ export function RoomSidebar() {
                     onChange={(e) => setPassword(e.target.value)}
                   />
                 </label>
+                <p className="settings-hint">{t.room.passwordHint}</p>
                 <label className="settings-field">
                   端口
                   <input
@@ -531,6 +553,57 @@ export function RoomSidebar() {
                     value={port}
                     onChange={(e) => setPort(e.target.value)}
                   />
+                </label>
+                <label className="room-check">
+                  <input
+                    type="checkbox"
+                    checked={skipEncrypt}
+                    onChange={(e) => setSkipEncrypt(e.target.checked)}
+                  />
+                  {t.room.skipEncrypt}
+                </label>
+                {skipEncrypt ? (
+                  <p
+                    className={
+                      publicOn || tunnel ? "room-leave-warn" : "settings-hint"
+                    }
+                  >
+                    {t.room.skipEncryptHint}
+                  </p>
+                ) : null}
+                <label className="room-check">
+                  <input
+                    type="checkbox"
+                    checked={autoApprove}
+                    onChange={(e) => setAutoApprove(e.target.checked)}
+                  />
+                  自动放行新设备
+                </label>
+                <label className="room-check">
+                  <input
+                    type="checkbox"
+                    checked={publicOn}
+                    onChange={(e) => setPublicOn(e.target.checked)}
+                  />
+                  公网可达
+                </label>
+                {publicOn ? (
+                  <label className="settings-field">
+                    <input
+                      placeholder={t.room.publicWss}
+                      value={publicWss}
+                      spellCheck={false}
+                      onChange={(e) => setPublicWss(e.target.value)}
+                    />
+                  </label>
+                ) : null}
+                <label className="room-check">
+                  <input
+                    type="checkbox"
+                    checked={tunnel}
+                    onChange={(e) => setTunnel(e.target.checked)}
+                  />
+                  {t.room.tunnel}
                 </label>
                 <label className="settings-field">
                   Mod 选集
@@ -566,24 +639,37 @@ export function RoomSidebar() {
                     onChange={(e) => {
                       const v = e.target.value;
                       setSecret(v);
+                      const inviteErr = joinErrorForInvite(v);
+                      if (inviteErr) {
+                        // CDR1 / 损坏邀请码：只提示，不自动填、不 join
+                        setErr(inviteErr);
+                        setInviteHosts([]);
+                        setInviteChecksum("");
+                        return;
+                      }
                       if (looksLikeRoomInvite(v)) {
-                        try {
-                          const inv = decodeRoomInvite(v);
-                          setHost(inv.host);
-                          setJoinPort(String(inv.port));
-                          setInviteHosts(inv.hosts ?? []);
-                          setInviteChecksum(inv.modChecksum ?? "");
-                          setOffer(null);
-                          setCacheHit(undefined);
-                          setErr(null);
-                        } catch {
-                          // incomplete
-                        }
+                        const inv = decodeRoomInvite(v);
+                        setHost(inv.host);
+                        setJoinPort(String(inv.port));
+                        setInviteHosts(inv.hosts ?? []);
+                        setInviteChecksum(inv.modChecksum ?? "");
+                        setOffer(null);
+                        setCacheHit(undefined);
                       } else {
                         setInviteHosts([]);
                         setInviteChecksum("");
                       }
+                      setErr(null);
                     }}
+                  />
+                </label>
+                <label className="settings-field">
+                  密码
+                  <input
+                    type="password"
+                    placeholder="可空"
+                    value={joinPassword}
+                    onChange={(e) => setJoinPassword(e.target.value)}
                   />
                 </label>
                 <details className="room-join-advanced">
@@ -601,14 +687,6 @@ export function RoomSidebar() {
                     <input
                       value={joinPort}
                       onChange={(e) => setJoinPort(e.target.value)}
-                    />
-                  </label>
-                  <label className="settings-field">
-                    密码
-                    <input
-                      type="password"
-                      value={joinPassword}
-                      onChange={(e) => setJoinPassword(e.target.value)}
                     />
                   </label>
                 </details>
@@ -667,6 +745,8 @@ export function RoomSidebar() {
                 disabled={
                   busy ||
                   (dialog === "join" && !secret.trim() && !host.trim()) ||
+                  (dialog === "join" &&
+                    Boolean(joinErrorForInvite(secret.trim()))) ||
                   (dialog === "join" && peeking && Boolean(inviteChecksum))
                 }
                 onClick={() =>

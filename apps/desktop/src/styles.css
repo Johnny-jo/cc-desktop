@@ -4955,6 +4955,85 @@ body.session-detaching {
   color: var(--text);
 }
 
+.room-invite-encrypt {
+  margin: 0;
+  font-size: 0.846rem;
+  color: var(--text-muted);
+}
+
+.room-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.875rem;
+  cursor: pointer;
+}
+
+.room-check input[type="checkbox"] {
+  margin: 0;
+}
+
+.room-pending-banner {
+  padding: 6px 10px;
+  font-size: 0.846rem;
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.room-pending-title {
+  font-weight: 600;
+  color: var(--warn);
+}
+
+.room-pending-warn {
+  margin: 4px 0 0;
+  color: var(--warn);
+}
+
+.room-pending-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.room-pending-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.room-pending-fp {
+  flex: 1;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  color: var(--text-faint);
+}
+
+.room-member-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.room-member-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 0.875rem;
+}
+
+.room-member-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Seat chips */
 .room-seats {
   display: flex;
