@@ -34,6 +34,12 @@ extraResources:
     to: bin/cpa
     filter:
       - "**/*"
+  # Optional cloudflared for T2 room tunnels. The dir may stay empty —
+  # prepare-vendor.mjs creates it; the binary itself is never committed.
+  - from: ../../vendor/win-x64/cloudflared
+    to: bin/cloudflared
+    filter:
+      - "**/*"
   - from: resources/mods
     to: mods
     filter:

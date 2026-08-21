@@ -527,6 +527,12 @@ export type IpcInvokeMap = {
          * written into the invite's u array; forces encryption on.
          */
         publicWss?: string;
+        /**
+         * Start a Cloudflare tunnel for this room (T2) — the resulting
+         * wss://*.trycloudflare.com URL goes into the invite; forces
+         * encryption on. Tunnel failure degrades to a LAN-only room.
+         */
+        tunnel?: boolean;
       },
     ];
     result: { ok: boolean; room?: import("./room-protocol").RoomSnapshot; error?: string };

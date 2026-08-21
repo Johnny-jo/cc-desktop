@@ -74,6 +74,7 @@ import { hashModFiles } from "@claude-desktop/shared/mod-hash";
 import { RoomConnection } from "./room-connection";
 import { loadOrCreateDeviceKeys } from "./room-device-store";
 import { HandshakeWatchdog } from "./room-limits";
+import { startRoomTunnel } from "./room-tunnel";
 import {
   getKernelCacheDir,
   getKernelImprovePath,
@@ -134,6 +135,8 @@ type RoomRecord = {
    * u array. TLS is terminated outside this process — S1 never does it here.
    */
   publicWss?: string;
+  /** Live cloudflared child + its public wss URL while the T2 tunnel is up. */
+  tunnel?: { wss: string; kill: () => void };
   /** Process-level X25519 device identity (shared by all rooms). */
   deviceKeys: DeviceKeys;
   /** Post-handshake connections (host: one per guest ws; guest: the client ws). */
@@ -324,6 +327,8 @@ export class RoomService {
   private readonly userDataDir: string;
   private readonly isPackaged: boolean;
   private readonly resourcesPath?: string;
+  /** Optional cloudflared override (T2 tunnel; tests inject a fake binary). */
+  private readonly cloudflaredPath?: string;
   /** Process-level room device identity (persisted under userData). */
   private readonly deviceKeys: DeviceKeys;
   private readonly deviceFp: string;
@@ -345,6 +350,7 @@ export class RoomService {
     userDataDir?: string;
     isPackaged?: boolean;
     resourcesPath?: string;
+    cloudflaredPath?: string;
   }) {
     this.getWindow = opts.getWindow;
     this.sessions = opts.sessions;
@@ -353,6 +359,7 @@ export class RoomService {
     this.userDataDir = opts.userDataDir ?? os.tmpdir();
     this.isPackaged = opts.isPackaged ?? false;
     this.resourcesPath = opts.resourcesPath;
+    this.cloudflaredPath = opts.cloudflaredPath;
     this.deviceKeys = loadOrCreateDeviceKeys(this.userDataDir);
     this.deviceFp = fingerprintPublic(this.deviceKeys.publicRaw);
     this.hydrateFromArchive();
@@ -363,6 +370,7 @@ export class RoomService {
       isPackaged: this.isPackaged,
       userDataDir: this.userDataDir,
       ...(this.resourcesPath ? { resourcesPath: this.resourcesPath } : {}),
+      ...(this.cloudflaredPath ? { cloudflaredPath: this.cloudflaredPath } : {}),
     };
   }
 
@@ -553,6 +561,9 @@ export function activate(ctx) {
     }
     const hosts = lanAddresses();
     const host = hosts[0] ?? "127.0.0.1";
+    const wssList = [r.publicWss, r.tunnel?.wss].filter(
+      (u): u is string => Boolean(u),
+    );
     let secret: string | undefined;
     try {
       // CDR2: host/port/fingerprint only — the password never goes in here.
@@ -563,7 +574,7 @@ export function activate(ctx) {
         hostFingerprint: r.hostFingerprint,
         modChecksum: r.modChecksum || undefined,
         roomName: r.name,
-        ...(r.publicWss ? { wss: [r.publicWss] } : {}),
+        ...(wssList.length ? { wss: wssList } : {}),
       });
     } catch {
       secret = undefined;
@@ -900,6 +911,12 @@ export function activate(ctx) {
     publicWss?: string;
     /** wss:// relay endpoints (T1/T2) — forces encryption on. */
     wss?: string[];
+    /**
+     * Start a Cloudflare tunnel after bind (T2). The public wss:// URL goes
+     * into the invite's u array; forces encryption on. Tunnel failures
+     * degrade to a LAN-only room instead of failing create.
+     */
+    tunnel?: boolean;
   }): Promise<{ ok: boolean; room?: RoomSnapshot; error?: string }> {
     const name = opts.name.trim();
     if (!name) return { ok: false, error: "请填写群聊名" };
@@ -910,7 +927,10 @@ export function activate(ctx) {
     const port = opts.port && opts.port > 0 ? opts.port : ROOM_DEFAULT_PORT;
     // Relayed (public) rooms must never go plaintext.
     const encrypt =
-      opts.encrypt !== false || (opts.wss?.length ?? 0) > 0 || Boolean(publicWss);
+      opts.encrypt !== false ||
+      (opts.wss?.length ?? 0) > 0 ||
+      Boolean(publicWss) ||
+      Boolean(opts.tunnel);
 
     // Refuse if we already host an open room on this port
     for (const existing of this.rooms.values()) {
@@ -1038,6 +1058,26 @@ export function activate(ctx) {
       text: `本机已开口 · 客人请连：${ips.map((ip) => `${ip}:${port}`).join(" 或 ")}（防火墙需放行 TCP ${port}）`,
       authorLabel: "系统",
     });
+
+    if (opts.tunnel) {
+      // T2: cloudflared quick/named tunnel pointing at the loopback port.
+      // Failures degrade to a LAN-only room — create never fails on this.
+      const t = await startRoomTunnel({ port, env: this.pathEnv() });
+      if (t.ok) {
+        rec.tunnel = { wss: t.wss, kill: t.kill };
+        this.append(rec, {
+          kind: "system",
+          text: `Cloudflare 隧道已开启：${t.wss}`,
+          authorLabel: "系统",
+        });
+      } else {
+        this.append(rec, {
+          kind: "system",
+          text: `Cloudflare 隧道不可用：${t.error}（房间仍可通过局域网加入）`,
+          authorLabel: "系统",
+        });
+      }
+    }
 
     this.rooms.set(roomId, rec);
     this.persist(rec);
@@ -1808,6 +1848,12 @@ export function activate(ctx) {
     this.disposeModHost(r);
     this.disposeKernel(r, shouldDelete);
     try {
+      r.tunnel?.kill();
+    } catch {
+      // ignore
+    }
+    r.tunnel = undefined;
+    try {
       r.server?.close();
     } catch {
       // ignore
@@ -2458,6 +2504,12 @@ export function activate(ctx) {
       this.disposeModHost(r);
       this.disposeKernel(r, false);
       this.denyAllPending(r);
+      try {
+        r.tunnel?.kill();
+      } catch {
+        // ignore
+      }
+      r.tunnel = undefined;
       for (const conn of r.connections.values()) {
         try {
           conn.close();

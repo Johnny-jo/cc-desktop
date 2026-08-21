@@ -395,6 +395,8 @@ const desktop = {
     encrypt?: boolean;
     /** Public wss:// endpoint (T1/T2) — goes into the invite; forces encrypt. */
     publicWss?: string;
+    /** Cloudflare tunnel (T2) — forces encrypt; failure keeps the LAN room. */
+    tunnel?: boolean;
   }) =>
     ipcRenderer.invoke(IPC.roomCreate, opts) as Promise<{
       ok: boolean;

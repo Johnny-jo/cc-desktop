@@ -152,6 +152,9 @@ function main() {
   // Clean slate so leftover credential files cannot linger in vendor/.
   rmrf(vendorRoot);
   ensureDir(vendorRoot);
+  // Reserve the (optional, possibly empty) cloudflared dir so the
+  // electron-builder extraResources bin/cloudflared/** entry always resolves.
+  ensureDir(path.join(vendorRoot, "cloudflared"));
 
   if (process.env.SKIP_CLAUDE !== "1") {
     const claudeSrc = resolveSdkClaudeExe();

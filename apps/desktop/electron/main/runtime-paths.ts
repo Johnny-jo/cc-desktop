@@ -24,6 +24,8 @@ export type RuntimePathEnv = {
   platform?: NodeJS.Platform;
   /** Optional override for tests / monorepo root */
   projectRoot?: string;
+  /** Explicit cloudflared binary override (T2 room tunnel; tests inject fakes). */
+  cloudflaredPath?: string;
   /**
    * Dev-time CPA source dir (exe + optional config.yaml).
    * Defaults to CLAUDE_DESKTOP_CPA_DIST or D:\gitrep\CC\CPA on Windows.
@@ -42,6 +44,10 @@ function claudeBinaryName(platform: NodeJS.Platform): string {
 
 function cpaBinaryName(platform: NodeJS.Platform): string {
   return platform === "win32" ? "cli-proxy-api.exe" : "cli-proxy-api";
+}
+
+function cloudflaredBinaryName(platform: NodeJS.Platform): string {
+  return platform === "win32" ? "cloudflared.exe" : "cloudflared";
 }
 
 /** Packaged extraResources root: <resources>/bin */
@@ -132,6 +138,47 @@ export function getCpaExecutablePath(env: RuntimePathEnv): string {
 
   // Last resort: keep legacy default so existing settings still make sense.
   return LEGACY_CPA_DEFAULTS.exe;
+}
+
+/**
+ * Locate the optional cloudflared binary for T2 room tunnels.
+ * Order: explicit override → packaged extraResources (bin/cloudflared) → PATH.
+ * Returns null when cloudflared is not installed — callers degrade to LAN-only.
+ */
+export function resolveCloudflared(env: RuntimePathEnv): string | null {
+  const platform = env.platform ?? process.platform;
+  const name = cloudflaredBinaryName(platform);
+
+  if (env.cloudflaredPath && fs.existsSync(env.cloudflaredPath)) {
+    return env.cloudflaredPath;
+  }
+
+  // Outside Electron (tests) there is no process.resourcesPath — skip bundled.
+  const resources =
+    env.resourcesPath ??
+    (typeof process !== "undefined" ? process.resourcesPath : "") ??
+    "";
+  if (resources) {
+    const bundled = path.join(bundledBinRoot(env), "cloudflared", name);
+    if (fs.existsSync(bundled)) return bundled;
+  }
+
+  // PATH lookup: dev machines with a global cloudflared install.
+  const pathEnv =
+    typeof process !== "undefined" ? (process.env.PATH ?? "") : "";
+  const exts = platform === "win32" ? [".exe", ""] : [""];
+  for (const dir of pathEnv.split(path.delimiter)) {
+    if (!dir) continue;
+    for (const ext of exts) {
+      const candidate = path.join(dir, `cloudflared${ext}`);
+      try {
+        if (fs.existsSync(candidate)) return candidate;
+      } catch {
+        // keep searching
+      }
+    }
+  }
+  return null;
 }
 
 /** Template shipped with the app (read-only in packaged builds). */
@@ -536,4 +583,5 @@ export const __testing = {
   findProjectRoot,
   claudeBinaryName,
   cpaBinaryName,
+  cloudflaredBinaryName,
 };
