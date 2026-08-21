@@ -6,8 +6,6 @@ import { WebSocket, WebSocketServer, type RawData } from "ws";
 import type { BrowserWindow } from "electron";
 import { IPC, MOD_BUNDLE_MAX_BYTES } from "@claude-desktop/shared";
 import type {
-  DeviceKeys,
-  Handshake,
   ModOfferPayload,
   RoomListItem,
   RoomMember,
@@ -20,21 +18,24 @@ import type {
   RoomFrame,
   RoomFrameType,
 } from "@claude-desktop/shared";
+import type { DeviceKeys } from "@claude-desktop/shared/room-crypto";
+import type { Handshake } from "@claude-desktop/shared/room-handshake";
 import {
-  HandshakeReject,
   ROOM_DEFAULT_PORT,
   ROOM_HANDSHAKE_TIMEOUT_MS,
   ROOM_PROTOCOL_VERSION,
-  deriveSessionKey,
   encodeRoomInvite,
-  fingerprintPublic,
-  makeHandshake,
   makeRoomFrame,
-  parsePdu,
   parseRoomFrame,
+} from "@claude-desktop/shared";
+import { deriveSessionKey, fingerprintPublic } from "@claude-desktop/shared/room-crypto";
+import {
+  HandshakeReject,
+  makeHandshake,
   provePassword,
   verifyPassword,
-} from "@claude-desktop/shared";
+} from "@claude-desktop/shared/room-handshake";
+import { parsePdu } from "@claude-desktop/shared/room-pdu";
 import type { SessionManager, SessionRunOpts } from "./session-manager";
 import type { SettingsStore } from "./settings-store";
 import type { RoomArchive, StoredRoom } from "./room-archive";

@@ -1,13 +1,12 @@
 import type { WebSocket } from "ws";
 import {
   openEnvelope,
-  parsePdu,
-  parseRoomFrame,
   sealEnvelope,
   ROOM_TRANSPORT_VERSION,
   type AeadEnvelope,
-  type RoomFrame,
-} from "@claude-desktop/shared";
+} from "@claude-desktop/shared/room-crypto";
+import { parsePdu } from "@claude-desktop/shared/room-pdu";
+import { parseRoomFrame, type RoomFrame } from "@claude-desktop/shared";
 
 /** Send an ack after this many received app frames… */
 const ACK_EVERY = 8;

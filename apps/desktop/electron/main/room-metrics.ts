@@ -5,7 +5,8 @@
  * `console.info("[room-metrics]", json)` log so the counters can be grepped
  * out of a log capture — S1 ships no metrics UI.
  */
-import type { HandshakeReject, RoomMetricsSnapshot, RoomPath } from "@claude-desktop/shared";
+import type { RoomMetricsSnapshot, RoomPath } from "@claude-desktop/shared";
+import type { HandshakeReject } from "@claude-desktop/shared/room-handshake";
 
 export type MetricEvent =
   | { type: "connect"; path: RoomPath; ok: boolean }

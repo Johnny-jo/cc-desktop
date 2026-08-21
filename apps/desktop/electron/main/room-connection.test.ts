@@ -4,13 +4,12 @@ import {
   deriveSessionKey,
   fingerprintPublic,
   generateDeviceKeys,
-  makeRoomFrame,
   openEnvelope,
-  parsePdu,
   sealEnvelope,
   type AeadEnvelope,
-  type RoomFrame,
-} from "@claude-desktop/shared";
+} from "@claude-desktop/shared/room-crypto";
+import { parsePdu } from "@claude-desktop/shared/room-pdu";
+import { makeRoomFrame, type RoomFrame } from "@claude-desktop/shared";
 import { RoomConnection } from "./room-connection";
 
 const KID = "test-kid";

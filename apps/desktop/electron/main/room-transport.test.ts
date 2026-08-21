@@ -6,20 +6,20 @@ import { WebSocket, type RawData } from "ws";
 import {
   IPC,
   ROOM_PROTOCOL_VERSION,
-  deriveSessionKey,
-  fingerprintPublic,
-  generateDeviceKeys,
-  makeHandshake,
   makeRoomFrame,
-  openEnvelope,
-  parsePdu,
   parseRoomFrame,
-  provePassword,
-  sealEnvelope,
-  type Handshake,
   type RoomFrame,
   type RoomSnapshot,
 } from "@claude-desktop/shared";
+import {
+  deriveSessionKey,
+  fingerprintPublic,
+  generateDeviceKeys,
+  openEnvelope,
+  sealEnvelope,
+} from "@claude-desktop/shared/room-crypto";
+import { makeHandshake, provePassword, type Handshake } from "@claude-desktop/shared/room-handshake";
+import { parsePdu } from "@claude-desktop/shared/room-pdu";
 import { RoomService } from "./room-service";
 import { RoomMetrics } from "./room-metrics";
 import type { SessionManager } from "./session-manager";

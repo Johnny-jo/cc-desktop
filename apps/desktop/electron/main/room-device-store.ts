@@ -5,7 +5,7 @@ import {
   generateDeviceKeys,
   importDeviceKeys,
   type DeviceKeys,
-} from "@claude-desktop/shared";
+} from "@claude-desktop/shared/room-crypto";
 
 type DeviceFile = {
   v: 1;

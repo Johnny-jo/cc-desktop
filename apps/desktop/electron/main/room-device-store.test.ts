@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, afterEach } from "vitest";
-import { fingerprintPublic } from "@claude-desktop/shared";
+import { fingerprintPublic } from "@claude-desktop/shared/room-crypto";
 import { loadOrCreateDeviceKeys } from "./room-device-store";
 
 const dirs: string[] = [];
