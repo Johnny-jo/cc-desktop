@@ -211,8 +211,9 @@ export function shortChecksum(parts: string[]): string {
 }
 
 // ---------------------------------------------------------------------------
-// Invite secret key (encode IP/port/password for one-tap join)
-// Not military crypto — LAN convenience token. Prefix: CDR1.
+// Invite secret key (encode host/port/fingerprint for one-tap join)
+// Not military crypto — LAN convenience token. Prefix: CDR2. (legacy: CDR1.)
+// CDR2 never carries the room password; confidentiality comes from AEAD.
 // ---------------------------------------------------------------------------
 
 export type RoomInvitePayload = {
@@ -221,12 +222,25 @@ export type RoomInvitePayload = {
   /** All candidate LAN IPs (join tries in order) */
   hosts?: string[];
   port: number;
-  password?: string;
+  /** wss:// relay endpoints (T1/T2) */
+  wss?: string[];
+  /** Host device fingerprint (64-hex); proven by the handshake HMAC */
+  hostFingerprint: string;
   modChecksum?: string;
   roomName?: string;
 };
 
-const INVITE_PREFIX = "CDR1.";
+/**
+ * Decoded CDR1 invite. Tests / diagnostics only — a CDR1 code embedded the
+ * room password and must never be used as a join credential.
+ */
+export type LegacyRoomInvite = RoomInvitePayload & {
+  password?: string;
+  legacy: true;
+};
+
+const INVITE_PREFIX = "CDR2.";
+const LEGACY_INVITE_PREFIX = "CDR1.";
 /** Fixed XOR key material (app-shared). Obfuscation only. */
 const INVITE_KEY = "claude-desktop-room-invite-v1";
 
@@ -279,11 +293,159 @@ function fromBase64Url(s: string): Uint8Array {
   return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
 }
 
+/** Wire shape of an invite body (v1 = legacy CDR1, v2 = CDR2). */
+type InviteBody = {
+  v?: number;
+  h?: string;
+  hs?: string[];
+  p?: number;
+  u?: string[];
+  f?: string;
+  w?: string;
+  m?: string;
+  n?: string;
+};
+
+/** Find the invite line inside a (possibly multi-line) paste. */
+function extractInviteLine(secret: string, prefix: string): string | null {
+  const s = secret.trim().replace(/^["']|["']$/g, "");
+  if (s.startsWith(prefix)) return s;
+  const line = s
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .find((l) => l.startsWith(prefix));
+  return line ?? null;
+}
+
+function decodeInviteBody(line: string, prefix: string): InviteBody {
+  const b64 = line.slice(prefix.length).replace(/\s/g, "");
+  if (!b64) throw new Error("邀请码内容为空");
+  let plain: string;
+  try {
+    const cipher = fromBase64Url(b64);
+    plain = bytesToUtf8(xorBytes(cipher, INVITE_KEY));
+  } catch {
+    throw new Error("邀请码无法解码");
+  }
+  try {
+    return JSON.parse(plain) as InviteBody;
+  } catch {
+    throw new Error("邀请码内容损坏");
+  }
+}
+
+function parseInvitePort(p: number | undefined): number {
+  const port = Number(p);
+  if (!Number.isFinite(port) || port < 1 || port > 65535) {
+    throw new Error("邀请码端口无效");
+  }
+  return port;
+}
+
+function inviteHosts(h: string, hs: string[] | undefined): string[] {
+  return [h, ...(Array.isArray(hs) ? hs : [])].filter(
+    (x, i, a): x is string => Boolean(x) && a.indexOf(x) === i,
+  );
+}
+
 /**
- * Encode invite (host/port/password/…) into a single secret key string.
- * Example: CDR1.aGVsbG8…
+ * Encode invite (host/port/fingerprint/…) into a single secret key string.
+ * Example: CDR2.aGVsbG8…
+ * Never carries the room password; throws when hostFingerprint is missing.
  */
 export function encodeRoomInvite(payload: RoomInvitePayload): string {
+  const hosts = payload.hosts?.length
+    ? payload.hosts
+    : payload.host
+      ? [payload.host]
+      : [];
+  const host = payload.host || hosts[0] || "";
+  if (!host || !payload.port) {
+    throw new Error("invite requires host and port");
+  }
+  if (!payload.hostFingerprint) {
+    throw new Error("invite requires hostFingerprint");
+  }
+  const body = {
+    v: 2 as const,
+    h: host,
+    hs: hosts.filter((x) => x && x !== host),
+    p: payload.port,
+    ...(payload.wss?.length ? { u: payload.wss } : {}),
+    f: payload.hostFingerprint,
+    ...(payload.roomName ? { n: payload.roomName } : {}),
+    ...(payload.modChecksum ? { m: payload.modChecksum } : {}),
+  };
+  const plain = utf8ToBytes(JSON.stringify(body));
+  const cipher = xorBytes(plain, INVITE_KEY);
+  return INVITE_PREFIX + toBase64Url(cipher);
+}
+
+/**
+ * Decode a CDR2. secret key back to host/port/fingerprint.
+ * Accepts optional whitespace / surrounding quotes / multi-line paste.
+ * CDR1. codes are refused: they embedded the room password.
+ */
+export function decodeRoomInvite(secret: string): RoomInvitePayload {
+  if (extractInviteLine(secret, LEGACY_INVITE_PREFIX)) {
+    throw new Error("该邀请码由旧版本生成，安全性不足，请让房主重新生成");
+  }
+  const line = extractInviteLine(secret, INVITE_PREFIX);
+  if (!line) {
+    throw new Error("无效邀请码（应以 CDR2. 开头）");
+  }
+  const body = decodeInviteBody(line, INVITE_PREFIX);
+  if (body.v !== 2 || !body.h || !body.p || !body.f) {
+    throw new Error("邀请码版本或字段无效");
+  }
+  return {
+    host: body.h,
+    hosts: inviteHosts(body.h, body.hs),
+    port: parseInvitePort(body.p),
+    ...(Array.isArray(body.u) && body.u.length
+      ? { wss: body.u.map(String) }
+      : {}),
+    hostFingerprint: String(body.f),
+    ...(body.m ? { modChecksum: String(body.m) } : {}),
+    ...(body.n ? { roomName: String(body.n) } : {}),
+  };
+}
+
+/**
+ * Decode a legacy CDR1. invite for hint / diagnostics only.
+ * @internal tests & diagnostics — UI must not use the result to join.
+ */
+export function decodeLegacyRoomInviteForHint(secret: string): LegacyRoomInvite {
+  const line = extractInviteLine(secret, LEGACY_INVITE_PREFIX);
+  if (!line) {
+    throw new Error("不是旧版邀请码（应以 CDR1. 开头）");
+  }
+  const body = decodeInviteBody(line, LEGACY_INVITE_PREFIX);
+  if (body.v !== 1 || !body.h || !body.p) {
+    throw new Error("邀请码版本或字段无效");
+  }
+  return {
+    host: body.h,
+    hosts: inviteHosts(body.h, body.hs),
+    port: parseInvitePort(body.p),
+    // CDR1 has no device fingerprint; empty string marks "unknown".
+    hostFingerprint: "",
+    legacy: true,
+    ...(body.w ? { password: String(body.w) } : {}),
+    ...(body.m ? { modChecksum: String(body.m) } : {}),
+    ...(body.n ? { roomName: String(body.n) } : {}),
+  };
+}
+
+/** @internal test only — production code must never emit CDR1 (it embeds the password). */
+export function encodeCdr1ForTest(payload: {
+  host: string;
+  hosts?: string[];
+  port: number;
+  password?: string;
+  modChecksum?: string;
+  roomName?: string;
+}): string {
   const hosts = payload.hosts?.length
     ? payload.hosts
     : payload.host
@@ -304,72 +466,13 @@ export function encodeRoomInvite(payload: RoomInvitePayload): string {
   };
   const plain = utf8ToBytes(JSON.stringify(body));
   const cipher = xorBytes(plain, INVITE_KEY);
-  return INVITE_PREFIX + toBase64Url(cipher);
+  return LEGACY_INVITE_PREFIX + toBase64Url(cipher);
 }
 
-/**
- * Decode a secret key back to host/port/password.
- * Accepts optional whitespace / surrounding quotes.
- */
-export function decodeRoomInvite(secret: string): RoomInvitePayload {
-  let s = secret.trim().replace(/^["']|["']$/g, "");
-  // Allow pasting multi-line invite with key on its own line
-  if (!s.startsWith(INVITE_PREFIX)) {
-    const line = s
-      .split(/\r?\n/)
-      .map((l) => l.trim())
-      .find((l) => l.startsWith(INVITE_PREFIX));
-    if (line) s = line;
-  }
-  if (!s.startsWith(INVITE_PREFIX)) {
-    throw new Error("无效邀请码（应以 CDR1. 开头）");
-  }
-  const b64 = s.slice(INVITE_PREFIX.length).replace(/\s/g, "");
-  if (!b64) throw new Error("邀请码内容为空");
-  let plain: string;
-  try {
-    const cipher = fromBase64Url(b64);
-    plain = bytesToUtf8(xorBytes(cipher, INVITE_KEY));
-  } catch {
-    throw new Error("邀请码无法解码");
-  }
-  let body: {
-    v?: number;
-    h?: string;
-    hs?: string[];
-    p?: number;
-    w?: string;
-    m?: string;
-    n?: string;
-  };
-  try {
-    body = JSON.parse(plain) as typeof body;
-  } catch {
-    throw new Error("邀请码内容损坏");
-  }
-  if (body.v !== 1 || !body.h || !body.p) {
-    throw new Error("邀请码版本或字段无效");
-  }
-  const port = Number(body.p);
-  if (!Number.isFinite(port) || port < 1 || port > 65535) {
-    throw new Error("邀请码端口无效");
-  }
-  const hosts = [body.h, ...(Array.isArray(body.hs) ? body.hs : [])].filter(
-    (x, i, a): x is string => Boolean(x) && a.indexOf(x) === i,
-  );
-  return {
-    host: body.h,
-    hosts,
-    port,
-    ...(body.w ? { password: String(body.w) } : {}),
-    ...(body.m ? { modChecksum: String(body.m) } : {}),
-    ...(body.n ? { roomName: String(body.n) } : {}),
-  };
-}
-
-/** True if text looks like a room invite secret key. */
+/** True if text looks like a room invite secret key (CDR1. or CDR2.). */
 export function looksLikeRoomInvite(text: string): boolean {
-  const s = text.trim();
-  if (s.startsWith(INVITE_PREFIX)) return true;
-  return s.split(/\r?\n/).some((l) => l.trim().startsWith(INVITE_PREFIX));
+  return (
+    extractInviteLine(text, INVITE_PREFIX) !== null ||
+    extractInviteLine(text, LEGACY_INVITE_PREFIX) !== null
+  );
 }
