@@ -6,6 +6,17 @@ export const MOD_HOST_API = 1;
 export const MOD_KERNEL_API = 2;
 export const MOD_BUNDLE_MAX_BYTES = 512 * 1024;
 
+export const ROOM_HANDSHAKE_TIMEOUT_MS = 10_000;
+export const ROOM_FRAME_LIMITS = {
+  handshake: 8 * 1024,
+  "chat.user": 64 * 1024,
+  "chat.event": 64 * 1024,
+  "state.snapshot": 2 * 1024 * 1024,
+  "mod.bundle": MOD_BUNDLE_MAX_BYTES,
+  envelope: 2 * 1024 * 1024 + 256,
+  default: 256 * 1024,
+} as const;
+
 export type RoomRole = "host" | "member";
 export type RoomSeatKind = "human" | "agent";
 export type RoomStatus = "open" | "ended";
