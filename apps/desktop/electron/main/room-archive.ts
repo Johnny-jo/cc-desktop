@@ -22,6 +22,8 @@ export type StoredRoom = {
     modChecksum?: string;
     secret?: string;
     hostFingerprint?: string;
+    /** wss:// relay endpoints from the CDR2 invite (T1/T2). */
+    wss?: string[];
   };
   memberCount: number;
   updatedAt: number;

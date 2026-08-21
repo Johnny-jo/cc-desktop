@@ -365,6 +365,148 @@ describe("room transport: handshake + encrypted frames", () => {
   });
 });
 
+describe("room transport: reconnect", () => {
+  it("reconnects via handshake and receives a fresh snapshot within 3s", async () => {
+    const host = makeRooms();
+    const { room, port } = await createHost(host, { password: "pw" });
+    const events: Array<{
+      roomId?: string;
+      reconnecting?: boolean;
+      reconnectAttempt?: number;
+      room?: RoomSnapshot;
+    }> = [];
+    const guest = makeRooms((ch, p) => {
+      if (ch === IPC.roomEvent) events.push(p as (typeof events)[number]);
+    });
+    const res = await guest.join({
+      host: "127.0.0.1",
+      port,
+      password: "pw",
+      hostFingerprint: room.hostFingerprint,
+    });
+    expect(res.ok).toBe(true);
+
+    // Simulate a network drop: kill the guest's underlying socket while the
+    // host process stays up.
+    const guestRecs = guest as unknown as {
+      rooms: Map<string, { client?: WebSocket | null }>;
+    };
+    const grec = guestRecs.rooms.get(room.roomId);
+    expect(grec?.client).toBeTruthy();
+    grec!.client!.terminate();
+
+    // Within 3s: a reconnect is announced, then a fresh open snapshot lands.
+    const deadline = Date.now() + 3000;
+    let sawReconnecting = false;
+    let reopened: RoomSnapshot | undefined;
+    while (Date.now() < deadline && !reopened) {
+      for (const e of events) {
+        if (e.roomId !== room.roomId) continue;
+        if (e.reconnecting) {
+          sawReconnecting = true;
+          continue;
+        }
+        if (sawReconnecting && e.room?.status === "open") reopened = e.room;
+      }
+      if (!reopened) await sleep(50);
+    }
+    expect(sawReconnecting).toBe(true);
+    expect(reopened).toBeTruthy();
+    expect(
+      reopened!.items.some((i) => i.text.includes("已重新连接")),
+    ).toBe(true);
+    expect(guest.get(room.roomId)?.status).toBe("open");
+  });
+
+  it("does not reconnect after the host ends the room", async () => {
+    const host = makeRooms();
+    const { room, port } = await createHost(host, { password: "pw" });
+    const events: Array<{
+      roomId?: string;
+      reconnecting?: boolean;
+      closed?: boolean;
+    }> = [];
+    const guest = makeRooms((ch, p) => {
+      if (ch === IPC.roomEvent) events.push(p as (typeof events)[number]);
+    });
+    const res = await guest.join({
+      host: "127.0.0.1",
+      port,
+      password: "pw",
+      hostFingerprint: room.hostFingerprint,
+    });
+    expect(res.ok).toBe(true);
+
+    expect(host.end(room.roomId).ok).toBe(true);
+
+    // Wait past the first reconnect backoff (1s): any reconnect attempt
+    // would have shown up in the event log by then.
+    await sleep(1500);
+    const forRoom = events.filter((e) => e.roomId === room.roomId);
+    expect(forRoom.some((e) => e.closed)).toBe(true);
+    expect(forRoom.some((e) => e.reconnecting)).toBe(false);
+    expect(guest.get(room.roomId)?.status).toBe("ended");
+  });
+
+  it("gives up after 5 backoff attempts and keeps the room offline", async () => {
+    const host = makeRooms();
+    const { room, port } = await createHost(host, { password: "pw" });
+    const events: Array<{
+      roomId?: string;
+      reconnecting?: boolean;
+      reconnectAttempt?: number;
+      closed?: boolean;
+      offline?: boolean;
+    }> = [];
+    const guest = makeRooms((ch, p) => {
+      if (ch === IPC.roomEvent) events.push(p as (typeof events)[number]);
+    });
+    const res = await guest.join({
+      host: "127.0.0.1",
+      port,
+      password: "pw",
+      hostFingerprint: room.hostFingerprint,
+    });
+    expect(res.ok).toBe(true);
+
+    // Injectable backoff: make the 1s/2s/4s/8s/8s waits instant.
+    const guestSvc = guest as unknown as {
+      rooms: Map<string, { client?: WebSocket | null }>;
+      reconnectSleep: (ms: number) => Promise<void>;
+    };
+    guestSvc.reconnectSleep = () => Promise.resolve();
+
+    // Host dies without room.closed (crash): close server + cut sockets.
+    const hostSvc = host as unknown as {
+      rooms: Map<string, {
+        server?: { close(): void } | null;
+        guests: Set<WebSocket>;
+      }>;
+    };
+    const hrec = hostSvc.rooms.get(room.roomId)!;
+    for (const g of hrec.guests) g.terminate();
+    hrec.server?.close();
+
+    const deadline = Date.now() + 5000;
+    let offlineEv: (typeof events)[number] | undefined;
+    while (Date.now() < deadline && !offlineEv) {
+      offlineEv = events.find(
+        (e) => e.roomId === room.roomId && e.closed && e.offline,
+      );
+      if (!offlineEv) await sleep(50);
+    }
+    expect(offlineEv).toBeTruthy();
+    const attempts = events.filter(
+      (e) => e.roomId === room.roomId && e.reconnecting,
+    );
+    expect(attempts.map((a) => a.reconnectAttempt)).toEqual([1, 2, 3, 4, 5]);
+    expect(guest.get(room.roomId)?.status).toBe("ended");
+    expect(guest.list().find((l) => l.roomId === room.roomId)?.offline).toBe(
+      true,
+    );
+  });
+});
+
 describe("room transport: approval, TOFU, kick", () => {
   it("pending device does not receive snapshot until approved", async () => {
     const events: Array<{ pending?: Array<{ fp: string; name: string }> }> = [];

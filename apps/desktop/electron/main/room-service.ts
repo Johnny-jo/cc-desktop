@@ -100,6 +100,8 @@ import {
 
 const MOD_CHECKSUM_RE = /^[0-9a-f]{64}$/;
 export const ROOM_MOD_BUNDLE_CHUNK = 48 * 1024;
+/** Guest reconnect: 5 attempts, exponential backoff 1s/2s/4s/8s/8s (task 9). */
+const RECONNECT_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 8_000] as const;
 
 type GuestWs = WebSocket & { userId?: string; fetching?: boolean };
 
@@ -171,6 +173,8 @@ type RoomRecord = {
     modChecksum?: string;
     secret?: string;
     hostFingerprint?: string;
+    /** wss:// relay endpoints from the CDR2 invite (T1/T2). */
+    wss?: string[];
   };
   reconnecting?: boolean;
   /** Guest dropped (reconnect exhausted) — room + history kept, can rejoin */
@@ -290,6 +294,9 @@ export class RoomService {
   /** Process-level room device identity (persisted under userData). */
   private readonly deviceKeys: DeviceKeys;
   private readonly deviceFp: string;
+  /** Injectable backoff sleep for guest reconnect (tests make it instant). */
+  private reconnectSleep: (ms: number) => Promise<void> = (ms) =>
+    new Promise((resolve) => setTimeout(resolve, ms));
 
   constructor(opts: {
     getWindow: () => BrowserWindow | null;
@@ -444,6 +451,7 @@ export function activate(ctx) {
                 modChecksum: stored.join.modChecksum,
                 secret: stored.join.secret,
                 hostFingerprint: stored.join.hostFingerprint,
+                wss: stored.join.wss,
               },
             }
           : {}),
@@ -1189,6 +1197,7 @@ export function activate(ctx) {
                     password: opts.password,
                     modChecksum: checksum,
                     hostFingerprint: hs.hostFp,
+                    wss: opts.wss,
                   },
                 };
                 this.rooms.set(snap.roomId, rec);
@@ -1236,7 +1245,10 @@ export function activate(ctx) {
   }
 
   /**
-   * Guest reconnect: up to 3 attempts, each waits up to 30s for TCP+handshake.
+   * Guest reconnect: 5 attempts, exponential backoff 1s/2s/4s/8s/8s before
+   * each attempt. Every attempt re-runs the full join() handshake path
+   * (password prove + host fingerprint check via handshakeAsGuest) and pulls
+   * a fresh welcome/state.snapshot.
    */
   private async reconnectGuest(r: RoomRecord): Promise<void> {
     if (
@@ -1256,7 +1268,12 @@ export function activate(ctx) {
       ...(info.hosts ?? []).filter((h) => h && h !== info.host),
     ];
 
-    for (let attempt = 1; attempt <= 3; attempt++) {
+    for (let attempt = 1; attempt <= RECONNECT_BACKOFF_MS.length; attempt++) {
+      if (r.closing || (r.reconnectGen ?? 0) !== gen) {
+        r.reconnecting = false;
+        return;
+      }
+      await this.reconnectSleep(RECONNECT_BACKOFF_MS[attempt - 1]);
       if (r.closing || (r.reconnectGen ?? 0) !== gen) {
         r.reconnecting = false;
         return;
@@ -1265,7 +1282,7 @@ export function activate(ctx) {
         roomId: r.roomId,
         reconnecting: true,
         reconnectAttempt: attempt,
-        message: `与主机断开，正在重连（${attempt}/3，最长 30 秒）…`,
+        message: `与主机断开，正在重连（${attempt}/${RECONNECT_BACKOFF_MS.length}）…`,
         room: this.snapshot(r),
       });
 
@@ -1305,7 +1322,7 @@ export function activate(ctx) {
     if (r.closing || (r.reconnectGen ?? 0) !== gen) return;
     this.dismissGuest(
       r,
-      "无法连接主机（已重试 3 次），连接已断开；聊天记录已保留，可稍后重连",
+      `无法连接主机（已重试 ${RECONNECT_BACKOFF_MS.length} 次），连接已断开；聊天记录已保留，可稍后重连`,
       { offline: true },
     );
   }
@@ -1326,11 +1343,13 @@ export function activate(ctx) {
       };
       let ws: WebSocket;
       try {
-        ws = new WebSocket(`ws://${host}:${port}`, { handshakeTimeout: 25_000 });
+        ws = new WebSocket(`ws://${host}:${port}`, { handshakeTimeout: 10_000 });
       } catch {
         done(false);
         return;
       }
+      // Per-attempt budget 12s: 5 attempts + backoff stays in the same
+      // magnitude as the old 3×30s, but the first retry lands ~1s after drop.
       const timer = setTimeout(() => {
         try {
           ws.terminate();
@@ -1338,7 +1357,7 @@ export function activate(ctx) {
           // ignore
         }
         done(false);
-      }, 30_000);
+      }, 12_000);
 
       ws.on("error", () => {
         /* wait for close */
@@ -1347,7 +1366,8 @@ export function activate(ctx) {
         void this.handshakeAsGuest(ws, {
           password: password ?? "",
           name: displayName(),
-          hostFingerprint: r.hostFingerprint || undefined,
+          hostFingerprint:
+            r.joinInfo?.hostFingerprint || r.hostFingerprint || undefined,
           userId: r.localUserId || undefined,
         }).then((hs) => {
           if (settled) return;
@@ -1392,6 +1412,9 @@ export function activate(ctx) {
             if (frame.type === "welcome" || frame.type === "state.snapshot") {
               clearTimeout(timer);
               const snap = frame.payload as RoomSnapshot;
+              // Fresh handshake ⇒ new kid + session key; the new
+              // RoomConnection restarts msg_id at 1. Old envelopes are never
+              // replayed — frames missed while offline return via snapshot.
               r.client = ws;
               r.connections.clear();
               r.connections.set(ws, conn);
@@ -1472,6 +1495,7 @@ export function activate(ctx) {
       password: info.password,
       modChecksum: info.modChecksum,
       hostFingerprint: info.hostFingerprint,
+      wss: info.wss,
       userId,
     });
     if (!res.ok) {
@@ -3234,6 +3258,7 @@ export function activate(ctx) {
                 modChecksum: r.joinInfo.modChecksum,
                 secret: r.joinInfo.secret,
                 hostFingerprint: r.joinInfo.hostFingerprint,
+                wss: r.joinInfo.wss,
               },
             }
           : {}),
