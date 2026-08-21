@@ -53,6 +53,10 @@
 - 任务 13：「自动放行新设备」「公网可达」两标签无 i18n 键，按 RoomSidebar 惯例硬编码中文；客人侧等待沿用 busy 进度 + 60s 超时错误文案。
 - 任务 14：**计划内部冲突的取舍**——任务 7 说「mod.fetch 必须在 hs.ok 之后」，任务 14 规则 5 说「mod.fetch 仍允许（checksum 已在邀请码里）」；按任务 14 执行，加密房 pre-hs.ok 的明文 mod.fetch 会被服务（fetchMod 客户端流程不变，仍先握手）。**已知缺口**：尺寸闸门只在 onGuest.onMsg（握手前 + 明文房全程）；握手升级后加密房入站归 RoomConnection.onMessage，无字节上限（AEAD 校验兜底），如需收紧给 RoomConnection 加同类检查，另开任务。
 
+## S1 之后追加
+
+- **自建中继服务器**（commit `cdf8ffd`）：用户自有公网 VPS 场景。`scripts/room-relay-server.mjs`（单文件，仅依赖 `ws`，`node room-relay-server.mjs --port 7600 [--token xxx]`）单端口按 path 分流：`/ctl` 房主控制通道（token timingSafeEqual 校验、id 占用拒 4409）、`/work` 房主工作通道（每客人一条）、`/r/<roomId>` 客人入口（10s 配对超时、每房间待配对上限 32）；哑管道原样转发、只见 AEAD 密文。房主端 `room-relay.ts`（startRoomRelay，ctl 断开 3s 重连且 roomId 不变、url 稳定）；create({ relay, relayToken }) 强制 encrypt、invite 并入 `u` 数组、end()/disposeAll() 清理；UI 创建对话框加「中继服务器」复选 + 地址/token；pathForCandidateUrl 修正（公网 ws → T1）。测试 10 例含真实中继进程端到端（guest 经中继三段链路 + AEAD 加入）。偏离：本地回跳用 ws 客户端而非裸 TCP（本地是 WebSocketServer 需 upgrade）；中继缓冲待配对客人消息 ≤256 条防 hello 丢失死锁。
+
 ## 后续（非 S1 范围）
 
 - RoomConnection 入站尺寸闸门（见上）。
