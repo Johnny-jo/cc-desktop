@@ -56,6 +56,7 @@
 ## S1 之后追加
 
 - **自建中继服务器**（commit `cdf8ffd`）：用户自有公网 VPS 场景。`scripts/room-relay-server.mjs`（单文件，仅依赖 `ws`，`node room-relay-server.mjs --port 7600 [--token xxx]`）单端口按 path 分流：`/ctl` 房主控制通道（token timingSafeEqual 校验、id 占用拒 4409）、`/work` 房主工作通道（每客人一条）、`/r/<roomId>` 客人入口（10s 配对超时、每房间待配对上限 32）；哑管道原样转发、只见 AEAD 密文。房主端 `room-relay.ts`（startRoomRelay，ctl 断开 3s 重连且 roomId 不变、url 稳定）；create({ relay, relayToken }) 强制 encrypt、invite 并入 `u` 数组、end()/disposeAll() 清理；UI 创建对话框加「中继服务器」复选 + 地址/token；pathForCandidateUrl 修正（公网 ws → T1）。测试 10 例含真实中继进程端到端（guest 经中继三段链路 + AEAD 加入）。偏离：本地回跳用 ws 客户端而非裸 TCP（本地是 WebSocketServer 需 upgrade）；中继缓冲待配对客人消息 ≤256 条防 hello 丢失死锁。
+- **房主重启自动恢复开房**（commit `171d286`）：启动时对归档中 `role=host` 且退出时 open 的房间自动 re-listen（原端口）+ 重挂公网路径，**原邀请码继续有效**（设备指纹/端口/中继 roomId 全稳定）。StoredRoom 新增 password（仅 host）/publicWss/tunnel/relay/relayToken/relayRoomId；quick tunnel 恢复时拿新 URL 并时间线提示旧入口失效（named tunnel 不受影响）；端口被占等失败 → 标 ended + 系统消息、不崩、不影响其他房间；guest 房间不自动恢复（手动 rejoin）。注意：blacklist/knownDevices 未持久化，恢复后为空，非 autoApprove 房间的老客人需重新审批一次；mod/kernel 宿主不随 resume 重启（modChecksum 保留）。测试 room-resume.test.ts 5 例（核心恢复/中继稳定/隧道更新/端口占用/guest 不恢复），模拟方式 = 同 userDataDir 起第二个 RoomService（disposeAll 不动归档，正好模拟进程退出）。
 
 ## 后续（非 S1 范围）
 
