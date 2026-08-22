@@ -47,6 +47,21 @@ export type StoredRoom = {
   requireMods?: boolean;
   modChecksum?: string;
   hostLabel?: string;
+  /**
+   * Host rooms only: the room password itself, so hosting can resume after a
+   * restart (guest archives already store join.password in plaintext — the
+   * archive is local-only either way).
+   */
+  password?: string;
+  /** Stable public wss:// endpoint (reverse proxy); restored into the invite. */
+  publicWss?: string;
+  /** A Cloudflare tunnel was on — re-opened on resume (quick tunnels get a new URL). */
+  tunnel?: boolean;
+  /** Self-hosted relay base address (ws:// or wss://). */
+  relay?: string;
+  relayToken?: string;
+  /** 12-hex relay room id — re-registered on resume so the relay URL is stable. */
+  relayRoomId?: string;
 };
 
 type IndexFile = {
@@ -163,6 +178,12 @@ export class RoomArchive {
       ...(r.requireMods != null ? { requireMods: r.requireMods } : {}),
       ...(r.modChecksum ? { modChecksum: r.modChecksum } : {}),
       ...(r.hostLabel ? { hostLabel: r.hostLabel } : {}),
+      ...(r.password ? { password: r.password } : {}),
+      ...(r.publicWss ? { publicWss: r.publicWss } : {}),
+      ...(r.tunnel ? { tunnel: true } : {}),
+      ...(r.relay ? { relay: r.relay } : {}),
+      ...(r.relayToken ? { relayToken: r.relayToken } : {}),
+      ...(r.relayRoomId ? { relayRoomId: r.relayRoomId } : {}),
     };
   }
 }

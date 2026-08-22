@@ -78,7 +78,7 @@ import { loadOrCreateDeviceKeys } from "./room-device-store";
 import { frameLimit, HandshakeWatchdog, TokenBucket } from "./room-limits";
 import { isHandshakeReason, RoomMetrics } from "./room-metrics";
 import { startRoomRelay } from "./room-relay";
-import { startRoomTunnel } from "./room-tunnel";
+import { readNamedTunnelConfig, startRoomTunnel } from "./room-tunnel";
 import {
   getKernelCacheDir,
   getKernelImprovePath,
@@ -202,6 +202,17 @@ type RoomRecord = {
   tunnel?: { wss: string; kill: () => void };
   /** Live self-hosted relay handle + its public join URL while connected. */
   relay?: { url: string; kill: () => void };
+  /**
+   * Persisted relay config (host rooms): on restart the same relayRoomId is
+   * re-registered, so the relay join URL in old invites keeps working.
+   */
+  relayAddr?: string;
+  relayToken?: string;
+  relayRoomId?: string;
+  /** Tunnel requested at create — re-opened on resume (quick tunnels get a new URL). */
+  tunnelWanted?: boolean;
+  /** Archived host room that was open at exit — hosting resumes on startup. */
+  resumePending?: boolean;
   /** Process-level X25519 device identity (shared by all rooms). */
   deviceKeys: DeviceKeys;
   /** Post-handshake connections (host: one per guest ws; guest: the client ws). */
@@ -469,6 +480,9 @@ export class RoomService {
     this.deviceFp = fingerprintPublic(this.deviceKeys.publicRaw);
     this.metrics = opts.metrics ?? new RoomMetrics();
     this.hydrateFromArchive();
+    // Fire-and-forget: rebind host rooms that were open at exit (each
+    // completion/failure pushes a roomEvent; resume never throws).
+    this.resumeArchivedRooms();
   }
 
   private pathEnv(): RuntimePathEnv {
@@ -563,18 +577,30 @@ export function activate(ctx) {
   private hydrateFromArchive(): void {
     if (!this.archive) return;
     for (const stored of this.archive.loadIndex()) {
-      // No live socket after restart — never show a stale「开着」.
+      // No live socket after restart: guest rooms show ended (manual rejoin);
+      // host rooms left open are flagged resumePending and rebound by
+      // resumeArchivedRooms() right after this hydrate.
       const status = stored.status === "open" ? "ended" : stored.status;
       const rec: RoomRecord = {
         roomId: stored.roomId,
         name: stored.name,
-        password: stored.join?.password ?? "",
+        // Host rooms persist their own password (resume hosting); older
+        // archives only carry join.password on guest rooms — a pre-resume
+        // host archive without it simply reopens passwordless.
+        password: stored.password ?? stored.join?.password ?? "",
         port: stored.port,
         requireMods: Boolean(stored.requireMods),
         autoApprove: Boolean(stored.autoApprove),
         encrypt: stored.encrypt ?? true,
         hostFingerprint:
           stored.hostFingerprint ?? stored.join?.hostFingerprint ?? "",
+        // Public paths default to "not restored" on old archives that lack
+        // the fields; the LAN listener resumes regardless.
+        ...(stored.publicWss ? { publicWss: stored.publicWss } : {}),
+        ...(stored.tunnel ? { tunnelWanted: true } : {}),
+        ...(stored.relay ? { relayAddr: stored.relay } : {}),
+        ...(stored.relayToken ? { relayToken: stored.relayToken } : {}),
+        ...(stored.relayRoomId ? { relayRoomId: stored.relayRoomId } : {}),
         deviceKeys: this.deviceKeys,
         connections: new Map(),
         pendingByFp: new Map(),
@@ -582,7 +608,7 @@ export function activate(ctx) {
         knownDevices: new Map(),
         modChecksum: stored.modChecksum ?? "",
         status,
-        hostUserId: "",
+        hostUserId: stored.role === "host" ? (stored.localUserId ?? "") : "",
         hostLabel: stored.hostLabel ?? "",
         localUserId: stored.localUserId ?? "",
         localRole: stored.role,
@@ -610,8 +636,123 @@ export function activate(ctx) {
             }
           : {}),
       };
+      // Host rooms left open at exit resume hosting on startup: same port +
+      // persisted device keys → same fingerprint → the old invite stays valid.
+      if (stored.status === "open" && stored.role === "host") {
+        rec.resumePending = true;
+      }
       this.rooms.set(rec.roomId, rec);
-      if (status !== stored.status) this.persist(rec);
+      // Keep the archived "open" for rooms about to resume — if the app dies
+      // mid-resume the next launch retries; a failed resume persists "ended".
+      if (status !== stored.status && !rec.resumePending) this.persist(rec);
+    }
+  }
+
+  /** Rebind every archived host room left open at exit (fire-and-forget). */
+  private resumeArchivedRooms(): void {
+    for (const r of this.rooms.values()) {
+      if (!r.resumePending) continue;
+      r.resumePending = undefined;
+      void this.resumeHostRoom(r);
+    }
+  }
+
+  /**
+   * Resume hosting one archived room: rebind its original port (0.0.0.0) with
+   * the same onGuest wiring as create(), then re-establish the persisted
+   * public paths. Never throws — a failed resume marks the room ended with a
+   * system timeline message and leaves the other rooms alone.
+   */
+  private async resumeHostRoom(r: RoomRecord): Promise<void> {
+    try {
+      const bound = await this.bindHostServer(r);
+      if (!bound.ok) {
+        r.status = "ended";
+        this.append(r, {
+          kind: "system",
+          text: `重启后自动恢复开房失败：${bound.error}。房间已标记为结束，可重新创建`,
+          authorLabel: "系统",
+        });
+        this.emit(r);
+        return;
+      }
+      r.status = "open";
+      this.append(r, {
+        kind: "system",
+        text: `已从上次退出恢复开房 · 监听 0.0.0.0:${r.port}（原邀请码仍有效）`,
+        authorLabel: "系统",
+      });
+      // publicWss is a stable external endpoint — nothing to re-establish;
+      // hydrate already restored it and invite() picks it up from here.
+      if (r.tunnelWanted) {
+        // Quick tunnels get a random URL per process (old invites lose the
+        // tunnel entry); named tunnels read the stable endpoint from
+        // userData/cloudflare-tunnel.json. Tunnel failure degrades to LAN.
+        const named = readNamedTunnelConfig(this.userDataDir);
+        const t = await startRoomTunnel({ port: r.port, env: this.pathEnv() });
+        if (t.ok) {
+          r.tunnel = { wss: t.wss, kill: t.kill };
+          this.append(r, {
+            kind: "system",
+            text: `Cloudflare 隧道已开启：${t.wss}`,
+            authorLabel: "系统",
+          });
+          if (!named) {
+            this.append(r, {
+              kind: "system",
+              text: "隧道地址已更新，旧邀请码的隧道入口已失效，请重新分享邀请码",
+              authorLabel: "系统",
+            });
+          }
+        } else {
+          this.append(r, {
+            kind: "system",
+            text: `Cloudflare 隧道不可用：${t.error}（房间仍可通过局域网加入）`,
+            authorLabel: "系统",
+          });
+        }
+      }
+      if (r.relayAddr && r.relayRoomId) {
+        // Re-register the same room id → the relay join URL is unchanged, so
+        // old invites keep working. Relay failure degrades to LAN.
+        const res = await startRoomRelay({
+          relay: r.relayAddr,
+          ...(r.relayToken ? { token: r.relayToken } : {}),
+          roomId: r.relayRoomId,
+          localPort: r.port,
+        });
+        if (res.ok) {
+          r.relay = { url: res.url, kill: res.kill };
+          this.append(r, {
+            kind: "system",
+            text: `中继服务器已连接：${res.url}`,
+            authorLabel: "系统",
+          });
+        } else {
+          this.append(r, {
+            kind: "system",
+            text: `中继不可用：${res.error}（房间仍可通过局域网加入）`,
+            authorLabel: "系统",
+          });
+        }
+      }
+      this.persist(r);
+      this.emit(r);
+    } catch (err) {
+      // Belt and braces: a resume failure must never take the app down.
+      r.status = "ended";
+      try {
+        r.server?.close();
+      } catch {
+        // ignore
+      }
+      r.server = null;
+      this.append(r, {
+        kind: "system",
+        text: `重启后自动恢复开房失败：${err instanceof Error ? err.message : String(err)}`,
+        authorLabel: "系统",
+      });
+      this.emit(r);
     }
   }
 
@@ -1084,6 +1225,7 @@ export function activate(ctx) {
       encrypt,
       hostFingerprint: this.deviceFp,
       ...(publicWss ? { publicWss } : {}),
+      ...(opts.tunnel ? { tunnelWanted: true } : {}),
       deviceKeys: this.deviceKeys,
       connections: new Map(),
       pendingByFp: new Map(),
@@ -1125,55 +1267,8 @@ export function activate(ctx) {
       client: null,
     };
 
-    let wss: WebSocketServer;
-    try {
-      wss = new WebSocketServer({ host: "0.0.0.0", port, backlog: 16 });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return {
-        ok: false,
-        error: `无法绑定端口 ${port}：${msg}（可能被占用，请换端口）`,
-      };
-    }
-
-    rec.server = wss;
-    wss.on("connection", (ws) => this.onGuest(rec, ws));
-    wss.on("error", (err) => {
-      this.pushError(`群聊端口 ${port} 错误：${err.message}`);
-    });
-
-    try {
-      await waitForListening(wss, port);
-    } catch (err) {
-      try {
-        wss.close();
-      } catch {
-        // ignore
-      }
-      const msg = err instanceof Error ? err.message : String(err);
-      // EADDRINUSE often surfaces here
-      if (/EADDRINUSE|in use/i.test(msg)) {
-        return {
-          ok: false,
-          error: `端口 ${port} 已被占用，请换一个端口再创建`,
-        };
-      }
-      return { ok: false, error: `监听失败：${msg}` };
-    }
-
-    // Self-check: can we connect to ourselves on 127.0.0.1?
-    const loopbackOk = await this.probeLocalPort(port);
-    if (!loopbackOk) {
-      try {
-        wss.close();
-      } catch {
-        // ignore
-      }
-      return {
-        ok: false,
-        error: `端口 ${port} 已绑定但本机探测失败，请重启应用后重试`,
-      };
-    }
+    const bound = await this.bindHostServer(rec);
+    if (!bound.ok) return { ok: false, error: bound.error };
 
     this.append(rec, {
       kind: "system",
@@ -1204,10 +1299,16 @@ export function activate(ctx) {
     if (relay) {
       // Self-hosted relay: the host dials out, guests join via the relay URL.
       // Failures degrade to a LAN-only room — create never fails on this.
+      // The relay address/token/roomId persist with the room so a restart
+      // re-registers the same id and the old invite URL keeps working.
+      const relayRoomId = randomBytes(6).toString("hex");
+      rec.relayAddr = relay;
+      if (relayToken) rec.relayToken = relayToken;
+      rec.relayRoomId = relayRoomId;
       const res = await startRoomRelay({
         relay,
         ...(relayToken ? { token: relayToken } : {}),
-        roomId: randomBytes(6).toString("hex"),
+        roomId: relayRoomId,
         localPort: port,
       });
       if (res.ok) {
@@ -1230,6 +1331,69 @@ export function activate(ctx) {
     this.persist(rec);
     this.emit(rec);
     return { ok: true, room: this.snapshot(rec) };
+  }
+
+  /**
+   * Bind the room's WebSocketServer on 0.0.0.0 with the onGuest wiring and a
+   * loopback self-check. Shared by create() and resumeHostRoom(); on failure
+   * the half-bound server is closed and r.server is left null.
+   */
+  private async bindHostServer(
+    r: RoomRecord,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const port = r.port;
+    let wss: WebSocketServer;
+    try {
+      wss = new WebSocketServer({ host: "0.0.0.0", port, backlog: 16 });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        ok: false,
+        error: `无法绑定端口 ${port}：${msg}（可能被占用，请换端口）`,
+      };
+    }
+
+    r.server = wss;
+    wss.on("connection", (ws) => this.onGuest(r, ws));
+    wss.on("error", (err) => {
+      this.pushError(`群聊端口 ${port} 错误：${err.message}`);
+    });
+
+    try {
+      await waitForListening(wss, port);
+    } catch (err) {
+      try {
+        wss.close();
+      } catch {
+        // ignore
+      }
+      r.server = null;
+      const msg = err instanceof Error ? err.message : String(err);
+      // EADDRINUSE often surfaces here
+      if (/EADDRINUSE|in use/i.test(msg)) {
+        return {
+          ok: false,
+          error: `端口 ${port} 已被占用，请换一个端口再创建`,
+        };
+      }
+      return { ok: false, error: `监听失败：${msg}` };
+    }
+
+    // Self-check: can we connect to ourselves on 127.0.0.1?
+    const loopbackOk = await this.probeLocalPort(port);
+    if (!loopbackOk) {
+      try {
+        wss.close();
+      } catch {
+        // ignore
+      }
+      r.server = null;
+      return {
+        ok: false,
+        error: `端口 ${port} 已绑定但本机探测失败，请重启应用后重试`,
+      };
+    }
+    return { ok: true };
   }
 
   /** Quick WS connect to 127.0.0.1:port to verify the host is reachable locally. */
@@ -3733,6 +3897,16 @@ export function activate(ctx) {
         modChecksum: r.modChecksum,
         hostLabel: r.hostLabel,
         localUserId: r.localUserId || undefined,
+        // Host-side secrets/public paths for resume-hosting after a restart
+        // (guest rooms carry their rejoin data under join.* instead).
+        ...(r.localRole === "host" && r.password
+          ? { password: r.password }
+          : {}),
+        ...(r.publicWss ? { publicWss: r.publicWss } : {}),
+        ...(r.tunnelWanted ? { tunnel: true } : {}),
+        ...(r.relayAddr ? { relay: r.relayAddr } : {}),
+        ...(r.relayToken ? { relayToken: r.relayToken } : {}),
+        ...(r.relayRoomId ? { relayRoomId: r.relayRoomId } : {}),
         ...(r.offline ? { offline: true } : {}),
         ...(r.joinInfo
           ? {
