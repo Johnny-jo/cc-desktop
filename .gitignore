@@ -11,3 +11,5 @@ release
 .superpowers
 # Prepared binaries for electron-builder (scripts/prepare-vendor.mjs)
 vendor/
+# Local scratch / download tooling, not project source
+tools/
