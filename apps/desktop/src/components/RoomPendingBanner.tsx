@@ -4,6 +4,7 @@ import { shortFingerprint } from "../lib/room-invite-ui";
 import {
   approveRoomDevice,
   denyRoomDevice,
+  getPendingEpoch,
   listRoomPending,
   setRoomPending,
   useRoomStore,
@@ -25,24 +26,39 @@ export function RoomPendingBanner({
   const devices = useRoomStore((s) => s.pendingDevices);
   const fingerprintChanged = useRoomStore((s) => s.fingerprintChanged);
   const [busyFp, setBusyFp] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   // Catch up on devices that queued before this view mounted; live updates
-  // arrive as room:event { pending } via bindRoomEvents.
+  // arrive as room:event { pending } via bindRoomEvents. Skip the result if
+  // a live event already wrote the queue (stale empty snapshot would hide a
+  // real request, stale non-empty would resurrect a disconnected guest).
   useEffect(() => {
     if (!canHost) return;
+    let cancelled = false;
+    const epoch = getPendingEpoch();
     void listRoomPending(roomId).then((res) => {
-      if (res.ok) setRoomPending(roomId, res.pending);
+      if (cancelled || !res.ok) return;
+      if (getPendingEpoch() !== epoch) return;
+      setRoomPending(roomId, res.pending);
     });
+    return () => {
+      cancelled = true;
+    };
   }, [canHost, roomId]);
 
   if (!canHost) return null;
-  if (!devices.length && !fingerprintChanged) return null;
+  if (!devices.length && !fingerprintChanged && !actionError) return null;
 
   const decide = async (fp: string, approve: boolean) => {
     setBusyFp(fp);
-    if (approve) await approveRoomDevice(roomId, fp);
-    else await denyRoomDevice(roomId, fp);
+    setActionError(null);
+    const res = approve
+      ? await approveRoomDevice(roomId, fp)
+      : await denyRoomDevice(roomId, fp);
     setBusyFp(null);
+    if (!res.ok) {
+      setActionError(res.error ?? (approve ? "批准失败" : "拒绝失败"));
+    }
     // 主进程随后会再推一次 pending 列表刷新这里
   };
 
@@ -52,6 +68,7 @@ export function RoomPendingBanner({
       {fingerprintChanged ? (
         <p className="room-pending-warn">{t.room.fingerprintChanged}</p>
       ) : null}
+      {actionError ? <p className="room-pending-warn">{actionError}</p> : null}
       {devices.map((d) => (
         <div key={d.fp} className="room-pending-row">
           <span className="room-pending-name">{d.name}</span>

@@ -17,7 +17,7 @@ import { parseTrailingAt } from "../lib/at-mention";
 import { formatModBadge } from "../lib/room-mod-ui";
 import { useI18n } from "../i18n/useI18n";
 import { ModPlayPanel } from "./ModPlayPanel";
-import { RoomAddSeatModal } from "./RoomAddSeatModal";
+import { RoomAddSeatModal, type SeatDraft } from "./RoomAddSeatModal";
 import { RoomInviteModal } from "./RoomInviteModal";
 import { RoomLeaveConfirm } from "./RoomLeaveConfirm";
 import { RoomPendingBanner } from "./RoomPendingBanner";
@@ -58,6 +58,7 @@ export function RoomStage() {
     listening: boolean;
   } | null>(null);
   const [addOpen, setAddOpen] = useState(false);
+  const [editSeat, setEditSeat] = useState<SeatDraft | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [confirmLeave, setConfirmLeave] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -352,6 +353,26 @@ export function RoomStage() {
               {s.running ? <span className="room-seat-pulse" aria-hidden /> : null}
               {s.takenOverBy ? <span className="room-seat-tag">接管中</span> : null}
               {isMine ? <span className="room-seat-tag mine">我</span> : null}
+              {s.kind === "agent" && room.status === "open" && canHost ? (
+                <span
+                  className="room-seat-act"
+                  role="button"
+                  tabIndex={0}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setEditSeat({
+                      seatId: s.id,
+                      name: s.name,
+                      agentName: s.agentName ?? "",
+                      agentPrompt: s.agentPrompt ?? "",
+                      skillNames: s.skillNames ?? [],
+                      model: s.model ?? "",
+                    });
+                  }}
+                >
+                  {t.room.seatSettings}
+                </span>
+              ) : null}
               {s.kind === "agent" && room.status === "open" ? (
                 <span
                   className="room-seat-act"
@@ -381,10 +402,15 @@ export function RoomStage() {
         ) : null}
       </div>
 
-      {addOpen ? (
+      {addOpen || editSeat ? (
         <RoomAddSeatModal
           agents={settings?.agents ?? []}
-          onClose={() => setAddOpen(false)}
+          models={settings?.models ?? []}
+          initial={editSeat ?? undefined}
+          onClose={() => {
+            setAddOpen(false);
+            setEditSeat(null);
+          }}
         />
       ) : null}
 

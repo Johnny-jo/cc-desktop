@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { decodeRoomInvite, looksLikeRoomInvite } from "@claude-desktop/shared";
 import { fillTemplate } from "../lib/room-mod-ui";
 import { shortFingerprint } from "../lib/room-invite-ui";
 import { useI18n } from "../i18n/useI18n";
@@ -38,6 +39,15 @@ export function RoomInviteModal({
     },
     [],
   );
+
+  const relayUrl = (() => {
+    if (!looksLikeRoomInvite(code)) return "";
+    try {
+      return (decodeRoomInvite(code).wss ?? [])[0] ?? "";
+    } catch {
+      return "";
+    }
+  })();
 
   const copy = async () => {
     try {
@@ -94,6 +104,11 @@ export function RoomInviteModal({
           ) : (
             <p className="room-leave-warn">{t.room.inviteNotListening}</p>
           )}
+          {relayUrl ? (
+            <p className="settings-hint">
+              {fillTemplate(t.room.inviteRelay, { url: relayUrl })}
+            </p>
+          ) : null}
         </div>
       </div>
     </div>,

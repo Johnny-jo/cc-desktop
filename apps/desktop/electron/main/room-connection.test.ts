@@ -222,6 +222,34 @@ describe("RoomConnection", () => {
     expect(got[0]).toEqual(frame);
   });
 
+  it("sendFrame closes and throws when the session key cannot seal", async () => {
+    const wss = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    await new Promise<void>((resolve, reject) => {
+      wss.once("listening", () => resolve());
+      wss.once("error", reject);
+    });
+    const addr = wss.address();
+    const port = typeof addr === "object" && addr ? addr.port : 0;
+    const serverWsP = new Promise<WebSocket>((resolve) =>
+      wss.once("connection", (ws) => resolve(ws)),
+    );
+    const clientWs = new WebSocket(`ws://127.0.0.1:${port}`);
+    await Promise.all([serverWsP, waitOpen(clientWs)]);
+    const conn = new RoomConnection({
+      ws: clientWs,
+      kid: KID,
+      key: Buffer.alloc(16),
+      selfFp: "aa",
+      peerFp: "bb",
+      encrypt: true,
+    });
+    expect(() =>
+      conn.sendFrame(makeRoomFrame("room-1", 1, "chat.user", { text: "x" })),
+    ).toThrow(/key length|unknown cipher/i);
+    conn.close();
+    wss.close();
+  });
+
   it("acks every 8 app frames and advances peerUpto", async () => {
     const p = await makePair(true);
     expect(p.client.peerUpto).toBe(0);

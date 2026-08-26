@@ -1,3 +1,4 @@
+import { getCiphers } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   fingerprintPublic,
@@ -5,6 +6,7 @@ import {
   deriveSessionKey,
   sealEnvelope,
   openEnvelope,
+  ROOM_AEAD_ALG,
   type DeviceKeys,
 } from "./room-crypto";
 
@@ -31,6 +33,11 @@ describe("session key", () => {
 });
 
 describe("envelope", () => {
+  it("uses AES-256-GCM so Electron BoringSSL can seal frames", () => {
+    expect(ROOM_AEAD_ALG).toBe("aes-256-gcm");
+    expect(getCiphers()).toContain(ROOM_AEAD_ALG);
+  });
+
   const keys = (): { a: DeviceKeys; b: DeviceKeys; key: Buffer } => {
     const a = generateDeviceKeys();
     const b = generateDeviceKeys();

@@ -3,6 +3,7 @@ import {
   MOD_BUNDLE_MAX_BYTES,
   ROOM_FRAME_LIMITS,
   ROOM_HANDSHAKE_TIMEOUT_MS,
+  ROOM_HANDSHAKE_OPEN_TIMEOUT_MS,
 } from "@claude-desktop/shared";
 import {
   HandshakeWatchdog,
@@ -16,6 +17,7 @@ import {
 describe("room protocol limit constants", () => {
   it("exports handshake timeout and the frame limit table", () => {
     expect(ROOM_HANDSHAKE_TIMEOUT_MS).toBe(10_000);
+    expect(ROOM_HANDSHAKE_OPEN_TIMEOUT_MS).toBe(20_000);
     expect(ROOM_FRAME_LIMITS.handshake).toBe(8 * 1024);
     expect(ROOM_FRAME_LIMITS["chat.user"]).toBe(64 * 1024);
     expect(ROOM_FRAME_LIMITS["chat.event"]).toBe(64 * 1024);

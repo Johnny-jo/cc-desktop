@@ -138,6 +138,7 @@ export const IPC = {
   roomList: "room:list",
   roomGet: "room:get",
   roomAddSeat: "room:add-seat",
+  roomUpdateSeat: "room:update-seat",
   roomTakeover: "room:takeover",
   roomReturnSeat: "room:return-seat",
   roomSend: "room:send",
@@ -587,6 +588,23 @@ export type IpcInvokeMap = {
         kind: import("./room-protocol").RoomSeatKind;
         name: string;
         agentName?: string;
+        agentPrompt?: string;
+        skillNames?: string[];
+        model?: string;
+      },
+    ];
+    result: { ok: boolean; room?: import("./room-protocol").RoomSnapshot; error?: string };
+  };
+  [IPC.roomUpdateSeat]: {
+    args: [
+      {
+        roomId: string;
+        seatId: string;
+        name?: string;
+        agentName?: string;
+        agentPrompt?: string;
+        skillNames?: string[];
+        model?: string;
       },
     ];
     result: { ok: boolean; room?: import("./room-protocol").RoomSnapshot; error?: string };
@@ -640,7 +658,14 @@ export type IpcInvokeMap = {
     result: { ok: boolean; error?: string };
   };
   [IPC.roomPeek]: {
-    args: [{ host: string; port: number }];
+    args: [
+      {
+        host: string;
+        port: number;
+        hosts?: string[];
+        wss?: string[];
+      },
+    ];
     result: {
       ok: boolean;
       offer?: import("./room-protocol").ModOfferPayload;
@@ -653,9 +678,10 @@ export type IpcInvokeMap = {
         host: string;
         port: number;
         checksum: string;
-        /** Room password — needed for the handshake proof before mod.fetch. */
         password?: string;
         hostFingerprint?: string;
+        hosts?: string[];
+        wss?: string[];
       },
     ];
     result: {
@@ -854,6 +880,11 @@ export type IpcEventMap = {
   [IPC.appUpdateStatus]: UpdateStatusDto;
   [IPC.roomEvent]: {
     roomId: string;
+    /**
+     * Guest join dialog: host is holding the handshake for approval.
+     * May arrive with an empty roomId before the guest has a RoomRecord.
+     */
+    joining?: "pending-approval" | null;
     room?: import("./room-protocol").RoomSnapshot;
     /** host left / room deleted — guest should alert and remove */
     closed?: boolean;

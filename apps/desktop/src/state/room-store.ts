@@ -44,6 +44,8 @@ type RoomUiState = {
   pendingDevices: RoomPendingDevice[];
   /** Host side: a known device came back with a new fingerprint */
   fingerprintChanged: boolean;
+  /** Guest join dialog: waiting for host approval */
+  joinPhase: "pending-approval" | null;
 };
 
 const state: RoomUiState = {
@@ -57,6 +59,7 @@ const state: RoomUiState = {
   mod: null,
   pendingDevices: [],
   fingerprintChanged: false,
+  joinPhase: null,
 };
 
 const modsByRoom = new Map<string, RoomModState>();
@@ -64,6 +67,8 @@ const pendingByRoom = new Map<
   string,
   { devices: RoomPendingDevice[]; fingerprintChanged: boolean }
 >();
+/** Bumped on every pending write so in-flight list fetches cannot clobber live events. */
+let pendingEpoch = 0;
 
 const listeners = new Set<() => void>();
 
@@ -146,11 +151,16 @@ export function selectSeat(seatId: string | null): void {
 }
 
 /** Host side: replace the approval queue for a room (IPC event or poll). */
+export function getPendingEpoch(): number {
+  return pendingEpoch;
+}
+
 export function setRoomPending(
   roomId: string,
   devices: RoomPendingDevice[],
   fingerprintChanged = false,
 ): void {
+  pendingEpoch += 1;
   if (!devices.length && !fingerprintChanged) pendingByRoom.delete(roomId);
   else pendingByRoom.set(roomId, { devices, fingerprintChanged });
   if (state.activeRoomId === roomId) {
@@ -186,6 +196,7 @@ export function bindRoomEvents(): () => void {
   return getDesktop().on("room:event", (...args: unknown[]) => {
     const ev = args[0] as {
       roomId: string;
+      joining?: "pending-approval" | null;
       room?: RoomSnapshot;
       closed?: boolean;
       offline?: boolean;
@@ -198,6 +209,9 @@ export function bindRoomEvents(): () => void {
       pending?: RoomPendingDevice[];
       fingerprintChanged?: boolean;
     };
+    if (ev?.joining === "pending-approval") {
+      set({ joinPhase: "pending-approval" });
+    }
     if (!ev?.roomId) return;
 
     // Host approval queue pushes arrive without a snapshot.
@@ -312,7 +326,9 @@ export async function joinRoom(opts: {
   if (!hasDesktopApi("joinRoom")) {
     return { ok: false, error: "请完全重启应用后再使用群聊" };
   }
+  set({ joinPhase: null });
   const res = await getDesktop().joinRoom(opts);
+  set({ joinPhase: null });
   if (!res.ok || !res.room) {
     set({ lastError: res.error ?? "加入失败" });
     return { ok: false, error: res.error };
@@ -345,11 +361,31 @@ export async function addSeat(
   kind: "human" | "agent",
   name: string,
   agentName?: string,
+  extra?: { agentPrompt?: string; skillNames?: string[]; model?: string },
 ): Promise<void> {
   const id = state.activeRoomId;
   if (!id || !hasDesktopApi("addRoomSeat")) return;
-  const res = await getDesktop().addRoomSeat(id, kind, name, agentName);
+  const res = await getDesktop().addRoomSeat(id, kind, name, agentName, extra);
   if (res.room) set({ activeRoom: res.room });
+}
+
+export async function updateSeat(
+  seatId: string,
+  patch: {
+    name?: string;
+    agentName?: string;
+    agentPrompt?: string;
+    skillNames?: string[];
+    model?: string;
+  },
+): Promise<{ ok: boolean; error?: string }> {
+  const id = state.activeRoomId;
+  if (!id || !hasDesktopApi("updateRoomSeat")) {
+    return { ok: false, error: "请完全重启应用后再使用群聊" };
+  }
+  const res = await getDesktop().updateRoomSeat(id, seatId, patch);
+  if (res.room) set({ activeRoom: res.room });
+  return { ok: res.ok !== false, error: res.error };
 }
 
 export async function rollDice(): Promise<{ ok: boolean; error?: string }> {
@@ -462,6 +498,8 @@ export async function listRoomPending(
 export async function peekRoom(opts: {
   host: string;
   port: number;
+  hosts?: string[];
+  wss?: string[];
 }): Promise<{ ok: boolean; offer?: ModOfferPayload; error?: string }> {
   if (!hasDesktopApi("peekRoom")) {
     return { ok: false, error: "请完全重启应用后再使用群聊" };
@@ -475,6 +513,8 @@ export async function fetchRoomMod(opts: {
   checksum: string;
   password?: string;
   hostFingerprint?: string;
+  hosts?: string[];
+  wss?: string[];
 }): Promise<{
   ok: boolean;
   checksum?: string;

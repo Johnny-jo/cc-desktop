@@ -127,11 +127,15 @@ export const en = {
     syncAndJoin: "Sync and join",
     syncing: "Syncing…",
     joining: "Joining…",
+    waitingApprove: "Waiting for host approval…",
+    retryJoin: "Retry join",
     creating: "Creating…",
     peeking: "Checking group chat pack…",
     joinBtn: "Join",
     createHint:
       "The host listens on 0.0.0.0:port. Guests paste the invite code. Allow that TCP port in the firewall. Pick a play pack and extensions in Group chat settings after the group chat is open.",
+    relayHint:
+      "One relay can host many rooms; each room gets its own path. Guests only need the invite code.",
     createBtn: "Create and open",
     startPlay: "Start",
     endPlay: "End round",
@@ -157,6 +161,7 @@ export const en = {
     inviteCopied: "Copied",
     inviteFirewall:
       "The guest pastes this code in Group chats → Join. Allow TCP {port} in the firewall.",
+    inviteRelay: "Relay URL for this room: {url}",
     inviteNotListening:
       "Warning: the host is not listening. Recreate the group chat.",
     addSeatTitle: "Add agent seat",
@@ -165,6 +170,13 @@ export const en = {
     addSeatAgent: "Persona (custom agent)",
     addSeatAgentNone: "No persona",
     addSeatSubmit: "Add",
+    addSeatPrompt: "System prompt (optional)",
+    addSeatPromptPh: "Role, tone, and boundaries for this seat",
+    addSeatModel: "Model",
+    addSeatModelDefault: "Use host default model",
+    addSeatSkills: "Skills",
+    addSeatSkillsEmpty: "No skills installed. Add some in Settings → Skills.",
+    seatSettings: "Seat settings",
     quoteAction: "Quote",
     rejoin: "Reconnect",
     offline: "Offline",

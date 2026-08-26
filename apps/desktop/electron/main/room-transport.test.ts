@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { WebSocket, type RawData } from "ws";
+import { WebSocket, WebSocketServer, type RawData } from "ws";
 import {
   IPC,
   ROOM_PROTOCOL_VERSION,
@@ -583,6 +583,109 @@ describe("room transport: reconnect", () => {
   });
 });
 
+/**
+ * Transparent WS proxy that delays host→guest messages. Models the relay
+ * work-channel pairing stall: the guest socket is already open (and the
+ * handshake timer is running) before hs.challenge arrives.
+ */
+async function startWsMessageDelay(opts: {
+  destPort: number;
+  delayHostToGuestMs: number;
+}): Promise<{ port: number; close: () => void }> {
+  const wss = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await new Promise<void>((resolve, reject) => {
+    wss.once("listening", () => resolve());
+    wss.once("error", reject);
+  });
+  const addr = wss.address();
+  const port = typeof addr === "object" && addr ? addr.port : 0;
+  wss.on("connection", (guestWs) => {
+    const hostWs = new WebSocket(`ws://127.0.0.1:${opts.destPort}`);
+    const flush: Array<() => void> = [];
+    hostWs.on("open", () => {
+      for (const f of flush.splice(0)) f();
+    });
+    guestWs.on("message", (d, bin) => {
+      const send = () => {
+        if (hostWs.readyState === WebSocket.OPEN) {
+          hostWs.send(d, { binary: bin });
+        }
+      };
+      if (hostWs.readyState === WebSocket.OPEN) send();
+      else flush.push(send);
+    });
+    let firstFromHost = true;
+    hostWs.on("message", (d, bin) => {
+      const send = () => {
+        if (guestWs.readyState === WebSocket.OPEN) {
+          guestWs.send(d, { binary: bin });
+        }
+      };
+      // Only the first host→guest frame (hs.challenge) is delayed — after
+      // pairing, subsequent frames are forwarded immediately.
+      if (firstFromHost) {
+        firstFromHost = false;
+        setTimeout(send, opts.delayHostToGuestMs);
+      } else {
+        send();
+      }
+    });
+    guestWs.on("close", () => {
+      try {
+        hostWs.close();
+      } catch {
+        // ignore
+      }
+    });
+    hostWs.on("close", () => {
+      try {
+        guestWs.close();
+      } catch {
+        // ignore
+      }
+    });
+  });
+  return {
+    port,
+    close: () => {
+      wss.close();
+    },
+  };
+}
+
+describe("room transport: delayed first handshake (relay pairing stall)", () => {
+  it("guest still joins when challenge arrives after the prove-phase timeout", async () => {
+    const host = makeRooms();
+    const { room, port } = await createHost(host, {
+      password: "pw",
+      autoApprove: true,
+    });
+    const proxy = await startWsMessageDelay({
+      destPort: port,
+      delayHostToGuestMs: 300,
+    });
+    const guest = makeRooms();
+    // Prove-phase budget is shorter than the delayed challenge. Before the
+    // fix, the same 80ms timer covers "wait for challenge", so join fails
+    // with 握手超时 even though the host is about to answer.
+    (guest as unknown as { handshakeTimeoutMs: number }).handshakeTimeoutMs = 80;
+    (guest as unknown as { handshakeOpenTimeoutMs: number }).handshakeOpenTimeoutMs =
+      2_000;
+    try {
+      const res = await guest.join({
+        host: "127.0.0.1",
+        port: proxy.port,
+        password: "pw",
+        hostFingerprint: room.hostFingerprint,
+      });
+      expect(res.ok).toBe(true);
+      expect(res.room?.roomId).toBe(room.roomId);
+    } finally {
+      proxy.close();
+    }
+  });
+});
+
 describe("room transport: approval, TOFU, kick", () => {
   it("pending device does not receive snapshot until approved", async () => {
     const events: Array<{ pending?: Array<{ fp: string; name: string }> }> = [];
@@ -595,7 +698,12 @@ describe("room transport: approval, TOFU, kick", () => {
       password: "pw",
       autoApprove: false,
     });
-    const guest = makeRooms();
+    const guestEvents: Array<{ joining?: string }> = [];
+    const guest = makeRooms((ch, p) => {
+      if (ch === IPC.roomEvent) {
+        guestEvents.push(p as (typeof guestEvents)[number]);
+      }
+    });
 
     const joinP = guest.join({
       host: "127.0.0.1",
@@ -606,6 +714,9 @@ describe("room transport: approval, TOFU, kick", () => {
 
     // 待审批期间：join() 阻塞、本地不建 RoomRecord 席位、收不到快照
     await sleep(150);
+    expect(guestEvents.some((e) => e.joining === "pending-approval")).toBe(
+      true,
+    );
     const pend = host.pendingDevices(room.roomId);
     expect(pend.ok).toBe(true);
     expect(pend.pending).toHaveLength(1);

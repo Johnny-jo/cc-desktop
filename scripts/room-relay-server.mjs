@@ -64,6 +64,8 @@ function parseArgs(argv) {
 const { port, token } = parseArgs(process.argv.slice(2));
 
 const OPEN = 1;
+/** Ping idle hops so a proxy / NAT does not drop a guest waiting for approval. */
+const HEARTBEAT_MS = 15_000;
 /** Guests waiting for their work channel, per room. */
 const MAX_PENDING_PER_ROOM = 32;
 /** A pending guest is dropped when no work channel shows up in time. */
@@ -93,6 +95,16 @@ function closeQuiet(ws, code) {
   } catch {
     // ignore
   }
+}
+
+function attachHeartbeat(ws) {
+  ws.isAlive = true;
+  ws.on("pong", () => {
+    ws.isAlive = true;
+  });
+  ws.on("message", () => {
+    ws.isAlive = true;
+  });
 }
 
 /** ctl dropped → the whole room (guests + work channels) goes away. */
@@ -157,6 +169,7 @@ function onCtl(url, ws) {
   if (existing) teardownRoom(id, existing); // stale ctl — clean leftovers
   const room = { ctl: ws, seq: 0, pending: new Map(), sockets: new Set([ws]) };
   rooms.set(id, room);
+  attachHeartbeat(ws);
   try {
     ws.send(JSON.stringify({ t: "ready", id }));
   } catch {
@@ -184,6 +197,7 @@ function onWork(url, ws) {
   // Stop buffering before pipe() attaches its own guest message handler.
   room.pending.delete(seq);
   clearTimeout(entry.timer);
+  attachHeartbeat(ws);
   pipe(room, entry.ws, ws, `${id}#${seq}`);
   for (const [data, isBinary] of entry.buf.splice(0)) {
     try {
@@ -213,6 +227,7 @@ function onGuest(url, ws) {
   }, PAIR_TIMEOUT_MS);
   room.pending.set(seq, entry);
   room.sockets.add(ws);
+  attachHeartbeat(ws);
   // Buffer while pending: the guest sends its handshake immediately after
   // connect, before the host's work channel has arrived.
   ws.on("message", (data, isBinary) => {
@@ -265,6 +280,24 @@ server.on("error", (err) => {
   console.error(`room-relay: ${err.message}`);
   process.exit(1);
 });
+
+setInterval(() => {
+  for (const room of rooms.values()) {
+    for (const ws of [...room.sockets]) {
+      if (ws.readyState !== OPEN) continue;
+      if (ws.isAlive === false) {
+        closeQuiet(ws);
+        continue;
+      }
+      ws.isAlive = false;
+      try {
+        ws.ping();
+      } catch {
+        // ignore
+      }
+    }
+  }
+}, HEARTBEAT_MS).unref?.();
 
 server.listen(port, () => {
   const addr = server.address();

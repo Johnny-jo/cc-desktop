@@ -13,3 +13,6 @@ release
 vendor/
 # Local scratch / download tooling, not project source
 tools/
+.tmp/
+.claude/worktrees/
+.claude/settings.local.json

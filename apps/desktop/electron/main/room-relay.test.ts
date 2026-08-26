@@ -332,6 +332,7 @@ async function createRelayHost(
   rooms: RoomService,
   relay: string,
   password = "pw",
+  autoApprove = true,
 ): Promise<RoomSnapshot> {
   let last = "create failed";
   for (let i = 0; i < 10; i++) {
@@ -339,7 +340,7 @@ async function createRelayHost(
       name: "t",
       port: 21000 + Math.floor(Math.random() * 20000),
       password,
-      autoApprove: true,
+      autoApprove,
       relay,
     });
     if (res.ok && res.room) return res.room;
@@ -403,6 +404,76 @@ describe("RoomService relay option", () => {
         },
         { timeout: 10_000 },
       );
+    },
+    30_000,
+  );
+
+  it(
+    "guest held for host approval still joins through the relay after approve",
+    async () => {
+      const relay = await startRelay();
+      const host = makeRooms();
+      const room = await createRelayHost(host, relay.url, "pw", false);
+      const inv = host.invite(room.roomId);
+      const decoded = decodeRoomInvite(inv.secret!);
+      const relayUrl = (decoded.wss ?? []).find((u) =>
+        u.includes(`:${relay.port}/`),
+      );
+
+      const guest = makeRooms();
+      const joinP = guest.join({
+        host: "192.0.0.1",
+        port: 1,
+        password: "pw",
+        wss: [relayUrl!],
+        hostFingerprint: room.hostFingerprint,
+      });
+
+      await vi.waitFor(
+        () => {
+          const pend = host.pendingDevices(room.roomId);
+          expect(pend.ok).toBe(true);
+          expect(pend.pending).toHaveLength(1);
+        },
+        { timeout: 10_000 },
+      );
+      expect(guest.list()).toHaveLength(0);
+
+      const fp = host.pendingDevices(room.roomId).pending[0].fp;
+      const approved = host.approveDevice(room.roomId, fp);
+      expect(approved.ok).toBe(true);
+
+      const joined = await joinP;
+      expect(joined.ok).toBe(true);
+      expect(joined.error).toBeUndefined();
+      expect(joined.room?.roomId).toBe(room.roomId);
+      expect(host.pendingDevices(room.roomId).pending).toHaveLength(0);
+      expect(
+        host.get(room.roomId)?.members.some((m) => m.role === "member"),
+      ).toBe(true);
+    },
+    30_000,
+  );
+
+  it(
+    "peeks the mod offer through the relay without a LAN path",
+    async () => {
+      const relay = await startRelay();
+      const host = makeRooms();
+      const room = await createRelayHost(host, relay.url);
+      const inv = host.invite(room.roomId);
+      const decoded = decodeRoomInvite(inv.secret!);
+      const relayUrl = (decoded.wss ?? []).find((u) =>
+        u.includes(`:${relay.port}/`),
+      );
+      const guest = makeRooms();
+      const peeked = await guest.peek({
+        host: "192.0.0.1",
+        port: 1,
+        wss: [relayUrl!],
+      });
+      expect(peeked.ok).toBe(true);
+      expect(peeked.offer?.checksum ?? "").toBe(room.modChecksum);
     },
     30_000,
   );

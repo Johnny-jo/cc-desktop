@@ -911,7 +911,15 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
   });
   ipcMain.handle(IPC.roomAddSeat, async (_e, opts) => {
     if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
-    return ctx.rooms.addSeat(opts.roomId, opts.kind, opts.name, opts.agentName);
+    return ctx.rooms.addSeat(opts.roomId, opts.kind, opts.name, opts.agentName, {
+      agentPrompt: opts.agentPrompt,
+      skillNames: opts.skillNames,
+      model: opts.model,
+    });
+  });
+  ipcMain.handle(IPC.roomUpdateSeat, async (_e, opts) => {
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
+    return ctx.rooms.updateSeat(opts.roomId, opts.seatId, opts);
   });
   ipcMain.handle(IPC.roomTakeover, async (_e, { roomId, seatId }) => {
     if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };

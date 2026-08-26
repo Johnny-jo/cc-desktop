@@ -4973,6 +4973,15 @@ body.session-detaching {
   margin: 0;
 }
 
+.room-seat-skills {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 160px;
+  overflow: auto;
+  margin-top: 6px;
+}
+
 .room-pending-banner {
   padding: 6px 10px;
   font-size: 0.846rem;

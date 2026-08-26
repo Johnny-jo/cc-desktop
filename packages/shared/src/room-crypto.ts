@@ -11,6 +11,13 @@ import {
 } from "node:crypto";
 
 export const ROOM_TRANSPORT_VERSION = 1 as const;
+/**
+ * Electron's Node crypto is BoringSSL, which does not register
+ * ChaCha20-Poly1305 as an EVP_CIPHER (`createCipheriv` throws "Unknown cipher").
+ * AES-256-GCM is in both OpenSSL (vitest/Node) and BoringSSL (Electron 34).
+ * Spec allows either; nonce 12 / tag 16 / key 32 stay the same.
+ */
+export const ROOM_AEAD_ALG = "aes-256-gcm" as const;
 const HKDF_INFO = Buffer.from("cc-desktop-room-s1");
 const NONCE_LEN = 12;
 const TAG_LEN = 16;
@@ -66,7 +73,7 @@ export function sealEnvelope(opts: {
   const nonce = Buffer.alloc(NONCE_LEN);
   nonce.writeBigUInt64BE(opts.sendSeq, 4);
   const ad = aad(opts.kid, opts.fromFp, opts.sendSeq);
-  const cipher = createCipheriv("chacha20-poly1305", opts.key, nonce, {
+  const cipher = createCipheriv(ROOM_AEAD_ALG, opts.key, nonce, {
     authTagLength: TAG_LEN,
   });
   cipher.setAAD(ad, { plaintextLength: opts.plain.length });
@@ -101,7 +108,7 @@ export function openEnvelope(opts: {
   if (blob.length < TAG_LEN) throw new Error("short ciphertext");
   const tag = blob.subarray(blob.length - TAG_LEN);
   const data = blob.subarray(0, blob.length - TAG_LEN);
-  const decipher = createDecipheriv("chacha20-poly1305", opts.key, nonce, {
+  const decipher = createDecipheriv(ROOM_AEAD_ALG, opts.key, nonce, {
     authTagLength: TAG_LEN,
   });
   decipher.setAAD(ad, { plaintextLength: data.length });

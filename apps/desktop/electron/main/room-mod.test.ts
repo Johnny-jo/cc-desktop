@@ -234,6 +234,28 @@ function envFor(userDataDir: string): RuntimePathEnv {
 }
 
 describe("room mod handshake + play loop", () => {
+  it("stores agent prompt, skills, and model on a seat", async () => {
+    const { rooms } = makeRooms();
+    const { room } = await createHost(rooms);
+    const added = rooms.addSeat(room.roomId, "agent", "Arch", "architect", {
+      agentPrompt: "只谈架构",
+      skillNames: ["tdd"],
+      model: "opus",
+    });
+    expect(added.ok).toBe(true);
+    const seat = added.room!.seats.find((s) => s.name === "Arch");
+    expect(seat?.agentPrompt).toBe("只谈架构");
+    expect(seat?.skillNames).toEqual(["tdd"]);
+    expect(seat?.model).toBe("opus");
+    const upd = rooms.updateSeat(room.roomId, seat!.id, {
+      skillNames: ["tdd", "review"],
+    });
+    expect(upd.ok).toBe(true);
+    expect(
+      upd.room!.seats.find((s) => s.id === seat!.id)?.skillNames,
+    ).toEqual(["tdd", "review"]);
+  });
+
   it("host enable + guest hello receives offer with real checksum (no join)", async () => {
     const { rooms } = makeRooms();
     const pack = writeFixture(path.join(tmp(), "pack"));

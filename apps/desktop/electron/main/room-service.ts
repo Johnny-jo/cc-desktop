@@ -22,6 +22,7 @@ import type { DeviceKeys } from "@claude-desktop/shared/room-crypto";
 import type { Handshake } from "@claude-desktop/shared/room-handshake";
 import {
   ROOM_DEFAULT_PORT,
+  ROOM_HANDSHAKE_OPEN_TIMEOUT_MS,
   ROOM_HANDSHAKE_TIMEOUT_MS,
   ROOM_PROTOCOL_VERSION,
   encodeRoomInvite,
@@ -75,7 +76,12 @@ import {
 import { hashModFiles } from "@claude-desktop/shared/mod-hash";
 import { RoomConnection } from "./room-connection";
 import { loadOrCreateDeviceKeys } from "./room-device-store";
-import { frameLimit, HandshakeWatchdog, TokenBucket } from "./room-limits";
+import {
+  frameLimit,
+  HandshakeWatchdog,
+  startWsHeartbeat,
+  TokenBucket,
+} from "./room-limits";
 import { isHandshakeReason, RoomMetrics } from "./room-metrics";
 import { startRoomRelay } from "./room-relay";
 import { readNamedTunnelConfig, startRoomTunnel } from "./room-tunnel";
@@ -445,6 +451,11 @@ export class RoomService {
   /** Injectable half-open handshake timeout (tests shrink it to ms). */
   private handshakeTimeoutMs: number = ROOM_HANDSHAKE_TIMEOUT_MS;
   /**
+   * Guest wait for the first hs.challenge (tests shrink it). Covers relay
+   * work-channel pairing after the guest socket is already open.
+   */
+  private handshakeOpenTimeoutMs: number = ROOM_HANDSHAKE_OPEN_TIMEOUT_MS;
+  /**
    * Test-only hook: when false, wss:// join candidates skip TLS CA checks so
    * self-signed local test certs pass. Never set outside tests — production
    * guests always verify the relay certificate against the system CA.
@@ -604,8 +615,10 @@ export function activate(ctx) {
         deviceKeys: this.deviceKeys,
         connections: new Map(),
         pendingByFp: new Map(),
-        blacklist: new Set(),
-        knownDevices: new Map(),
+        blacklist: new Set(stored.blacklist ?? []),
+        knownDevices: new Map(
+          (stored.knownDevices ?? []).map((d) => [d.fp, d]),
+        ),
         modChecksum: stored.modChecksum ?? "",
         status,
         hostUserId: stored.role === "host" ? (stored.localUserId ?? "") : "",
@@ -843,13 +856,16 @@ export function activate(ctx) {
   async peek(opts: {
     host: string;
     port: number;
+    hosts?: string[];
+    wss?: string[];
   }): Promise<{ ok: boolean; offer?: ModOfferPayload; error?: string }> {
     const host = this.normalizeHost(opts.host);
     const port = opts.port;
     if (!host || !port) return { ok: false, error: "请填写地址和端口" };
     const cached = this.cachedOffer(host, port);
     if (cached) return { ok: true, offer: cached };
-    return this.withHostSocket(host, port, async (ws) => {
+    const urls = this.joinCandidateUrls(host, opts.hosts, port, opts.wss);
+    return this.withHostSocket(urls, async (ws) => {
       const pending = waitFrame(ws, "mod.offer", 8000);
       this.sendRaw(ws, "pending", 1, "hello", {
         protocol: ROOM_PROTOCOL_VERSION,
@@ -872,6 +888,8 @@ export function activate(ctx) {
     checksum: string;
     password?: string;
     hostFingerprint?: string;
+    hosts?: string[];
+    wss?: string[];
   }): Promise<{
     ok: boolean;
     checksum?: string;
@@ -885,7 +903,8 @@ export function activate(ctx) {
     if (!MOD_CHECKSUM_RE.test(checksum)) {
       return { ok: false, error: "模组校验码无效" };
     }
-    return this.withHostSocket(host, port, async (ws) => {
+    const urls = this.joinCandidateUrls(host, opts.hosts, port, opts.wss);
+    return this.withHostSocket(urls, async (ws) => {
       const pendingOffer = waitFrame(ws, "mod.offer", 8000);
       this.sendRaw(ws, "pending", 1, "hello", {
         protocol: ROOM_PROTOCOL_VERSION,
@@ -906,22 +925,12 @@ export function activate(ctx) {
       if (offer.checksum !== checksum) {
         return { ok: false, error: "模组校验码不一致", offer };
       }
-      // Run the handshake on this short connection first, then pull the
-      // bundle over the authenticated RoomConnection (encrypted on
-      // encrypt:true rooms; the host also serves pre-hs.ok mod.fetch in
-      // cleartext, but fetching encrypted leaks nothing on the wire).
-      const hs = await this.handshakeAsGuest(ws, {
-        password: opts.password ?? "",
-        name: displayName(),
-        hostFingerprint: opts.hostFingerprint,
-      });
-      if (!hs.ok) {
-        return { ok: false, error: hs.error, offer };
-      }
-      const collecting = collectBundles(ws, hs.conn, checksum, offer.size, 30_000);
-      hs.conn.sendFrame(makeRoomFrame("pending", 2, "mod.fetch", { checksum }));
+      // Host serves mod.fetch before hs.ok (checksum is already in the
+      // invite). Skipping the handshake avoids a fake approval request
+      // for this short-lived download — join() still does the real one.
+      const collecting = collectBundles(ws, null, checksum, offer.size, 30_000);
+      this.sendRaw(ws, "pending", 2, "mod.fetch", { checksum });
       const collected = await collecting;
-      hs.conn.close();
       if (!collected.ok) {
         return { ok: false, error: collected.error, offer };
       }
@@ -1611,14 +1620,31 @@ export function activate(ctx) {
             }
           });
           // Password already proven by the handshake — never inside join.
-          conn.sendFrame(
-            makeRoomFrame("pending", 1, "join", {
-              userId,
-              name,
-              protocol: ROOM_PROTOCOL_VERSION,
-              modChecksum: checksum,
-            }),
-          );
+          try {
+            conn.sendFrame(
+              makeRoomFrame("pending", 1, "join", {
+                userId,
+                name,
+                protocol: ROOM_PROTOCOL_VERSION,
+                modChecksum: checksum,
+              }),
+            );
+          } catch (err) {
+            if (timer) clearTimeout(timer);
+            try {
+              ws.close();
+            } catch {
+              // ignore
+            }
+            const msg = err instanceof Error ? err.message : String(err);
+            done({ ok: false, error: `加入失败：无法加密发送（${msg}）` });
+          }
+        })
+        .catch((err: unknown) => {
+          if (settled) return;
+          if (timer) clearTimeout(timer);
+          const msg = err instanceof Error ? err.message : String(err);
+          done({ ok: false, error: `加入失败：${msg}` });
         });
 
         ws.on("close", () => {
@@ -1941,14 +1967,28 @@ export function activate(ctx) {
               done(true);
             }
           });
-          conn.sendFrame(
-            makeRoomFrame(r.roomId, 1, "join", {
-              userId: r.localUserId || randomUUID(),
-              name: displayName(),
-              protocol: ROOM_PROTOCOL_VERSION,
-              modChecksum: (modChecksum ?? "").trim(),
-            }),
-          );
+          try {
+            conn.sendFrame(
+              makeRoomFrame(r.roomId, 1, "join", {
+                userId: r.localUserId || randomUUID(),
+                name: displayName(),
+                protocol: ROOM_PROTOCOL_VERSION,
+                modChecksum: (modChecksum ?? "").trim(),
+              }),
+            );
+          } catch {
+            clearTimeout(timer);
+            try {
+              ws.close();
+            } catch {
+              // ignore
+            }
+            done(false);
+          }
+        }).catch(() => {
+          if (settled) return;
+          clearTimeout(timer);
+          done(false);
         });
       });
       ws.on("close", () => {
@@ -2236,6 +2276,7 @@ export function activate(ctx) {
     kind: RoomSeatKind,
     name: string,
     agentName?: string,
+    extra?: { agentPrompt?: string; skillNames?: string[]; model?: string },
   ) {
     const r = this.rooms.get(roomId);
     if (!r || r.status !== "open") {
@@ -2261,6 +2302,15 @@ export function activate(ctx) {
       sessionId: null,
       running: false,
       agentName: kind === "agent" ? (agentName ?? label) : null,
+      ...(kind === "agent" && extra?.agentPrompt?.trim()
+        ? { agentPrompt: extra.agentPrompt.trim() }
+        : {}),
+      ...(kind === "agent" && extra?.skillNames?.length
+        ? { skillNames: extra.skillNames }
+        : {}),
+      ...(kind === "agent" && extra?.model?.trim()
+        ? { model: extra.model.trim() }
+        : {}),
     };
     r.seats.push(seat);
     this.append(r, {
@@ -2270,6 +2320,49 @@ export function activate(ctx) {
     });
     this.pushState(r);
     return { ok: true, room: this.snapshot(r) };
+  }
+
+  updateSeat(
+    roomId: string,
+    seatId: string,
+    patch: {
+      name?: string;
+      agentName?: string;
+      agentPrompt?: string;
+      skillNames?: string[];
+      model?: string;
+    },
+  ) {
+    const r = this.hostRoom(roomId);
+    if (!r.ok) return r;
+    const rec = r.room;
+    const seat = rec.seats.find((s) => s.id === seatId);
+    if (!seat) return { ok: false, error: "席位不存在" };
+    if (seat.kind !== "agent") {
+      return { ok: false, error: "只能改 Agent 席位的设定" };
+    }
+    if (typeof patch.name === "string" && patch.name.trim()) {
+      seat.name = patch.name.trim();
+    }
+    if (patch.agentName !== undefined) {
+      seat.agentName = patch.agentName.trim() || seat.name;
+    }
+    if (patch.agentPrompt !== undefined) {
+      const p = patch.agentPrompt.trim();
+      if (p) seat.agentPrompt = p;
+      else delete seat.agentPrompt;
+    }
+    if (patch.skillNames !== undefined) {
+      if (patch.skillNames.length) seat.skillNames = patch.skillNames;
+      else delete seat.skillNames;
+    }
+    if (patch.model !== undefined) {
+      const m = patch.model.trim();
+      if (m) seat.model = m;
+      else delete seat.model;
+    }
+    this.pushState(rec);
+    return { ok: true, room: this.snapshot(rec) };
   }
 
   /** Host-side: add a seat for a member (from seat.add frame). */
@@ -2871,6 +2964,18 @@ export function activate(ctx) {
     this.rooms.clear();
   }
 
+  private agentSeatPrefix(seat: RoomSeat): string {
+    const lines = [`【你是群聊席位「${seat.name}」】`];
+    if (seat.agentName) lines.push(`人设：${seat.agentName}`);
+    if (seat.agentPrompt?.trim()) lines.push(seat.agentPrompt.trim());
+    if (seat.skillNames?.length) {
+      lines.push(
+        `请优先使用这些 skills：${seat.skillNames.join("、")}。不要主动使用未列出的 skill。`,
+      );
+    }
+    return lines.join("\n");
+  }
+
   private async runAgentSeat(r: RoomRecord, seat: RoomSeat, text: string) {
     const cwd = this.settings.get().lastProjectPath;
     if (!cwd) {
@@ -2886,15 +2991,15 @@ export function activate(ctx) {
     seat.running = true;
     this.pushState(r);
     const prompt = {
-      text:
-        seat.agentName && !seat.sessionId
-          ? `【你是群聊席位「${seat.name}」，人设：${seat.agentName}】\n${text}`
-          : text,
+      text: !seat.sessionId
+        ? `${this.agentSeatPrefix(seat)}\n${text}`
+        : text,
       attachments: [],
     };
     const extras = {
       ...this.seatToolOpts(r, seat),
       replaceExtras: true,
+      ...(seat.model ? { model: seat.model } : {}),
     };
     try {
       if (!seat.sessionId) {
@@ -3214,6 +3319,7 @@ export function activate(ctx) {
           name: state.guestName ?? "guest",
           ...(state.userId ? { userId: state.userId } : {}),
         });
+        this.persist(r);
       }
       const kid = randomBytes(8).toString("base64url");
       const conn = new RoomConnection({
@@ -3276,11 +3382,30 @@ export function activate(ctx) {
     rec.connections.set(entry.ws, conn);
     conn.onFrame((frame) => this.handleGuestFrame(rec, entry.ws, frame));
     this.metrics.record({ type: "handshake", reason: "ok" });
-    entry.ws.send(
-      JSON.stringify(makeHandshake("ok", { kid, encrypt: rec.encrypt })),
-    );
+    try {
+      entry.ws.send(
+        JSON.stringify(makeHandshake("ok", { kid, encrypt: rec.encrypt })),
+      );
+    } catch (err) {
+      rec.connections.delete(entry.ws);
+      rec.knownDevices.delete(fingerprint);
+      try {
+        conn.close();
+      } catch {
+        // ignore
+      }
+      this.emitPending(rec);
+      return {
+        ok: false,
+        error:
+          err instanceof Error
+            ? `批准失败：${err.message}`
+            : "批准失败：无法通知该设备",
+      };
+    }
     entry.upgrade();
     this.emitPending(rec);
+    this.persist(rec);
     return { ok: true };
   }
 
@@ -3349,7 +3474,7 @@ export function activate(ctx) {
     rec.guests.delete(target);
     rec.connections.delete(target);
     if (conn) {
-      conn.sendFrame(
+      conn.trySendFrame(
         makeRoomFrame(rec.roomId, ++rec.seq, "kick", {
           userId,
           message: "你已被群主移出群聊",
@@ -3441,6 +3566,7 @@ export function activate(ctx) {
     return new Promise((resolve) => {
       let settled = false;
       let pending: { key: Buffer; hostFp: string } | null = null;
+      const stopHeartbeat = startWsHeartbeat(ws);
       const finish = (
         v:
           | { ok: true; conn: RoomConnection; hostFp: string; encrypt: boolean }
@@ -3448,26 +3574,33 @@ export function activate(ctx) {
       ) => {
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
+        stopHeartbeat();
+        if (timer) clearTimeout(timer);
         ws.off("message", onMsg);
         ws.off("close", onClose);
         resolve(v);
       };
-      let timer = setTimeout(
-        () => {
+      const armTimer = (ms: number, error: string) => {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => {
           this.metrics.record({
             type: "handshake",
             reason: HandshakeReject.timeout,
           });
-          finish({ ok: false, error: "握手超时" });
-        },
-        this.handshakeTimeoutMs,
-      );
+          finish({ ok: false, error });
+        }, ms);
+      };
+      // First wait is longer than the prove-phase timeout: hello is sent
+      // the moment the guest socket opens, but a relay may still be pairing
+      // the work channel (up to 10s) before hs.challenge can come back.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      armTimer(this.handshakeOpenTimeoutMs, "握手超时");
       const onMsg = (data: RawData) => {
         const pdu = parsePdu(String(data));
         if (!pdu || pdu.kind !== "hs") return;
         const hs = pdu.hs;
         if (hs.type === "challenge") {
+          armTimer(this.handshakeTimeoutMs, "握手超时");
           const p = hs.payload as {
             pub?: string;
             fp?: string;
@@ -3544,20 +3677,11 @@ export function activate(ctx) {
         }
         if (hs.type === "pending") {
           // Host is holding us for approval — wait up to 60s for hs.ok.
-          clearTimeout(timer);
-          timer = setTimeout(
-            () => {
-              this.metrics.record({
-                type: "handshake",
-                reason: HandshakeReject.timeout,
-              });
-              finish({
-                ok: false,
-                error: "等待群主审批超时（60 秒），请稍后再试",
-              });
-            },
-            60_000,
-          );
+          armTimer(60_000, "等待群主审批超时（60 秒），请稍后再试");
+          this.safeSend(IPC.roomEvent, {
+            roomId: "",
+            joining: "pending-approval",
+          });
           return;
         }
       };
@@ -3907,6 +4031,12 @@ export function activate(ctx) {
         ...(r.relayAddr ? { relay: r.relayAddr } : {}),
         ...(r.relayToken ? { relayToken: r.relayToken } : {}),
         ...(r.relayRoomId ? { relayRoomId: r.relayRoomId } : {}),
+        ...(r.localRole === "host" && r.knownDevices.size
+          ? { knownDevices: [...r.knownDevices.values()] }
+          : {}),
+        ...(r.localRole === "host" && r.blacklist.size
+          ? { blacklist: [...r.blacklist] }
+          : {}),
         ...(r.offline ? { offline: true } : {}),
         ...(r.joinInfo
           ? {
@@ -3987,8 +4117,7 @@ export function activate(ctx) {
     for (const g of r.guests) {
       const conn = r.connections.get(g);
       if (conn) {
-        conn.sendFrame(frame);
-        sent += 1;
+        if (conn.trySendFrame(frame)) sent += 1;
         continue;
       }
       // No connection: only possible for legacy plaintext (skip-encrypt) guests.
@@ -4015,7 +4144,7 @@ export function activate(ctx) {
     const frame = makeRoomFrame(r.roomId, r.seq, type, payload);
     const conn = r.connections.get(ws);
     if (conn) {
-      conn.sendFrame(frame);
+      conn.trySendFrame(frame);
       return;
     }
     // No connection (peek / legacy plaintext): answer in cleartext.
@@ -4030,7 +4159,7 @@ export function activate(ctx) {
     const frame = makeRoomFrame(r.roomId, r.seq, type, payload);
     const conn = r.connections.get(r.client);
     if (conn) {
-      conn.sendFrame(frame);
+      conn.trySendFrame(frame);
       return;
     }
     r.client.send(JSON.stringify(frame));
@@ -4165,21 +4294,15 @@ export function activate(ctx) {
   }
 
   private async withHostSocket<T>(
-    host: string,
-    port: number,
+    urls: string[],
     fn: (ws: WebSocket) => Promise<T>,
   ): Promise<T | { ok: false; error: string }> {
-    let ws: WebSocket;
-    try {
-      ws = new WebSocket(`ws://${host}:${port}`, { handshakeTimeout: 10_000 });
-    } catch (err) {
-      return {
-        ok: false,
-        error: `无法创建连接：${err instanceof Error ? err.message : String(err)}`,
-      };
+    const winner = await this.raceCandidates(urls, 2_000);
+    if (!winner) {
+      return { ok: false, error: "无法连接主机" };
     }
+    const ws = winner.ws;
     try {
-      await waitOpen(ws, 10_000);
       return await fn(ws);
     } catch (err) {
       return {
@@ -4822,7 +4945,7 @@ function assembleChunks(chunks: Map<number, Buffer>): Buffer {
 
 function collectBundles(
   ws: WebSocket,
-  conn: RoomConnection,
+  conn: RoomConnection | null,
   checksum: string,
   size: number,
   timeoutMs: number,
@@ -4837,6 +4960,7 @@ function collectBundles(
       settled = true;
       clearTimeout(timer);
       ws.off("close", onClose);
+      ws.off("message", onMsg);
       resolve(result);
     };
     const onFrame = (frame: RoomFrame) => {
@@ -4862,7 +4986,12 @@ function collectBundles(
         finish({ ok: true, bytes: assembleChunks(chunks) });
       }
     };
-    conn.onFrame(onFrame);
+    const onMsg = (data: RawData) => {
+      const frame = parseRoomFrame(String(data));
+      if (frame) onFrame(frame);
+    };
+    if (conn) conn.onFrame(onFrame);
+    else ws.on("message", onMsg);
     const onClose = () => finish({ ok: false, error: "模组下载不完整" });
     const timer = setTimeout(
       () => finish({ ok: false, error: "模组下载不完整" }),

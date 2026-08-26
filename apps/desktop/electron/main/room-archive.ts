@@ -62,6 +62,10 @@ export type StoredRoom = {
   relayToken?: string;
   /** 12-hex relay room id — re-registered on resume so the relay URL is stable. */
   relayRoomId?: string;
+  /** Host TOFU memory — approved device fingerprints, restored on resume. */
+  knownDevices?: Array<{ fp: string; name: string; userId?: string }>;
+  /** Host kick list — restored on resume so a kicked device stays out. */
+  blacklist?: string[];
 };
 
 type IndexFile = {
@@ -184,6 +188,26 @@ export class RoomArchive {
       ...(r.relay ? { relay: r.relay } : {}),
       ...(r.relayToken ? { relayToken: r.relayToken } : {}),
       ...(r.relayRoomId ? { relayRoomId: r.relayRoomId } : {}),
+      ...(Array.isArray(r.knownDevices) && r.knownDevices.length
+        ? {
+            knownDevices: r.knownDevices
+              .filter(
+                (d) =>
+                  d &&
+                  typeof d.fp === "string" &&
+                  d.fp &&
+                  typeof d.name === "string",
+              )
+              .map((d) => ({
+                fp: d.fp,
+                name: d.name,
+                ...(d.userId ? { userId: d.userId } : {}),
+              })),
+          }
+        : {}),
+      ...(Array.isArray(r.blacklist) && r.blacklist.length
+        ? { blacklist: r.blacklist.filter((fp) => typeof fp === "string" && fp) }
+        : {}),
     };
   }
 }

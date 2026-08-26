@@ -445,12 +445,34 @@ const desktop = {
     kind: import("@claude-desktop/shared").RoomSeatKind,
     name: string,
     agentName?: string,
+    extra?: { agentPrompt?: string; skillNames?: string[]; model?: string },
   ) =>
     ipcRenderer.invoke(IPC.roomAddSeat, {
       roomId,
       kind,
       name,
       agentName,
+      ...extra,
+    }) as Promise<{
+      ok: boolean;
+      room?: import("@claude-desktop/shared").RoomSnapshot;
+      error?: string;
+    }>,
+  updateRoomSeat: (
+    roomId: string,
+    seatId: string,
+    patch: {
+      name?: string;
+      agentName?: string;
+      agentPrompt?: string;
+      skillNames?: string[];
+      model?: string;
+    },
+  ) =>
+    ipcRenderer.invoke(IPC.roomUpdateSeat, {
+      roomId,
+      seatId,
+      ...patch,
     }) as Promise<{
       ok: boolean;
       room?: import("@claude-desktop/shared").RoomSnapshot;
@@ -536,7 +558,12 @@ const desktop = {
       ok: boolean;
       error?: string;
     }>,
-  peekRoom: (opts: { host: string; port: number }) =>
+  peekRoom: (opts: {
+    host: string;
+    port: number;
+    hosts?: string[];
+    wss?: string[];
+  }) =>
     ipcRenderer.invoke(IPC.roomPeek, opts) as Promise<{
       ok: boolean;
       offer?: import("@claude-desktop/shared").ModOfferPayload;
@@ -548,6 +575,8 @@ const desktop = {
     checksum: string;
     password?: string;
     hostFingerprint?: string;
+    hosts?: string[];
+    wss?: string[];
   }) =>
     ipcRenderer.invoke(IPC.roomFetchMod, opts) as Promise<{
       ok: boolean;

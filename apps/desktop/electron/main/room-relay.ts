@@ -1,4 +1,5 @@
 import { WebSocket, type RawData } from "ws";
+import { startWsHeartbeat } from "./room-limits";
 
 /**
  * Self-hosted room relay client (host side).
@@ -23,7 +24,7 @@ export type RoomRelayResult =
   | { ok: true; url: string; kill: () => void }
   | { ok: false; error: string };
 
-type Bridge = { work: WebSocket; local: WebSocket | null };
+type Bridge = { work: WebSocket; local: WebSocket | null; stopBeat?: () => void };
 
 /**
  * Register opts.roomId on the relay and resolve with the public join URL
@@ -57,6 +58,7 @@ export function startRoomRelay(opts: {
     let settled = false;
     let killed = false;
     let ctl: WebSocket | null = null;
+    let stopCtlBeat: (() => void) | null = null;
     let reconnect: ReturnType<typeof setTimeout> | null = null;
     const bridges = new Set<Bridge>();
 
@@ -65,6 +67,8 @@ export function startRoomRelay(opts: {
       killed = true;
       if (reconnect) clearTimeout(reconnect);
       reconnect = null;
+      stopCtlBeat?.();
+      stopCtlBeat = null;
       try {
         ctl?.close();
       } catch {
@@ -98,6 +102,8 @@ export function startRoomRelay(opts: {
     function dropBridge(b: Bridge): void {
       if (!bridges.has(b)) return;
       bridges.delete(b);
+      b.stopBeat?.();
+      b.stopBeat = undefined;
       try {
         b.work.close();
       } catch {
@@ -124,7 +130,7 @@ export function startRoomRelay(opts: {
       } catch {
         return;
       }
-      const bridge: Bridge = { work, local: null };
+      const bridge: Bridge = { work, local: null, stopBeat: startWsHeartbeat(work) };
       bridges.add(bridge);
       const buffered: Array<[RawData, boolean]> = [];
       work.on("open", () => {
@@ -187,6 +193,8 @@ export function startRoomRelay(opts: {
         return;
       }
       ctl = ws;
+      stopCtlBeat?.();
+      stopCtlBeat = startWsHeartbeat(ws);
       ws.on("message", (data) => {
         let msg: { t?: unknown; seq?: unknown } | null = null;
         try {
@@ -204,7 +212,11 @@ export function startRoomRelay(opts: {
         }
       });
       ws.on("close", (code) => {
-        if (ctl === ws) ctl = null;
+        if (ctl === ws) {
+          ctl = null;
+          stopCtlBeat?.();
+          stopCtlBeat = null;
+        }
         if (killed) return;
         if (!settled) {
           if (code === 4409) settle({ ok: false, error: "中继 id 被占用" });

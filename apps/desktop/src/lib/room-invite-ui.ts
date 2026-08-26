@@ -21,3 +21,30 @@ export function shortFingerprint(fp: string): string {
   if (clean.length <= 8) return clean;
   return `${clean.slice(0, 4)}…${clean.slice(-2)}`;
 }
+
+const LAST_RELAY_KEY = "room-last-relay.v1";
+
+export function loadLastRelay(): { address: string; token: string } {
+  try {
+    const raw = localStorage.getItem(LAST_RELAY_KEY);
+    if (!raw) return { address: "", token: "" };
+    const o = JSON.parse(raw) as { address?: unknown; token?: unknown };
+    return {
+      address: typeof o.address === "string" ? o.address : "",
+      token: typeof o.token === "string" ? o.token : "",
+    };
+  } catch {
+    return { address: "", token: "" };
+  }
+}
+
+export function saveLastRelay(address: string, token: string): void {
+  try {
+    localStorage.setItem(
+      LAST_RELAY_KEY,
+      JSON.stringify({ address, token }),
+    );
+  } catch {
+    // ignore quota / private mode
+  }
+}

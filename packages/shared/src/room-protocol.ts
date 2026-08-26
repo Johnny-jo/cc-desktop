@@ -7,6 +7,12 @@ export const MOD_KERNEL_API = 2;
 export const MOD_BUNDLE_MAX_BYTES = 512 * 1024;
 
 export const ROOM_HANDSHAKE_TIMEOUT_MS = 10_000;
+/**
+ * Guest wait for the first hs.challenge. Longer than the prove-phase
+ * timeout because a relay work-channel may still be pairing after the
+ * guest socket is already open (hello sits in the relay buffer until then).
+ */
+export const ROOM_HANDSHAKE_OPEN_TIMEOUT_MS = 20_000;
 export const ROOM_FRAME_LIMITS = {
   handshake: 8 * 1024,
   "chat.user": 64 * 1024,
@@ -125,6 +131,12 @@ export type RoomSeat = {
   running: boolean;
   /** Agent persona name from settings.agents (host-only meaning) */
   agentName: string | null;
+  /** Extra system prompt for this agent seat. */
+  agentPrompt?: string;
+  /** Skill names this seat should prefer. */
+  skillNames?: string[];
+  /** Optional model override; omit = host default. */
+  model?: string;
 };
 
 /** QQ-style quoted message reference (id + excerpt snapshot) */

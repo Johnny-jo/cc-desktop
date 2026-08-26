@@ -178,12 +178,13 @@ async function createHostRoom(
     password?: string;
     relay?: string;
     tunnel?: boolean;
+    autoApprove?: boolean;
   },
 ): Promise<RoomSnapshot> {
   const res = await svc.create({
     name: opts.name ?? "t",
     port: opts.port,
-    autoApprove: true,
+    autoApprove: opts.autoApprove !== false,
     ...(opts.password ? { password: opts.password } : {}),
     ...(opts.relay ? { relay: opts.relay } : {}),
     ...(opts.tunnel ? { tunnel: true } : {}),
@@ -346,6 +347,54 @@ describe("RoomService resume hosting", () => {
       expect(
         rejoined.room!.items.some((i) => i.text === "before-restart-1"),
       ).toBe(true);
+    },
+    40_000,
+  );
+
+  it(
+    "restores approved devices so a known guest does not wait for approval after host restart",
+    async () => {
+      const hostDir = tmp();
+      const host1 = makeService(hostDir);
+      const port = await freePort();
+      const room = await createHostRoom(host1, {
+        port,
+        password: "pw",
+        autoApprove: false,
+      });
+      const guestDir = tmp();
+      const guest1 = makeService(guestDir);
+      const joinP = guest1.join({
+        host: "127.0.0.1",
+        port,
+        password: "pw",
+        hostFingerprint: room.hostFingerprint,
+      });
+      await vi.waitFor(
+        () => {
+          expect(host1.pendingDevices(room.roomId).pending.length).toBe(1);
+        },
+        { timeout: 8_000 },
+      );
+      const fp = host1.pendingDevices(room.roomId).pending[0].fp;
+      expect(host1.approveDevice(room.roomId, fp).ok).toBe(true);
+      const joined = await joinP;
+      expect(joined.ok).toBe(true);
+
+      host1.disposeAll();
+      await waitPortFree(port);
+      const host2 = makeService(hostDir);
+      await waitResumed(host2, room.roomId);
+
+      const guest2 = makeService(guestDir);
+      const rejoin = await guest2.join({
+        host: "127.0.0.1",
+        port,
+        password: "pw",
+        hostFingerprint: room.hostFingerprint,
+      });
+      expect(rejoin.ok).toBe(true);
+      expect(host2.pendingDevices(room.roomId).pending).toHaveLength(0);
     },
     40_000,
   );

@@ -13,7 +13,11 @@ import {
   joinPrimaryAction,
   offerHasMod,
 } from "../lib/room-mod-ui";
-import { joinErrorForInvite } from "../lib/room-invite-ui";
+import {
+  joinErrorForInvite,
+  loadLastRelay,
+  saveLastRelay,
+} from "../lib/room-invite-ui";
 import { useI18n } from "../i18n/useI18n";
 import {
   loadLastCollectionId,
@@ -44,6 +48,7 @@ export function RoomSidebar() {
   const lastError = useRoomStore((s) => s.lastError);
   const dialog = useRoomStore((s) => s.dialog);
   const reconnectNote = useRoomStore((s) => s.reconnectNote);
+  const joinPhase = useRoomStore((s) => s.joinPhase);
   const [open, setOpen] = useState(false);
 
   // Create form
@@ -55,9 +60,9 @@ export function RoomSidebar() {
   const [publicOn, setPublicOn] = useState(false);
   const [publicWss, setPublicWss] = useState("");
   const [tunnel, setTunnel] = useState(false);
-  const [relayOn, setRelayOn] = useState(false);
-  const [relay, setRelay] = useState("");
-  const [relayToken, setRelayToken] = useState("");
+  const [relayOn, setRelayOn] = useState(() => Boolean(loadLastRelay().address));
+  const [relay, setRelay] = useState(() => loadLastRelay().address);
+  const [relayToken, setRelayToken] = useState(() => loadLastRelay().token);
   // Mod 选集（创建时一键套用）
   const [collections, setCollections] = useState<ModCollection[]>([]);
   const [collectionId, setCollectionId] = useState<string>(() =>
@@ -112,12 +117,14 @@ export function RoomSidebar() {
     let p = Number(joinPort) || ROOM_DEFAULT_PORT;
     let extras = inviteHosts;
     const secretRaw = secret.trim();
+    let wss: string[] = [];
     if (looksLikeRoomInvite(secretRaw)) {
       try {
         const inv = decodeRoomInvite(secretRaw);
         h = inv.host;
         p = inv.port;
         extras = inv.hosts ?? [];
+        wss = inv.wss ?? [];
       } catch {
         setPeeking(false);
         return;
@@ -133,20 +140,19 @@ export function RoomSidebar() {
       setPeeking(false);
       return;
     }
-    const candidates = [h, ...extras.filter((x) => x && x !== h)];
     setPeeking(true);
     const timer = window.setTimeout(() => {
       void (async () => {
         let found: ModOfferPayload | null = null;
-        for (const candidate of candidates) {
-          if (gen !== peekGen.current) return;
-          const res = await peekRoom({ host: candidate, port: p });
-          if (gen !== peekGen.current) return;
-          if (res.ok) {
-            found = res.offer ?? null;
-            break;
-          }
-        }
+        if (gen !== peekGen.current) return;
+        const res = await peekRoom({
+          host: h,
+          port: p,
+          hosts: extras,
+          wss: wss.length ? wss : undefined,
+        });
+        if (gen !== peekGen.current) return;
+        if (res.ok) found = res.offer ?? null;
         if (gen !== peekGen.current) return;
         setOffer(found);
         const checksum = found?.checksum || inviteChecksum;
@@ -221,6 +227,9 @@ export function RoomSidebar() {
     const roomName = name.trim() || `群聊-${p}`;
     // 公网 / 隧道 / 中继房间强制加密：忽略「跳过加密」（表单里有对应提示）
     const skip = skipEncrypt && !publicOn && !tunnel && !relayOn;
+    if (relayOn && relay.trim()) {
+      saveLastRelay(relay.trim(), relayToken.trim());
+    }
     const res = await createRoom({
       name: roomName,
       password: password || undefined,
@@ -335,52 +344,53 @@ export function RoomSidebar() {
     const needSync = primary === "sync-join";
     const checksum = target.checksum;
 
-    let lastError = "";
-    for (const candidate of target.candidates) {
-      if (gen !== joinGen.current) return;
-      if (needSync) {
-        if (!checksum) {
-          lastError = "缺少模组校验码";
-          break;
-        }
-        setProgress(t.room.syncing);
-        const fetched = await fetchRoomMod({
-          host: candidate,
-          port: target.port,
-          checksum,
-          password: target.password,
-          hostFingerprint: target.fingerprint,
-        });
-        if (gen !== joinGen.current) return;
-        if (!fetched.ok) {
-          lastError = fetched.error ?? "同步失败";
-          continue;
-        }
-      }
-      if (gen !== joinGen.current) return;
-      setProgress(needSync ? t.room.joining : null);
-      const res = await joinRoom({
-        host: candidate,
-        port: target.port,
-        password: target.password,
-        modChecksum: checksum,
-        hosts: target.candidates,
-        wss: target.wss.length ? target.wss : undefined,
-        hostFingerprint: target.fingerprint,
-      });
-      if (gen !== joinGen.current) return;
-      if (res.ok) {
+    const wss = target.wss.length ? target.wss : undefined;
+    if (needSync) {
+      if (!checksum) {
         setBusy(false);
-        setProgress(null);
-        resetForms();
-        closeRoomDialog();
+        setErr("缺少模组校验码");
         return;
       }
-      lastError = res.error ?? "加入失败";
+      setProgress(t.room.syncing);
+      const fetched = await fetchRoomMod({
+        host: target.host,
+        port: target.port,
+        checksum,
+        password: target.password,
+        hostFingerprint: target.fingerprint,
+        hosts: target.candidates,
+        wss,
+      });
+      if (gen !== joinGen.current) return;
+      if (!fetched.ok) {
+        setBusy(false);
+        setProgress(null);
+        setErr(fetched.error ?? "同步失败");
+        return;
+      }
+    }
+    if (gen !== joinGen.current) return;
+    setProgress(needSync ? t.room.joining : null);
+    const res = await joinRoom({
+      host: target.host,
+      port: target.port,
+      password: target.password,
+      modChecksum: checksum,
+      hosts: target.candidates,
+      wss,
+      hostFingerprint: target.fingerprint,
+    });
+    if (gen !== joinGen.current) return;
+    if (res.ok) {
+      setBusy(false);
+      setProgress(null);
+      resetForms();
+      closeRoomDialog();
+      return;
     }
     setBusy(false);
     setProgress(null);
-    setErr(lastError || "加入失败");
+    setErr(res.error ?? "加入失败");
   };
 
   return (
@@ -643,6 +653,7 @@ export function RoomSidebar() {
                         onChange={(e) => setRelayToken(e.target.value)}
                       />
                     </label>
+                    <p className="settings-hint">{t.room.relayHint}</p>
                   </>
                 ) : null}
                 <label className="settings-field">
@@ -798,15 +809,25 @@ export function RoomSidebar() {
                     ? t.room.creating
                     : t.room.createBtn
                   : busy
-                    ? progress ||
-                      (joinPrimaryAction({ inviteChecksum, offer, cacheHit }) ===
-                      "sync-join"
-                        ? t.room.syncing
-                        : t.room.joining)
-                    : joinPrimaryAction({ inviteChecksum, offer, cacheHit }) ===
-                        "sync-join"
-                      ? t.room.syncAndJoin
-                      : t.room.joinBtn}
+                    ? joinPhase === "pending-approval"
+                      ? t.room.waitingApprove
+                      : progress ||
+                        (joinPrimaryAction({
+                          inviteChecksum,
+                          offer,
+                          cacheHit,
+                        }) === "sync-join"
+                          ? t.room.syncing
+                          : t.room.joining)
+                    : err && /超时|断开|关闭/.test(err)
+                      ? t.room.retryJoin
+                      : joinPrimaryAction({
+                            inviteChecksum,
+                            offer,
+                            cacheHit,
+                          }) === "sync-join"
+                        ? t.room.syncAndJoin
+                        : t.room.joinBtn}
               </button>
             </footer>
           </div>

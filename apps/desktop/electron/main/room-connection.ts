@@ -7,6 +7,7 @@ import {
 } from "@claude-desktop/shared/room-crypto";
 import { parsePdu } from "@claude-desktop/shared/room-pdu";
 import { parseRoomFrame, type RoomFrame } from "@claude-desktop/shared";
+import { startWsHeartbeat } from "./room-limits";
 
 /** Send an ack after this many received app frames… */
 const ACK_EVERY = 8;
@@ -41,11 +42,14 @@ export class RoomConnection {
   private ackTimer: NodeJS.Timeout | null = null;
   private readonly handlers: Array<(frame: RoomFrame) => void> = [];
   private closed = false;
+  private readonly stopHeartbeat: () => void;
 
   constructor(opts: RoomConnectionOpts) {
     this.opts = opts;
     this.lastAckAt = Date.now();
+    this.stopHeartbeat = startWsHeartbeat(opts.ws);
     opts.ws.on("message", (data) => this.onMessage(String(data)));
+    opts.ws.on("close", () => this.close());
   }
 
   get peerFp(): string {
@@ -70,20 +74,37 @@ export class RoomConnection {
       this.opts.ws.send(JSON.stringify(frame));
       return;
     }
-    const env = sealEnvelope({
-      key: this.opts.key,
-      kid: this.opts.kid,
-      sendSeq: this.sendSeq,
-      fromFp: this.opts.selfFp,
-      plain: Buffer.from(JSON.stringify(frame), "utf8"),
-    });
+    let env: AeadEnvelope;
+    try {
+      env = sealEnvelope({
+        key: this.opts.key,
+        kid: this.opts.kid,
+        sendSeq: this.sendSeq,
+        fromFp: this.opts.selfFp,
+        plain: Buffer.from(JSON.stringify(frame), "utf8"),
+      });
+    } catch (err) {
+      this.close();
+      throw err;
+    }
     this.sendSeq += 1n;
     this.opts.ws.send(JSON.stringify(env));
+  }
+
+  /** Host fan-out: never throw; a dead peer must not stall the others. */
+  trySendFrame(frame: RoomFrame): boolean {
+    try {
+      this.sendFrame(frame);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.stopHeartbeat();
     if (this.ackTimer) {
       clearTimeout(this.ackTimer);
       this.ackTimer = null;

@@ -59,6 +59,8 @@ export type QueryFn = (args: {
 export type SessionRunOpts = {
   extraMcpServers?: Record<string, unknown>;
   extraAllowedTools?: string[];
+  /** Per-session model override (room agent seats). */
+  model?: string;
   /**
    * When true, extraMcpServers / extraAllowedTools replace the session extras
    * instead of merging. Room seats always pass this.
@@ -207,6 +209,7 @@ type SessionEntry = {
   nextId: (prefix: string) => string;
   extraMcpServers?: Record<string, unknown>;
   extraAllowedTools?: string[];
+  model?: string;
 };
 
 /**
@@ -1313,6 +1316,7 @@ export class SessionManager {
       nextId: createIdFactory(),
       extraMcpServers: opts?.extraMcpServers,
       extraAllowedTools: opts?.extraAllowedTools,
+      ...(opts?.model ? { model: opts.model } : {}),
     };
     this.sessions.set(sessionId, entry);
     if (!summary.hiddenFromList) this.emitSession({ ...summary });
@@ -1341,6 +1345,10 @@ export class SessionManager {
       throw new Error(`Unknown session: ${sessionId}`);
     }
     let reopenForExtras = false;
+    if (opts?.model && opts.model !== entry.model) {
+      entry.model = opts.model;
+      reopenForExtras = true;
+    }
     if (opts?.replaceExtras) {
       const nextServers = opts.extraMcpServers ?? {};
       const nextTools = opts.extraAllowedTools ?? [];
@@ -1495,7 +1503,7 @@ export class SessionManager {
       cwd: entry.summary.cwd,
       includePartialMessages: true,
       permissionMode: settings.permissionMode,
-      model: settings.defaultModel,
+      model: entry.model || settings.defaultModel,
       ...(settings.effort ? { effort: settings.effort } : {}),
       ...(claudePath ? { pathToClaudeCodeExecutable: claudePath } : {}),
       env,
