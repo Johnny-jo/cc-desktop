@@ -74,7 +74,7 @@ function applyWindowTheme(theme: "dark" | "light"): void {
       win.setTitleBarOverlay({
         color: theme === "light" ? APP_BG_LIGHT : APP_BG,
         symbolColor: theme === "light" ? TITLE_SYMBOL_LIGHT : TITLE_SYMBOL_DARK,
-        height: 36,
+        height: 40,
       });
       win.setBackgroundColor(theme === "light" ? APP_BG_LIGHT : APP_BG);
     } catch {
@@ -223,7 +223,7 @@ function buildWindow(width: number, height: number): BrowserWindow {
     titleBarOverlay: {
       color: APP_BG,
       symbolColor: "#e8e8e8",
-      height: 36,
+      height: 40,
     },
     webPreferences: {
       preload: path.join(__dirname, "../preload/index.js"),
@@ -465,6 +465,7 @@ function bootstrap() {
   const roomArchive = new RoomArchive(userDataDir);
   const rooms = new RoomService({
     getWindow: getMainWindow,
+    sendToAllWindows: sendToRenderer,
     sessions,
     settings,
     archive: roomArchive,

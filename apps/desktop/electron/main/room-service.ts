@@ -565,6 +565,11 @@ function waitForListening(
 export class RoomService {
   private rooms = new Map<string, RoomRecord>();
   private readonly getWindow: () => BrowserWindow | null;
+  /**
+   * Multi-window push (main + detached room/session windows). When absent,
+   * safeSend falls back to getWindow() — tests inject only getWindow.
+   */
+  private readonly sendToAllWindows?: (channel: string, payload: unknown) => void;
   private readonly sessions: SessionManager;
   private readonly settings: SettingsStore;
   private readonly archive: RoomArchive | null;
@@ -622,6 +627,8 @@ export class RoomService {
 
   constructor(opts: {
     getWindow: () => BrowserWindow | null;
+    /** Push a channel to every live renderer window (main + detached). */
+    sendToAllWindows?: (channel: string, payload: unknown) => void;
     sessions: SessionManager;
     settings: SettingsStore;
     archive?: RoomArchive | null;
@@ -634,6 +641,7 @@ export class RoomService {
     cpa?: CpaSupervisor;
   }) {
     this.getWindow = opts.getWindow;
+    this.sendToAllWindows = opts.sendToAllWindows;
     this.sessions = opts.sessions;
     this.settings = opts.settings;
     this.cpa = opts.cpa;
@@ -4982,6 +4990,7 @@ export function activate(ctx) {
     rec.seats = rec.seats.filter(
       (s) => !(s.kind === "human" && s.occupantUserId === userId),
     );
+    this.unbindMemberFromSeats(rec, userId);
     const by = actorRole === "admin" ? "管理员" : "群主";
     this.append(rec, {
       kind: "system",
@@ -5803,12 +5812,28 @@ export function activate(ctx) {
     r.seats = r.seats.filter(
       (s) => !(s.kind === "human" && s.occupantUserId === userId),
     );
+    this.unbindMemberFromSeats(r, userId);
     this.append(r, {
       kind: "system",
       text: `${name} 退出了群聊`,
       authorLabel: "系统",
     });
     this.pushState(r);
+  }
+
+  /**
+   * 成员被移除（踢出/退出）后，清掉席位上挂着他的引用：接管标记直接释放；
+   * Agent 席位的 文件/AI/执行 绑定置空，resolveWorkspaceUserId /
+   * resolveAiUserId 的缺省链会回落到房主。只清引用，席位本身保留。
+   */
+  private unbindMemberFromSeats(r: RoomRecord, userId: string): void {
+    for (const seat of r.seats) {
+      if (seat.takenOverBy === userId) seat.takenOverBy = null;
+      if (seat.kind !== "agent") continue;
+      if (seat.workspaceUserId === userId) seat.workspaceUserId = null;
+      if (seat.executorUserId === userId) seat.executorUserId = null;
+      if (seat.aiUserId === userId) seat.aiUserId = null;
+    }
   }
 
   private snapshot(r: RoomRecord): RoomSnapshot {
@@ -6000,6 +6025,11 @@ export function activate(ctx) {
   }
 
   private safeSend(channel: string, payload: unknown): void {
+    // 分窗（独立群聊窗口）也要收到 room:event，否则只刷新主窗口。
+    if (this.sendToAllWindows) {
+      this.sendToAllWindows(channel, payload);
+      return;
+    }
     const win = this.getWindow();
     if (!win || win.isDestroyed()) return;
     const wc = win.webContents;
