@@ -527,7 +527,7 @@ export function RoomStage() {
                       ) : (
                         <div className="room-msg-text">{renderText(it.text)}</div>
                       )}
-                      {it.kind === "user" || it.kind === "assistant" ? (
+                      {/* {it.kind === "user" || it.kind === "assistant" ? (
                         <button
                           type="button"
                           className="room-msg-quote-btn"
@@ -542,7 +542,7 @@ export function RoomStage() {
                         >
                           {t.room.quoteAction}
                         </button>
-                      ) : null}
+                      ) : null} */}
                     </>
                   )}
                 </div>

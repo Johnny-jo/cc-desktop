@@ -5567,7 +5567,8 @@ body.session-detaching {
   color: var(--text-faint);
   font-style: italic;
   font-size: 0.846rem;
-  padding: 4px 2px;
+  padding: 4px 12px;
+  display: inline-block;
 }
 
 /* Markdown 体（assistant 回复）：交给 .md 排版，不用 pre-wrap */
@@ -5736,7 +5737,7 @@ body.session-detaching {
 }
 
 /* hover 出「引用」按钮 */
-.room-msg-quote-btn {
+/* .room-msg-quote-btn {
   position: absolute;
   top: -2px;
   right: 0;
@@ -5749,7 +5750,7 @@ body.session-detaching {
   padding: 2px 8px;
   cursor: pointer;
   transition: opacity 120ms ease, border-color 120ms ease, color 120ms ease;
-}
+} */
 
 .room-msg.is-me .room-msg-quote-btn {
   right: auto;
@@ -5757,14 +5758,14 @@ body.session-detaching {
 }
 
 .room-msg:hover .room-msg-quote-btn,
-.room-msg-quote-btn:focus-visible {
+/* .room-msg-quote-btn:focus-visible {
   opacity: 1;
-}
+} */
 
-.room-msg-quote-btn:hover {
+/* .room-msg-quote-btn:hover {
   border-color: var(--accent);
   color: var(--accent);
-}
+} */
 
 .room-msg.kind-system .room-msg-text {
   background: transparent;

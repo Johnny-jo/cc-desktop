@@ -1443,6 +1443,7 @@ export class SessionManager {
     if (opts?.hiddenFromList) entry.summary.hiddenFromList = true;
     if (opts?.title) entry.summary.title = opts.title;
     if (opts?.permissionMode) entry.permissionMode = opts.permissionMode;
+    if (opts?.pathJail) entry.pathJail = opts.pathJail;
     if (opts?.extraEnv) entry.extraEnv = opts.extraEnv;
     if (opts?.skipCpa) entry.skipCpa = true;
 
@@ -1648,6 +1649,34 @@ export class SessionManager {
       // Surface SDK Notification events (permission needed, idle, task done)
       // for desktop notifications.
       hooks: {
+        // 路径围栏必须挂在 PreToolUse：canUseTool 只管需要授权的工具，
+        // Read/Glob/Grep 等只读工具在多数权限模式下根本不进 canUseTool，
+        // 而 PreToolUse 对每一次工具调用都会触发（含只读、含 bypass 模式）。
+        PreToolUse: [
+          {
+            hooks: [
+              async (input: {
+                tool_name?: string;
+                tool_input?: unknown;
+              }) => {
+                if (!entry.pathJail) return {};
+                const violation = pathJailViolation(
+                  entry.pathJail,
+                  String(input.tool_name ?? ""),
+                  (input.tool_input ?? {}) as Record<string, unknown>,
+                );
+                if (!violation) return {};
+                return {
+                  hookSpecificOutput: {
+                    hookEventName: "PreToolUse" as const,
+                    permissionDecision: "deny" as const,
+                    permissionDecisionReason: violation,
+                  },
+                };
+              },
+            ],
+          },
+        ],
         Notification: [
           {
             hooks: [

@@ -21,9 +21,9 @@ function queryFn(): QueryFn {
   };
 }
 
-function manager(): SessionManager {
+function manager(qf: QueryFn = queryFn()): SessionManager {
   return new SessionManager({
-    queryFn: queryFn(),
+    queryFn: qf,
     permissionBroker: { canUseTool: vi.fn() } as unknown as PermissionBroker,
     diffTracker: {
       onToolUse: vi.fn(),
@@ -107,5 +107,88 @@ describe("SessionManager extras replace / sync", () => {
     const after = (sm as unknown as { sessions: Map<string, { streamGen: number; extraMcpServers?: Record<string, unknown> }> }).sessions.get(id)!;
     expect(Object.keys(after.extraMcpServers ?? {})).toEqual([]);
     expect(after.streamGen).toBe(before + 1);
+  });
+});
+
+type CapturedOptions = {
+  hooks?: {
+    PreToolUse?: Array<{
+      hooks: Array<(input: unknown) => Promise<Record<string, unknown>>>;
+    }>;
+  };
+};
+
+function capturingQueryFn(captured: { options?: CapturedOptions }): QueryFn {
+  return async function* (args) {
+    captured.options = args.options as CapturedOptions;
+    await takeFirstUserText(args.prompt);
+    yield { type: "result", subtype: "success", total_cost_usd: 0 };
+  };
+}
+
+async function preToolUse(
+  options: CapturedOptions,
+  toolName: string,
+  input: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const hook = options.hooks?.PreToolUse?.[0]?.hooks[0];
+  expect(hook).toBeTruthy();
+  return hook!({ tool_name: toolName, tool_input: input });
+}
+
+describe("pathJail PreToolUse hook（只读工具也拦）", () => {
+  it("越界 Read 被 deny，区内路径放行", async () => {
+    const captured: { options?: CapturedOptions } = {};
+    const sm = manager(capturingQueryFn(captured));
+    await sm.start(
+      { text: "hi", attachments: [] },
+      "D:/p",
+      { pathJail: "D:/p" },
+    );
+    const out = await preToolUse(captured.options!, "Read", {
+      file_path: "D:/other/secrets.txt",
+    }) as { hookSpecificOutput?: { permissionDecision?: string } };
+    expect(out.hookSpecificOutput?.permissionDecision).toBe("deny");
+
+    const inside = await preToolUse(captured.options!, "Read", {
+      file_path: "D:/p/src/a.ts",
+    });
+    expect(inside).toEqual({});
+
+    const rel = await preToolUse(captured.options!, "Edit", {
+      file_path: "../escape.ts",
+    }) as { hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string } };
+    expect(rel.hookSpecificOutput?.permissionDecision).toBe("deny");
+    expect(rel.hookSpecificOutput?.permissionDecisionReason).toContain("已拒绝");
+  });
+
+  it("无 pathJail 的会话 hook 完全放行", async () => {
+    const captured: { options?: CapturedOptions } = {};
+    const sm = manager(capturingQueryFn(captured));
+    await sm.start({ text: "hi", attachments: [] }, "D:/p");
+    const out = await preToolUse(captured.options!, "Read", {
+      file_path: "D:/other/secrets.txt",
+    });
+    expect(out).toEqual({});
+  });
+
+  it("continue 带上 pathJail 后围栏立即生效", async () => {
+    const captured: { options?: CapturedOptions } = {};
+    const sm = manager(capturingQueryFn(captured));
+    const id = await sm.start({ text: "hi", attachments: [] }, "D:/p");
+    await sm.continue(
+      id,
+      { text: "next", attachments: [] },
+      { pathJail: "D:/p" },
+    );
+    const entry = (sm as unknown as {
+      sessions: Map<string, { pathJail?: string }>;
+    }).sessions.get(id);
+    expect(entry?.pathJail).toBe("D:/p");
+    const out = await preToolUse(captured.options!, "Glob", {
+      pattern: "**/*",
+      path: "D:/other",
+    }) as { hookSpecificOutput?: { permissionDecision?: string } };
+    expect(out.hookSpecificOutput?.permissionDecision).toBe("deny");
   });
 });
