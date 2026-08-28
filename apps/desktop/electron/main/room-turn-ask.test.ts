@@ -171,9 +171,14 @@ describe("room turn ask (filePolicy = ask)", () => {
     await vi.waitFor(() =>
       expect(host.sessions.start).toHaveBeenCalledTimes(1),
     );
-    const extras = (host.sessions.start as ReturnType<typeof vi.fn>).mock
-      .calls[0][2] as Record<string, unknown>;
+    const startArgs = (host.sessions.start as ReturnType<typeof vi.fn>).mock
+      .calls[0];
+    const extras = startArgs[2] as Record<string, unknown>;
     expect(extras.pathJail).toBe(host.dir);
+    // 首条 prompt 带路径守卫提示并点名内置 skill
+    const promptText = (startArgs[0] as { text: string }).text;
+    expect(promptText).toContain("路径守卫");
+    expect(promptText).toContain("room-workspace-guard");
     // 作答后广播 resolved，便于关掉其他窗口的弹窗。
     await vi.waitFor(() =>
       expect(
@@ -369,6 +374,20 @@ describe("pathJailViolation", () => {
         command: "git status && echo ok > src/out.txt",
       }),
     ).toBeNull();
+  });
+
+  it("Bash 中段 .. 逃逸（sub/../../x）被拒", () => {
+    const v = pathJailViolation(root, "Bash", {
+      command: "cat sub/../../etc/passwd",
+    });
+    expect(v).toContain("已拒绝");
+  });
+
+  it("Bash pushd 到工作区外被拒", () => {
+    const v = pathJailViolation(root, "Bash", {
+      command: "pushd .. && echo x > leaked.txt",
+    });
+    expect(v).toContain("已拒绝");
   });
 
   it("未登记的工具放行", () => {

@@ -223,7 +223,15 @@ export type PermissionRequest = {
 };
 
 export type PermissionDecision =
-  | { behavior: "allow"; scope: "once" | "session" | "always" }
+  | {
+      behavior: "allow";
+      scope: "once" | "session" | "always";
+      /**
+       * AskUserQuestion 这类工具需要把用户的答案合并进工具入参再放行
+       * （SDK 以 updatedInput 回传给模型）。
+       */
+      updatedInput?: Record<string, unknown>;
+    }
   | { behavior: "deny"; message?: string };
 
 export type AppSettings = {

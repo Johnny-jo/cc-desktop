@@ -296,11 +296,15 @@ export function extractBashPathCandidates(command: string): string[] {
   while ((m = redir.exec(text))) push(m[1] ?? "");
 
   const cd =
-    /(?:^|[\s;&|])(?:cd|chdir|Set-Location|Push-Location)\s+(?:-Path\s+|-LiteralPath\s+)?([^\s|&;]+)/gi;
+    /(?:^|[\s;&|])(?:cd|chdir|pushd|Set-Location|Push-Location)\s+(?:-Path\s+|-LiteralPath\s+)?([^\s|&;]+)/gi;
   while ((m = cd.exec(text))) push(m[1] ?? "");
 
   const up = /(?:^|[\s"'=(])(\.\.(?:[\\/][^\s"'<>|&;]*)?)/g;
   while ((m = up.exec(text))) push(m[1] ?? "");
+
+  // 中段逃逸：sub/../../x —— .. 前面贴着字符时上面的 up 抓不到。
+  const mid = /(?:^|[\s"'=(])([^\s"'<>|&;]*[\\/]\.\.(?:[\\/][^\s"'<>|&;]*)?)/g;
+  while ((m = mid.exec(text))) push(m[1] ?? "");
 
   return out;
 }
@@ -334,7 +338,7 @@ export function pathJailViolation(
     const command = String(input.command ?? "");
     if (!command.trim()) return null;
     if (
-      /(?:^|[;&|]\s*)(?:cd|chdir|Set-Location|Push-Location)(?:\s*(?:&&|\|\||;|$))/i.test(
+      /(?:^|[;&|]\s*)(?:cd|chdir|pushd|Set-Location|Push-Location)(?:\s*(?:&&|\|\||;|$))/i.test(
         command,
       )
     ) {

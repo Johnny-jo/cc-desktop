@@ -6893,6 +6893,33 @@ body.session-detaching {
   line-height: 1.45;
 }
 
+/* AskUserQuestion 选项表单 */
+.ask-question {
+  margin-bottom: 14px;
+}
+
+.ask-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.ask-option {
+  max-width: 100%;
+  text-align: left;
+}
+
+.ask-other {
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 0.923rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input, var(--bg-code));
+  color: var(--text);
+}
+
 .permission-details summary {
   cursor: pointer;
   color: var(--text-muted);

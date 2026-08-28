@@ -70,6 +70,39 @@ export function ensureSkillsDir(scope: "user" | "project", cwd?: string | null):
 }
 
 /**
+ * 内置 skill：群聊/远程执行的工作区路径守卫说明。由应用托管——每次启动
+ * 覆盖写入，用户改不动（内容更新随版本下发）。房间驱动的会话提示词会
+ * 点名让 AI 读它。
+ */
+export const BUILTIN_PATH_GUARD_SKILL = "room-workspace-guard";
+
+const PATH_GUARD_SKILL_MD = `---
+name: ${BUILTIN_PATH_GUARD_SKILL}
+description: 群聊/远程执行时的工作区路径守卫规则。当任务来自群聊房间、或提示词提到"路径守卫"时必读。
+---
+
+# 工作区路径守卫
+
+你在群聊房间里被派任务时，工作区主人启用了路径守卫：
+
+1. 所有文件操作（Read/Write/Edit/MultiEdit/Glob/Grep/LS）必须限制在主人打开的项目目录内，越界会被直接拒绝。
+2. Bash 命令同样受限：命令中出现目录外的绝对路径、\`..\` 逃逸、\`~\` 或 \`$HOME\` 主目录、\`cd\`/\`pushd\` 到目录外，都会被直接拒绝。
+3. 被拒绝后不要换招绕过（换工具、拼相对路径、先写临时目录再移动、用 python/node 写文件，都算违规且同样会被拦）。
+4. 正确做法：在允许的项目目录内完成任务；确需访问目录外内容时，在回复里向工作区主人说明理由和具体路径，由主人决定。
+`;
+
+export function ensureBuiltinSkills(): void {
+  try {
+    const dir = path.join(userSkillsDir(), BUILTIN_PATH_GUARD_SKILL);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "SKILL.md"), PATH_GUARD_SKILL_MD, "utf8");
+  } catch {
+    // non-fatal — 守卫靠 hook 强制执行，skill 只是告知
+  }
+}
+
+
+/**
  * Delete an installed skill. Safety: only deletes directories that look like
  * a skill (contain SKILL.md) and live under the expected skills root.
  */

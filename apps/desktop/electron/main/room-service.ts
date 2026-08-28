@@ -66,6 +66,7 @@ import {
 import { parsePdu } from "@claude-desktop/shared/room-pdu";
 import type { SessionManager, SessionRunOpts } from "./session-manager";
 import type { SettingsStore } from "./settings-store";
+import { BUILTIN_PATH_GUARD_SKILL } from "./skill-store";
 import type { CpaSupervisor } from "./cpa-supervisor";
 import {
   buildReqFrames,
@@ -3287,6 +3288,17 @@ export function activate(ctx) {
     return lines.join("\n");
   }
 
+  /**
+   * 路径守卫提示：群聊驱动的会话一律被 hook 圈在 cwd 内，这里先把规则讲清楚，
+   * 免得 AI 撞墙后换招绕过（skill 里有完整规则，首条提示点名它）。
+   */
+  private pathGuardPrefix(cwd: string): string {
+    return [
+      `路径守卫：你只能读写 ${cwd} 之内的文件；Bash 命令也不允许访问该目录之外的路径（越界会被直接拒绝，被拒绝后不要换工具或拼路径绕过）。`,
+      `完整规则见 skill「${BUILTIN_PATH_GUARD_SKILL}」，首轮请先阅读它。`,
+    ].join("\n");
+  }
+
   private async runAgentSeat(
     r: RoomRecord,
     seat: RoomSeat,
@@ -3343,7 +3355,7 @@ export function activate(ctx) {
     }
     const prompt = {
       text: !seat.sessionId
-        ? `${this.agentSeatPrefix(seat)}\n${text}`
+        ? `${this.agentSeatPrefix(seat)}\n${this.pathGuardPrefix(cwd)}\n${text}`
         : text,
       attachments: attachments ?? [],
     };
@@ -4407,7 +4419,9 @@ export function activate(ctx) {
       ? `> 席位模型「${em.fallbackFrom}」在本机网关未配置，已改用本机默认模型\n\n`
       : "";
     const prompt = {
-      text: prevSession ? text : `${this.agentSeatPrefix(seat)}\n${text}`,
+      text: prevSession
+        ? text
+        : `${this.agentSeatPrefix(seat)}\n${this.pathGuardPrefix(cwd)}\n${text}`,
       attachments: [],
     };
     const perm = this.turnPermissionMode(r, seat, nt.requesterUserId);

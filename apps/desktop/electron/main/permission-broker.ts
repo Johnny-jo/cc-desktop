@@ -186,7 +186,10 @@ export class PermissionBroker {
         const normalized = normalizeRuleString(ruleStr);
         if (normalized) this.onAddAllowRule?.(normalized);
       }
-      entry.resolve({ behavior: "allow", updatedInput: entry.input });
+      entry.resolve({
+        behavior: "allow",
+        updatedInput: decision.updatedInput ?? entry.input,
+      });
     } else {
       entry.resolve({
         behavior: "deny",
