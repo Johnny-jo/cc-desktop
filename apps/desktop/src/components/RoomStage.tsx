@@ -4,14 +4,24 @@ import type { Attachment, RoomQuoteRef, RoomTimelineItem } from "@claude-desktop
 import { formatFileSize } from "@claude-desktop/shared";
 import { useAppStore } from "../state/store";
 import {
+  askRoomAiShare,
   recallRoomMessage,
   rejoinRoom,
   returnSeat,
   selectSeat,
   sendToSeat,
+  setRoomAiShare,
   takeoverSeat,
   useRoomStore,
 } from "../state/room-store";
+import {
+  canManageSeats,
+  countOnlineMembers,
+  memberIsOnline,
+  resolveAiUserId,
+  resolveWorkspaceUserId,
+} from "@claude-desktop/shared";
+import { fillTemplate } from "../lib/room-mod-ui";
 import { getDesktop, hasDesktopApi } from "../lib/desktop-api";
 import { parseTrailingAt } from "../lib/at-mention";
 import { formatModBadge } from "../lib/room-mod-ui";
@@ -135,31 +145,19 @@ export function RoomStage() {
   );
   const canHost = myRole === "host";
   const myUserId = room.localUserId;
-  // 执行节点下拉："" = 房主本机；客人新建席位默认在自己机器上跑
+  const myMember = room.members.find((m) => m.userId === myUserId);
+  const canManage = canHost || canManageSeats(myMember?.role);
   const hostMember = room.members.find((m) => m.role === "host");
   const hostUserId = hostMember?.userId ?? null;
-  const execLabel = (base: string, projectPath?: string | null) =>
-    `${base}${projectPath ? `（${projectPath}）` : "（未开项目）"}`;
-  const seatExecutors = [
-    {
-      userId: "",
-      label: execLabel(
-        `房主（${room.hostLabel}）的电脑`,
-        hostMember?.projectPath,
-      ),
-      projectPath: hostMember?.projectPath ?? null,
-    },
-    ...room.members
-      .filter((m) => m.role !== "host")
-      .map((m) => ({
-        userId: m.userId,
-        label: execLabel(
-          `${m.name}${m.userId === myUserId ? "（我）" : ""}的电脑`,
-          m.projectPath,
-        ),
-        projectPath: m.projectPath ?? null,
-      })),
-  ];
+  const seatMembers = room.members.map((m) => ({
+    userId: m.userId,
+    label: `${m.name}${m.userId === myUserId ? "（我）" : ""}`,
+    projectPath: m.projectPath ?? null,
+    aiShare: m.aiShare,
+    aiModels: m.aiModels,
+    isSelf: m.userId === myUserId,
+  }));
+  const defaultBindId = myUserId ?? hostUserId ?? "";
   const modActive = Boolean(room.modChecksum);
   const stageBadge = formatModBadge(
     mod?.offer?.checksum === room.modChecksum
@@ -308,7 +306,15 @@ export function RoomStage() {
             aria-label={pulseOn ? t.room.pulseLive : undefined}
           />
           <span className="room-meta">
-            {room.memberCount} 人 · {room.status === "open" ? "在线" : "已结束"}
+            {offline
+              ? t.room.offline
+              : room.status === "open"
+                ? fillTemplate(t.room.peopleOnline, {
+                    n: String(
+                      room.onlineCount ?? countOnlineMembers(room.members),
+                    ),
+                  })
+                : "已结束"}
             {room.kernel?.mods.some((m) => m.state === "active")
               ? ` · ${t.room.settingsExtensions} ${
                   room.kernel.mods.filter((m) => m.state === "active").length
@@ -356,6 +362,29 @@ export function RoomStage() {
         <RoomPendingBanner roomId={room.roomId} canHost={canHost} />
       ) : null}
 
+      {room.status === "open" && myMember?.aiShare === "pending" ? (
+        <div className="room-offline-banner">
+          <span>
+            {room.members.find((m) => m.userId === myMember.aiAskBy)?.name ?? "成员"}{" "}
+            想借用你的 AI
+          </span>
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={() => void setRoomAiShare(room.roomId, true)}
+          >
+            同意
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={() => void setRoomAiShare(room.roomId, false)}
+          >
+            拒绝
+          </button>
+        </div>
+      ) : null}
+
       {modActive ? (
         <ModPlayPanel
           role={myRole}
@@ -368,6 +397,8 @@ export function RoomStage() {
         <RoomSettingsModal
           room={room}
           canHost={canHost}
+          canAdmin={canManage}
+          offline={offline}
           onClose={() => setSettingsOpen(false)}
         />
       ) : null}
@@ -387,7 +418,11 @@ export function RoomStage() {
         <RoomAddSeatModal
           agents={settings?.agents ?? []}
           models={settings?.models ?? []}
-          executors={seatExecutors}
+          members={seatMembers}
+          canRetarget={canManage}
+          onAskAiShare={(userId) => {
+            void askRoomAiShare(room.roomId, userId);
+          }}
           initial={
             editSeat ?? {
               name: "",
@@ -395,8 +430,9 @@ export function RoomStage() {
               agentPrompt: "",
               skillNames: [],
               model: "",
-              // 客人新建席位默认在自己电脑上跑；房主默认房主本机
-              executorUserId: canHost ? "" : (myUserId ?? ""),
+              executorUserId: defaultBindId,
+              aiUserId: defaultBindId,
+              workspaceUserId: defaultBindId,
             }
           }
           onClose={() => {
@@ -563,8 +599,9 @@ export function RoomStage() {
           remoteChanges={room.remoteChanges}
           seats={room.seats}
           memberName={(seat) => {
-            const id = seat?.executorUserId;
-            if (!id || id === hostUserId) return "房主";
+            const id = seat
+              ? resolveWorkspaceUserId(seat, hostUserId ?? "")
+              : "";
             return (
               room.members.find((m) => m.userId === id)?.name ?? "成员"
             );
@@ -734,7 +771,16 @@ export function RoomStage() {
           {sideOpen ? (
             <>
               <div className="room-side-head">
-                <span className="room-side-title">成员 {room.memberCount}</span>
+                <span className="room-side-title">
+                  成员 {room.memberCount}
+                  {room.status === "open"
+                    ? ` · ${fillTemplate(t.room.peopleOnline, {
+                        n: String(
+                          room.onlineCount ?? countOnlineMembers(room.members),
+                        ),
+                      })}`
+                    : ""}
+                </span>
                 <button
                   type="button"
                   className="room-side-toggle"
@@ -773,25 +819,55 @@ export function RoomStage() {
                       {s.running ? (
                         <span className="room-seat-pulse" aria-hidden />
                       ) : null}
-                      {s.kind === "agent" &&
-                      s.executorUserId &&
-                      hostUserId &&
-                      s.executorUserId !== hostUserId ? (
-                        <span className="room-seat-tag remote">
-                          远端·{room.members.find((m) => m.userId === s.executorUserId)?.name ?? "成员"}
-                        </span>
+                      {s.kind === "agent" && hostUserId ? (
+                        <>
+                          {resolveWorkspaceUserId(s, hostUserId) !== hostUserId ? (
+                            <span className="room-seat-tag remote">
+                              文件·{room.members.find((m) => m.userId === resolveWorkspaceUserId(s, hostUserId))?.name ?? "成员"}
+                            </span>
+                          ) : null}
+                          {resolveAiUserId(s, hostUserId) !==
+                          resolveWorkspaceUserId(s, hostUserId) ? (
+                            <span className="room-seat-tag">
+                              AI·{room.members.find((m) => m.userId === resolveAiUserId(s, hostUserId))?.name ?? "成员"}
+                            </span>
+                          ) : null}
+                        </>
                       ) : null}
                       {s.takenOverBy ? (
                         <span className="room-seat-tag">接管中</span>
                       ) : null}
+                      {s.kind === "human" ? (
+                        <span
+                          className={`room-seat-tag${
+                            memberIsOnline(
+                              room.members.find(
+                                (m) => m.userId === s.occupantUserId,
+                              ),
+                            )
+                              ? ""
+                              : " is-offline"
+                          }`}
+                        >
+                          {memberIsOnline(
+                            room.members.find(
+                              (m) => m.userId === s.occupantUserId,
+                            ),
+                          )
+                            ? t.room.memberOnline
+                            : t.room.memberOffline}
+                        </span>
+                      ) : null}
                       {isMine ? <span className="room-seat-tag mine">我</span> : null}
-                      {s.kind === "agent" && room.status === "open" && canHost ? (
+                      {s.kind === "agent" && room.status === "open" && canManage ? (
                         <span
                           className="room-seat-act"
                           role="button"
                           tabIndex={0}
                           onClick={(e) => {
                             e.stopPropagation();
+                            const ws = resolveWorkspaceUserId(s, hostUserId ?? defaultBindId);
+                            const ai = resolveAiUserId(s, hostUserId ?? defaultBindId);
                             setEditSeat({
                               seatId: s.id,
                               name: s.name,
@@ -799,10 +875,9 @@ export function RoomStage() {
                               agentPrompt: s.agentPrompt ?? "",
                               skillNames: s.skillNames ?? [],
                               model: s.model ?? "",
-                              executorUserId:
-                                s.executorUserId && s.executorUserId !== hostUserId
-                                  ? s.executorUserId
-                                  : "",
+                              executorUserId: ws,
+                              workspaceUserId: ws,
+                              aiUserId: ai,
                             });
                           }}
                         >
@@ -863,7 +938,9 @@ export function RoomStage() {
                   strokeLinejoin="round"
                 />
               </svg>
-              <span className="room-side-count">{room.memberCount}</span>
+              <span className="room-side-count">
+                {room.onlineCount ?? countOnlineMembers(room.members)}
+              </span>
             </button>
           )}
         </aside>

@@ -4,6 +4,7 @@ import type {
   FileChange,
   McpServersMap,
   McpSetServersResultDto,
+  PermissionMode,
   SdkNormalizedEvent,
   SessionMcpServerStatus,
   SessionSummary,
@@ -61,6 +62,12 @@ export type SessionRunOpts = {
   extraAllowedTools?: string[];
   /** Per-session model override (room agent seats). */
   model?: string;
+  /** Per-session permission override (room filePolicy allow → auto). */
+  permissionMode?: PermissionMode;
+  /** Merge over CPA env (borrowed AI proxy sets ANTHROPIC_BASE_URL here). */
+  extraEnv?: Record<string, string>;
+  /** Skip local CPA ready check (borrowed AI talks to a loopback proxy). */
+  skipCpa?: boolean;
   /**
    * When true, extraMcpServers / extraAllowedTools replace the session extras
    * instead of merging. Room seats always pass this.
@@ -212,6 +219,9 @@ type SessionEntry = {
   extraMcpServers?: Record<string, unknown>;
   extraAllowedTools?: string[];
   model?: string;
+  permissionMode?: PermissionMode;
+  extraEnv?: Record<string, string>;
+  skipCpa?: boolean;
 };
 
 /**
@@ -1284,7 +1294,7 @@ export class SessionManager {
     cwd: string,
     opts?: SessionRunOpts,
   ): Promise<string> {
-    await this.ensureCpaOrThrow();
+    if (!opts?.skipCpa) await this.ensureCpaOrThrow();
 
     const { content, errors } = buildUserContent(prompt);
     if (errors.length) {
@@ -1319,6 +1329,9 @@ export class SessionManager {
       extraMcpServers: opts?.extraMcpServers,
       extraAllowedTools: opts?.extraAllowedTools,
       ...(opts?.model ? { model: opts.model } : {}),
+      ...(opts?.permissionMode ? { permissionMode: opts.permissionMode } : {}),
+      ...(opts?.extraEnv ? { extraEnv: opts.extraEnv } : {}),
+      ...(opts?.skipCpa ? { skipCpa: true } : {}),
     };
     this.sessions.set(sessionId, entry);
     opts?.onSessionId?.(sessionId);
@@ -1383,8 +1396,11 @@ export class SessionManager {
     }
     if (opts?.hiddenFromList) entry.summary.hiddenFromList = true;
     if (opts?.title) entry.summary.title = opts.title;
+    if (opts?.permissionMode) entry.permissionMode = opts.permissionMode;
+    if (opts?.extraEnv) entry.extraEnv = opts.extraEnv;
+    if (opts?.skipCpa) entry.skipCpa = true;
 
-    await this.ensureCpaOrThrow(sessionId);
+    if (!entry.skipCpa && !opts?.skipCpa) await this.ensureCpaOrThrow(sessionId);
 
     const { content, errors } = buildUserContent(prompt);
     if (errors.length) {
@@ -1491,7 +1507,10 @@ export class SessionManager {
     abortController: AbortController,
   ): Record<string, unknown> {
     const settings = this.settings.get();
-    const env = this.cpa.buildProcessEnv(settings.defaultModel);
+    const env = {
+      ...this.cpa.buildProcessEnv(entry.model || settings.defaultModel),
+      ...(entry.extraEnv ?? {}),
+    };
     // Prefer the bundled / vendor Claude Code binary so the app does not
     // require a global `claude` on PATH (packaged installs ship claude.exe).
     const claudePath =
@@ -1505,7 +1524,7 @@ export class SessionManager {
     return {
       cwd: entry.summary.cwd,
       includePartialMessages: true,
-      permissionMode: settings.permissionMode,
+      permissionMode: entry.permissionMode ?? settings.permissionMode,
       model: entry.model || settings.defaultModel,
       ...(settings.effort ? { effort: settings.effort } : {}),
       ...(claudePath ? { pathToClaudeCodeExecutable: claudePath } : {}),

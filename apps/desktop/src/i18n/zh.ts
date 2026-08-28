@@ -195,6 +195,9 @@ export const zh: Messages = {
     approve: "批准",
     deny: "拒绝",
     kick: "移出",
+    peopleOnline: "{n} 人在线",
+    memberOnline: "在线",
+    memberOffline: "离线",
     fingerprintChanged: "该设备指纹已变化，需重新批准才能继续。",
   },
   onboarding: {

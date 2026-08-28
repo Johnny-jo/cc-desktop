@@ -5139,6 +5139,12 @@ body.session-detaching {
   color: var(--accent);
 }
 
+.room-member-badge.is-off,
+.room-seat-tag.is-offline {
+  background: color-mix(in srgb, var(--text-muted) 18%, transparent);
+  color: var(--text-muted);
+}
+
 /* 群聊设置·概览：卡片式分组 */
 .room-settings-section.room-overview {
   gap: 10px;

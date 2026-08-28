@@ -1,6 +1,11 @@
 import React, { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import type { RoomSnapshot } from "@claude-desktop/shared";
+import {
+  countOnlineMembers,
+  memberIsOnline,
+  type RoomSnapshot,
+} from "@claude-desktop/shared";
+import { fillTemplate } from "../lib/room-mod-ui";
 import { useI18n } from "../i18n/useI18n";
 import {
   applyRoomKernelProposal,
@@ -12,6 +17,9 @@ import {
   getRoomKernelImprove,
   kickRoomMember,
   leaveActiveRoom,
+  setRoomAiShare,
+  setRoomFilePolicy,
+  setRoomMemberRole,
   listRoomKernelMemory,
   listRoomMods,
   proposeRoomKernelImprove,
@@ -29,10 +37,18 @@ import { isRoomMuted, setRoomMuted } from "../lib/room-notify";
 type Props = {
   room: RoomSnapshot;
   canHost: boolean;
+  canAdmin?: boolean;
+  offline?: boolean;
   onClose: () => void;
 };
 
-export function RoomSettingsModal({ room, canHost, onClose }: Props) {
+export function RoomSettingsModal({
+  room,
+  canHost,
+  canAdmin,
+  offline,
+  onClose,
+}: Props) {
   const { t } = useI18n();
   const [packs, setPacks] = useState<RoomModPack[]>([]);
   const [entries, setEntries] = useState<Array<{ key: string; value: string }>>([]);
@@ -254,6 +270,19 @@ export function RoomSettingsModal({ room, canHost, onClose }: Props) {
     if (!res.ok) setErr(res.error ?? t.common.error);
   };
 
+  const me = room.members.find((m) => m.userId === room.localUserId);
+  const filePolicy = me?.filePolicy ?? "ask";
+  const aiShareOn = me?.aiShare === "on";
+  const canKick = Boolean(canAdmin) && room.status === "open";
+
+  const changeRole = async (userId: string, role: "admin" | "member") => {
+    setBusyId(`role:${userId}`);
+    setErr(null);
+    const res = await setRoomMemberRole(room.roomId, userId, role);
+    setBusyId(null);
+    if (!res.ok) setErr(res.error ?? t.common.error);
+  };
+
   const loadedIds = new Set((room.kernel?.mods ?? []).map((m) => m.id));
   const enabledKernel = kernelPacks.filter((p) => loadedIds.has(p.id));
   const pending = (improve?.proposals ?? []).filter((p) => p.status === "pending");
@@ -301,9 +330,17 @@ export function RoomSettingsModal({ room, canHost, onClose }: Props) {
               <div className="room-overview-card room-overview-head">
                 <div className="room-overview-title">{room.name}</div>
                 <div className="room-overview-meta">
-                  {room.memberCount} 人 ·{" "}
-                  {t.room.settingsPort.replace("{port}", String(room.port))} ·{" "}
-                  {room.status === "open" ? "在线" : "已结束"}
+                  {offline
+                    ? t.room.offline
+                    : room.status === "open"
+                      ? fillTemplate(t.room.peopleOnline, {
+                          n: String(
+                            room.onlineCount ??
+                              countOnlineMembers(room.members),
+                          ),
+                        })
+                      : "已结束"}{" "}
+                  · {t.room.settingsPort.replace("{port}", String(room.port))}
                 </div>
                 {canHost && room.status === "open" ? (
                   <div className="room-rename-row">
@@ -354,6 +391,13 @@ export function RoomSettingsModal({ room, canHost, onClose }: Props) {
               <div className="room-overview-card">
                 <div className="room-overview-card-title">
                   成员 {room.memberCount}
+                  {room.status === "open"
+                    ? ` · ${fillTemplate(t.room.peopleOnline, {
+                        n: String(
+                          room.onlineCount ?? countOnlineMembers(room.members),
+                        ),
+                      })}`
+                    : ""}
                 </div>
                 <ul className="room-member-list">
                   {room.members.map((m) => (
@@ -362,11 +406,40 @@ export function RoomSettingsModal({ room, canHost, onClose }: Props) {
                         {m.name}
                         {m.role === "host" ? (
                           <span className="room-member-badge">群主</span>
+                        ) : m.role === "admin" ? (
+                          <span className="room-member-badge">管理员</span>
                         ) : null}
+                        <span
+                          className={`room-member-badge${
+                            memberIsOnline(m) ? "" : " is-off"
+                          }`}
+                        >
+                          {memberIsOnline(m)
+                            ? t.room.memberOnline
+                            : t.room.memberOffline}
+                        </span>
                       </span>
                       {canHost &&
                       room.status === "open" &&
                       m.role !== "host" &&
+                      m.userId !== room.localUserId ? (
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm"
+                          disabled={busyId === `role:${m.userId}`}
+                          onClick={() =>
+                            void changeRole(
+                              m.userId,
+                              m.role === "admin" ? "member" : "admin",
+                            )
+                          }
+                        >
+                          {m.role === "admin" ? "取消管理员" : "设为管理员"}
+                        </button>
+                      ) : null}
+                      {canKick &&
+                      m.role !== "host" &&
+                      !(me?.role === "admin" && m.role === "admin") &&
                       m.userId !== room.localUserId ? (
                         <button
                           type="button"
@@ -383,16 +456,50 @@ export function RoomSettingsModal({ room, canHost, onClose }: Props) {
               </div>
 
               {room.status === "open" ? (
-                <div className="room-danger-zone">
-                  <button
-                    type="button"
-                    className="btn btn-sm btn-danger"
-                    onClick={() => setConfirmLeave(true)}
-                  >
-                    {canHost ? t.room.leaveConfirmYesHost : t.room.leaveConfirmYes}
-                  </button>
+                <div className="room-overview-card">
+                  <div className="room-overview-card-title">我的项目权限</div>
+                  <p className="settings-hint">
+                    别人的 Agent 以你当前打开的项目为工作目录时
+                  </p>
+                  {(["ask", "allow", "deny"] as const).map((p) => (
+                    <label key={p} className="room-check">
+                      <input
+                        type="radio"
+                        name="file-policy"
+                        checked={filePolicy === p}
+                        onChange={() => void setRoomFilePolicy(room.roomId, p)}
+                      />
+                      {p === "allow"
+                        ? "完全允许操作"
+                        : p === "deny"
+                          ? "禁止操作"
+                          : "审批操作"}
+                    </label>
+                  ))}
+                  <label className="room-check" style={{ marginTop: 8 }}>
+                    <input
+                      type="checkbox"
+                      checked={aiShareOn}
+                      onChange={(e) =>
+                        void setRoomAiShare(room.roomId, e.target.checked)
+                      }
+                    />
+                    允许本房席位借用我的 AI（模型 / 额度）
+                  </label>
                 </div>
               ) : null}
+
+              <div className="room-danger-zone">
+                <button
+                  type="button"
+                  className="btn btn-sm btn-danger"
+                  onClick={() => setConfirmLeave(true)}
+                >
+                  {canHost && room.status === "open"
+                    ? t.room.leaveConfirmYesHost
+                    : t.room.leaveConfirmYes}
+                </button>
+              </div>
             </section>
           ) : null}
 
@@ -662,7 +769,7 @@ export function RoomSettingsModal({ room, canHost, onClose }: Props) {
       </div>
       {confirmLeave ? (
         <RoomLeaveConfirm
-          isHost={canHost}
+          isHost={canHost && room.status === "open"}
           roomName={room.name}
           onCancel={() => setConfirmLeave(false)}
           onConfirm={() => {

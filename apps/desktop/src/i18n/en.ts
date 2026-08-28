@@ -200,6 +200,9 @@ export const en = {
     approve: "Approve",
     deny: "Deny",
     kick: "Remove",
+    peopleOnline: "{n} online",
+    memberOnline: "Online",
+    memberOffline: "Offline",
     fingerprintChanged:
       "This device fingerprint changed. Re-approve to continue.",
   },

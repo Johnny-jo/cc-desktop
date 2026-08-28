@@ -94,6 +94,14 @@ export class CpaSupervisor {
     return this.status;
   }
 
+  /** Loopback origin + token for borrowing this machine's CPA. Null if no token. */
+  getProxyTarget(): { origin: string; token: string } | null {
+    const token = this.getToken();
+    if (!token) return null;
+    const port = this.getSettings().cpaPort;
+    return { origin: `http://127.0.0.1:${port}`, token };
+  }
+
   buildProcessEnv(model?: string): Record<string, string> {
     const settings = this.getSettings();
     const token = this.getToken() ?? "";

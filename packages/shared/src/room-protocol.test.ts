@@ -78,6 +78,17 @@ const MOD_FRAME_TYPES = [
   "mod.fail",
 ] as const;
 
+const BORROW_AI_FRAME_TYPES = [
+  "seat.update",
+  "member.role",
+  "member.kick",
+  "ai.share",
+  "ai.ask",
+  "ai.models",
+  "ai.http",
+  "file.policy",
+] as const;
+
 describe("mod protocol frames", () => {
   it("includes new frame types in RoomFrameType via makeRoomFrame", () => {
     for (const type of MOD_FRAME_TYPES) {
@@ -103,6 +114,17 @@ describe("mod protocol frames", () => {
       expect(parsed?.type).toBe(type);
       expect(parsed?.v).toBe(1);
       expect(parsed?.roomId).toBe("room-1");
+    }
+  });
+});
+
+describe("borrow-ai protocol frames", () => {
+  it("round-trips new frame types", () => {
+    for (const type of BORROW_AI_FRAME_TYPES) {
+      const frame = makeRoomFrame("room-1", 1, type, {});
+      expect(frame.type).toBe(type);
+      const parsed = parseRoomFrame(JSON.stringify(frame));
+      expect(parsed?.type).toBe(type);
     }
   });
 });

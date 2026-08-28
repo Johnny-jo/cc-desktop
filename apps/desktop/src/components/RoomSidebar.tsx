@@ -164,11 +164,12 @@ function RoomRow({ r, active }: { r: RoomListItem; active: boolean }) {
         <span className="session-title">{r.name}</span>
         <span className="session-meta">
           <span>
-            {r.memberCount} 人 ·{" "}
             {r.offline
               ? t.room.offline
               : r.status === "open"
-                ? "在线"
+                ? fillTemplate(t.room.peopleOnline, {
+                    n: String(r.onlineCount ?? r.memberCount),
+                  })
                 : "已结束"}
             {r.role === "host" ? " · 群主" : ""}
           </span>

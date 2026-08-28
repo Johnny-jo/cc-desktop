@@ -471,6 +471,7 @@ function bootstrap() {
     userDataDir,
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
+    cpa,
   });
 
   const applyCliModelToDesktop = (model: string) => {

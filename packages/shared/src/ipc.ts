@@ -177,6 +177,10 @@ export const IPC = {
   roomDenyDevice: "room:deny-device",
   /** Host kicks a member: drop connection, blacklist device fingerprint */
   roomKick: "room:kick",
+  roomSetMemberRole: "room:set-member-role",
+  roomSetFilePolicy: "room:set-file-policy",
+  roomSetAiShare: "room:set-ai-share",
+  roomAskAiShare: "room:ask-ai-share",
   /** Host renames the room (name lives in the snapshot, broadcast to all) */
   roomRename: "room:rename",
   /** Recall a timeline message (own messages; host can recall any) */
@@ -601,6 +605,9 @@ export type IpcInvokeMap = {
         agentPrompt?: string;
         skillNames?: string[];
         model?: string;
+        executorUserId?: string;
+        aiUserId?: string;
+        workspaceUserId?: string;
       },
     ];
     result: { ok: boolean; room?: import("./room-protocol").RoomSnapshot; error?: string };
@@ -615,6 +622,9 @@ export type IpcInvokeMap = {
         agentPrompt?: string;
         skillNames?: string[];
         model?: string;
+        executorUserId?: string;
+        aiUserId?: string;
+        workspaceUserId?: string;
       },
     ];
     result: { ok: boolean; room?: import("./room-protocol").RoomSnapshot; error?: string };
@@ -821,6 +831,22 @@ export type IpcInvokeMap = {
   };
   [IPC.roomKick]: {
     args: [{ roomId: string; userId: string }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.roomSetMemberRole]: {
+    args: [{ roomId: string; userId: string; role: "admin" | "member" }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.roomSetFilePolicy]: {
+    args: [{ roomId: string; policy: import("./room-protocol").RoomFilePolicy }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.roomSetAiShare]: {
+    args: [{ roomId: string; on: boolean }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.roomAskAiShare]: {
+    args: [{ roomId: string; targetUserId: string; seatId?: string }];
     result: { ok: boolean; error?: string };
   };
   [IPC.roomRename]: {

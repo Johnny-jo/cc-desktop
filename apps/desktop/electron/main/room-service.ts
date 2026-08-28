@@ -8,24 +8,42 @@ import { IPC, MOD_BUNDLE_MAX_BYTES } from "@claude-desktop/shared";
 import type {
   Attachment,
   ModOfferPayload,
+  PermissionMode,
+  RoomAiAskPayload,
+  RoomAiSharePayload,
   RoomChatRecallPayload,
   RoomExecAbortPayload,
   RoomExecEventPayload,
   RoomExecResultPayload,
+  RoomAiHttpPayload,
   RoomExecRunPayload,
+  RoomFilePolicy,
+  RoomFilePolicyPayload,
   RoomListItem,
   RoomMember,
+  RoomMemberKickPayload,
   RoomNodeInfoPayload,
   RoomPath,
   RoomQuoteRef,
+  RoomRole,
   RoomSeat,
   RoomSeatKind,
+  RoomSeatUpdatePayload,
   RoomSnapshot,
   RoomTimelineItem,
   RoomFrame,
   RoomFrameType,
   FileChange,
   SdkNormalizedEvent,
+} from "@claude-desktop/shared";
+import {
+  canKickMember,
+  canManageSeats,
+  canSetMemberRole,
+  countOnlineMembers,
+  effectiveFilePolicy,
+  resolveAiUserId,
+  resolveWorkspaceUserId,
 } from "@claude-desktop/shared";
 import type { DeviceKeys } from "@claude-desktop/shared/room-crypto";
 import type { Handshake } from "@claude-desktop/shared/room-handshake";
@@ -48,6 +66,15 @@ import {
 import { parsePdu } from "@claude-desktop/shared/room-pdu";
 import type { SessionManager, SessionRunOpts } from "./session-manager";
 import type { SettingsStore } from "./settings-store";
+import type { CpaSupervisor } from "./cpa-supervisor";
+import {
+  buildReqFrames,
+  buildResFrames,
+  concatChunks,
+  parseBorrowToken,
+  startLoopbackProxy,
+  type LoopbackProxy,
+} from "./room-ai-proxy";
 import type { RoomArchive, StoredRoom } from "./room-archive";
 import { ModHost, type ModSeat } from "./mod-host";
 import {
@@ -146,6 +173,14 @@ const KNOWN_ROOM_FRAME_TYPES: ReadonlySet<string> = new Set<RoomFrameType>([
   "seat.takeover",
   "seat.return",
   "seat.add",
+  "seat.update",
+  "member.role",
+  "member.kick",
+  "ai.share",
+  "ai.ask",
+  "ai.models",
+  "ai.http",
+  "file.policy",
   "chat.user",
   "chat.event",
   "chat.recall",
@@ -227,6 +262,7 @@ type RemoteTurn = {
 type NodeTurn = {
   turnId: string;
   seatId: string;
+  requesterUserId?: string | null;
   heartbeat: ReturnType<typeof setInterval> | null;
   /** 本机 SessionManager 会话（abort 用），start 之后才有。 */
   sessionId?: string;
@@ -561,6 +597,28 @@ export class RoomService {
    * debug IPC can snapshot them; tests inject a quiet instance.
    */
   readonly metrics: RoomMetrics;
+  private readonly cpa?: CpaSupervisor;
+  private readonly aiProxies = new Map<string, LoopbackProxy>();
+  private readonly aiHttpWait = new Map<
+    string,
+    {
+      parts: Map<number, string>;
+      status?: number;
+      resolve: (v: { status: number; body: Buffer }) => void;
+      reject: (e: Error) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >();
+  private readonly aiHttpAssemble = new Map<
+    string,
+    {
+      method?: string;
+      path?: string;
+      targetUserId: string;
+      sourceUserId: string;
+      parts: Map<number, string>;
+    }
+  >();
 
   constructor(opts: {
     getWindow: () => BrowserWindow | null;
@@ -573,10 +631,12 @@ export class RoomService {
     cloudflaredPath?: string;
     /** Injectable transport counters (tests pass a silent logger). */
     metrics?: RoomMetrics;
+    cpa?: CpaSupervisor;
   }) {
     this.getWindow = opts.getWindow;
     this.sessions = opts.sessions;
     this.settings = opts.settings;
+    this.cpa = opts.cpa;
     this.archive = opts.archive ?? null;
     this.userDataDir = opts.userDataDir ?? os.tmpdir();
     this.isPackaged = opts.isPackaged ?? false;
@@ -720,14 +780,21 @@ export function activate(ctx) {
         hostLabel: stored.hostLabel ?? "",
         localUserId: stored.localUserId ?? "",
         localRole: stored.role,
-        members: stored.members ?? [],
+        members: (stored.members ?? []).map((m) => ({
+          ...m,
+          // 重启后没有活 socket：只有房主自己算在线，客人等手动重连。
+          online: stored.role === "host" ? m.role === "host" : m.online,
+        })),
         seats: stored.seats ?? [],
         items: stored.items ?? [],
         seq: 1,
         server: null,
         guests: new Set(),
         client: null,
-        ...(stored.offline ? { offline: true } : {}),
+        ...(stored.offline ||
+        (stored.role === "member" && stored.status === "open")
+          ? { offline: true }
+          : {}),
         ...(stored.join
           ? {
               joinInfo: {
@@ -873,6 +940,7 @@ export function activate(ctx) {
         status: r.status,
         role: r.localRole,
         memberCount: r.members.length,
+        onlineCount: countOnlineMembers(r.members),
         port: r.port,
         inviteHost: r.joinInfo?.host || lanAddress(),
         ...(r.offline ? { offline: true } : {}),
@@ -1346,6 +1414,7 @@ export function activate(ctx) {
           userId: hostUserId,
           name: hostName,
           role: "host",
+          online: true,
           projectPath: this.settings.get().lastProjectPath ?? null,
         },
       ],
@@ -2107,21 +2176,19 @@ export function activate(ctx) {
   leave(roomId: string) {
     const r = this.rooms.get(roomId);
     if (!r) return { ok: false, error: "群聊不存在" };
-    // Host leave = delete room for everyone
+    // Host leave of a live room = dissolve. Ended/failed host rooms just
+    // drop the local archive so they can get it off the list.
     if (r.localRole === "host") {
-      return this.end(roomId, { delete: true });
+      if (r.status === "open" && r.server) {
+        return this.end(roomId, { delete: true });
+      }
+      return this.deleteLocal(roomId);
     }
     this.cancelGuestReconnect(r);
-    try {
-      r.client?.close();
-    } catch {
-      // ignore
+    if (r.client && r.client.readyState === WebSocket.OPEN) {
+      this.sendClient(r, "leave", { userId: r.localUserId });
     }
-    r.client = null;
-    r.status = "ended";
-    this.persist(r);
-    this.emit(r);
-    return { ok: true };
+    return this.deleteLocal(roomId);
   }
 
   private cancelGuestReconnect(r: RoomRecord): void {
@@ -2171,7 +2238,8 @@ export function activate(ctx) {
   ): void {
     if (!this.rooms.has(r.roomId)) return;
     this.cancelGuestReconnect(r);
-    r.status = "ended";
+    // 断线不是解散：保持可重连。真正退出走 leave() → deleteLocal。
+    if (!opts?.offline) r.status = "ended";
     this.disposeExecTurns(r);
     try {
       r.client?.close();
@@ -2186,7 +2254,7 @@ export function activate(ctx) {
     this.safeSend(IPC.roomEvent, {
       roomId: r.roomId,
       closed: true,
-      ...(r.offline ? { offline: true } : {}),
+      ...(r.offline ? { offline: true, silent: true } : {}),
       message,
     });
   }
@@ -2265,6 +2333,10 @@ export function activate(ctx) {
         this.onExecAbort(r, frame.payload as RoomExecAbortPayload);
         return;
       }
+      if (frame.type === "ai.http") {
+        this.onAiHttp(r, r.hostUserId, frame.payload as RoomAiHttpPayload);
+        return;
+      }
       if (frame.type === "error") {
         this.safeSend(IPC.roomEvent, {
           roomId: r.roomId,
@@ -2292,10 +2364,12 @@ export function activate(ctx) {
       if (
         r.status === "open" &&
         r.localRole === "member" &&
-        !r.closing &&
-        !r.reconnecting
+        !r.closing
       ) {
-        void this.reconnectGuest(r);
+        // 手动重连：断线立刻离线，由用户点「重连」，不再自动打。
+        this.dismissGuest(r, "连接已断开，聊天记录已保留，可稍后重连", {
+          offline: true,
+        });
       }
     });
     // 对账上报：（重）连上后把本机还在跑的远程轮次告诉房主——
@@ -2406,6 +2480,8 @@ export function activate(ctx) {
       skillNames?: string[];
       model?: string;
       executorUserId?: string;
+      aiUserId?: string;
+      workspaceUserId?: string;
     },
   ) {
     const r = this.rooms.get(roomId);
@@ -2428,20 +2504,23 @@ export function activate(ctx) {
         ...(kind === "agent" && extra?.model?.trim()
           ? { model: extra.model.trim() }
           : {}),
-        // 客人创建的 Agent 席位默认在客人自己机器上执行
         ...(kind === "agent"
-          ? { executorUserId: extra?.executorUserId ?? r.localUserId }
+          ? {
+              executorUserId:
+                extra?.workspaceUserId ?? extra?.executorUserId ?? r.localUserId,
+              workspaceUserId:
+                extra?.workspaceUserId ?? extra?.executorUserId ?? r.localUserId,
+              aiUserId:
+                extra?.aiUserId ??
+                extra?.workspaceUserId ??
+                extra?.executorUserId ??
+                r.localUserId,
+            }
           : {}),
       });
       return { ok: true };
     }
     const label = name.trim() || (kind === "agent" ? "Agent" : displayName());
-    const executor =
-      kind === "agent" &&
-      extra?.executorUserId &&
-      r.members.some((m) => m.userId === extra.executorUserId)
-        ? extra.executorUserId
-        : r.localUserId;
     const seat: RoomSeat = {
       id: randomUUID(),
       kind,
@@ -2451,7 +2530,6 @@ export function activate(ctx) {
       sessionId: null,
       running: false,
       agentName: kind === "agent" ? (agentName ?? label) : null,
-      ...(kind === "agent" ? { executorUserId: executor } : {}),
       ...(kind === "agent" && extra?.agentPrompt?.trim()
         ? { agentPrompt: extra.agentPrompt.trim() }
         : {}),
@@ -2462,6 +2540,9 @@ export function activate(ctx) {
         ? { model: extra.model.trim() }
         : {}),
     };
+    if (kind === "agent") {
+      this.applySeatAxes(r, seat, extra, r.localUserId);
+    }
     r.seats.push(seat);
     this.append(r, {
       kind: "system",
@@ -2482,11 +2563,28 @@ export function activate(ctx) {
       skillNames?: string[];
       model?: string;
       executorUserId?: string;
+      aiUserId?: string;
+      workspaceUserId?: string;
     },
   ) {
-    const r = this.hostRoom(roomId);
-    if (!r.ok) return r;
-    const rec = r.room;
+    const rec0 = this.rooms.get(roomId);
+    if (!rec0 || rec0.status !== "open") {
+      return { ok: false, error: "群聊不可用" };
+    }
+    if (rec0.localRole !== "host") {
+      if (!canManageSeats(this.memberRole(rec0, rec0.localUserId))) {
+        return { ok: false, error: "没有权限改席位" };
+      }
+      this.sendClient(rec0, "seat.update", {
+        seatId,
+        ...patch,
+      } satisfies RoomSeatUpdatePayload);
+      return { ok: true };
+    }
+    if (!canManageSeats(this.memberRole(rec0, rec0.localUserId))) {
+      return { ok: false, error: "没有权限改席位" };
+    }
+    const rec = rec0;
     const seat = rec.seats.find((s) => s.id === seatId);
     if (!seat) return { ok: false, error: "席位不存在" };
     if (seat.kind !== "agent") {
@@ -2512,14 +2610,21 @@ export function activate(ctx) {
       if (m) seat.model = m;
       else delete seat.model;
     }
-    if (patch.executorUserId !== undefined) {
-      const e = patch.executorUserId.trim();
-      // 空串 / 房主自己 = 回房主本机执行；否则必须是房间里的人
-      if (!e || e === rec.localUserId) {
-        seat.executorUserId = rec.localUserId;
-      } else if (rec.members.some((m) => m.userId === e)) {
-        seat.executorUserId = e;
-      }
+    if (
+      patch.executorUserId !== undefined ||
+      patch.workspaceUserId !== undefined ||
+      patch.aiUserId !== undefined
+    ) {
+      this.applySeatAxes(
+        rec,
+        seat,
+        {
+          executorUserId: patch.executorUserId,
+          workspaceUserId: patch.workspaceUserId ?? patch.executorUserId,
+          aiUserId: patch.aiUserId,
+        },
+        resolveWorkspaceUserId(seat, rec.hostUserId),
+      );
     }
     this.pushState(rec);
     return { ok: true, room: this.snapshot(rec) };
@@ -2537,19 +2642,13 @@ export function activate(ctx) {
       skillNames?: string[];
       model?: string;
       executorUserId?: string;
+      aiUserId?: string;
+      workspaceUserId?: string;
     },
   ) {
     const member = r.members.find((m) => m.userId === userId);
     if (!member) return;
     const label = name.trim() || (kind === "agent" ? "Agent" : member.name);
-    // 执行节点：客人席位默认在客人自己机器上；指向别人时需对方在房间里
-    const executor =
-      kind === "agent"
-        ? extra?.executorUserId &&
-          r.members.some((m) => m.userId === extra.executorUserId)
-          ? extra.executorUserId
-          : userId
-        : undefined;
     const seat: RoomSeat = {
       id: randomUUID(),
       kind,
@@ -2559,7 +2658,6 @@ export function activate(ctx) {
       sessionId: null,
       running: false,
       agentName: kind === "agent" ? (agentName ?? label) : null,
-      ...(executor ? { executorUserId: executor } : {}),
       ...(kind === "agent" && extra?.agentPrompt?.trim()
         ? { agentPrompt: extra.agentPrompt.trim() }
         : {}),
@@ -2570,6 +2668,9 @@ export function activate(ctx) {
         ? { model: extra.model.trim() }
         : {}),
     };
+    if (kind === "agent") {
+      this.applySeatAxes(r, seat, extra, userId);
+    }
     r.seats.push(seat);
     this.append(r, {
       kind: "system",
@@ -3178,6 +3279,7 @@ export function activate(ctx) {
   ) {
     // 远程执行：席位绑定了其他成员的机器 → 派发过去，不在房主本机跑。
     // 附件是本机路径，远端读不到，只随文本带 [Attached: 名字]。
+    if (this.refuseDeniedWorkspace(r, seat, requesterUserId ?? null)) return;
     if (this.seatExecutor(r, seat)) {
       this.dispatchRemoteTurn(r, seat, text, requesterUserId ?? null);
       return;
@@ -3195,7 +3297,11 @@ export function activate(ctx) {
     }
     seat.running = true;
     this.pushState(r);
-    const em = this.effectiveSeatModel(seat);
+    const borrowing =
+      resolveAiUserId(seat, r.hostUserId) !== r.localUserId;
+    const em = borrowing
+      ? { model: seat.model }
+      : this.effectiveSeatModel(seat);
     if (em.fallbackFrom) {
       this.append(r, {
         kind: "tool",
@@ -3211,14 +3317,18 @@ export function activate(ctx) {
         : text,
       attachments: attachments ?? [],
     };
-    const extras = {
+    const extras: SessionRunOpts = {
       ...this.seatToolOpts(r, seat),
       replaceExtras: true,
       // 席位会话不出现在左侧会话列表（不占“对话格子”），diff 事件照发。
       hiddenFromList: true,
       ...(em.model ? { model: em.model } : {}),
+      ...(this.turnPermissionMode(r, seat, requesterUserId)
+        ? { permissionMode: this.turnPermissionMode(r, seat, requesterUserId) }
+        : {}),
     };
     try {
+      Object.assign(extras, await this.borrowAiExtras(r, seat));
       if (!seat.sessionId) {
         const id = await this.sessions.start(prompt, cwd, extras);
         seat.sessionId = id;
@@ -3254,11 +3364,454 @@ export function activate(ctx) {
 
   /* ── 远程执行（docs/room-remote-exec-design.md §4/§5） ─────────────── */
 
-  /** 席位该去哪台机器跑：null = 房主本机（现状行为）。 */
+  /** 席位该去哪台机器跑：null = 本机（房主循环或节点自己）。 */
   private seatExecutor(r: RoomRecord, seat: RoomSeat): string | null {
-    const e = seat.executorUserId;
+    const e = resolveWorkspaceUserId(seat, r.hostUserId);
     if (!e || e === r.localUserId) return null;
     return e;
+  }
+
+  private memberRole(r: RoomRecord, userId: string): RoomRole {
+    return r.members.find((m) => m.userId === userId)?.role ?? "member";
+  }
+
+  private localModelsList(): string[] {
+    const st = this.settings.get();
+    if (Array.isArray(st.models) && st.models.length) return [...st.models];
+    return st.defaultModel ? [st.defaultModel] : [];
+  }
+
+  private applySeatAxes(
+    r: RoomRecord,
+    seat: RoomSeat,
+    extra?: {
+      aiUserId?: string;
+      workspaceUserId?: string;
+      executorUserId?: string;
+    },
+    fallbackUserId?: string,
+  ): void {
+    const fallback = fallbackUserId || r.localUserId;
+    const wsRaw = extra?.workspaceUserId || extra?.executorUserId;
+    const ws =
+      wsRaw && r.members.some((m) => m.userId === wsRaw) ? wsRaw : fallback;
+    seat.workspaceUserId = ws;
+    seat.executorUserId = ws;
+    const aiRaw = extra?.aiUserId;
+    const ai =
+      aiRaw && r.members.some((m) => m.userId === aiRaw) ? aiRaw : ws;
+    seat.aiUserId = ai;
+    if (ai !== fallback && ai !== r.localUserId) {
+      const owner = r.members.find((m) => m.userId === ai);
+      if (owner && (owner.aiShare === "off" || !owner.aiShare)) {
+        owner.aiShare = "pending";
+        owner.aiAskBy = r.localUserId;
+      }
+    }
+  }
+
+  setMemberRole(
+    roomId: string,
+    userId: string,
+    role: "admin" | "member",
+  ): { ok: boolean; error?: string } {
+    const r = this.rooms.get(roomId);
+    if (!r || r.status !== "open") return { ok: false, error: "群聊不可用" };
+    if (r.localRole !== "host") {
+      return { ok: false, error: "只有群主可以设置管理员" };
+    }
+    if (!canSetMemberRole(this.memberRole(r, r.localUserId))) {
+      return { ok: false, error: "只有群主可以设置管理员" };
+    }
+    if (userId === r.hostUserId) return { ok: false, error: "不能改群主角色" };
+    const m = r.members.find((mm) => mm.userId === userId);
+    if (!m) return { ok: false, error: "成员不在房间" };
+    m.role = role;
+    this.append(r, {
+      kind: "system",
+      text:
+        role === "admin"
+          ? `${m.name} 被设为管理员`
+          : `${m.name} 被取消管理员`,
+      authorLabel: "系统",
+    });
+    this.pushState(r);
+    return { ok: true };
+  }
+
+  setFilePolicy(
+    roomId: string,
+    policy: RoomFilePolicy,
+  ): { ok: boolean; error?: string } {
+    const r = this.rooms.get(roomId);
+    if (!r || r.status !== "open") return { ok: false, error: "群聊不可用" };
+    if (policy !== "allow" && policy !== "ask" && policy !== "deny") {
+      return { ok: false, error: "无效的操作策略" };
+    }
+    if (r.localRole !== "host") {
+      this.sendClient(r, "file.policy", {
+        policy,
+      } satisfies RoomFilePolicyPayload);
+      return { ok: true };
+    }
+    const m = r.members.find((mm) => mm.userId === r.localUserId);
+    if (!m) return { ok: false, error: "成员不存在" };
+    m.filePolicy = policy;
+    this.pushState(r);
+    return { ok: true };
+  }
+
+  setAiShare(
+    roomId: string,
+    on: boolean,
+  ): { ok: boolean; error?: string } {
+    const r = this.rooms.get(roomId);
+    if (!r || r.status !== "open") return { ok: false, error: "群聊不可用" };
+    const models = on ? this.localModelsList() : [];
+    if (r.localRole !== "host") {
+      this.sendClient(r, "ai.share", {
+        on,
+        ...(models.length ? { models } : {}),
+      } satisfies RoomAiSharePayload);
+      return { ok: true };
+    }
+    this.applyAiShare(r, r.localUserId, on, models);
+    this.pushState(r);
+    return { ok: true };
+  }
+
+  askAiShare(
+    roomId: string,
+    targetUserId: string,
+    seatId?: string,
+  ): { ok: boolean; error?: string } {
+    const r = this.rooms.get(roomId);
+    if (!r || r.status !== "open") return { ok: false, error: "群聊不可用" };
+    if (!canManageSeats(this.memberRole(r, r.localUserId))) {
+      return { ok: false, error: "没有权限请求借用 AI" };
+    }
+    if (r.localRole !== "host") {
+      this.sendClient(r, "ai.ask", {
+        targetUserId,
+        fromUserId: r.localUserId,
+        ...(seatId ? { seatId } : {}),
+      } satisfies RoomAiAskPayload);
+      return { ok: true };
+    }
+    return this.applyAiAsk(r, r.localUserId, targetUserId);
+  }
+
+  private applyAiAsk(
+    r: RoomRecord,
+    fromUserId: string,
+    targetUserId: string,
+  ): { ok: boolean; error?: string } {
+    if (targetUserId === fromUserId) return { ok: true };
+    const target = r.members.find((m) => m.userId === targetUserId);
+    if (!target) return { ok: false, error: "对方不在房间" };
+    if (target.aiShare === "on") return { ok: true };
+    target.aiShare = "pending";
+    target.aiAskBy = fromUserId;
+    this.append(r, {
+      kind: "system",
+      text: `${this.memberName(r, fromUserId)} 想借用「${target.name}」的 AI`,
+      authorLabel: "系统",
+    });
+    this.pushState(r);
+    return { ok: true };
+  }
+
+  private applyAiShare(
+    r: RoomRecord,
+    userId: string,
+    on: boolean,
+    models?: string[],
+  ): void {
+    const m = r.members.find((mm) => mm.userId === userId);
+    if (!m) return;
+    m.aiShare = on ? "on" : "off";
+    m.aiAskBy = null;
+    if (on) {
+      m.aiModels = models?.length ? models : this.localModelsList();
+      return;
+    }
+    delete m.aiModels;
+    for (const seat of r.seats) {
+      if (seat.kind !== "agent") continue;
+      if (resolveAiUserId(seat, r.hostUserId) !== userId) continue;
+      const ws = resolveWorkspaceUserId(seat, r.hostUserId);
+      seat.aiUserId = ws;
+    }
+  }
+
+  private turnPermissionMode(
+    r: RoomRecord,
+    seat: RoomSeat,
+    requesterUserId: string | null | undefined,
+  ): PermissionMode | undefined {
+    const ws = resolveWorkspaceUserId(seat, r.hostUserId);
+    const policy = effectiveFilePolicy(
+      r.members.find((m) => m.userId === ws)?.filePolicy,
+      ws,
+      requesterUserId,
+    );
+    if (policy === "deny") return undefined;
+    if (policy === "allow") return "auto";
+    return undefined;
+  }
+
+  private refuseDeniedWorkspace(
+    r: RoomRecord,
+    seat: RoomSeat,
+    requesterUserId: string | null | undefined,
+  ): boolean {
+    const ws = resolveWorkspaceUserId(seat, r.hostUserId);
+    const policy = effectiveFilePolicy(
+      r.members.find((m) => m.userId === ws)?.filePolicy,
+      ws,
+      requesterUserId,
+    );
+    if (policy !== "deny") return false;
+    const name = this.memberName(r, ws);
+    this.append(r, {
+      kind: "tool",
+      seatId: seat.id,
+      text: `「${name}」禁止他人操作其项目，任务被拒绝`,
+      authorLabel: "系统",
+    });
+    this.pushState(r);
+    return true;
+  }
+
+  private async ensureAiProxy(r: RoomRecord): Promise<number> {
+    const existing = this.aiProxies.get(r.roomId);
+    if (existing) return existing.port;
+    const proxy = await startLoopbackProxy((req) => this.proxyAiHttp(r, req));
+    this.aiProxies.set(r.roomId, proxy);
+    return proxy.port;
+  }
+
+  private async borrowAiExtras(
+    r: RoomRecord,
+    seat: RoomSeat,
+  ): Promise<Partial<SessionRunOpts>> {
+    const aiId = resolveAiUserId(seat, r.hostUserId);
+    if (aiId === r.localUserId) return {};
+    const owner = r.members.find((m) => m.userId === aiId);
+    if (!owner || owner.aiShare !== "on") {
+      throw new Error("对方尚未同意借用 AI");
+    }
+    const port = await this.ensureAiProxy(r);
+    return {
+      skipCpa: true,
+      extraEnv: {
+        ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}`,
+        ANTHROPIC_AUTH_TOKEN: `room-borrow:${aiId}`,
+        ANTHROPIC_MODEL: seat.model || "",
+      },
+    };
+  }
+
+  private async proxyAiHttp(
+    r: RoomRecord,
+    req: { method: string; path: string; body: Buffer; auth?: string },
+  ): Promise<{ status: number; body: Buffer }> {
+    const targetUserId = parseBorrowToken(req.auth);
+    if (!targetUserId) {
+      return {
+        status: 401,
+        body: Buffer.from(JSON.stringify({ error: { message: "missing borrow token" } })),
+      };
+    }
+    const requestId = randomUUID();
+    const frames = buildReqFrames({
+      requestId,
+      targetUserId,
+      sourceUserId: r.localUserId,
+      method: req.method,
+      path: req.path,
+      body: req.body,
+    });
+    const pending = new Promise<{ status: number; body: Buffer }>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.aiHttpWait.delete(requestId);
+        reject(new Error("借用 AI 超时"));
+      }, 180_000);
+      this.aiHttpWait.set(requestId, {
+        parts: new Map(),
+        resolve: (v) => {
+          clearTimeout(timer);
+          resolve(v);
+        },
+        reject: (e) => {
+          clearTimeout(timer);
+          reject(e);
+        },
+        timer,
+      });
+    });
+    for (const frame of frames) this.sendAiHttp(r, frame);
+    return pending;
+  }
+
+  private sendAiHttp(r: RoomRecord, p: RoomAiHttpPayload): void {
+    if (r.localRole === "host") {
+      this.onAiHttp(r, r.localUserId, p);
+      return;
+    }
+    this.sendClient(r, "ai.http", p);
+  }
+
+  private onAiHttp(
+    r: RoomRecord,
+    fromUserId: string,
+    p: RoomAiHttpPayload,
+  ): void {
+    if (!p || typeof p.requestId !== "string") return;
+    if (p.dir === "req") {
+      if (p.targetUserId === r.localUserId) {
+        this.assembleAiHttpReq(r, p);
+        return;
+      }
+      if (r.localRole === "host") {
+        const ws = this.findGuestWsByUserId(r, p.targetUserId);
+        if (ws) this.reply(ws, r, "ai.http", p);
+        return;
+      }
+      this.sendClient(r, "ai.http", p);
+      return;
+    }
+    // res
+    if (p.sourceUserId === r.localUserId) {
+      this.completeAiHttpRes(p);
+      return;
+    }
+    if (r.localRole === "host" && p.sourceUserId) {
+      const ws = this.findGuestWsByUserId(r, p.sourceUserId);
+      if (ws) this.reply(ws, r, "ai.http", p);
+      return;
+    }
+    if (r.localRole !== "host") this.sendClient(r, "ai.http", p);
+    void fromUserId;
+  }
+
+  private assembleAiHttpReq(r: RoomRecord, p: RoomAiHttpPayload): void {
+    let box = this.aiHttpAssemble.get(p.requestId);
+    if (!box) {
+      box = {
+        targetUserId: p.targetUserId,
+        sourceUserId: p.sourceUserId || "",
+        parts: new Map(),
+      };
+      this.aiHttpAssemble.set(p.requestId, box);
+    }
+    if (p.method) box.method = p.method;
+    if (p.path) box.path = p.path;
+    if (p.sourceUserId) box.sourceUserId = p.sourceUserId;
+    if (p.data) box.parts.set(p.seq, p.data);
+    if (!p.last) return;
+    const ordered = [...box.parts.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([, d]) => d);
+    const body = concatChunks(ordered);
+    this.aiHttpAssemble.delete(p.requestId);
+    void this.serveLocalCpa(r, {
+      requestId: p.requestId,
+      targetUserId: box.targetUserId,
+      sourceUserId: box.sourceUserId,
+      method: box.method || "POST",
+      path: box.path || "/",
+      body,
+    });
+  }
+
+  private async serveLocalCpa(
+    r: RoomRecord,
+    req: {
+      requestId: string;
+      targetUserId: string;
+      sourceUserId: string;
+      method: string;
+      path: string;
+      body: Buffer;
+    },
+  ): Promise<void> {
+    const fail = (status: number, message: string) => {
+      for (const frame of buildResFrames({
+        requestId: req.requestId,
+        targetUserId: req.targetUserId,
+        sourceUserId: req.sourceUserId,
+        status,
+        body: Buffer.from(JSON.stringify({ error: { message } })),
+      })) {
+        this.sendAiHttpRes(r, frame);
+      }
+    };
+    const target = this.cpa?.getProxyTarget();
+    if (!target) {
+      fail(503, "本机 CPA 未就绪，无法出借 AI");
+      return;
+    }
+    const owner = r.members.find((m) => m.userId === r.localUserId);
+    if (owner && owner.aiShare !== "on") {
+      fail(403, "未开启 AI 共享");
+      return;
+    }
+    try {
+      const url = `${target.origin}${req.path.startsWith("/") ? req.path : `/${req.path}`}`;
+      const res = await fetch(url, {
+        method: req.method,
+        headers: {
+          Authorization: `Bearer ${target.token}`,
+          "content-type": "application/json",
+        },
+        body:
+          req.method === "GET" || req.method === "HEAD"
+            ? undefined
+            : new Uint8Array(req.body),
+      });
+      const buf = Buffer.from(await res.arrayBuffer());
+      for (const frame of buildResFrames({
+        requestId: req.requestId,
+        targetUserId: req.targetUserId,
+        sourceUserId: req.sourceUserId,
+        status: res.status,
+        body: buf,
+      })) {
+        this.sendAiHttpRes(r, frame);
+      }
+    } catch (err) {
+      fail(502, err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  private sendAiHttpRes(r: RoomRecord, p: RoomAiHttpPayload): void {
+    if (p.sourceUserId === r.localUserId) {
+      this.completeAiHttpRes(p);
+      return;
+    }
+    if (r.localRole === "host" && p.sourceUserId) {
+      const ws = this.findGuestWsByUserId(r, p.sourceUserId);
+      if (ws) this.reply(ws, r, "ai.http", p);
+      return;
+    }
+    this.sendClient(r, "ai.http", p);
+  }
+
+  private completeAiHttpRes(p: RoomAiHttpPayload): void {
+    const wait = this.aiHttpWait.get(p.requestId);
+    if (!wait) return;
+    if (typeof p.status === "number") wait.status = p.status;
+    if (p.data) wait.parts.set(p.seq, p.data);
+    if (!p.last) return;
+    const ordered = [...wait.parts.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([, d]) => d);
+    this.aiHttpWait.delete(p.requestId);
+    wait.resolve({
+      status: wait.status ?? 200,
+      body: concatChunks(ordered),
+    });
   }
 
   /** 本机网关已配置的模型名列表（用于校验席位模型在执行节点上是否存在）。 */
@@ -3370,6 +3923,7 @@ export function activate(ctx) {
       turnId,
       seatId: seat.id,
       text,
+      requesterUserId,
     } satisfies RoomExecRunPayload);
     turn.ackTimer = setTimeout(
       () => this.onExecAckTimeout(r.roomId, turnId),
@@ -3440,6 +3994,7 @@ export function activate(ctx) {
         turnId,
         seatId: turn.seatId,
         text: turn.text,
+        requesterUserId: turn.requesterUserId,
       } satisfies RoomExecRunPayload);
       turn.ackTimer = setTimeout(
         () => this.onExecAckTimeout(roomId, turnId),
@@ -3647,14 +4202,24 @@ export function activate(ctx) {
     };
     const seat = r.seats.find((s) => s.id === p.seatId);
     if (!seat || seat.kind !== "agent") return fail("席位不存在或不是 Agent");
-    if (seat.executorUserId && seat.executorUserId !== r.localUserId) {
+    const wsId = resolveWorkspaceUserId(seat, r.hostUserId);
+    if (wsId !== r.localUserId) {
       return fail("该席位不在本机执行");
+    }
+    const policy = effectiveFilePolicy(
+      r.members.find((m) => m.userId === wsId)?.filePolicy,
+      wsId,
+      p.requesterUserId,
+    );
+    if (policy === "deny") {
+      return fail("本机禁止他人操作此项目");
     }
     const cwd = this.settings.get().lastProjectPath;
     if (!cwd) return fail("本机尚未打开项目，无法执行");
     const nt: NodeTurn = {
       turnId: p.turnId,
       seatId: p.seatId,
+      requesterUserId: p.requesterUserId ?? null,
       heartbeat: null,
       startedAt: Date.now(),
       liveText: "",
@@ -3694,7 +4259,11 @@ export function activate(ctx) {
     const seatSessions = (r.nodeSeatSessions ??= new Map());
     const prevSession = seatSessions.get(nt.seatId);
     // 席位模型在节点本机校验：未配置则回落本机默认，回复里注明。
-    const em = this.effectiveSeatModel(seat);
+    const borrowing =
+      resolveAiUserId(seat, r.hostUserId) !== r.localUserId;
+    const em = borrowing
+      ? { model: seat.model }
+      : this.effectiveSeatModel(seat);
     const modelNote = em.fallbackFrom
       ? `> 席位模型「${em.fallbackFrom}」在本机网关未配置，已改用本机默认模型\n\n`
       : "";
@@ -3702,16 +4271,19 @@ export function activate(ctx) {
       text: prevSession ? text : `${this.agentSeatPrefix(seat)}\n${text}`,
       attachments: [],
     };
-    const extras = {
+    const perm = this.turnPermissionMode(r, seat, nt.requesterUserId);
+    const extras: SessionRunOpts = {
       replaceExtras: true,
       hiddenFromList: true,
       ...(em.model ? { model: em.model } : {}),
+      ...(perm ? { permissionMode: perm } : {}),
       // 会话条目一建好就拿到 id：流式事件映射 + 中途 abort 都靠它
       onSessionId: (id: string) => {
         nt.sessionId = id;
       },
     };
     try {
+      Object.assign(extras, await this.borrowAiExtras(r, seat));
       let sid = prevSession;
       if (!sid) {
         sid = await this.sessions.start(prompt, cwd, extras);
@@ -3876,6 +4448,16 @@ export function activate(ctx) {
       if (nt.heartbeat) clearInterval(nt.heartbeat);
     }
     r.nodeTurns?.clear();
+    const proxy = this.aiProxies.get(r.roomId);
+    if (proxy) {
+      proxy.close();
+      this.aiProxies.delete(r.roomId);
+    }
+    for (const [id, wait] of this.aiHttpWait) {
+      clearTimeout(wait.timer);
+      wait.reject(new Error("房间已关闭"));
+      this.aiHttpWait.delete(id);
+    }
   }
 
   /** 房主：中止某席位名下所有在跑的远程轮（接管/踢人等）。 */
@@ -4022,7 +4604,6 @@ export function activate(ctx) {
       // 远程执行对账：掉线者名下在跑的轮次立即判失联（不等心跳超时）
       const goneUserId = (ws as GuestWs).userId;
       if (goneUserId && r.remoteTurns?.size) {
-        let settled = false;
         for (const turn of r.remoteTurns.values()) {
           if (turn.executorUserId !== goneUserId || !this.isTurnActive(turn)) {
             continue;
@@ -4034,10 +4615,9 @@ export function activate(ctx) {
             text: `「${this.memberName(r, goneUserId)}」掉线，其电脑上的执行中断（${turn.turnId.slice(0, 8)}）`,
             authorLabel: "系统",
           });
-          settled = true;
         }
-        if (settled) this.pushState(r);
       }
+      this.markMemberOffline(r, goneUserId);
     });
   }
 
@@ -4328,9 +4908,35 @@ export function activate(ctx) {
    * old invite gets hs.reject { reason: "blacklist" }.
    */
   kick(roomId: string, userId: string): { ok: boolean; error?: string } {
-    const r = this.hostRoom(roomId);
-    if (!r.ok) return r;
-    const rec = r.room;
+    const rec0 = this.rooms.get(roomId);
+    if (!rec0 || rec0.status !== "open") return { ok: false, error: "群聊不可用" };
+    if (rec0.localRole !== "host") {
+      if (
+        !canKickMember(
+          this.memberRole(rec0, rec0.localUserId),
+          rec0.members.find((m) => m.userId === userId)?.role,
+        )
+      ) {
+        return { ok: false, error: "没有权限踢人" };
+      }
+      this.sendClient(rec0, "member.kick", {
+        userId,
+      } satisfies RoomMemberKickPayload);
+      return { ok: true };
+    }
+    return this.kickOnHost(rec0, rec0.localUserId, userId);
+  }
+
+  private kickOnHost(
+    rec: RoomRecord,
+    actorUserId: string,
+    userId: string,
+  ): { ok: boolean; error?: string } {
+    const actorRole = this.memberRole(rec, actorUserId);
+    const targetRole = rec.members.find((m) => m.userId === userId)?.role;
+    if (!canKickMember(actorRole, targetRole)) {
+      return { ok: false, error: "没有权限踢人" };
+    }
     if (userId === rec.hostUserId) {
       return { ok: false, error: "不能踢出群主" };
     }
@@ -4359,7 +4965,7 @@ export function activate(ctx) {
       conn.trySendFrame(
         makeRoomFrame(rec.roomId, ++rec.seq, "kick", {
           userId,
-          message: "你已被群主移出群聊",
+          message: "你已被移出群聊",
         }),
       );
       conn.close();
@@ -4372,9 +4978,14 @@ export function activate(ctx) {
     }
     const name =
       rec.members.find((m) => m.userId === userId)?.name ?? userId;
+    rec.members = rec.members.filter((m) => m.userId !== userId);
+    rec.seats = rec.seats.filter(
+      (s) => !(s.kind === "human" && s.occupantUserId === userId),
+    );
+    const by = actorRole === "admin" ? "管理员" : "群主";
     this.append(rec, {
       kind: "system",
-      text: `${name} 已被群主移出并拉黑`,
+      text: `${name} 已被${by}移出并拉黑`,
       authorLabel: "系统",
     });
     this.pushState(rec);
@@ -4709,10 +5320,19 @@ export function activate(ctx) {
           ? p.projectPath
           : null;
       const existing = r.members.find((m) => m.userId === userId);
+      const rejoining = Boolean(existing);
       if (existing) {
         existing.projectPath = projectPath;
+        existing.name = name || existing.name;
+        existing.online = true;
       } else {
-        r.members.push({ userId, name, role: "member", projectPath });
+        r.members.push({
+          userId,
+          name,
+          role: "member",
+          online: true,
+          projectPath,
+        });
       }
       if (!r.seats.some((s) => s.kind === "human" && s.occupantUserId === userId)) {
         r.seats.push({
@@ -4726,11 +5346,23 @@ export function activate(ctx) {
           agentName: null,
         });
       }
+      // 同一人重连：关掉旧 socket，避免幽灵在线。
+      for (const old of [...r.guests]) {
+        if (old !== ws && (old as GuestWs).userId === userId) {
+          r.guests.delete(old);
+          r.connections.delete(old);
+          try {
+            old.close();
+          } catch {
+            // ignore
+          }
+        }
+      }
       r.guests.add(ws);
       (ws as GuestWs).userId = userId;
       this.append(r, {
         kind: "system",
-        text: `${name} 加入了群聊`,
+        text: rejoining ? `${name} 已重新连接` : `${name} 加入了群聊`,
         authorLabel: "系统",
       });
       this.reply(ws, r, "welcome", this.snapshot(r));
@@ -4745,6 +5377,16 @@ export function activate(ctx) {
     const userId = (ws as GuestWs).userId;
     if (!userId) {
       this.reply(ws, r, "error", { message: "请先加入" });
+      return;
+    }
+
+    if (frame.type === "leave") {
+      this.removeGuestMember(r, userId);
+      try {
+        ws.close();
+      } catch {
+        // ignore
+      }
       return;
     }
 
@@ -4885,6 +5527,8 @@ export function activate(ctx) {
         skillNames?: string[];
         model?: string;
         executorUserId?: string;
+        aiUserId?: string;
+        workspaceUserId?: string;
       };
       if (!p.userId) return;
       this.addSeatForMember(
@@ -4902,8 +5546,75 @@ export function activate(ctx) {
           model: typeof p.model === "string" ? p.model : undefined,
           executorUserId:
             typeof p.executorUserId === "string" ? p.executorUserId : undefined,
+          aiUserId: typeof p.aiUserId === "string" ? p.aiUserId : undefined,
+          workspaceUserId:
+            typeof p.workspaceUserId === "string" ? p.workspaceUserId : undefined,
         },
       );
+      return;
+    }
+
+    if (frame.type === "seat.update") {
+      if (!canManageSeats(this.memberRole(r, userId))) {
+        this.reply(ws, r, "error", { message: "没有权限改席位" });
+        return;
+      }
+      const p = frame.payload as RoomSeatUpdatePayload;
+      if (!p?.seatId) return;
+      this.updateSeat(r.roomId, p.seatId, p);
+      return;
+    }
+
+    if (frame.type === "member.kick") {
+      const p = frame.payload as RoomMemberKickPayload;
+      if (!p?.userId) return;
+      const res = this.kickOnHost(r, userId, p.userId);
+      if (!res.ok && res.error) {
+        this.reply(ws, r, "error", { message: res.error });
+      }
+      return;
+    }
+
+    if (frame.type === "file.policy") {
+      const p = frame.payload as RoomFilePolicyPayload;
+      if (p?.policy !== "allow" && p?.policy !== "ask" && p?.policy !== "deny") {
+        return;
+      }
+      const m = r.members.find((mm) => mm.userId === userId);
+      if (m) {
+        m.filePolicy = p.policy;
+        this.pushState(r);
+      }
+      return;
+    }
+
+    if (frame.type === "ai.share") {
+      const p = frame.payload as RoomAiSharePayload;
+      this.applyAiShare(
+        r,
+        userId,
+        Boolean(p?.on),
+        Array.isArray(p?.models)
+          ? p.models.filter((s): s is string => typeof s === "string").slice(0, 64)
+          : undefined,
+      );
+      this.pushState(r);
+      return;
+    }
+
+    if (frame.type === "ai.ask") {
+      if (!canManageSeats(this.memberRole(r, userId))) {
+        this.reply(ws, r, "error", { message: "没有权限请求借用 AI" });
+        return;
+      }
+      const p = frame.payload as RoomAiAskPayload;
+      if (!p?.targetUserId) return;
+      this.applyAiAsk(r, userId, p.targetUserId);
+      return;
+    }
+
+    if (frame.type === "ai.http") {
+      this.onAiHttp(r, userId, frame.payload as RoomAiHttpPayload);
       return;
     }
 
@@ -5067,6 +5778,39 @@ export function activate(ctx) {
     return r.members.find((m) => m.userId === userId)?.name ?? "成员";
   }
 
+  /** 客人 socket 断开：人还在名单里，只标离线。主动退出走 removeGuestMember。 */
+  private markMemberOffline(r: RoomRecord, userId?: string): void {
+    if (!userId) return;
+    const m = r.members.find((mm) => mm.userId === userId);
+    if (!m || m.role === "host") return;
+    const wasOnline = m.online !== false;
+    m.online = false;
+    if (wasOnline) {
+      this.append(r, {
+        kind: "system",
+        text: `${m.name} 已离线`,
+        authorLabel: "系统",
+      });
+    }
+    this.pushState(r);
+  }
+
+  private removeGuestMember(r: RoomRecord, userId: string): void {
+    const m = r.members.find((mm) => mm.userId === userId);
+    if (!m || m.role === "host") return;
+    const name = m.name;
+    r.members = r.members.filter((mm) => mm.userId !== userId);
+    r.seats = r.seats.filter(
+      (s) => !(s.kind === "human" && s.occupantUserId === userId),
+    );
+    this.append(r, {
+      kind: "system",
+      text: `${name} 退出了群聊`,
+      authorLabel: "系统",
+    });
+    this.pushState(r);
+  }
+
   private snapshot(r: RoomRecord): RoomSnapshot {
     return {
       roomId: r.roomId,
@@ -5076,6 +5820,7 @@ export function activate(ctx) {
       hostLabel: r.hostLabel,
       inviteHost: lanAddress(),
       memberCount: r.members.length,
+      onlineCount: countOnlineMembers(r.members),
       requireMods: r.requireMods,
       modChecksum: r.modChecksum,
       autoApprove: r.autoApprove,
@@ -5666,7 +6411,15 @@ export function activate(ctx) {
     this.pushState(r);
     if (!next.runAgent) return;
     const seat = r.seats.find((s) => s.id === current.seatId);
-    if (seat) void this.runAgentSeat(r, seat, current.text, undefined, next.attachments);
+    if (seat) {
+      void this.runAgentSeat(
+        r,
+        seat,
+        current.text,
+        current.authorUserId,
+        next.attachments,
+      );
+    }
   }
 
   private disposeKernel(r: RoomRecord, deleteStore: boolean): void {

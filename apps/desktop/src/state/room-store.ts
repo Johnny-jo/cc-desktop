@@ -308,7 +308,11 @@ export function bindRoomEvents(): () => void {
     if (ev.closed) {
       const msg = ev.message ?? "群聊已关闭";
       modsByRoom.delete(ev.roomId);
-      set({ reconnectNote: null });
+      const patch: Partial<RoomUiState> = { reconnectNote: null };
+      if (ev.offline && state.activeRoomId === ev.roomId && state.activeRoom) {
+        patch.activeRoom = { ...state.activeRoom, status: "ended" };
+      }
+      set(patch);
       void refreshRooms();
       if (!ev.silent) {
         set({ lastError: msg });
@@ -457,6 +461,8 @@ export async function addSeat(
     skillNames?: string[];
     model?: string;
     executorUserId?: string;
+    aiUserId?: string;
+    workspaceUserId?: string;
   },
 ): Promise<void> {
   const id = state.activeRoomId;
@@ -474,6 +480,8 @@ export async function updateSeat(
     skillNames?: string[];
     model?: string;
     executorUserId?: string;
+    aiUserId?: string;
+    workspaceUserId?: string;
   },
 ): Promise<{ ok: boolean; error?: string }> {
   const id = state.activeRoomId;
@@ -584,6 +592,48 @@ export async function kickRoomMember(
     return { ok: false, error: "请完全重启应用后再使用群聊" };
   }
   return getDesktop().kickRoomMember(roomId, userId);
+}
+
+export async function setRoomMemberRole(
+  roomId: string,
+  userId: string,
+  role: "admin" | "member",
+): Promise<{ ok: boolean; error?: string }> {
+  if (!hasDesktopApi("setRoomMemberRole")) {
+    return { ok: false, error: "请完全重启应用后再使用群聊" };
+  }
+  return getDesktop().setRoomMemberRole(roomId, userId, role);
+}
+
+export async function setRoomFilePolicy(
+  roomId: string,
+  policy: import("@claude-desktop/shared").RoomFilePolicy,
+): Promise<{ ok: boolean; error?: string }> {
+  if (!hasDesktopApi("setRoomFilePolicy")) {
+    return { ok: false, error: "请完全重启应用后再使用群聊" };
+  }
+  return getDesktop().setRoomFilePolicy(roomId, policy);
+}
+
+export async function setRoomAiShare(
+  roomId: string,
+  on: boolean,
+): Promise<{ ok: boolean; error?: string }> {
+  if (!hasDesktopApi("setRoomAiShare")) {
+    return { ok: false, error: "请完全重启应用后再使用群聊" };
+  }
+  return getDesktop().setRoomAiShare(roomId, on);
+}
+
+export async function askRoomAiShare(
+  roomId: string,
+  targetUserId: string,
+  seatId?: string,
+): Promise<{ ok: boolean; error?: string }> {
+  if (!hasDesktopApi("askRoomAiShare")) {
+    return { ok: false, error: "请完全重启应用后再使用群聊" };
+  }
+  return getDesktop().askRoomAiShare(roomId, targetUserId, seatId);
 }
 
 /** Host: rename the room; snapshot broadcast refreshes every client. */

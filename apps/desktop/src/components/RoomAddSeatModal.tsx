@@ -1,8 +1,18 @@
 import React, { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
+import type { RoomAiShare } from "@claude-desktop/shared";
 import { addSeat, updateSeat } from "../state/room-store";
 import { getDesktop, hasDesktopApi } from "../lib/desktop-api";
 import { useI18n } from "../i18n/useI18n";
+
+export type SeatMemberOpt = {
+  userId: string;
+  label: string;
+  projectPath?: string | null;
+  aiShare?: RoomAiShare;
+  aiModels?: string[];
+  isSelf?: boolean;
+};
 
 export type SeatDraft = {
   seatId?: string;
@@ -11,21 +21,26 @@ export type SeatDraft = {
   agentPrompt: string;
   skillNames: string[];
   model: string;
-  /** 执行节点 userId；"" = 房主本机 */
+  /** @deprecated 等于 workspaceUserId */
   executorUserId: string;
+  aiUserId: string;
+  workspaceUserId: string;
 };
 
 export function RoomAddSeatModal({
   agents,
   models,
-  executors,
+  members,
+  canRetarget,
+  onAskAiShare,
   initial,
   onClose,
 }: {
   agents: Array<{ name: string; description: string }>;
   models: string[];
-  /** 可选的执行节点（首位是房主，userId 为 ""）；projectPath 为该成员当前打开的项目 */
-  executors?: Array<{ userId: string; label: string; projectPath?: string | null }>;
+  members?: SeatMemberOpt[];
+  canRetarget?: boolean;
+  onAskAiShare?: (userId: string) => void;
   initial?: SeatDraft;
   onClose: () => void;
 }) {
@@ -37,8 +52,11 @@ export function RoomAddSeatModal({
     initial?.skillNames ?? [],
   );
   const [model, setModel] = useState(initial?.model ?? "");
-  const [executorUserId, setExecutorUserId] = useState(
-    initial?.executorUserId ?? "",
+  const [aiUserId, setAiUserId] = useState(
+    initial?.aiUserId || initial?.executorUserId || "",
+  );
+  const [workspaceUserId, setWorkspaceUserId] = useState(
+    initial?.workspaceUserId || initial?.executorUserId || "",
   );
   const [skills, setSkills] = useState<Array<{ name: string; scope: string }>>(
     [],
@@ -63,8 +81,19 @@ export function RoomAddSeatModal({
   }, []);
 
   const selected = agents.find((a) => a.name === agentName) ?? null;
-  const selectedExecutor =
-    executors?.find((e) => e.userId === executorUserId) ?? null;
+  const aiMember = members?.find((e) => e.userId === aiUserId) ?? null;
+  const wsMember = members?.find((e) => e.userId === workspaceUserId) ?? null;
+  const modelList =
+    !aiMember || aiMember.isSelf ? models : (aiMember.aiModels ?? []);
+  const showAxes = Boolean(members && members.length > 0 && canRetarget);
+  const shareHint =
+    aiMember && !aiMember.isSelf
+      ? aiMember.aiShare === "on"
+        ? null
+        : aiMember.aiShare === "pending"
+          ? "等待对方同意借用 AI"
+          : "尚未借用对方的 AI，需要先请求同意"
+      : null;
 
   const toggleSkill = (n: string) => {
     setSkillNames((prev) =>
@@ -79,7 +108,9 @@ export function RoomAddSeatModal({
       agentPrompt: agentPrompt.trim() || undefined,
       skillNames: skillNames.length ? skillNames : undefined,
       model: model.trim() || undefined,
-      executorUserId: executorUserId || undefined,
+      executorUserId: workspaceUserId || undefined,
+      workspaceUserId: workspaceUserId || undefined,
+      aiUserId: aiUserId || undefined,
     };
     if (initial?.seatId) {
       void updateSeat(initial.seatId, {
@@ -147,47 +178,84 @@ export function RoomAddSeatModal({
               onChange={(e) => setAgentPrompt(e.target.value)}
             />
           </label>
+          {showAxes ? (
+            <label className="settings-field">
+              AI 来源
+              <select
+                className="select"
+                value={aiUserId}
+                onChange={(e) => {
+                  setAiUserId(e.target.value);
+                  setModel("");
+                }}
+              >
+                {members!.map((ex) => (
+                  <option key={ex.userId} value={ex.userId}>
+                    {ex.label}
+                    {ex.isSelf
+                      ? ""
+                      : ex.aiShare === "on"
+                        ? "（已共享模型）"
+                        : "（未共享）"}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+          {shareHint ? <p className="settings-hint">{shareHint}</p> : null}
+          {aiMember && !aiMember.isSelf && aiMember.aiShare !== "on" ? (
+            <button
+              type="button"
+              className="btn btn-sm"
+              disabled={aiMember.aiShare === "pending"}
+              onClick={() => onAskAiShare?.(aiMember.userId)}
+            >
+              {aiMember.aiShare === "pending" ? "等待同意" : "请求借用"}
+            </button>
+          ) : null}
           <label className="settings-field">
             {t.room.addSeatModel}
             <select
               className="select"
               value={model}
               onChange={(e) => setModel(e.target.value)}
+              disabled={Boolean(aiMember && !aiMember.isSelf && aiMember.aiShare !== "on")}
             >
               <option value="">{t.room.addSeatModelDefault}</option>
-              {models.map((m) => (
+              {modelList.map((m) => (
                 <option key={m} value={m}>
                   {m}
                 </option>
               ))}
             </select>
           </label>
-          {executors && executors.length > 1 ? (
+          {showAxes ? (
             <label className="settings-field">
-              运行位置
+              工作目录
               <select
                 className="select"
-                value={executorUserId}
-                onChange={(e) => setExecutorUserId(e.target.value)}
+                value={workspaceUserId}
+                onChange={(e) => setWorkspaceUserId(e.target.value)}
               >
-                {executors.map((ex) => (
+                {members!.map((ex) => (
                   <option key={ex.userId} value={ex.userId}>
                     {ex.label}
+                    {ex.projectPath ? `（${ex.projectPath}）` : "（未开项目）"}
                   </option>
                 ))}
               </select>
             </label>
           ) : null}
-          {executors && executors.length > 1 && executorUserId ? (
+          {showAxes && aiUserId && workspaceUserId && aiUserId !== workspaceUserId ? (
             <p className="settings-hint">
-              这个 Agent 会在对方电脑上执行，改动落在对方的项目里；写文件需对方本人确认。
+              循环在文件主人电脑上跑，模型请求转到 AI 主人；写文件由文件主人确认。
             </p>
           ) : null}
-          {selectedExecutor && !selectedExecutor.projectPath ? (
+          {wsMember && !wsMember.projectPath ? (
             <p className="settings-hint">
-              {selectedExecutor.userId
-                ? "对方当前没有打开项目，现在发起执行会失败。"
-                : "房主当前没有打开项目，执行会失败。"}
+              {wsMember.isSelf
+                ? "当前没有打开项目，执行会失败。"
+                : "对方当前没有打开项目，现在发起执行会失败。"}
             </p>
           ) : null}
           {skills.length ? (

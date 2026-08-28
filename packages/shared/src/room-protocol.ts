@@ -25,9 +25,13 @@ export const ROOM_FRAME_LIMITS = {
   default: 256 * 1024,
 } as const;
 
-export type RoomRole = "host" | "member";
+export type RoomRole = "host" | "admin" | "member";
 export type RoomSeatKind = "human" | "agent";
 export type RoomStatus = "open" | "ended";
+/** 别人动我的项目时：完全允许 / 审批 / 禁止。缺省 ask。 */
+export type RoomFilePolicy = "allow" | "ask" | "deny";
+/** 是否把本机模型借给本房席位。缺省 off。 */
+export type RoomAiShare = "off" | "pending" | "on";
 
 /** Path that won the join race: T0 = LAN ws, T1 = public wss, T2 = cf tunnel. */
 export type RoomPath = "T0" | "T1" | "T2";
@@ -44,6 +48,14 @@ export type RoomFrameType =
   | "seat.takeover"
   | "seat.return"
   | "seat.add"
+  | "seat.update"
+  | "member.role"
+  | "member.kick"
+  | "ai.share"
+  | "ai.ask"
+  | "ai.models"
+  | "ai.http"
+  | "file.policy"
   | "chat.user"
   | "chat.event"
   | "chat.recall"
@@ -129,6 +141,19 @@ export type RoomMember = {
    * null/缺省 = 未开项目，远程执行席位选择时据此提示。
    */
   projectPath?: string | null;
+  /** 别人以我为 workspace 时的工具策略。缺省 ask。 */
+  filePolicy?: RoomFilePolicy;
+  /** 是否把本机 CPA 模型借给本房。缺省 off。 */
+  aiShare?: RoomAiShare;
+  /** 最近一次上报的模型 id（aiShare=on 时给席位下拉用）。 */
+  aiModels?: string[];
+  /** aiShare=pending 时，谁在请求借用。 */
+  aiAskBy?: string | null;
+  /**
+   * 当前是否连着房间（有活着的 socket）。缺省 / 未出现 = 视为在线（旧快照）。
+   * 房主在房间 open 时始终为 true。
+   */
+  online?: boolean;
 };
 
 export type RoomSeat = {
@@ -153,8 +178,17 @@ export type RoomSeat = {
   /**
    * 远程执行（docs/room-remote-exec-design.md）：这个 Agent 席位在哪台机器上
    * 运行——成员 userId。缺省 / null = 房主本机（现状行为）。
+   * 废弃别名：等于 workspaceUserId，读老快照时两轴都回退到它。
    */
   executorUserId?: string | null;
+  /**
+   * 用谁的 CPA / 模型。缺省 = workspaceUserId / executorUserId / 房主。
+   */
+  aiUserId?: string | null;
+  /**
+   * 在谁当前打开的项目里跑 Agent 循环。缺省 = executorUserId / 房主。
+   */
+  workspaceUserId?: string | null;
 };
 
 /** exec.run：房主 → 执行节点，请求跑一轮（turnId 全链路幂等键）。 */
@@ -162,6 +196,8 @@ export type RoomExecRunPayload = {
   turnId: string;
   seatId: string;
   text: string;
+  /** 谁发的这轮；节点用来套文件主人的 filePolicy。 */
+  requesterUserId?: string | null;
 };
 
 /** exec.event：节点 → 房主，ack / 15s 心跳 / 阶段提示 / 流式进度（二期）。 */
@@ -197,6 +233,75 @@ export type RoomExecAbortPayload = {
 /** node.info：客人 → 房主，上报本机当前项目路径变化（null = 未开项目）。 */
 export type RoomNodeInfoPayload = {
   projectPath: string | null;
+};
+
+/** seat.update：管理员/房主（客人侧）→ 房主，改 Agent 席位。 */
+export type RoomSeatUpdatePayload = {
+  seatId: string;
+  name?: string;
+  agentName?: string;
+  agentPrompt?: string;
+  skillNames?: string[];
+  model?: string;
+  aiUserId?: string;
+  workspaceUserId?: string;
+  executorUserId?: string;
+};
+
+/** member.role：房主 → 自己落座 / 客人不可发。客人侧不会发此帧。 */
+export type RoomMemberRolePayload = {
+  userId: string;
+  role: "admin" | "member";
+};
+
+/** member.kick：管理员（客人）→ 房主，请求踢人。 */
+export type RoomMemberKickPayload = {
+  userId: string;
+};
+
+/** ai.share：成员 → 房主（或房主本地），开关本机模型共享。 */
+export type RoomAiSharePayload = {
+  on: boolean;
+  models?: string[];
+};
+
+/** ai.ask：房主/管理员请求借用对方 AI。 */
+export type RoomAiAskPayload = {
+  targetUserId: string;
+  fromUserId: string;
+  seatId?: string;
+};
+
+/** ai.models：拉/回报对方模型目录。 */
+export type RoomAiModelsPayload = {
+  requestId: string;
+  targetUserId: string;
+  models?: string[];
+  error?: string;
+};
+
+/**
+ * ai.http：文件主人机器上的 SDK → AI 主人 CPA 的 HTTP 中继。
+ * 第一片带 method/path/status；后续只带 data；last 结束。
+ */
+export type RoomAiHttpPayload = {
+  requestId: string;
+  targetUserId: string;
+  /** 工作目录所在节点（回传 res 用）。 */
+  sourceUserId?: string;
+  dir: "req" | "res";
+  seq: number;
+  last: boolean;
+  method?: string;
+  path?: string;
+  status?: number;
+  /** base64 正文分片 */
+  data?: string;
+};
+
+/** file.policy：成员 → 房主，设置自己项目的操作策略。 */
+export type RoomFilePolicyPayload = {
+  policy: RoomFilePolicy;
 };
 
 /** QQ-style quoted message reference (id + excerpt snapshot) */
@@ -236,6 +341,8 @@ export type RoomSnapshot = {
   hostLabel: string;
   inviteHost: string;
   memberCount: number;
+  /** 当前连着的人数（members 里 online !== false）。 */
+  onlineCount?: number;
   requireMods: boolean;
   modChecksum: string;
   autoApprove: boolean;
@@ -281,6 +388,8 @@ export type RoomListItem = {
   status: RoomStatus;
   role: RoomRole;
   memberCount: number;
+  /** 当前连着的人数；缺省则 UI 回退 memberCount。 */
+  onlineCount?: number;
   port: number;
   inviteHost: string;
   /** guest lost connection — room + history kept locally, can rejoin */

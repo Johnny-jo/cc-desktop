@@ -918,6 +918,8 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
       skillNames: opts.skillNames,
       model: opts.model,
       executorUserId: opts.executorUserId,
+      aiUserId: opts.aiUserId,
+      workspaceUserId: opts.workspaceUserId,
     });
   });
   ipcMain.handle(IPC.roomUpdateSeat, async (_e, opts) => {
@@ -951,6 +953,22 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
   ipcMain.handle(IPC.roomKick, async (_e, { roomId, userId }) => {
     if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.kick(roomId, userId);
+  });
+  ipcMain.handle(IPC.roomSetMemberRole, async (_e, { roomId, userId, role }) => {
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
+    return ctx.rooms.setMemberRole(roomId, userId, role);
+  });
+  ipcMain.handle(IPC.roomSetFilePolicy, async (_e, { roomId, policy }) => {
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
+    return ctx.rooms.setFilePolicy(roomId, policy);
+  });
+  ipcMain.handle(IPC.roomSetAiShare, async (_e, { roomId, on }) => {
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
+    return ctx.rooms.setAiShare(roomId, on);
+  });
+  ipcMain.handle(IPC.roomAskAiShare, async (_e, { roomId, targetUserId, seatId }) => {
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
+    return ctx.rooms.askAiShare(roomId, targetUserId, seatId);
   });
   ipcMain.handle(IPC.roomRename, async (_e, { roomId, name }) => {
     if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };

@@ -457,6 +457,8 @@ const desktop = {
       skillNames?: string[];
       model?: string;
       executorUserId?: string;
+      aiUserId?: string;
+      workspaceUserId?: string;
     },
   ) =>
     ipcRenderer.invoke(IPC.roomAddSeat, {
@@ -480,6 +482,8 @@ const desktop = {
       skillNames?: string[];
       model?: string;
       executorUserId?: string;
+      aiUserId?: string;
+      workspaceUserId?: string;
     },
   ) =>
     ipcRenderer.invoke(IPC.roomUpdateSeat, {
@@ -530,6 +534,37 @@ const desktop = {
     }>,
   kickRoomMember: (roomId: string, userId: string) =>
     ipcRenderer.invoke(IPC.roomKick, { roomId, userId }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+  setRoomMemberRole: (
+    roomId: string,
+    userId: string,
+    role: "admin" | "member",
+  ) =>
+    ipcRenderer.invoke(IPC.roomSetMemberRole, { roomId, userId, role }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+  setRoomFilePolicy: (
+    roomId: string,
+    policy: import("@claude-desktop/shared").RoomFilePolicy,
+  ) =>
+    ipcRenderer.invoke(IPC.roomSetFilePolicy, { roomId, policy }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+  setRoomAiShare: (roomId: string, on: boolean) =>
+    ipcRenderer.invoke(IPC.roomSetAiShare, { roomId, on }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+  askRoomAiShare: (roomId: string, targetUserId: string, seatId?: string) =>
+    ipcRenderer.invoke(IPC.roomAskAiShare, {
+      roomId,
+      targetUserId,
+      seatId,
+    }) as Promise<{
       ok: boolean;
       error?: string;
     }>,

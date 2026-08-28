@@ -442,13 +442,14 @@ describe("room transport: handshake + encrypted frames", () => {
 });
 
 describe("room transport: reconnect", () => {
-  it("reconnects via handshake and receives a fresh snapshot within 3s", async () => {
+  it("goes offline on drop and comes back only on manual rejoin", async () => {
     const host = makeRooms();
     const { room, port } = await createHost(host, { password: "pw" });
     const events: Array<{
       roomId?: string;
       reconnecting?: boolean;
-      reconnectAttempt?: number;
+      closed?: boolean;
+      offline?: boolean;
       room?: RoomSnapshot;
     }> = [];
     const guest = makeRooms((ch, p) => {
@@ -471,27 +472,22 @@ describe("room transport: reconnect", () => {
     expect(grec?.client).toBeTruthy();
     grec!.client!.terminate();
 
-    // Within 3s: a reconnect is announced, then a fresh open snapshot lands.
-    const deadline = Date.now() + 3000;
-    let sawReconnecting = false;
-    let reopened: RoomSnapshot | undefined;
-    while (Date.now() < deadline && !reopened) {
-      for (const e of events) {
-        if (e.roomId !== room.roomId) continue;
-        if (e.reconnecting) {
-          sawReconnecting = true;
-          continue;
-        }
-        if (sawReconnecting && e.room?.status === "open") reopened = e.room;
-      }
-      if (!reopened) await sleep(50);
-    }
-    expect(sawReconnecting).toBe(true);
-    expect(reopened).toBeTruthy();
-    expect(
-      reopened!.items.some((i) => i.text.includes("已重新连接")),
-    ).toBe(true);
+    await vi.waitFor(() => {
+      expect(guest.list().find((l) => l.roomId === room.roomId)?.offline).toBe(
+        true,
+      );
+    });
+    expect(events.some((e) => e.roomId === room.roomId && e.reconnecting)).toBe(
+      false,
+    );
     expect(guest.get(room.roomId)?.status).toBe("open");
+
+    const again = await guest.rejoin(room.roomId);
+    expect(again.ok).toBe(true);
+    expect(guest.get(room.roomId)?.status).toBe("open");
+    expect(
+      host.get(room.roomId)!.items.some((i) => i.text.includes("已重新连接")),
+    ).toBe(true);
   });
 
   it("does not reconnect after the host ends the room", async () => {
@@ -524,13 +520,12 @@ describe("room transport: reconnect", () => {
     expect(guest.get(room.roomId)?.status).toBe("ended");
   });
 
-  it("gives up after 5 backoff attempts and keeps the room offline", async () => {
+  it("goes offline immediately when the host process dies", async () => {
     const host = makeRooms();
     const { room, port } = await createHost(host, { password: "pw" });
     const events: Array<{
       roomId?: string;
       reconnecting?: boolean;
-      reconnectAttempt?: number;
       closed?: boolean;
       offline?: boolean;
     }> = [];
@@ -545,13 +540,6 @@ describe("room transport: reconnect", () => {
     });
     expect(res.ok).toBe(true);
 
-    // Injectable backoff: make the 1s/2s/4s/8s/8s waits instant.
-    const guestSvc = guest as unknown as {
-      rooms: Map<string, { client?: WebSocket | null }>;
-      reconnectSleep: (ms: number) => Promise<void>;
-    };
-    guestSvc.reconnectSleep = () => Promise.resolve();
-
     // Host dies without room.closed (crash): close server + cut sockets.
     const hostSvc = host as unknown as {
       rooms: Map<string, {
@@ -563,20 +551,15 @@ describe("room transport: reconnect", () => {
     for (const g of hrec.guests) g.terminate();
     hrec.server?.close();
 
-    const deadline = Date.now() + 5000;
-    let offlineEv: (typeof events)[number] | undefined;
-    while (Date.now() < deadline && !offlineEv) {
-      offlineEv = events.find(
-        (e) => e.roomId === room.roomId && e.closed && e.offline,
-      );
-      if (!offlineEv) await sleep(50);
-    }
-    expect(offlineEv).toBeTruthy();
-    const attempts = events.filter(
-      (e) => e.roomId === room.roomId && e.reconnecting,
+    await vi.waitFor(() => {
+      expect(
+        events.some((e) => e.roomId === room.roomId && e.closed && e.offline),
+      ).toBe(true);
+    });
+    expect(events.some((e) => e.roomId === room.roomId && e.reconnecting)).toBe(
+      false,
     );
-    expect(attempts.map((a) => a.reconnectAttempt)).toEqual([1, 2, 3, 4, 5]);
-    expect(guest.get(room.roomId)?.status).toBe("ended");
+    expect(guest.get(room.roomId)?.status).toBe("open");
     expect(guest.list().find((l) => l.roomId === room.roomId)?.offline).toBe(
       true,
     );
