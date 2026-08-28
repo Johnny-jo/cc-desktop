@@ -44,6 +44,7 @@ import {
   type ContextCompressor,
 } from "./context-compressor";
 import { getClaudeExecutablePath } from "./runtime-paths";
+import path from "node:path";
 
 /**
  * Production query may receive a string (legacy/tests) or AsyncIterable (streaming).
@@ -64,6 +65,12 @@ export type SessionRunOpts = {
   model?: string;
   /** Per-session permission override (room filePolicy allow → auto). */
   permissionMode?: PermissionMode;
+  /**
+   * 路径围栏（绝对路径）：设置后，文件类工具（Read/Write/Edit/MultiEdit/
+   * NotebookEdit/Glob/Grep/LS）只能碰这个目录里的路径，越界直接拒绝，
+   * 不进权限弹窗。群聊席位/远程执行会话用它把 AI 圈死在工作区内。
+   */
+  pathJail?: string;
   /** Merge over CPA env (borrowed AI proxy sets ANTHROPIC_BASE_URL here). */
   extraEnv?: Record<string, string>;
   /** Skip local CPA ready check (borrowed AI talks to a loopback proxy). */
@@ -220,6 +227,8 @@ type SessionEntry = {
   extraAllowedTools?: string[];
   model?: string;
   permissionMode?: PermissionMode;
+  /** Room turns only: confine file tools to this root (see SessionRunOpts). */
+  pathJail?: string;
   extraEnv?: Record<string, string>;
   skipCpa?: boolean;
 };
@@ -241,6 +250,42 @@ function sameKeySet(a: string[], b: string[]): boolean {
   if (a.length !== b.length) return false;
   const left = new Set(a);
   return b.every((k) => left.has(k));
+}
+
+/**
+ * 路径围栏判定：返回越界原因（null = 放行）。只检查文件类工具的显式路径
+ * 参数；不带路径的 Glob/Grep 默认落在 cwd（必在围栏内），直接放行。
+ * Bash 命令无法可靠解析路径，仍交给权限弹窗（本机人可见完整命令）。
+ */
+export function pathJailViolation(
+  root: string,
+  toolName: string,
+  input: Record<string, unknown>,
+): string | null {
+  const PATH_KEYS: Record<string, string[]> = {
+    Read: ["file_path"],
+    Write: ["file_path"],
+    Edit: ["file_path"],
+    MultiEdit: ["file_path"],
+    NotebookEdit: ["notebook_path", "file_path"],
+    Glob: ["path"],
+    Grep: ["path"],
+    LS: ["path"],
+  };
+  const keys = PATH_KEYS[toolName];
+  if (!keys) return null;
+  const rootResolved = path.resolve(root);
+  for (const key of keys) {
+    const raw = input[key];
+    if (typeof raw !== "string" || !raw.trim()) continue;
+    const resolved = path.resolve(rootResolved, raw);
+    const rel = path.relative(rootResolved, resolved);
+    // rel 以 ".." 开头说明逃出围栏；跨盘符时 relative 直接返回绝对路径。
+    if (rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
+      return `已拒绝：${toolName} 试图访问工作区外的路径（${raw}）`;
+    }
+  }
+  return null;
 }
 
 function extrasChanged(
@@ -1330,6 +1375,7 @@ export class SessionManager {
       extraAllowedTools: opts?.extraAllowedTools,
       ...(opts?.model ? { model: opts.model } : {}),
       ...(opts?.permissionMode ? { permissionMode: opts.permissionMode } : {}),
+      ...(opts?.pathJail ? { pathJail: opts.pathJail } : {}),
       ...(opts?.extraEnv ? { extraEnv: opts.extraEnv } : {}),
       ...(opts?.skipCpa ? { skipCpa: true } : {}),
     };
@@ -1630,6 +1676,13 @@ export class SessionManager {
         input: Record<string, unknown>,
         _sdkOpts: { signal: AbortSignal },
       ) => {
+        // 路径围栏（群聊席位/远程执行）：越界文件操作直接拒，不进弹窗。
+        if (entry.pathJail) {
+          const violation = pathJailViolation(entry.pathJail, name, input);
+          if (violation) {
+            return { behavior: "deny" as const, message: violation };
+          }
+        }
         const result = await this.permissionBroker.canUseTool(
           name,
           input,

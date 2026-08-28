@@ -13,6 +13,7 @@ import {
 import { SideRail, type RailMode } from "./components/SideRail";
 import { ChangelogModal } from "./components/ChangelogModal";
 import { PermissionModal } from "./components/PermissionModal";
+import { RoomPermAskModal } from "./components/RoomPermAskModal";
 import { UserPromptModal } from "./components/UserPromptModal";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { OnboardingModal } from "./components/OnboardingModal";
@@ -376,6 +377,7 @@ export function App() {
         </div>
 
         <PermissionModal />
+        <RoomPermAskModal />
         <UserPromptModal />
         <OnboardingModal open={needsOnboarding} />
         <SettingsDrawer
@@ -409,6 +411,7 @@ export function App() {
         </div>
 
         <PermissionModal />
+        <RoomPermAskModal />
         <UserPromptModal />
         <OnboardingModal open={needsOnboarding} />
         <SettingsDrawer
@@ -895,6 +898,7 @@ export function App() {
       </div>
 
       <PermissionModal />
+      <RoomPermAskModal />
       <UserPromptModal />
       {tabMenu
         ? createPortal(

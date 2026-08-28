@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { useI18n } from "../i18n/useI18n";
 import { shortFingerprint } from "../lib/room-invite-ui";
 import {
@@ -62,35 +63,46 @@ export function RoomPendingBanner({
     // 主进程随后会再推一次 pending 列表刷新这里
   };
 
-  return (
-    <div className="room-pending-banner">
-      <div className="room-pending-title">{t.room.pendingTitle}</div>
-      {fingerprintChanged ? (
-        <p className="room-pending-warn">{t.room.fingerprintChanged}</p>
-      ) : null}
-      {actionError ? <p className="room-pending-warn">{actionError}</p> : null}
-      {devices.map((d) => (
-        <div key={d.fp} className="room-pending-row">
-          <span className="room-pending-name">{d.name}</span>
-          <span className="room-pending-fp">{shortFingerprint(d.fp)}</span>
-          <button
-            type="button"
-            className="btn btn-sm"
-            disabled={busyFp === d.fp}
-            onClick={() => void decide(d.fp, true)}
-          >
-            {t.room.approve}
-          </button>
-          <button
-            type="button"
-            className="btn btn-ghost btn-sm"
-            disabled={busyFp === d.fp}
-            onClick={() => void decide(d.fp, false)}
-          >
-            {t.room.deny}
-          </button>
+  return createPortal(
+    <div className="room-modal-overlay" role="presentation">
+      <div
+        className="room-modal"
+        role="dialog"
+        aria-label={t.room.pendingTitle}
+      >
+        <header className="room-modal-head">
+          <h3>{t.room.pendingTitle}</h3>
+        </header>
+        <div className="room-modal-body">
+          {fingerprintChanged ? (
+            <p className="room-pending-warn">{t.room.fingerprintChanged}</p>
+          ) : null}
+          {actionError ? <p className="room-pending-warn">{actionError}</p> : null}
+          {devices.map((d) => (
+            <div key={d.fp} className="room-pending-row">
+              <span className="room-pending-name">{d.name}</span>
+              <span className="room-pending-fp">{shortFingerprint(d.fp)}</span>
+              <button
+                type="button"
+                className="btn btn-sm"
+                disabled={busyFp === d.fp}
+                onClick={() => void decide(d.fp, true)}
+              >
+                {t.room.approve}
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                disabled={busyFp === d.fp}
+                onClick={() => void decide(d.fp, false)}
+              >
+                {t.room.deny}
+              </button>
+            </div>
+          ))}
         </div>
-      ))}
-    </div>
+      </div>
+    </div>,
+    document.body,
   );
 }

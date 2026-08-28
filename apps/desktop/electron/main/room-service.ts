@@ -624,6 +624,15 @@ export class RoomService {
       parts: Map<number, string>;
     }
   >();
+  /** 本机审批中的房间轮次（filePolicy = ask）：requestId → 挂起的决议。 */
+  private readonly turnAsks = new Map<
+    string,
+    {
+      roomId: string;
+      resolve: (allow: boolean) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >();
 
   constructor(opts: {
     getWindow: () => BrowserWindow | null;
@@ -3303,6 +3312,19 @@ export function activate(ctx) {
       this.pushState(r);
       return;
     }
+    // 文件策略 ask：别人要在本机项目上跑任务 → 先弹窗问本机用户。
+    if (this.needsLocalTurnAsk(r, seat, requesterUserId)) {
+      const allowed = await this.askLocalTurnApproval(
+        r,
+        seat,
+        requesterUserId,
+        text,
+      );
+      if (!allowed) {
+        this.refuseUnapprovedTurn(r, seat, requesterUserId, "被本机用户拒绝或超时");
+        return;
+      }
+    }
     seat.running = true;
     this.pushState(r);
     const borrowing =
@@ -3330,6 +3352,8 @@ export function activate(ctx) {
       replaceExtras: true,
       // 席位会话不出现在左侧会话列表（不占“对话格子”），diff 事件照发。
       hiddenFromList: true,
+      // 群聊驱动的 AI 圈死在工作区内：文件工具越界直接拒（不管谁发起的）。
+      pathJail: cwd,
       ...(em.model ? { model: em.model } : {}),
       ...(this.turnPermissionMode(r, seat, requesterUserId)
         ? { permissionMode: this.turnPermissionMode(r, seat, requesterUserId) }
@@ -3589,6 +3613,94 @@ export function activate(ctx) {
     });
     this.pushState(r);
     return true;
+  }
+
+  /**
+   * 这一轮要不要先问本机用户：工作区就在本机（ws === localUserId 才轮到本机
+   * 执行），且文件策略解析为 ask（请求人 ≠ 工作区主人时默认就是 ask）。
+   */
+  private needsLocalTurnAsk(
+    r: RoomRecord,
+    seat: RoomSeat,
+    requesterUserId: string | null | undefined,
+  ): boolean {
+    const ws = resolveWorkspaceUserId(seat, r.hostUserId);
+    if (ws !== r.localUserId) return false;
+    return (
+      effectiveFilePolicy(
+        r.members.find((m) => m.userId === ws)?.filePolicy,
+        ws,
+        requesterUserId,
+      ) === "ask"
+    );
+  }
+
+  /**
+   * 向本机 UI 弹审批（所有窗口都推，任一窗口作答即生效，其余窗口的弹窗
+   * 由 resolved 广播关掉）。120s 无人响应按拒绝处理。
+   */
+  private askLocalTurnApproval(
+    r: RoomRecord,
+    seat: RoomSeat,
+    requesterUserId: string | null | undefined,
+    text: string,
+  ): Promise<boolean> {
+    const requestId = randomUUID();
+    const payload = {
+      roomId: r.roomId,
+      requestId,
+      roomName: r.name,
+      requesterName: requesterUserId
+        ? this.memberName(r, requesterUserId)
+        : "成员",
+      seatName: seat.name,
+      projectPath: this.settings.get().lastProjectPath ?? "",
+      text: text.slice(0, 300),
+    };
+    return new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => {
+        this.turnAsks.delete(requestId);
+        this.safeSend(IPC.roomPermAsk, { roomId: r.roomId, requestId, resolved: true });
+        resolve(false);
+      }, 120_000);
+      this.turnAsks.set(requestId, { roomId: r.roomId, resolve, timer });
+      this.safeSend(IPC.roomPermAsk, payload);
+    });
+  }
+
+  /** IPC：本机用户在审批弹窗里点了 允许/拒绝。 */
+  respondTurnAsk(requestId: string, allow: boolean): { ok: boolean } {
+    const entry = this.turnAsks.get(requestId);
+    if (!entry) return { ok: false };
+    this.turnAsks.delete(requestId);
+    clearTimeout(entry.timer);
+    // 关掉其他窗口上的同款弹窗
+    this.safeSend(IPC.roomPermAsk, {
+      roomId: entry.roomId,
+      requestId,
+      resolved: true,
+    });
+    entry.resolve(allow);
+    return { ok: true };
+  }
+
+  /** 审批未通过：时间线留审计记录（全员可见），返回 true 表示已拦截。 */
+  private refuseUnapprovedTurn(
+    r: RoomRecord,
+    seat: RoomSeat,
+    requesterUserId: string | null | undefined,
+    reason: string,
+  ): void {
+    const name = requesterUserId
+      ? this.memberName(r, requesterUserId)
+      : "成员";
+    this.append(r, {
+      kind: "tool",
+      seatId: seat.id,
+      text: `「${name}」请求在本机项目执行任务，${reason}`,
+      authorLabel: "系统",
+    });
+    this.pushState(r);
   }
 
   private async ensureAiProxy(r: RoomRecord): Promise<number> {
@@ -4254,6 +4366,25 @@ export function activate(ctx) {
       } satisfies RoomExecEventPayload);
     }, EXEC_HEARTBEAT_INTERVAL_MS);
     nt.heartbeat.unref?.();
+    // 文件策略 ask：别人要在本机项目上跑 → 先弹窗问本机用户，通过才执行。
+    if (policy === "ask") {
+      void (async () => {
+        const allowed = await this.askLocalTurnApproval(
+          r,
+          seat,
+          p.requesterUserId ?? null,
+          p.text,
+        );
+        if (!allowed) {
+          if (nt.heartbeat) clearInterval(nt.heartbeat);
+          turns.delete(p.turnId);
+          fail("本机用户拒绝了这次远程执行");
+          return;
+        }
+        void this.runNodeTurn(r, nt, seat, p.text, cwd);
+      })();
+      return;
+    }
     void this.runNodeTurn(r, nt, seat, p.text, cwd);
   }
 
@@ -4283,6 +4414,8 @@ export function activate(ctx) {
     const extras: SessionRunOpts = {
       replaceExtras: true,
       hiddenFromList: true,
+      // 群聊驱动的 AI 圈死在工作区内：文件工具越界直接拒（不管谁发起的）。
+      pathJail: cwd,
       ...(em.model ? { model: em.model } : {}),
       ...(perm ? { permissionMode: perm } : {}),
       // 会话条目一建好就拿到 id：流式事件映射 + 中途 abort 都靠它

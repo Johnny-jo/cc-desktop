@@ -181,6 +181,10 @@ export const IPC = {
   roomSetFilePolicy: "room:set-file-policy",
   roomSetAiShare: "room:set-ai-share",
   roomAskAiShare: "room:ask-ai-share",
+  /** Workspace owner's machine asks its local user to approve a room turn
+   *  (filePolicy = ask); response comes back via roomPermRespond. */
+  roomPermAsk: "room:perm-ask",
+  roomPermRespond: "room:perm-respond",
   /** Host renames the room (name lives in the snapshot, broadcast to all) */
   roomRename: "room:rename",
   /** Recall a timeline message (own messages; host can recall any) */
@@ -849,6 +853,10 @@ export type IpcInvokeMap = {
     args: [{ roomId: string; targetUserId: string; seatId?: string }];
     result: { ok: boolean; error?: string };
   };
+  [IPC.roomPermRespond]: {
+    args: [{ requestId: string; allow: boolean }];
+    result: { ok: boolean };
+  };
   [IPC.roomRename]: {
     args: [{ roomId: string; name: string }];
     result: { ok: boolean; room?: import("./room-protocol").RoomSnapshot; error?: string };
@@ -891,6 +899,23 @@ export type RoomMetricsSnapshot = {
   fanoutBytes: number;
 };
 
+/**
+ * 房间远程执行的本地审批弹窗（filePolicy = ask）：工作区所在机器向本机用户
+ * 询问是否允许某成员跑一次任务。`resolved` 广播用于清掉其他窗口的同名弹窗
+ * （任一窗口作答后，其余窗口的弹窗随之关闭）。
+ */
+export type RoomPermAskPayload = {
+  roomId: string;
+  requestId: string;
+  roomName: string;
+  requesterName: string;
+  seatName: string;
+  projectPath: string;
+  /** 任务文本预览（截断） */
+  text: string;
+  resolved?: boolean;
+};
+
 /** Mirrors main auto-updater status (kept in shared so renderer can type it). */
 export type UpdateStatusDto =
   | { state: "idle" }
@@ -922,6 +947,7 @@ export type IpcEventMap = {
   [IPC.terminalExit]: { id: string; code: number | null };
   [IPC.terminalTitle]: { id: string; title: string };
   [IPC.appUpdateStatus]: UpdateStatusDto;
+  [IPC.roomPermAsk]: RoomPermAskPayload;
   [IPC.roomEvent]: {
     roomId: string;
     /**

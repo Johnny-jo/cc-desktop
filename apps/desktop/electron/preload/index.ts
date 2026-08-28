@@ -568,6 +568,11 @@ const desktop = {
       ok: boolean;
       error?: string;
     }>,
+  /** 房间远程执行的本机审批：允许 / 拒绝（对应 room:perm-ask 弹窗）。 */
+  respondRoomPermAsk: (requestId: string, allow: boolean) =>
+    ipcRenderer.invoke(IPC.roomPermRespond, { requestId, allow }) as Promise<{
+      ok: boolean;
+    }>,
   renameRoom: (roomId: string, name: string) =>
     ipcRenderer.invoke(IPC.roomRename, { roomId, name }) as Promise<{
       ok: boolean;

@@ -970,6 +970,10 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
     if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.askAiShare(roomId, targetUserId, seatId);
   });
+  ipcMain.handle(IPC.roomPermRespond, async (_e, { requestId, allow }) => {
+    if (!ctx.rooms) return { ok: false };
+    return ctx.rooms.respondTurnAsk(requestId, allow);
+  });
   ipcMain.handle(IPC.roomRename, async (_e, { roomId, name }) => {
     if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.rename(roomId, name);

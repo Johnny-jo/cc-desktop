@@ -362,28 +362,45 @@ export function RoomStage() {
         <RoomPendingBanner roomId={room.roomId} canHost={canHost} />
       ) : null}
 
-      {room.status === "open" && myMember?.aiShare === "pending" ? (
-        <div className="room-offline-banner">
-          <span>
-            {room.members.find((m) => m.userId === myMember.aiAskBy)?.name ?? "成员"}{" "}
-            想借用你的 AI
-          </span>
-          <button
-            type="button"
-            className="btn btn-sm"
-            onClick={() => void setRoomAiShare(room.roomId, true)}
-          >
-            同意
-          </button>
-          <button
-            type="button"
-            className="btn btn-ghost btn-sm"
-            onClick={() => void setRoomAiShare(room.roomId, false)}
-          >
-            拒绝
-          </button>
-        </div>
-      ) : null}
+      {room.status === "open" && myMember?.aiShare === "pending"
+        ? createPortal(
+            <div className="room-modal-overlay" role="presentation">
+              <div
+                className="room-modal"
+                role="dialog"
+                aria-label="借用 AI 审批"
+              >
+                <header className="room-modal-head">
+                  <h3>借用 AI 审批</h3>
+                </header>
+                <div className="room-modal-body">
+                  <p className="room-leave-text">
+                    {room.members.find((m) => m.userId === myMember.aiAskBy)?.name ?? "成员"}{" "}
+                    想借用你的 AI 在这个房间里执行任务，是否同意？
+                  </p>
+                </div>
+                <footer className="room-modal-foot">
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => void setRoomAiShare(room.roomId, false)}
+                  >
+                    拒绝
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    onClick={() => void setRoomAiShare(room.roomId, true)}
+                    autoFocus
+                  >
+                    同意
+                  </button>
+                </footer>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
 
       {modActive ? (
         <ModPlayPanel
