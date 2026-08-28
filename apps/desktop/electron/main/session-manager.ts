@@ -66,9 +66,8 @@ export type SessionRunOpts = {
   /** Per-session permission override (room filePolicy allow → auto). */
   permissionMode?: PermissionMode;
   /**
-   * 路径围栏（绝对路径）：设置后，文件类工具（Read/Write/Edit/MultiEdit/
-   * NotebookEdit/Glob/Grep/LS）只能碰这个目录里的路径，越界直接拒绝，
-   * 不进权限弹窗。群聊席位/远程执行会话用它把 AI 圈死在工作区内。
+   * 路径围栏（绝对路径）：设置后，文件类工具和 Bash 里的绝对路径 / `..` /
+   * 重定向 / cd 都不能越出这个目录，越界直接拒绝，不进权限弹窗。
    */
   pathJail?: string;
   /** Merge over CPA env (borrowed AI proxy sets ANTHROPIC_BASE_URL here). */
@@ -252,10 +251,65 @@ function sameKeySet(a: string[], b: string[]): boolean {
   return b.every((k) => left.has(k));
 }
 
+function pathOutsideJail(rootResolved: string, raw: string): boolean {
+  const trimmed = raw.replace(/^["']|["']$/g, "").trim();
+  if (!trimmed) return false;
+  if (
+    trimmed === "~" ||
+    trimmed.startsWith("~/") ||
+    trimmed.startsWith("~\\") ||
+    trimmed.startsWith("$HOME") ||
+    trimmed.startsWith("$env:") ||
+    /%USERPROFILE%/i.test(trimmed) ||
+    /%HOMEDRIVE%/i.test(trimmed) ||
+    /%HOMEPATH%/i.test(trimmed)
+  ) {
+    return true;
+  }
+  const resolved = path.resolve(rootResolved, trimmed);
+  const rel = path.relative(rootResolved, resolved);
+  // rel 以 ".." 开头说明逃出围栏；跨盘符时 relative 直接返回绝对路径。
+  return rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel);
+}
+
+function unquoteToken(raw: string): string {
+  return raw.replace(/^["']|["']$/g, "").trim();
+}
+
+/** 从 Bash/PowerShell 命令里抽出可能指向文件的片段。宁可误拦，不能放行越界写。 */
+export function extractBashPathCandidates(command: string): string[] {
+  const out: string[] = [];
+  const push = (raw: string) => {
+    const t = unquoteToken(raw);
+    if (t) out.push(t);
+  };
+  const text = command.replace(/[\r\n]+/g, " ");
+
+  let m: RegExpExecArray | null;
+  const winAbs = /[A-Za-z]:[\\/][^\s"'<>|&;]*/g;
+  while ((m = winAbs.exec(text))) push(m[0]);
+
+  const unixAbs = /(?:^|[\s"'=(])(\/(?!\/)[^\s"'<>|&;]*)/g;
+  while ((m = unixAbs.exec(text))) push(m[1] ?? "");
+
+  const redir = /(?:[\d]?)(?:>>?|<)\s*([^\s|&;]+)/g;
+  while ((m = redir.exec(text))) push(m[1] ?? "");
+
+  const cd =
+    /(?:^|[\s;&|])(?:cd|chdir|Set-Location|Push-Location)\s+(?:-Path\s+|-LiteralPath\s+)?([^\s|&;]+)/gi;
+  while ((m = cd.exec(text))) push(m[1] ?? "");
+
+  const up = /(?:^|[\s"'=(])(\.\.(?:[\\/][^\s"'<>|&;]*)?)/g;
+  while ((m = up.exec(text))) push(m[1] ?? "");
+
+  return out;
+}
+
 /**
- * 路径围栏判定：返回越界原因（null = 放行）。只检查文件类工具的显式路径
- * 参数；不带路径的 Glob/Grep 默认落在 cwd（必在围栏内），直接放行。
- * Bash 命令无法可靠解析路径，仍交给权限弹窗（本机人可见完整命令）。
+ * 路径围栏判定：返回越界原因（null = 放行）。
+ * 文件类工具检查显式路径参数（file_path / path 都认）。
+ * 不带路径的 Glob/Grep 默认落在 cwd（必在围栏内），直接放行。
+ * Bash：从命令里抽出绝对路径、..、重定向、cd，越界直接拒，不进审批。
  */
 export function pathJailViolation(
   root: string,
@@ -263,27 +317,41 @@ export function pathJailViolation(
   input: Record<string, unknown>,
 ): string | null {
   const PATH_KEYS: Record<string, string[]> = {
-    Read: ["file_path"],
-    Write: ["file_path"],
-    Edit: ["file_path"],
-    MultiEdit: ["file_path"],
-    NotebookEdit: ["notebook_path", "file_path"],
+    Read: ["file_path", "path"],
+    Write: ["file_path", "path"],
+    Edit: ["file_path", "path"],
+    MultiEdit: ["file_path", "path"],
+    NotebookEdit: ["notebook_path", "file_path", "path"],
     Glob: ["path"],
     Grep: ["path"],
     LS: ["path"],
   };
+  const rootResolved = path.resolve(root);
+  const deny = (raw: string) =>
+    `已拒绝：${toolName} 试图访问工作区外的路径（${raw}）`;
+
+  if (toolName === "Bash") {
+    const command = String(input.command ?? "");
+    if (!command.trim()) return null;
+    if (
+      /(?:^|[;&|]\s*)(?:cd|chdir|Set-Location|Push-Location)(?:\s*(?:&&|\|\||;|$))/i.test(
+        command,
+      )
+    ) {
+      return deny("cd");
+    }
+    for (const raw of extractBashPathCandidates(command)) {
+      if (pathOutsideJail(rootResolved, raw)) return deny(raw);
+    }
+    return null;
+  }
+
   const keys = PATH_KEYS[toolName];
   if (!keys) return null;
-  const rootResolved = path.resolve(root);
   for (const key of keys) {
     const raw = input[key];
     if (typeof raw !== "string" || !raw.trim()) continue;
-    const resolved = path.resolve(rootResolved, raw);
-    const rel = path.relative(rootResolved, resolved);
-    // rel 以 ".." 开头说明逃出围栏；跨盘符时 relative 直接返回绝对路径。
-    if (rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
-      return `已拒绝：${toolName} 试图访问工作区外的路径（${raw}）`;
-    }
+    if (pathOutsideJail(rootResolved, raw)) return deny(raw);
   }
   return null;
 }

@@ -333,9 +333,41 @@ describe("pathJailViolation", () => {
     expect(v).toContain("已拒绝");
   });
 
-  it("Bash 不做路径解析，交给权限弹窗", () => {
+  it("Write 用 path 字段越界也被拒", () => {
+    const v = pathJailViolation(root, "Write", {
+      path: path.join(os.tmpdir(), "jail-other", "x.ts"),
+    });
+    expect(v).toContain("已拒绝");
+  });
+
+  it("Bash 重定向到工作区外被拒", () => {
+    const outside = path.join(os.tmpdir(), "jail-other", "leak.txt");
+    const v = pathJailViolation(root, "Bash", {
+      command: `echo hi > "${outside}"`,
+    });
+    expect(v).toContain("已拒绝");
+  });
+
+  it("Bash cd 到工作区外被拒", () => {
+    const v = pathJailViolation(root, "Bash", {
+      command: "cd .. && echo x > escaped.txt",
+    });
+    expect(v).toContain("已拒绝");
+  });
+
+  it("Bash 里 python/绝对路径写到工作区外被拒", () => {
+    const outside = path.join(os.tmpdir(), "jail-other", "x.py");
+    const v = pathJailViolation(root, "Bash", {
+      command: `python -c "open(r'${outside}', 'w').write('x')"`,
+    });
+    expect(v).toContain("已拒绝");
+  });
+
+  it("Bash 在工作区内的命令放行", () => {
     expect(
-      pathJailViolation(root, "Bash", { command: "rm -rf /" }),
+      pathJailViolation(root, "Bash", {
+        command: "git status && echo ok > src/out.txt",
+      }),
     ).toBeNull();
   });
 
