@@ -85,6 +85,7 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
 
       await access(path, fs.constants.R_OK);
       ctx.settings.update({ lastProjectPath: path });
+      ctx.rooms?.reportLocalProject(path);
       return { path };
     },
   );
@@ -381,6 +382,7 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
       // Restore cwd as last project when user switches sessions.
       if (summary.cwd) {
         ctx.settings.update({ lastProjectPath: summary.cwd });
+        ctx.rooms?.reportLocalProject(summary.cwd);
       }
       const page = ctx.sessions.getTranscriptPage(sessionId, { limit });
       return {
@@ -915,6 +917,7 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
       agentPrompt: opts.agentPrompt,
       skillNames: opts.skillNames,
       model: opts.model,
+      executorUserId: opts.executorUserId,
     });
   });
   ipcMain.handle(IPC.roomUpdateSeat, async (_e, opts) => {
@@ -929,9 +932,9 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
     if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.returnSeat(roomId, seatId);
   });
-  ipcMain.handle(IPC.roomSend, async (_e, { roomId, seatId, text, quote }) => {
+  ipcMain.handle(IPC.roomSend, async (_e, { roomId, seatId, text, quote, attachments }) => {
     if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
-    return ctx.rooms.send(roomId, seatId, text, quote);
+    return ctx.rooms.send(roomId, seatId, text, quote, attachments);
   });
   ipcMain.handle(IPC.roomRejoin, async (_e, { roomId }) => {
     if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
@@ -948,6 +951,14 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
   ipcMain.handle(IPC.roomKick, async (_e, { roomId, userId }) => {
     if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.kick(roomId, userId);
+  });
+  ipcMain.handle(IPC.roomRename, async (_e, { roomId, name }) => {
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
+    return ctx.rooms.rename(roomId, name);
+  });
+  ipcMain.handle(IPC.roomRecall, async (_e, { roomId, itemId }) => {
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
+    return ctx.rooms.recall(roomId, itemId);
   });
   ipcMain.handle(IPC.roomPending, async (_e, { roomId }) => {
     if (!ctx.rooms) return { ok: false, pending: [] };

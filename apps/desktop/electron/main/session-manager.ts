@@ -68,6 +68,8 @@ export type SessionRunOpts = {
   replaceExtras?: boolean;
   /** Omit from SessionManager.list / session sidebar */
   hiddenFromList?: boolean;
+  /** start() 里会话条目一建好就同步回调（远程执行节点映射事件流用）。 */
+  onSessionId?: (sessionId: string) => void;
   title?: string;
   /** Persist this instead of the raw prompt (avoid dumping private views). */
   persistText?: string;
@@ -1319,6 +1321,7 @@ export class SessionManager {
       ...(opts?.model ? { model: opts.model } : {}),
     };
     this.sessions.set(sessionId, entry);
+    opts?.onSessionId?.(sessionId);
     if (!summary.hiddenFromList) this.emitSession({ ...summary });
     this.persistSummary(entry);
     this.replaceTranscript(
@@ -1326,7 +1329,7 @@ export class SessionManager {
       appendUserItem(
         { items: entry.items, optimisticUserTexts: [] },
         opts?.persistText ?? displayPrompt(prompt),
-        { nextId: entry.nextId },
+        { nextId: entry.nextId, attachments: prompt.attachments },
       ).items,
       { persist: true },
     );
@@ -1397,7 +1400,7 @@ export class SessionManager {
     const next = appendUserItem(
       { items: entry.items, optimisticUserTexts: [] },
       opts?.persistText ?? displayPrompt(prompt),
-      { nextId: entry.nextId },
+      { nextId: entry.nextId, attachments: prompt.attachments },
     );
     this.replaceTranscript(entry, next.items, { persist: true });
 

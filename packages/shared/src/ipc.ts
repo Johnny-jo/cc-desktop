@@ -107,6 +107,8 @@ export const IPC = {
   terminalResize: "terminal:resize",
   /** Open a session in its own detached window (browser-style drag-out) */
   windowOpenSession: "window:open-session",
+  /** Open a room in its own detached window (double-click / drag-out) */
+  windowOpenRoom: "window:open-room",
   // main → renderer (webContents.send)
   sessionEvent: "session:event",
   permissionRequest: "permission:request",
@@ -175,6 +177,10 @@ export const IPC = {
   roomDenyDevice: "room:deny-device",
   /** Host kicks a member: drop connection, blacklist device fingerprint */
   roomKick: "room:kick",
+  /** Host renames the room (name lives in the snapshot, broadcast to all) */
+  roomRename: "room:rename",
+  /** Recall a timeline message (own messages; host can recall any) */
+  roomRecall: "room:recall",
   /** Host: list devices waiting for approval */
   roomPending: "room:pending",
   /** Debug: current process room transport counters (task 12) */
@@ -285,6 +291,10 @@ export type IpcInvokeMap = {
   };
   [IPC.windowOpenSession]: {
     args: [{ sessionId: string }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.windowOpenRoom]: {
+    args: [{ roomId: string }];
     result: { ok: boolean; error?: string };
   };
   [IPC.permissionRespond]: {
@@ -811,6 +821,14 @@ export type IpcInvokeMap = {
   };
   [IPC.roomKick]: {
     args: [{ roomId: string; userId: string }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.roomRename]: {
+    args: [{ roomId: string; name: string }];
+    result: { ok: boolean; room?: import("./room-protocol").RoomSnapshot; error?: string };
+  };
+  [IPC.roomRecall]: {
+    args: [{ roomId: string; itemId: string }];
     result: { ok: boolean; error?: string };
   };
   [IPC.roomPending]: {

@@ -284,6 +284,12 @@ function createSessionWindow(sessionId: string) {
   loadRenderer(win, { detached: "1", session: sessionId });
 }
 
+/** Double-click / drag-out: a room-only window bound to one room. */
+function createRoomWindow(roomId: string) {
+  const win = buildWindow(960, 720);
+  loadRenderer(win, { detached: "1", room: roomId });
+}
+
 function bootstrap() {
   const { encrypt, decrypt } = createTokenCrypto();
   const userDataDir = app.getPath("userData");
@@ -411,6 +417,8 @@ function bootstrap() {
     ),
     emit: (event: SdkNormalizedEvent) => {
       sendToRenderer(IPC.sessionEvent, event);
+      // 远程执行节点：命中本机在跑的席位会话时节流转发进度给房主
+      rooms?.onSessionEvent(event);
     },
     emitSession: (summary: SessionSummary) => {
       sendToRenderer(IPC.sessionUpdated, summary);
@@ -509,6 +517,18 @@ function bootstrap() {
         return { ok: false, error: `Unknown session: ${sessionId}` };
       }
       createSessionWindow(sessionId);
+      return { ok: true };
+    },
+  );
+
+  // Double-click / drag-out: open a room in its own room-only window.
+  ipcMain.handle(
+    IPC.windowOpenRoom,
+    async (_e, { roomId }: { roomId: string }) => {
+      if (!rooms.get(roomId)) {
+        return { ok: false, error: `Unknown room: ${roomId}` };
+      }
+      createRoomWindow(roomId);
       return { ok: true };
     },
   );

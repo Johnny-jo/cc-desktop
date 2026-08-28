@@ -1,12 +1,12 @@
 import React, { useEffect, useRef, useState } from "react";
-import type { RoomQuoteRef } from "@claude-desktop/shared";
+import { createPortal } from "react-dom";
+import type { Attachment, RoomQuoteRef, RoomTimelineItem } from "@claude-desktop/shared";
+import { formatFileSize } from "@claude-desktop/shared";
 import { useAppStore } from "../state/store";
 import {
-  leaveActiveRoom,
-  playRps,
+  recallRoomMessage,
   rejoinRoom,
   returnSeat,
-  rollDice,
   selectSeat,
   sendToSeat,
   takeoverSeat,
@@ -17,10 +17,11 @@ import { parseTrailingAt } from "../lib/at-mention";
 import { formatModBadge } from "../lib/room-mod-ui";
 import { useI18n } from "../i18n/useI18n";
 import { ModPlayPanel } from "./ModPlayPanel";
+import { MarkdownBody } from "./MarkdownBody";
 import { RoomAddSeatModal, type SeatDraft } from "./RoomAddSeatModal";
 import { RoomInviteModal } from "./RoomInviteModal";
-import { RoomLeaveConfirm } from "./RoomLeaveConfirm";
 import { RoomPendingBanner } from "./RoomPendingBanner";
+import { RoomRemoteChanges } from "./RoomRemoteChanges";
 import { RoomSettingsModal } from "./RoomSettingsModal";
 
 function SeatAvatar({ kind }: { kind: "human" | "agent" }) {
@@ -60,17 +61,29 @@ export function RoomStage() {
   const [addOpen, setAddOpen] = useState(false);
   const [editSeat, setEditSeat] = useState<SeatDraft | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [confirmLeave, setConfirmLeave] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // 右侧成员/席位面板：默认展开，可折叠成窄条
+  const [sideOpen, setSideOpen] = useState(true);
   const [quote, setQuote] = useState<RoomQuoteRef | null>(null);
+  // 拖拽进来的待发送附件（复用主对话的 readAttachment 管道）
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [attErr, setAttErr] = useState<string | null>(null);
+  const [dragging, setDragging] = useState(false);
+  // 气泡右键菜单：复制 / 引用 / 撤回
+  const [bubbleMenu, setBubbleMenu] = useState<{
+    x: number;
+    y: number;
+    item: RoomTimelineItem;
+  } | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
   const [mentionClosed, setMentionClosed] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const timelineRef = useRef<HTMLDivElement | null>(null);
   const lastItem = room?.items[room.items.length - 1];
+  const runningCount = room?.seats.filter((s) => s.running).length ?? 0;
   const timelinePinKey = lastItem
-    ? `${lastItem.id}:${lastItem.text?.length ?? 0}`
-    : "0";
+    ? `${lastItem.id}:${lastItem.text?.length ?? 0}:${runningCount}`
+    : `0:${runningCount}`;
 
   useEffect(() => {
     const el = timelineRef.current;
@@ -81,6 +94,16 @@ export function RoomStage() {
     pin();
     requestAnimationFrame(pin);
   }, [room?.roomId, timelinePinKey]);
+
+  // 气泡菜单：点击别处 / Esc 关闭
+  useEffect(() => {
+    if (!bubbleMenu) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setBubbleMenu(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [bubbleMenu]);
 
   if (!room) {
     return (
@@ -112,6 +135,31 @@ export function RoomStage() {
   );
   const canHost = myRole === "host";
   const myUserId = room.localUserId;
+  // 执行节点下拉："" = 房主本机；客人新建席位默认在自己机器上跑
+  const hostMember = room.members.find((m) => m.role === "host");
+  const hostUserId = hostMember?.userId ?? null;
+  const execLabel = (base: string, projectPath?: string | null) =>
+    `${base}${projectPath ? `（${projectPath}）` : "（未开项目）"}`;
+  const seatExecutors = [
+    {
+      userId: "",
+      label: execLabel(
+        `房主（${room.hostLabel}）的电脑`,
+        hostMember?.projectPath,
+      ),
+      projectPath: hostMember?.projectPath ?? null,
+    },
+    ...room.members
+      .filter((m) => m.role !== "host")
+      .map((m) => ({
+        userId: m.userId,
+        label: execLabel(
+          `${m.name}${m.userId === myUserId ? "（我）" : ""}的电脑`,
+          m.projectPath,
+        ),
+        projectPath: m.projectPath ?? null,
+      })),
+  ];
   const modActive = Boolean(room.modChecksum);
   const stageBadge = formatModBadge(
     mod?.offer?.checksum === room.modChecksum
@@ -182,31 +230,52 @@ export function RoomStage() {
     return out;
   };
 
+  const addFiles = async (files: File[]) => {
+    if (!hasDesktopApi("getPathForFile") || !hasDesktopApi("readAttachment")) return;
+    const desktop = getDesktop();
+    const added: Attachment[] = [];
+    for (const file of files) {
+      try {
+        const path = desktop.getPathForFile(file);
+        added.push(await desktop.readAttachment(path));
+      } catch (e) {
+        setAttErr(e instanceof Error ? e.message : String(e));
+      }
+    }
+    let next = [...attachments, ...added];
+    if (next.length > 5) {
+      setAttErr("最多 5 个附件");
+      next = next.slice(0, 5);
+    }
+    if (added.length) setAttErr(null);
+    setAttachments(next);
+  };
+
   const onSend = async () => {
     const t = draft.trim();
-    if (!t) return;
+    if (!t && attachments.length === 0) return;
     setErr(null);
-    const res = await sendToSeat(t, quote ?? undefined);
+    // @提及路由：文中 @了某个可对话的 Agent 席位时，直接发给该席位
+    // （群里任何人都能 @ 任何未被接管的 Agent，不限席位创建者）。
+    const mentionSeat = (() => {
+      const m = t.match(/@([^\s@]+)/);
+      if (!m) return null;
+      const seat = room.seats.find((s) => s.name === m[1]);
+      if (!seat || seat.kind !== "agent") return null;
+      if (seat.takenOverBy && seat.takenOverBy !== myUserId) return null;
+      return seat;
+    })();
+    const res = await sendToSeat(t, quote ?? undefined, mentionSeat?.id, attachments);
     if (!res.ok) {
       setErr(res.error ?? "发送失败");
       return;
     }
     setDraft("");
     setQuote(null);
+    setAttachments([]);
+    setAttErr(null);
     setMentionIndex(0);
     setMentionClosed(false);
-  };
-
-  const onDice = async () => {
-    setErr(null);
-    const res = await rollDice();
-    if (!res.ok) setErr(res.error ?? "掷骰子失败");
-  };
-
-  const onRps = async (hand: "rock" | "scissors" | "paper") => {
-    setErr(null);
-    const res = await playRps(hand);
-    if (!res.ok) setErr(res.error ?? "出拳失败");
   };
 
   const onInvite = async () => {
@@ -239,7 +308,7 @@ export function RoomStage() {
             aria-label={pulseOn ? t.room.pulseLive : undefined}
           />
           <span className="room-meta">
-            {room.memberCount} 人 · {room.status === "open" ? "开着" : "已结束"}
+            {room.memberCount} 人 · {room.status === "open" ? "在线" : "已结束"}
             {room.kernel?.mods.some((m) => m.state === "active")
               ? ` · ${t.room.settingsExtensions} ${
                   room.kernel.mods.filter((m) => m.state === "active").length
@@ -265,27 +334,8 @@ export function RoomStage() {
               邀请
             </button>
           ) : null}
-          <button
-            type="button"
-            className="btn btn-sm"
-            onClick={() => setConfirmLeave(true)}
-          >
-            {canHost ? t.room.leaveConfirmYesHost : t.room.leaveConfirmYes}
-          </button>
         </div>
       </header>
-
-      {confirmLeave ? (
-        <RoomLeaveConfirm
-          isHost={canHost}
-          roomName={room.name}
-          onCancel={() => setConfirmLeave(false)}
-          onConfirm={() => {
-            setConfirmLeave(false);
-            void leaveActiveRoom();
-          }}
-        />
-      ) : null}
 
       {reconnectNote ? <div className="room-reconnect-banner">{reconnectNote}</div> : null}
 
@@ -333,80 +383,22 @@ export function RoomStage() {
         />
       ) : null}
 
-      {/* ── Seats row ── */}
-      <div className="room-seats" role="tablist">
-        {room.seats.map((s) => {
-          const active = s.id === selectedSeatId;
-          const isMine = myUserId && s.kind === "human" && s.occupantUserId === myUserId;
-          return (
-            <div
-              key={s.id}
-              role="tab"
-              aria-selected={active}
-              className={`room-seat${active ? " active" : ""}${s.kind === "agent" ? " is-agent" : ""}${s.running ? " is-running" : ""}${isMine ? " is-mine" : ""}`}
-              onClick={() => selectSeat(s.id)}
-            >
-              <span className="room-seat-avatar" aria-hidden>
-                <SeatAvatar kind={s.kind} />
-              </span>
-              <span className="room-seat-name">{s.name}</span>
-              {s.running ? <span className="room-seat-pulse" aria-hidden /> : null}
-              {s.takenOverBy ? <span className="room-seat-tag">接管中</span> : null}
-              {isMine ? <span className="room-seat-tag mine">我</span> : null}
-              {s.kind === "agent" && room.status === "open" && canHost ? (
-                <span
-                  className="room-seat-act"
-                  role="button"
-                  tabIndex={0}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setEditSeat({
-                      seatId: s.id,
-                      name: s.name,
-                      agentName: s.agentName ?? "",
-                      agentPrompt: s.agentPrompt ?? "",
-                      skillNames: s.skillNames ?? [],
-                      model: s.model ?? "",
-                    });
-                  }}
-                >
-                  {t.room.seatSettings}
-                </span>
-              ) : null}
-              {s.kind === "agent" && room.status === "open" ? (
-                <span
-                  className="room-seat-act"
-                  role="button"
-                  tabIndex={0}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void (s.takenOverBy ? returnSeat(s.id) : takeoverSeat(s.id));
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.stopPropagation();
-                      void (s.takenOverBy ? returnSeat(s.id) : takeoverSeat(s.id));
-                    }
-                  }}
-                >
-                  {s.takenOverBy ? "交还" : "接管"}
-                </span>
-              ) : null}
-            </div>
-          );
-        })}
-        {room.status === "open" ? (
-          <button type="button" className="room-seat add" onClick={() => setAddOpen(true)}>
-            + 席位
-          </button>
-        ) : null}
-      </div>
-
       {addOpen || editSeat ? (
         <RoomAddSeatModal
           agents={settings?.agents ?? []}
           models={settings?.models ?? []}
-          initial={editSeat ?? undefined}
+          executors={seatExecutors}
+          initial={
+            editSeat ?? {
+              name: "",
+              agentName: "",
+              agentPrompt: "",
+              skillNames: [],
+              model: "",
+              // 客人新建席位默认在自己电脑上跑；房主默认房主本机
+              executorUserId: canHost ? "" : (myUserId ?? ""),
+            }
+          }
           onClose={() => {
             setAddOpen(false);
             setEditSeat(null);
@@ -414,8 +406,11 @@ export function RoomStage() {
         />
       ) : null}
 
-      {/* ── Timeline ── */}
-      <div className="room-timeline" ref={timelineRef}>
+      {/* ── Body: 主区（时间线+输入框） + 右侧成员面板 ── */}
+      <div className="room-body">
+        <div className="room-main">
+          {/* ── Timeline ── */}
+          <div className="room-timeline" ref={timelineRef}>
         {room.items.length === 0 ? (
           <p className="room-stage-empty">还没有消息，选一个席位开始</p>
         ) : (
@@ -423,10 +418,20 @@ export function RoomStage() {
             const seat = it.seatId ? room.seats.find((s) => s.id === it.seatId) : null;
             const seatName = seat?.name ?? "";
             const isMe = myUserId && it.authorUserId === myUserId;
+            const menuable =
+              (it.kind === "user" || it.kind === "assistant") && !it.recalled;
             return (
               <div
                 key={it.id}
                 className={`room-msg${isMe ? " is-me" : ""} kind-${it.kind}${it.seatId && it.seatId === selectedSeatId ? " focus" : ""}`}
+                onContextMenu={
+                  menuable
+                    ? (e) => {
+                        e.preventDefault();
+                        setBubbleMenu({ x: e.clientX, y: e.clientY, item: it });
+                      }
+                    : undefined
+                }
               >
                 <div className="room-msg-avatar" aria-hidden>
                   {seat ? <SeatAvatar kind={seat.kind} /> : <SeatAvatar kind="human" />}
@@ -445,49 +450,146 @@ export function RoomStage() {
                       })}
                     </span>
                   </div>
-                  {it.quote ? (
-                    <div className="room-msg-quote">
-                      <span className="room-msg-quote-author">
-                        {it.quote.authorLabel}
-                      </span>
-                      <span className="room-msg-quote-text">{it.quote.text}</span>
-                    </div>
-                  ) : null}
-                  {it.kind === "game" && it.game ? (
-                    <div className="room-msg-game">
-                      <span className="room-game-icon">{it.game.value}</span>
-                      <span>{it.text}</span>
-                    </div>
+                  {it.recalled ? (
+                    <div className="room-msg-text room-recalled">此消息已撤回</div>
                   ) : (
-                    <div className="room-msg-text">{renderText(it.text)}</div>
+                    <>
+                      {it.quote ? (
+                        <div className="room-msg-quote">
+                          <span className="room-msg-quote-author">
+                            {it.quote.authorLabel}
+                          </span>
+                          <span className="room-msg-quote-text">{it.quote.text}</span>
+                        </div>
+                      ) : null}
+                      {it.kind === "game" && it.game ? (
+                        <div className="room-msg-game">
+                          <span className="room-game-icon">{it.game.value}</span>
+                          <span>{it.text}</span>
+                        </div>
+                      ) : it.kind === "assistant" ? (
+                        <div className="room-msg-text md">
+                          <MarkdownBody text={it.text} />
+                        </div>
+                      ) : (
+                        <div className="room-msg-text">{renderText(it.text)}</div>
+                      )}
+                      {it.kind === "user" || it.kind === "assistant" ? (
+                        <button
+                          type="button"
+                          className="room-msg-quote-btn"
+                          title={t.room.quoteAction}
+                          onClick={() =>
+                            setQuote({
+                              id: it.id,
+                              authorLabel: it.authorLabel,
+                              text: it.text.slice(0, 120),
+                            })
+                          }
+                        >
+                          {t.room.quoteAction}
+                        </button>
+                      ) : null}
+                    </>
                   )}
-                  {it.kind === "user" || it.kind === "assistant" ? (
-                    <button
-                      type="button"
-                      className="room-msg-quote-btn"
-                      title={t.room.quoteAction}
-                      onClick={() =>
-                        setQuote({
-                          id: it.id,
-                          authorLabel: it.authorLabel,
-                          text: it.text.slice(0, 120),
-                        })
-                      }
-                    >
-                      {t.room.quoteAction}
-                    </button>
-                  ) : null}
                 </div>
               </div>
             );
           })
         )}
+        {/* 工作动效：Agent 席位 running 时在时间线尾部挂打字气泡；
+            有实时进度的远端席位改挂流式气泡 */}
+        {room.seats
+          .filter(
+            (s) =>
+              s.kind === "agent" &&
+              s.running &&
+              !(room.liveExec ?? []).some((e) => e.seatId === s.id && e.text),
+          )
+          .map((s) => (
+            <div
+              key={`typing-${s.id}`}
+              className="room-msg kind-assistant room-typing"
+            >
+              <div className="room-msg-avatar" aria-hidden>
+                <SeatAvatar kind="agent" />
+              </div>
+              <div className="room-msg-body">
+                <div className="room-msg-meta">
+                  <span className="room-msg-author">{s.name}</span>
+                </div>
+                <div className="room-typing-dots" aria-label="正在工作">
+                  <span />
+                  <span />
+                  <span />
+                </div>
+              </div>
+            </div>
+          ))}
+        {(room.liveExec ?? [])
+          .filter((e) => e.text || e.tool)
+          .map((e) => {
+            const seat = room.seats.find((s) => s.id === e.seatId);
+            return (
+              <div key={`live-${e.turnId}`} className="room-msg kind-assistant">
+                <div className="room-msg-avatar" aria-hidden>
+                  <SeatAvatar kind="agent" />
+                </div>
+                <div className="room-msg-body">
+                  <div className="room-msg-meta">
+                    <span className="room-msg-author">
+                      {seat?.name ?? "Agent"}
+                    </span>
+                    <span className="room-msg-source">远端实时</span>
+                  </div>
+                  {e.text ? (
+                    <div className="room-msg-text md room-live-text">
+                      <MarkdownBody text={e.text} streaming />
+                    </div>
+                  ) : null}
+                  {e.tool ? (
+                    <div className="room-live-tool">🔧 {e.tool}</div>
+                  ) : null}
+                </div>
+              </div>
+            );
+          })}
       </div>
 
       {err || lastError ? <p className="room-err">{err || lastError}</p> : null}
 
+      {room.remoteChanges && Object.keys(room.remoteChanges).length ? (
+        <RoomRemoteChanges
+          remoteChanges={room.remoteChanges}
+          seats={room.seats}
+          memberName={(seat) => {
+            const id = seat?.executorUserId;
+            if (!id || id === hostUserId) return "房主";
+            return (
+              room.members.find((m) => m.userId === id)?.name ?? "成员"
+            );
+          }}
+        />
+      ) : null}
+
       {/* ── Composer ── */}
-      <div className="room-composer">
+      <div
+        className="room-composer"
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDragging(true);
+        }}
+        onDragLeave={(e) => {
+          e.preventDefault();
+          setDragging(false);
+        }}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragging(false);
+          const files = Array.from(e.dataTransfer.files);
+          if (files.length) void addFiles(files);
+        }}
+      >
         {mentionOpen ? (
           <ul className="slash-menu at-menu" role="listbox" aria-label="提及席位">
             {mentionMatches.map((s, i) => (
@@ -507,7 +609,7 @@ export function RoomStage() {
             ))}
           </ul>
         ) : null}
-        <div className="room-composer-box">
+        <div className={dragging ? "room-composer-box dragging" : "room-composer-box"}>
           {quote ? (
             <div className="room-quote-bar">
               <span className="room-quote-bar-author">{quote.authorLabel}</span>
@@ -524,13 +626,39 @@ export function RoomStage() {
               </button>
             </div>
           ) : null}
+          {attachments.length > 0 ? (
+            <div className="composer-attachments">
+              {attachments.map((a) => (
+                <div key={a.path} className="composer-attachment">
+                  <span className="composer-attachment-name" title={a.path}>
+                    {a.name}
+                  </span>
+                  <span className="composer-attachment-meta">
+                    {formatFileSize(a.size)} · {a.kind}
+                  </span>
+                  <button
+                    type="button"
+                    className="composer-attachment-remove"
+                    onClick={() =>
+                      setAttachments(attachments.filter((x) => x.path !== a.path))
+                    }
+                    title="移除"
+                    aria-label={`移除 ${a.name}`}
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          {attErr ? <div className="composer-attachment-error">{attErr}</div> : null}
           <textarea
             ref={inputRef}
             className="room-input"
             rows={2}
             placeholder={
               selected
-                ? `发给「${selected.name}」…  @ 提及，Enter 发送，Shift+Enter 换行`
+                ? `发给「${selected.name}」…  @ 提及，可拖文件进来，Enter 发送`
                 : "先在上方点一个席位再输入"
             }
             value={draft}
@@ -573,55 +701,238 @@ export function RoomStage() {
             }}
           />
           <div className="room-composer-bar">
-            <div className="room-game-row">
-              <button
-                type="button"
-                className="room-game-btn"
-                disabled={room.status !== "open" || offline || !selected}
-                title="掷骰子"
-                onClick={() => void onDice()}
-              >
-                🎲
-              </button>
-              <button
-                type="button"
-                className="room-game-btn"
-                disabled={room.status !== "open" || offline || !selected}
-                title="石头"
-                onClick={() => void onRps("rock")}
-              >
-                ✊
-              </button>
-              <button
-                type="button"
-                className="room-game-btn"
-                disabled={room.status !== "open" || offline || !selected}
-                title="剪刀"
-                onClick={() => void onRps("scissors")}
-              >
-                ✌️
-              </button>
-              <button
-                type="button"
-                className="room-game-btn"
-                disabled={room.status !== "open" || offline || !selected}
-                title="布"
-                onClick={() => void onRps("paper")}
-              >
-                ✋
-              </button>
-            </div>
             <button
               type="button"
-              className="btn btn-sm room-send-btn"
-              disabled={room.status !== "open" || offline || !draft.trim() || !selected}
+              className="sendstop-btn sendstop-send"
+              disabled={
+                room.status !== "open" ||
+                offline ||
+                (!draft.trim() && attachments.length === 0) ||
+                !selected
+              }
               onClick={() => void onSend()}
+              title="发送"
+              aria-label="发送"
             >
-              发送
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+                <path
+                  d="M8 13V3.5M8 3.5L3.5 8M8 3.5L12.5 8"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
             </button>
           </div>
         </div>
       </div>
+        </div>
+
+        {/* ── 右侧成员/席位面板（可折叠） ── */}
+        <aside className={`room-side${sideOpen ? "" : " collapsed"}`}>
+          {sideOpen ? (
+            <>
+              <div className="room-side-head">
+                <span className="room-side-title">成员 {room.memberCount}</span>
+                <button
+                  type="button"
+                  className="room-side-toggle"
+                  title="收起成员栏"
+                  aria-label="收起成员栏"
+                  onClick={() => setSideOpen(false)}
+                >
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
+                    <path
+                      d="M6 3l5 5-5 5"
+                      stroke="currentColor"
+                      strokeWidth="1.8"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </button>
+              </div>
+              <div className="room-side-list" role="tablist" aria-label="席位">
+                {room.seats.map((s) => {
+                  const active = s.id === selectedSeatId;
+                  const isMine =
+                    myUserId && s.kind === "human" && s.occupantUserId === myUserId;
+                  return (
+                    <div
+                      key={s.id}
+                      role="tab"
+                      aria-selected={active}
+                      className={`room-seat${active ? " active" : ""}${s.kind === "agent" ? " is-agent" : ""}${s.running ? " is-running" : ""}${isMine ? " is-mine" : ""}`}
+                      onClick={() => selectSeat(s.id)}
+                    >
+                      <span className="room-seat-avatar" aria-hidden>
+                        <SeatAvatar kind={s.kind} />
+                      </span>
+                      <span className="room-seat-name">{s.name}</span>
+                      {s.running ? (
+                        <span className="room-seat-pulse" aria-hidden />
+                      ) : null}
+                      {s.kind === "agent" &&
+                      s.executorUserId &&
+                      hostUserId &&
+                      s.executorUserId !== hostUserId ? (
+                        <span className="room-seat-tag remote">
+                          远端·{room.members.find((m) => m.userId === s.executorUserId)?.name ?? "成员"}
+                        </span>
+                      ) : null}
+                      {s.takenOverBy ? (
+                        <span className="room-seat-tag">接管中</span>
+                      ) : null}
+                      {isMine ? <span className="room-seat-tag mine">我</span> : null}
+                      {s.kind === "agent" && room.status === "open" && canHost ? (
+                        <span
+                          className="room-seat-act"
+                          role="button"
+                          tabIndex={0}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setEditSeat({
+                              seatId: s.id,
+                              name: s.name,
+                              agentName: s.agentName ?? "",
+                              agentPrompt: s.agentPrompt ?? "",
+                              skillNames: s.skillNames ?? [],
+                              model: s.model ?? "",
+                              executorUserId:
+                                s.executorUserId && s.executorUserId !== hostUserId
+                                  ? s.executorUserId
+                                  : "",
+                            });
+                          }}
+                        >
+                          {t.room.seatSettings}
+                        </span>
+                      ) : null}
+                      {s.kind === "agent" && room.status === "open" ? (
+                        <span
+                          className="room-seat-act"
+                          role="button"
+                          tabIndex={0}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void (s.takenOverBy
+                              ? returnSeat(s.id)
+                              : takeoverSeat(s.id));
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.stopPropagation();
+                              void (s.takenOverBy
+                                ? returnSeat(s.id)
+                                : takeoverSeat(s.id));
+                            }
+                          }}
+                        >
+                          {s.takenOverBy ? "交还" : "接管"}
+                        </span>
+                      ) : null}
+                    </div>
+                  );
+                })}
+                {room.status === "open" ? (
+                  <button
+                    type="button"
+                    className="room-seat add"
+                    onClick={() => setAddOpen(true)}
+                  >
+                    + 席位
+                  </button>
+                ) : null}
+              </div>
+            </>
+          ) : (
+            <button
+              type="button"
+              className="room-side-toggle room-side-expand"
+              title="展开成员栏"
+              aria-label="展开成员栏"
+              onClick={() => setSideOpen(true)}
+            >
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
+                <path
+                  d="M10 3l-5 5 5 5"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+              <span className="room-side-count">{room.memberCount}</span>
+            </button>
+          )}
+        </aside>
+      </div>
+
+      {bubbleMenu
+        ? createPortal(
+            <div
+              className="tab-menu-overlay"
+              onClick={() => setBubbleMenu(null)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setBubbleMenu(null);
+              }}
+            >
+              <div
+                className="tab-menu"
+                role="menu"
+                style={{ left: bubbleMenu.x, top: bubbleMenu.y }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    void navigator.clipboard?.writeText(bubbleMenu.item.text);
+                    setBubbleMenu(null);
+                  }}
+                >
+                  复制
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setQuote({
+                      id: bubbleMenu.item.id,
+                      authorLabel: bubbleMenu.item.authorLabel,
+                      text: bubbleMenu.item.text.slice(0, 120),
+                    });
+                    setBubbleMenu(null);
+                    inputRef.current?.focus();
+                  }}
+                >
+                  引用
+                </button>
+                {canHost ||
+                (bubbleMenu.item.authorUserId &&
+                  bubbleMenu.item.authorUserId === myUserId) ? (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="session-menu-danger"
+                    onClick={() => {
+                      const itemId = bubbleMenu.item.id;
+                      setBubbleMenu(null);
+                      void recallRoomMessage(room.roomId, itemId).then((res) => {
+                        if (!res.ok) setErr(res.error ?? "撤回失败");
+                      });
+                    }}
+                  >
+                    撤回
+                  </button>
+                ) : null}
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }

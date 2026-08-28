@@ -57,10 +57,13 @@ export function ChangesPanel({
 }) {
   const { t } = useI18n();
   const activeSessionId = useAppStore((s) => s.activeSessionId);
+  const changesOverride = useAppStore((s) => s.changesSessionOverride);
   const changesBySession = useAppStore((s) => s.changesBySession);
   const projectPath = useAppStore((s) => s.projectPath);
-  const changes = activeSessionId
-    ? (changesBySession[activeSessionId] ?? [])
+  // 群聊模式下无 activeSession：回退到席位会话（store 在席位 diff 时设置）。
+  const panelSessionId = activeSessionId ?? changesOverride;
+  const changes = panelSessionId
+    ? (changesBySession[panelSessionId] ?? [])
     : [];
 
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
@@ -87,7 +90,7 @@ export function ChangesPanel({
     setOpenFiles(new Set());
     setSelectedEventId(null);
     setFileViewPath(null);
-  }, [activeSessionId]);
+  }, [panelSessionId]);
 
   // Git overlay: branch + whether each changed file is also dirty in git.
   useEffect(() => {
@@ -110,7 +113,7 @@ export function ChangesPanel({
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [projectPath, activeSessionId]);
+  }, [projectPath, panelSessionId]);
 
   const gitDirty = useMemo(
     () => new Set((git?.changed ?? []).map(normPath)),
@@ -159,7 +162,7 @@ export function ChangesPanel({
 
   // Chat tool card → reveal the matching change record here.
   useEffect(() => {
-    if (!revealRequest || revealRequest.sessionId !== activeSessionId) return;
+    if (!revealRequest || revealRequest.sessionId !== panelSessionId) return;
     const byTool = revealRequest.toolUseId
       ? allOps.find((r) => r.event.toolUseId === revealRequest.toolUseId)
       : undefined;
@@ -184,7 +187,7 @@ export function ChangesPanel({
     clearRevealChange();
     // allOps changes on every diff push; only re-run for new requests.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [revealRequest, activeSessionId]);
+  }, [revealRequest, panelSessionId]);
 
   // Scroll the flashed row into view + clear the flash after the animation.
   useEffect(() => {
@@ -223,12 +226,12 @@ export function ChangesPanel({
   };
 
   async function restoreOp(row: OpRow) {
-    if (!activeSessionId) return;
+    if (!panelSessionId) return;
     setBusy(row.eventId);
     setNote(null);
     try {
       const res = await getDesktop().restoreChange(
-        activeSessionId,
+        panelSessionId,
         row.path,
         row.eventId,
       );
@@ -246,11 +249,11 @@ export function ChangesPanel({
   }
 
   async function restoreAll() {
-    if (!activeSessionId) return;
+    if (!panelSessionId) return;
     setBusy("*");
     setNote(null);
     try {
-      const res = await getDesktop().restoreAllChanges(activeSessionId);
+      const res = await getDesktop().restoreAllChanges(panelSessionId);
       if (res.failed.length) {
         setNote(`Restored ${res.restored.length}; failed: ${res.failed.join(", ")}`);
       } else {

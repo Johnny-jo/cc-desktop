@@ -11,16 +11,21 @@ export type SeatDraft = {
   agentPrompt: string;
   skillNames: string[];
   model: string;
+  /** 执行节点 userId；"" = 房主本机 */
+  executorUserId: string;
 };
 
 export function RoomAddSeatModal({
   agents,
   models,
+  executors,
   initial,
   onClose,
 }: {
   agents: Array<{ name: string; description: string }>;
   models: string[];
+  /** 可选的执行节点（首位是房主，userId 为 ""）；projectPath 为该成员当前打开的项目 */
+  executors?: Array<{ userId: string; label: string; projectPath?: string | null }>;
   initial?: SeatDraft;
   onClose: () => void;
 }) {
@@ -32,6 +37,9 @@ export function RoomAddSeatModal({
     initial?.skillNames ?? [],
   );
   const [model, setModel] = useState(initial?.model ?? "");
+  const [executorUserId, setExecutorUserId] = useState(
+    initial?.executorUserId ?? "",
+  );
   const [skills, setSkills] = useState<Array<{ name: string; scope: string }>>(
     [],
   );
@@ -55,6 +63,8 @@ export function RoomAddSeatModal({
   }, []);
 
   const selected = agents.find((a) => a.name === agentName) ?? null;
+  const selectedExecutor =
+    executors?.find((e) => e.userId === executorUserId) ?? null;
 
   const toggleSkill = (n: string) => {
     setSkillNames((prev) =>
@@ -69,6 +79,7 @@ export function RoomAddSeatModal({
       agentPrompt: agentPrompt.trim() || undefined,
       skillNames: skillNames.length ? skillNames : undefined,
       model: model.trim() || undefined,
+      executorUserId: executorUserId || undefined,
     };
     if (initial?.seatId) {
       void updateSeat(initial.seatId, {
@@ -151,6 +162,34 @@ export function RoomAddSeatModal({
               ))}
             </select>
           </label>
+          {executors && executors.length > 1 ? (
+            <label className="settings-field">
+              运行位置
+              <select
+                className="select"
+                value={executorUserId}
+                onChange={(e) => setExecutorUserId(e.target.value)}
+              >
+                {executors.map((ex) => (
+                  <option key={ex.userId} value={ex.userId}>
+                    {ex.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+          {executors && executors.length > 1 && executorUserId ? (
+            <p className="settings-hint">
+              这个 Agent 会在对方电脑上执行，改动落在对方的项目里；写文件需对方本人确认。
+            </p>
+          ) : null}
+          {selectedExecutor && !selectedExecutor.projectPath ? (
+            <p className="settings-hint">
+              {selectedExecutor.userId
+                ? "对方当前没有打开项目，现在发起执行会失败。"
+                : "房主当前没有打开项目，执行会失败。"}
+            </p>
+          ) : null}
           {skills.length ? (
             <fieldset className="settings-field">
               <legend>{t.room.addSeatSkills}</legend>

@@ -20,6 +20,7 @@ import {
   type UserPromptRequest,
 } from "@claude-desktop/shared";
 import { getDesktop } from "../lib/desktop-api";
+import { isActiveRoomSeatSession } from "./room-changes-bridge";
 
 export type AppState = {
   projectPath: string | null;
@@ -57,6 +58,11 @@ export type AppState = {
   } | null;
   /** Bumped on every diff:updated — file tree / open editors refresh. */
   fsChangeTick: number;
+  /**
+   * 群聊模式：当前房间某个 Agent 席位会话产生的 diff 要显示在变更栏时，
+   * 变更栏回退到这个 sessionId（无 activeSession 时生效）。
+   */
+  changesSessionOverride: string | null;
 };
 
 type Listener = () => void;
@@ -81,6 +87,7 @@ let state: AppState = {
   loadingSessionId: null,
   revealChangeRequest: null,
   fsChangeTick: 0,
+  changesSessionOverride: null,
 };
 
 const listeners = new Set<Listener>();
@@ -446,12 +453,23 @@ function subscribeDesktopEvents(): void {
         sessionId: string;
         changes: FileChange[];
       };
+      // 群聊席位会话（隐藏会话）也要缓存 diff，并请求弹出变更栏。
+      const roomSeat = isActiveRoomSeatSession(sessionId);
       setState({
-        ...(shouldCacheSession(sessionId)
+        ...(shouldCacheSession(sessionId) || roomSeat
           ? {
               changesBySession: {
                 ...state.changesBySession,
                 [sessionId]: changes,
+              },
+            }
+          : {}),
+        ...(roomSeat
+          ? {
+              changesSessionOverride: sessionId,
+              revealChangeRequest: {
+                sessionId,
+                nonce: (state.revealChangeRequest?.nonce ?? 0) + 1,
               },
             }
           : {}),
@@ -565,6 +583,19 @@ export function detachedWindowSessionId(): string | null {
   try {
     const q = new URLSearchParams(window.location.search);
     return q.get("detached") === "1" ? q.get("session") : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Room id when this window was spawned as a detached room window
+ * (`?detached=1&room=<id>`), else null.
+ */
+export function detachedWindowRoomId(): string | null {
+  try {
+    const q = new URLSearchParams(window.location.search);
+    return q.get("detached") === "1" ? q.get("room") : null;
   } catch {
     return null;
   }
@@ -687,6 +718,11 @@ export function clearLastError(): void {
 
 export function clearActiveSession(): void {
   setState({ activeSessionId: null });
+}
+
+/** 离开群聊时清掉变更栏的席位会话回退。 */
+export function clearChangesSessionOverride(): void {
+  if (state.changesSessionOverride) setState({ changesSessionOverride: null });
 }
 
 export function newChat(): void {
@@ -1330,6 +1366,7 @@ export function __resetStoreForTests(): void {
     loadingSessionId: null,
     revealChangeRequest: null,
     fsChangeTick: 0,
+    changesSessionOverride: null,
   };
   pendingStartPrompt = null;
   sessionCacheLru = [];

@@ -11,16 +11,20 @@ import {
   endRoomMod,
   getRoomKernelImprove,
   kickRoomMember,
+  leaveActiveRoom,
   listRoomKernelMemory,
   listRoomMods,
   proposeRoomKernelImprove,
   rejectRoomKernelProposal,
+  renameRoom,
   rollbackRoomKernelImprove,
   setRoomKernelAutonomy,
   setRoomKernelMemory,
   type KernelImproveState,
   type RoomModPack,
 } from "../state/room-store";
+import { RoomLeaveConfirm } from "./RoomLeaveConfirm";
+import { isRoomMuted, setRoomMuted } from "../lib/room-notify";
 
 type Props = {
   room: RoomSnapshot;
@@ -38,6 +42,11 @@ export function RoomSettingsModal({ room, canHost, onClose }: Props) {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  // 概览页：改名草稿 + 退出/解散确认
+  const [nameDraft, setNameDraft] = useState(room.name);
+  const [confirmLeave, setConfirmLeave] = useState(false);
+  // 消息免打扰：本机偏好（localStorage），普通消息不弹通知，@ 仍弹
+  const [muted, setMutedState] = useState(() => isRoomMuted(room.roomId));
   const [tab, setTab] = useState<"mods" | "improve" | "memory" | "overview">(
     "mods",
   );
@@ -90,6 +99,21 @@ export function RoomSettingsModal({ room, canHost, onClose }: Props) {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
+
+  // 改名成功后快照回流 → 草稿跟随最新名字
+  useEffect(() => {
+    setNameDraft(room.name);
+  }, [room.name]);
+
+  const submitRename = async () => {
+    const name = nameDraft.trim();
+    if (!name || name === room.name) return;
+    setBusyId("rename");
+    setErr(null);
+    const res = await renameRoom(room.roomId, name);
+    setBusyId(null);
+    if (!res.ok) setErr(res.error ?? t.common.error);
+  };
 
   const playPacks = packs.filter((p) => p.hostApi !== 2);
   const kernelPacks = packs.filter((p) => p.hostApi === 2);
@@ -273,35 +297,102 @@ export function RoomSettingsModal({ room, canHost, onClose }: Props) {
 
           <div className="room-modal-body room-settings-content">
           {tab === "overview" ? (
-            <section className="room-settings-section">
-              <h4>{t.room.settingsOverview}</h4>
-              <p className="settings-hint">
-                {room.name} · {room.memberCount} ·{" "}
-                {t.room.settingsPort.replace("{port}", String(room.port))}
-              </p>
-              <ul className="room-member-list">
-                {room.members.map((m) => (
-                  <li key={m.userId} className="room-member-row">
-                    <span className="room-member-name">
-                      {m.name}
-                      {m.role === "host" ? " · 群主" : ""}
-                    </span>
-                    {canHost &&
-                    room.status === "open" &&
-                    m.role !== "host" &&
-                    m.userId !== room.localUserId ? (
-                      <button
-                        type="button"
-                        className="btn btn-ghost btn-sm"
-                        disabled={busyId === `kick:${m.userId}`}
-                        onClick={() => void kickMember(m.userId)}
-                      >
-                        {t.room.kick}
-                      </button>
-                    ) : null}
-                  </li>
-                ))}
-              </ul>
+            <section className="room-settings-section room-overview">
+              <div className="room-overview-card room-overview-head">
+                <div className="room-overview-title">{room.name}</div>
+                <div className="room-overview-meta">
+                  {room.memberCount} 人 ·{" "}
+                  {t.room.settingsPort.replace("{port}", String(room.port))} ·{" "}
+                  {room.status === "open" ? "在线" : "已结束"}
+                </div>
+                {canHost && room.status === "open" ? (
+                  <div className="room-rename-row">
+                    <input
+                      value={nameDraft}
+                      maxLength={40}
+                      placeholder="群聊名"
+                      onChange={(e) => setNameDraft(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") void submitRename();
+                      }}
+                    />
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      disabled={
+                        busyId === "rename" ||
+                        !nameDraft.trim() ||
+                        nameDraft.trim() === room.name
+                      }
+                      onClick={() => void submitRename()}
+                    >
+                      保存
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="room-overview-card">
+                <div className="room-overview-card-title">通知</div>
+                <label className="room-check room-mute-check">
+                  <input
+                    type="checkbox"
+                    checked={muted}
+                    onChange={(e) => {
+                      const on = e.target.checked;
+                      setRoomMuted(room.roomId, on);
+                      setMutedState(on);
+                    }}
+                  />
+                  消息免打扰
+                </label>
+                <p className="settings-hint room-mute-hint">
+                  普通消息不弹桌面通知，@ 我的仍会弹
+                </p>
+              </div>
+
+              <div className="room-overview-card">
+                <div className="room-overview-card-title">
+                  成员 {room.memberCount}
+                </div>
+                <ul className="room-member-list">
+                  {room.members.map((m) => (
+                    <li key={m.userId} className="room-member-row">
+                      <span className="room-member-name">
+                        {m.name}
+                        {m.role === "host" ? (
+                          <span className="room-member-badge">群主</span>
+                        ) : null}
+                      </span>
+                      {canHost &&
+                      room.status === "open" &&
+                      m.role !== "host" &&
+                      m.userId !== room.localUserId ? (
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm"
+                          disabled={busyId === `kick:${m.userId}`}
+                          onClick={() => void kickMember(m.userId)}
+                        >
+                          {t.room.kick}
+                        </button>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+
+              {room.status === "open" ? (
+                <div className="room-danger-zone">
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-danger"
+                    onClick={() => setConfirmLeave(true)}
+                  >
+                    {canHost ? t.room.leaveConfirmYesHost : t.room.leaveConfirmYes}
+                  </button>
+                </div>
+              ) : null}
             </section>
           ) : null}
 
@@ -569,6 +660,18 @@ export function RoomSettingsModal({ room, canHost, onClose }: Props) {
           </button>
         </footer>
       </div>
+      {confirmLeave ? (
+        <RoomLeaveConfirm
+          isHost={canHost}
+          roomName={room.name}
+          onCancel={() => setConfirmLeave(false)}
+          onConfirm={() => {
+            setConfirmLeave(false);
+            onClose();
+            void leaveActiveRoom();
+          }}
+        />
+      ) : null}
     </div>,
     document.body,
   );

@@ -1,11 +1,13 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   ROOM_DEFAULT_PORT,
   decodeRoomInvite,
   looksLikeRoomInvite,
   type ModOfferPayload,
+  type RoomListItem,
 } from "@claude-desktop/shared";
+import { getDesktop, hasDesktopApi } from "../lib/desktop-api";
 import {
   fillTemplate,
   formatModBadge,
@@ -38,8 +40,172 @@ import {
   peekRoom,
   rejoinRoom,
   selectRoom,
+  setRoomError,
   useRoomStore,
 } from "../state/room-store";
+
+/** 单个群聊行：单击进入，双击 / 拖出侧栏在独立窗口打开（参考会话行的拖出）。 */
+function RoomRow({ r, active }: { r: RoomListItem; active: boolean }) {
+  const { t } = useI18n();
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const DRAG_THRESHOLD = 6;
+  const DRAG_SLACK = 6;
+  const dragRef = useRef<{
+    startX: number;
+    startY: number;
+    dragging: boolean;
+    detach: boolean;
+  } | null>(null);
+  const suppressClickRef = useRef(false);
+  const [dragGhost, setDragGhost] = useState<{
+    x: number;
+    y: number;
+    detach: boolean;
+  } | null>(null);
+
+  const endDrag = useCallback(() => {
+    window.removeEventListener("pointermove", onDragMove);
+    window.removeEventListener("pointerup", onDragEnd);
+    window.removeEventListener("pointercancel", onDragEnd);
+    document.body.classList.remove("session-detaching");
+    dragRef.current = null;
+    setDragGhost(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const onDragMove = useCallback(
+    (e: PointerEvent) => {
+      const d = dragRef.current;
+      if (!d) return;
+      if (!d.dragging) {
+        const dist = Math.hypot(e.clientX - d.startX, e.clientY - d.startY);
+        if (dist < DRAG_THRESHOLD) return;
+        d.dragging = true;
+        document.body.classList.add("session-detaching");
+      }
+      const sidebar = rootRef.current?.closest(".panel-sessions");
+      const rect = sidebar?.getBoundingClientRect();
+      d.detach = rect
+        ? e.clientX < rect.left - DRAG_SLACK ||
+          e.clientX > rect.right + DRAG_SLACK ||
+          e.clientY < rect.top - DRAG_SLACK ||
+          e.clientY > rect.bottom + DRAG_SLACK
+        : false;
+      setDragGhost({ x: e.clientX, y: e.clientY, detach: d.detach });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+
+  const openDetached = useCallback(() => {
+    // 旧版 preload 没有 openRoomWindow（dev 热更新只换渲染层，或应用驻留
+    // 托盘未真正退出）——给出可见提示，不能静默吞掉。
+    if (!hasDesktopApi("openRoomWindow")) {
+      setRoomError("分窗需要新版主进程：请彻底退出应用（托盘图标右键退出）后再启动");
+      return;
+    }
+    try {
+      void getDesktop()
+        .openRoomWindow(r.roomId)
+        .then((res) => {
+          if (!res.ok) setRoomError(res.error ?? "打开群聊窗口失败");
+        })
+        .catch(() => setRoomError("打开群聊窗口失败"));
+    } catch {
+      setRoomError("分窗需要新版主进程：请彻底退出应用（托盘图标右键退出）后再启动");
+    }
+  }, [r.roomId]);
+
+  const onDragEnd = useCallback(() => {
+    try {
+      const d = dragRef.current;
+      if (d?.dragging) {
+        suppressClickRef.current = true;
+        if (d.detach) openDetached();
+      }
+    } finally {
+      endDrag();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openDetached, endDrag]);
+
+  const onItemPointerDown = (e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    dragRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      dragging: false,
+      detach: false,
+    };
+    window.addEventListener("pointermove", onDragMove);
+    window.addEventListener("pointerup", onDragEnd);
+    window.addEventListener("pointercancel", onDragEnd);
+  };
+
+  // Unmount mid-drag: drop listeners so they never leak.
+  useEffect(() => endDrag, [endDrag]);
+
+  return (
+    <div ref={rootRef} className="room-list-row">
+      <button
+        type="button"
+        className={active ? "session-item active" : "session-item"}
+        onPointerDown={onItemPointerDown}
+        onClick={() => {
+          if (suppressClickRef.current) {
+            suppressClickRef.current = false;
+            return;
+          }
+          selectRoom(r.roomId);
+        }}
+        onDoubleClick={openDetached}
+        title={`${r.name}\n双击或拖出侧栏在新窗口打开`}
+      >
+        <span className="session-title">{r.name}</span>
+        <span className="session-meta">
+          <span>
+            {r.memberCount} 人 ·{" "}
+            {r.offline
+              ? t.room.offline
+              : r.status === "open"
+                ? "在线"
+                : "已结束"}
+            {r.role === "host" ? " · 群主" : ""}
+          </span>
+        </span>
+      </button>
+      {r.offline ? (
+        <button
+          type="button"
+          className="btn btn-ghost btn-sm room-row-rejoin"
+          title={t.room.rejoin}
+          onClick={(e) => {
+            e.stopPropagation();
+            void rejoinRoom(r.roomId);
+          }}
+        >
+          {t.room.rejoin}
+        </button>
+      ) : null}
+      {dragGhost
+        ? createPortal(
+            <div
+              className={`session-drag-ghost${dragGhost.detach ? " detach" : ""}`}
+              style={{ left: dragGhost.x + 14, top: dragGhost.y + 12 }}
+            >
+              <span className="session-drag-ghost-title">{r.name}</span>
+              {dragGhost.detach ? (
+                <span className="session-drag-ghost-hint">
+                  {t.sidebar.releaseToDetach}
+                </span>
+              ) : null}
+            </div>,
+            document.body,
+          )
+        : null}
+    </div>
+  );
+}
 
 export function RoomSidebar() {
   const { t } = useI18n();
@@ -49,7 +215,7 @@ export function RoomSidebar() {
   const dialog = useRoomStore((s) => s.dialog);
   const reconnectNote = useRoomStore((s) => s.reconnectNote);
   const joinPhase = useRoomStore((s) => s.joinPhase);
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(true);
 
   // Create form
   const [name, setName] = useState("");
@@ -477,43 +643,7 @@ export function RoomSidebar() {
             <p className="ft-hint">还没有群聊</p>
           ) : (
             rooms.map((r) => (
-              <div key={r.roomId} className="room-list-row">
-                <button
-                  type="button"
-                  className={
-                    r.roomId === activeRoomId
-                      ? "session-item active"
-                      : "session-item"
-                  }
-                  onClick={() => selectRoom(r.roomId)}
-                >
-                  <span className="session-title">{r.name}</span>
-                  <span className="session-meta">
-                    <span>
-                      {r.memberCount} 人 ·{" "}
-                      {r.offline
-                        ? t.room.offline
-                        : r.status === "open"
-                          ? "开着"
-                          : "已结束"}
-                      {r.role === "host" ? " · 群主" : ""}
-                    </span>
-                  </span>
-                </button>
-                {r.offline ? (
-                  <button
-                    type="button"
-                    className="btn btn-ghost btn-sm room-row-rejoin"
-                    title={t.room.rejoin}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void rejoinRoom(r.roomId);
-                    }}
-                  >
-                    {t.room.rejoin}
-                  </button>
-                ) : null}
-              </div>
+              <RoomRow key={r.roomId} r={r} active={r.roomId === activeRoomId} />
             ))
           )}
         </div>

@@ -6,9 +6,16 @@ import { WebSocket, WebSocketServer, type RawData } from "ws";
 import type { BrowserWindow } from "electron";
 import { IPC, MOD_BUNDLE_MAX_BYTES } from "@claude-desktop/shared";
 import type {
+  Attachment,
   ModOfferPayload,
+  RoomChatRecallPayload,
+  RoomExecAbortPayload,
+  RoomExecEventPayload,
+  RoomExecResultPayload,
+  RoomExecRunPayload,
   RoomListItem,
   RoomMember,
+  RoomNodeInfoPayload,
   RoomPath,
   RoomQuoteRef,
   RoomSeat,
@@ -17,6 +24,8 @@ import type {
   RoomTimelineItem,
   RoomFrame,
   RoomFrameType,
+  FileChange,
+  SdkNormalizedEvent,
 } from "@claude-desktop/shared";
 import type { DeviceKeys } from "@claude-desktop/shared/room-crypto";
 import type { Handshake } from "@claude-desktop/shared/room-handshake";
@@ -139,6 +148,12 @@ const KNOWN_ROOM_FRAME_TYPES: ReadonlySet<string> = new Set<RoomFrameType>([
   "seat.add",
   "chat.user",
   "chat.event",
+  "chat.recall",
+  "exec.run",
+  "exec.event",
+  "exec.result",
+  "exec.abort",
+  "node.info",
   "game.dice",
   "game.rps",
   "state.snapshot",
@@ -168,6 +183,76 @@ type ConnGuard = {
   /** Abuse charges so far (oversized / unknown type / forged roomId). */
   abused: number;
 };
+
+/* ── 远程执行（docs/room-remote-exec-design.md §4/§5） ───────────── */
+
+/** ack 超时：下发后 10s 无首帧，重发一次，再等 10s 判失败。 */
+const EXEC_ACK_TIMEOUT_MS = 10_000;
+/** 节点心跳间隔。 */
+const EXEC_HEARTBEAT_INTERVAL_MS = 15_000;
+/** 心跳超时：60s 无 exec.event → 失联。 */
+const EXEC_HEARTBEAT_TIMEOUT_MS = 60_000;
+/** 单轮总时长上限。 */
+const EXEC_TOTAL_TIMEOUT_MS = 10 * 60_000;
+
+type RemoteTurnState =
+  | "dispatched"
+  | "running"
+  | "done"
+  | "failed"
+  | "aborted"
+  | "timeout";
+
+/** 房主侧台账：一轮派发给成员机器的执行。 */
+type RemoteTurn = {
+  turnId: string;
+  seatId: string;
+  requesterUserId: string | null;
+  executorUserId: string;
+  state: RemoteTurnState;
+  dispatchedAt: number;
+  lastEventAt: number;
+  doneAt?: number;
+  error?: string;
+  ackTimer?: ReturnType<typeof setTimeout>;
+  heartbeatTimer?: ReturnType<typeof setInterval>;
+  totalTimer?: ReturnType<typeof setTimeout>;
+  /** ack 超时后已重发过一次。 */
+  resent?: boolean;
+  /** 原始任务文本（ack 超时重发用）。 */
+  text: string;
+};
+
+/** 节点侧：正在本机跑的一轮。 */
+type NodeTurn = {
+  turnId: string;
+  seatId: string;
+  heartbeat: ReturnType<typeof setInterval> | null;
+  /** 本机 SessionManager 会话（abort 用），start 之后才有。 */
+  sessionId?: string;
+  /** 本轮开始时间（过滤本轮改动用）。 */
+  startedAt: number;
+  /** 二期：流式进度累计文本。 */
+  liveText: string;
+  /** 二期：最近工具一行摘要。 */
+  liveTool?: string;
+  /** 二期：上次向房主发进度的时间（节流）。 */
+  lastLiveSendAt: number;
+};
+
+/** 房主侧 liveExec 条目（快照字段，节流广播，不持久化）。 */
+type LiveExecEntry = {
+  turnId: string;
+  seatId: string;
+  text: string;
+  tool?: string;
+  at: number;
+};
+
+/** 节点流式进度发送节流间隔。 */
+const EXEC_LIVE_INTERVAL_MS = 800;
+/** 进度文本尾部保留长度。 */
+const EXEC_LIVE_TEXT_TAIL = 1500;
 
 /** Charge one abuse event to the connection's token bucket (spec §9). */
 function chargeAbuse(guard: ConnGuard | undefined): void {
@@ -295,6 +380,16 @@ type RoomRecord = {
   kernelProjection?: RoomSnapshot["kernel"];
   inboundChain?: Promise<unknown>;
   kernelTimers?: ReturnType<typeof setInterval>[];
+  /** 房主侧：派发出去的远程执行轮（turnId → 台账）。 */
+  remoteTurns?: Map<string, RemoteTurn>;
+  /** 节点侧：本机正在跑的远程执行轮。 */
+  nodeTurns?: Map<string, NodeTurn>;
+  /** 节点侧：席位 → 本机 SessionManager 会话（续会话用）。 */
+  nodeSeatSessions?: Map<string, string>;
+  /** 房主侧：在跑远程轮的实时进度（快照字段，不持久化）。 */
+  liveExec?: Map<string, LiveExecEntry>;
+  /** 房主侧：席位 → 最近一轮结构化改动（截断，快照字段）。 */
+  remoteChanges?: Record<string, FileChange[]>;
 };
 
 function lanAddresses(): string[] {
@@ -1246,7 +1341,14 @@ export function activate(ctx) {
       hostLabel: hostName,
       localUserId: hostUserId,
       localRole: "host",
-      members: [{ userId: hostUserId, name: hostName, role: "host" }],
+      members: [
+        {
+          userId: hostUserId,
+          name: hostName,
+          role: "host",
+          projectPath: this.settings.get().lastProjectPath ?? null,
+        },
+      ],
       seats: [
         {
           id: randomUUID(),
@@ -1627,6 +1729,7 @@ export function activate(ctx) {
                 name,
                 protocol: ROOM_PROTOCOL_VERSION,
                 modChecksum: checksum,
+                projectPath: this.settings.get().lastProjectPath ?? null,
               }),
             );
           } catch (err) {
@@ -1974,6 +2077,7 @@ export function activate(ctx) {
                 name: displayName(),
                 protocol: ROOM_PROTOCOL_VERSION,
                 modChecksum: (modChecksum ?? "").trim(),
+                projectPath: this.settings.get().lastProjectPath ?? null,
               }),
             );
           } catch {
@@ -2068,6 +2172,7 @@ export function activate(ctx) {
     if (!this.rooms.has(r.roomId)) return;
     this.cancelGuestReconnect(r);
     r.status = "ended";
+    this.disposeExecTurns(r);
     try {
       r.client?.close();
     } catch {
@@ -2152,6 +2257,14 @@ export function activate(ctx) {
         );
         return;
       }
+      if (frame.type === "exec.run") {
+        this.onExecRun(r, frame.payload as RoomExecRunPayload);
+        return;
+      }
+      if (frame.type === "exec.abort") {
+        this.onExecAbort(r, frame.payload as RoomExecAbortPayload);
+        return;
+      }
       if (frame.type === "error") {
         this.safeSend(IPC.roomEvent, {
           roomId: r.roomId,
@@ -2185,6 +2298,17 @@ export function activate(ctx) {
         void this.reconnectGuest(r);
       }
     });
+    // 对账上报：（重）连上后把本机还在跑的远程轮次告诉房主——
+    // 房主若没有记录会回 exec.abort，双端收敛。
+    if (r.nodeTurns?.size) {
+      for (const nt of r.nodeTurns.values()) {
+        this.sendClient(r, "exec.event", {
+          turnId: nt.turnId,
+          seatId: nt.seatId,
+          phase: "running",
+        } satisfies RoomExecEventPayload);
+      }
+    }
   }
 
   /**
@@ -2218,6 +2342,7 @@ export function activate(ctx) {
     this.denyAllPending(r);
     this.disposeModHost(r);
     this.disposeKernel(r, shouldDelete);
+    this.disposeExecTurns(r);
     try {
       r.tunnel?.kill();
     } catch {
@@ -2276,7 +2401,12 @@ export function activate(ctx) {
     kind: RoomSeatKind,
     name: string,
     agentName?: string,
-    extra?: { agentPrompt?: string; skillNames?: string[]; model?: string },
+    extra?: {
+      agentPrompt?: string;
+      skillNames?: string[];
+      model?: string;
+      executorUserId?: string;
+    },
   ) {
     const r = this.rooms.get(roomId);
     if (!r || r.status !== "open") {
@@ -2289,10 +2419,29 @@ export function activate(ctx) {
         name: name.trim(),
         agentName: agentName ?? name.trim(),
         userId: r.localUserId,
+        ...(kind === "agent" && extra?.agentPrompt?.trim()
+          ? { agentPrompt: extra.agentPrompt.trim() }
+          : {}),
+        ...(kind === "agent" && extra?.skillNames?.length
+          ? { skillNames: extra.skillNames }
+          : {}),
+        ...(kind === "agent" && extra?.model?.trim()
+          ? { model: extra.model.trim() }
+          : {}),
+        // 客人创建的 Agent 席位默认在客人自己机器上执行
+        ...(kind === "agent"
+          ? { executorUserId: extra?.executorUserId ?? r.localUserId }
+          : {}),
       });
       return { ok: true };
     }
     const label = name.trim() || (kind === "agent" ? "Agent" : displayName());
+    const executor =
+      kind === "agent" &&
+      extra?.executorUserId &&
+      r.members.some((m) => m.userId === extra.executorUserId)
+        ? extra.executorUserId
+        : r.localUserId;
     const seat: RoomSeat = {
       id: randomUUID(),
       kind,
@@ -2302,6 +2451,7 @@ export function activate(ctx) {
       sessionId: null,
       running: false,
       agentName: kind === "agent" ? (agentName ?? label) : null,
+      ...(kind === "agent" ? { executorUserId: executor } : {}),
       ...(kind === "agent" && extra?.agentPrompt?.trim()
         ? { agentPrompt: extra.agentPrompt.trim() }
         : {}),
@@ -2331,6 +2481,7 @@ export function activate(ctx) {
       agentPrompt?: string;
       skillNames?: string[];
       model?: string;
+      executorUserId?: string;
     },
   ) {
     const r = this.hostRoom(roomId);
@@ -2361,6 +2512,15 @@ export function activate(ctx) {
       if (m) seat.model = m;
       else delete seat.model;
     }
+    if (patch.executorUserId !== undefined) {
+      const e = patch.executorUserId.trim();
+      // 空串 / 房主自己 = 回房主本机执行；否则必须是房间里的人
+      if (!e || e === rec.localUserId) {
+        seat.executorUserId = rec.localUserId;
+      } else if (rec.members.some((m) => m.userId === e)) {
+        seat.executorUserId = e;
+      }
+    }
     this.pushState(rec);
     return { ok: true, room: this.snapshot(rec) };
   }
@@ -2372,10 +2532,24 @@ export function activate(ctx) {
     kind: RoomSeatKind,
     name: string,
     agentName?: string,
+    extra?: {
+      agentPrompt?: string;
+      skillNames?: string[];
+      model?: string;
+      executorUserId?: string;
+    },
   ) {
     const member = r.members.find((m) => m.userId === userId);
     if (!member) return;
     const label = name.trim() || (kind === "agent" ? "Agent" : member.name);
+    // 执行节点：客人席位默认在客人自己机器上；指向别人时需对方在房间里
+    const executor =
+      kind === "agent"
+        ? extra?.executorUserId &&
+          r.members.some((m) => m.userId === extra.executorUserId)
+          ? extra.executorUserId
+          : userId
+        : undefined;
     const seat: RoomSeat = {
       id: randomUUID(),
       kind,
@@ -2385,6 +2559,16 @@ export function activate(ctx) {
       sessionId: null,
       running: false,
       agentName: kind === "agent" ? (agentName ?? label) : null,
+      ...(executor ? { executorUserId: executor } : {}),
+      ...(kind === "agent" && extra?.agentPrompt?.trim()
+        ? { agentPrompt: extra.agentPrompt.trim() }
+        : {}),
+      ...(kind === "agent" && extra?.skillNames?.length
+        ? { skillNames: extra.skillNames.slice(0, 32).map((s) => String(s)) }
+        : {}),
+      ...(kind === "agent" && extra?.model?.trim()
+        ? { model: extra.model.trim() }
+        : {}),
     };
     r.seats.push(seat);
     this.append(r, {
@@ -2452,6 +2636,7 @@ export function activate(ctx) {
     if (seat.kind !== "agent") return { ok: false, error: "只能接管 Agent 席位" };
     if (r.localRole === "host") {
       seat.takenOverBy = r.localUserId;
+      this.abortRemoteTurnsForSeat(r, seat.id, "席位被接管");
       if (seat.sessionId) {
         try {
           this.sessions.abort(seat.sessionId);
@@ -2854,11 +3039,18 @@ export function activate(ctx) {
     seatId: string,
     text: string,
     quote?: RoomQuoteRef,
+    attachments?: Attachment[],
   ) {
     const r = this.rooms.get(roomId);
     if (!r || r.status !== "open") return { ok: false, error: "群聊不可用" };
     const trimmed = text.trim();
-    if (!trimmed) return { ok: false, error: "消息为空" };
+    const atts = attachments?.length ? attachments : undefined;
+    if (!trimmed && !atts) return { ok: false, error: "消息为空" };
+    // 附件在消息文本里落一份 [Attached: 名字]，所有成员（含远端节点）都能看到；
+    // 文件内容只在席位跑在本机时穿进 Agent prompt（路径在别的机器上没意义）。
+    const body = atts
+      ? `${trimmed ? `${trimmed}\n\n` : ""}[Attached: ${atts.map((a) => a.name).join(", ")}]`
+      : trimmed;
     const seat = r.seats.find((s) => s.id === seatId);
     if (!seat) return { ok: false, error: "请先选一个席位" };
 
@@ -2879,7 +3071,7 @@ export function activate(ctx) {
       this.sendClient(r, "chat.user", {
         seatId,
         userId: r.localUserId,
-        text: trimmed,
+        text: body,
         ...(quote ? { quote } : {}),
       });
       return { ok: true };
@@ -2897,11 +3089,11 @@ export function activate(ctx) {
             seatId,
             authorUserId: r.localUserId,
             authorLabel: this.memberName(r, r.localUserId),
-            text: trimmed,
+            text: body,
             at: Date.now(),
             ...(quote ? { quote } : {}),
           },
-          { runAgent: true },
+          { runAgent: true, attachments: atts },
         ),
       );
       return { ok: true };
@@ -2918,7 +3110,7 @@ export function activate(ctx) {
           seatId,
           authorUserId: r.localUserId,
           authorLabel: this.memberName(r, r.localUserId),
-          text: trimmed,
+          text: body,
           at: Date.now(),
           ...(quote ? { quote } : {}),
         },
@@ -2933,6 +3125,7 @@ export function activate(ctx) {
       this.cancelGuestReconnect(r);
       this.disposeModHost(r);
       this.disposeKernel(r, false);
+      this.disposeExecTurns(r);
       this.denyAllPending(r);
       try {
         r.tunnel?.kill();
@@ -2976,7 +3169,19 @@ export function activate(ctx) {
     return lines.join("\n");
   }
 
-  private async runAgentSeat(r: RoomRecord, seat: RoomSeat, text: string) {
+  private async runAgentSeat(
+    r: RoomRecord,
+    seat: RoomSeat,
+    text: string,
+    requesterUserId?: string | null,
+    attachments?: Attachment[],
+  ) {
+    // 远程执行：席位绑定了其他成员的机器 → 派发过去，不在房主本机跑。
+    // 附件是本机路径，远端读不到，只随文本带 [Attached: 名字]。
+    if (this.seatExecutor(r, seat)) {
+      this.dispatchRemoteTurn(r, seat, text, requesterUserId ?? null);
+      return;
+    }
     const cwd = this.settings.get().lastProjectPath;
     if (!cwd) {
       this.append(r, {
@@ -2990,16 +3195,28 @@ export function activate(ctx) {
     }
     seat.running = true;
     this.pushState(r);
+    const em = this.effectiveSeatModel(seat);
+    if (em.fallbackFrom) {
+      this.append(r, {
+        kind: "tool",
+        seatId: seat.id,
+        text: `席位模型「${em.fallbackFrom}」在本机网关未配置，已改用本机默认模型`,
+        authorLabel: "系统",
+      });
+      this.pushState(r);
+    }
     const prompt = {
       text: !seat.sessionId
         ? `${this.agentSeatPrefix(seat)}\n${text}`
         : text,
-      attachments: [],
+      attachments: attachments ?? [],
     };
     const extras = {
       ...this.seatToolOpts(r, seat),
       replaceExtras: true,
-      ...(seat.model ? { model: seat.model } : {}),
+      // 席位会话不出现在左侧会话列表（不占“对话格子”），diff 事件照发。
+      hiddenFromList: true,
+      ...(em.model ? { model: em.model } : {}),
     };
     try {
       if (!seat.sessionId) {
@@ -3032,6 +3249,652 @@ export function activate(ctx) {
     } finally {
       seat.running = false;
       this.pushState(r);
+    }
+  }
+
+  /* ── 远程执行（docs/room-remote-exec-design.md §4/§5） ─────────────── */
+
+  /** 席位该去哪台机器跑：null = 房主本机（现状行为）。 */
+  private seatExecutor(r: RoomRecord, seat: RoomSeat): string | null {
+    const e = seat.executorUserId;
+    if (!e || e === r.localUserId) return null;
+    return e;
+  }
+
+  /** 本机网关已配置的模型名列表（用于校验席位模型在执行节点上是否存在）。 */
+  private localModels(): string[] {
+    const st = this.settings.get();
+    if (Array.isArray(st.models) && st.models.length) return st.models;
+    return st.defaultModel ? [st.defaultModel] : [];
+  }
+
+  /**
+   * 席位模型只在挑选它的那台机器上保证存在。在执行节点本地校验：
+   * 未配置就回落节点默认模型（不覆盖 model），fallbackFrom 用于提示。
+   */
+  private effectiveSeatModel(seat: RoomSeat): {
+    model?: string;
+    fallbackFrom?: string;
+  } {
+    if (!seat.model) return {};
+    const known = this.localModels();
+    if (!known.length || known.includes(seat.model)) return { model: seat.model };
+    return { fallbackFrom: seat.model };
+  }
+
+  private findGuestWsByUserId(r: RoomRecord, userId: string): WebSocket | null {
+    for (const g of r.guests) {
+      if ((g as GuestWs).userId === userId && g.readyState === WebSocket.OPEN) {
+        return g;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * 证据链：每房间一份 exec-log.jsonl（两端同格式、只追加），
+   * 落在 userData/rooms/ 下，与房间归档同目录。
+   */
+  private execLog(
+    r: RoomRecord,
+    entry: {
+      turnId: string;
+      dir: "out" | "in";
+      type: string;
+      seatId?: string;
+      state?: string;
+      note?: string;
+    },
+  ): void {
+    try {
+      const dir = path.join(this.userDataDir, "rooms");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.appendFileSync(
+        path.join(dir, `${r.roomId}.exec-log.jsonl`),
+        `${JSON.stringify({ ts: Date.now(), ...entry })}\n`,
+        "utf8",
+      );
+    } catch {
+      // 日志写失败不影响执行
+    }
+  }
+
+  /** 房主：把一个席位轮次派发给它的执行节点。 */
+  private dispatchRemoteTurn(
+    r: RoomRecord,
+    seat: RoomSeat,
+    text: string,
+    requesterUserId: string | null,
+  ): void {
+    const executor = seat.executorUserId!;
+    const nodeName = this.memberName(r, executor);
+    const ws = this.findGuestWsByUserId(r, executor);
+    if (!ws) {
+      this.append(r, {
+        kind: "system",
+        seatId: seat.id,
+        text: `「${seat.name}」应在 ${nodeName} 的电脑上运行，但对方不在线`,
+        authorLabel: "系统",
+      });
+      this.pushState(r);
+      return;
+    }
+    const turnId = randomUUID();
+    const turn: RemoteTurn = {
+      turnId,
+      seatId: seat.id,
+      requesterUserId,
+      executorUserId: executor,
+      state: "dispatched",
+      dispatchedAt: Date.now(),
+      lastEventAt: Date.now(),
+      text,
+    };
+    (r.remoteTurns ??= new Map()).set(turnId, turn);
+    seat.running = true;
+    this.execLog(r, {
+      turnId,
+      dir: "out",
+      type: "exec.run",
+      seatId: seat.id,
+      state: "dispatched",
+      note: `executor=${nodeName}`,
+    });
+    this.append(r, {
+      kind: "tool",
+      seatId: seat.id,
+      text: `已派发给「${nodeName}」的电脑执行（任务 ${turnId.slice(0, 8)}）`,
+      authorLabel: "系统",
+    });
+    this.reply(ws, r, "exec.run", {
+      turnId,
+      seatId: seat.id,
+      text,
+    } satisfies RoomExecRunPayload);
+    turn.ackTimer = setTimeout(
+      () => this.onExecAckTimeout(r.roomId, turnId),
+      EXEC_ACK_TIMEOUT_MS,
+    );
+    turn.heartbeatTimer = setInterval(
+      () => this.onExecHeartbeatCheck(r.roomId, turnId),
+      20_000,
+    );
+    turn.totalTimer = setTimeout(
+      () => this.onExecTotalTimeout(r.roomId, turnId),
+      EXEC_TOTAL_TIMEOUT_MS,
+    );
+    this.pushState(r);
+  }
+
+  private clearRemoteTurnTimers(turn: RemoteTurn): void {
+    if (turn.ackTimer) clearTimeout(turn.ackTimer);
+    if (turn.heartbeatTimer) clearInterval(turn.heartbeatTimer);
+    if (turn.totalTimer) clearTimeout(turn.totalTimer);
+    turn.ackTimer = undefined;
+    turn.heartbeatTimer = undefined;
+    turn.totalTimer = undefined;
+  }
+
+  private isTurnActive(t: RemoteTurn): boolean {
+    return t.state === "dispatched" || t.state === "running";
+  }
+
+  /** 收敛到终态：清定时器、写台账、席位 running 复位。 */
+  private settleRemoteTurn(
+    r: RoomRecord,
+    turn: RemoteTurn,
+    state: RemoteTurnState,
+    error?: string,
+  ): void {
+    if (!this.isTurnActive(turn)) return;
+    turn.state = state;
+    turn.doneAt = Date.now();
+    if (error) turn.error = error;
+    this.clearRemoteTurnTimers(turn);
+    r.liveExec?.delete(turn.turnId);
+    this.execLog(r, {
+      turnId: turn.turnId,
+      dir: "in",
+      type: "exec.result",
+      seatId: turn.seatId,
+      state,
+      ...(error ? { note: error } : {}),
+    });
+    const seat = r.seats.find((s) => s.id === turn.seatId);
+    const stillActive = [...(r.remoteTurns?.values() ?? [])].some(
+      (t) => t !== turn && t.seatId === turn.seatId && this.isTurnActive(t),
+    );
+    if (seat && !stillActive) seat.running = false;
+  }
+
+  private onExecAckTimeout(roomId: string, turnId: string): void {
+    const r = this.rooms.get(roomId);
+    const turn = r?.remoteTurns?.get(turnId);
+    if (!r || !turn || turn.state !== "dispatched") return;
+    const ws = this.findGuestWsByUserId(r, turn.executorUserId);
+    if (!turn.resent && ws) {
+      // ack 超时重发一次（节点幂等：重复的 exec.run 只回 ack）
+      turn.resent = true;
+      this.execLog(r, { turnId, dir: "out", type: "exec.run", state: "resent" });
+      this.reply(ws, r, "exec.run", {
+        turnId,
+        seatId: turn.seatId,
+        text: turn.text,
+      } satisfies RoomExecRunPayload);
+      turn.ackTimer = setTimeout(
+        () => this.onExecAckTimeout(roomId, turnId),
+        EXEC_ACK_TIMEOUT_MS,
+      );
+      return;
+    }
+    const seat = r.seats.find((s) => s.id === turn.seatId);
+    this.settleRemoteTurn(r, turn, "failed", "节点无响应");
+    this.append(r, {
+      kind: "tool",
+      seatId: turn.seatId,
+      text: `「${this.memberName(r, turn.executorUserId)}」的电脑无响应，任务失败（${turnId.slice(0, 8)}）`,
+      authorLabel: "系统",
+    });
+    if (seat) seat.running = false;
+    this.pushState(r);
+  }
+
+  private onExecHeartbeatCheck(roomId: string, turnId: string): void {
+    const r = this.rooms.get(roomId);
+    const turn = r?.remoteTurns?.get(turnId);
+    if (!r || !turn || !this.isTurnActive(turn)) return;
+    if (Date.now() - turn.lastEventAt <= EXEC_HEARTBEAT_TIMEOUT_MS) return;
+    this.settleRemoteTurn(r, turn, "failed", "心跳超时（失联）");
+    const ws = this.findGuestWsByUserId(r, turn.executorUserId);
+    if (ws) {
+      this.reply(ws, r, "exec.abort", {
+        turnId,
+        reason: "心跳超时",
+      } satisfies RoomExecAbortPayload);
+    }
+    this.append(r, {
+      kind: "tool",
+      seatId: turn.seatId,
+      text: `「${this.memberName(r, turn.executorUserId)}」的电脑失联，任务中断（${turnId.slice(0, 8)}）`,
+      authorLabel: "系统",
+    });
+    this.pushState(r);
+  }
+
+  private onExecTotalTimeout(roomId: string, turnId: string): void {
+    const r = this.rooms.get(roomId);
+    const turn = r?.remoteTurns?.get(turnId);
+    if (!r || !turn || !this.isTurnActive(turn)) return;
+    this.settleRemoteTurn(r, turn, "timeout", "超过单轮时长上限");
+    const ws = this.findGuestWsByUserId(r, turn.executorUserId);
+    if (ws) {
+      this.reply(ws, r, "exec.abort", {
+        turnId,
+        reason: "超过单轮时长上限",
+      } satisfies RoomExecAbortPayload);
+    }
+    this.append(r, {
+      kind: "tool",
+      seatId: turn.seatId,
+      text: `任务超过 10 分钟未完成，已中止（${turnId.slice(0, 8)}）`,
+      authorLabel: "系统",
+    });
+    this.pushState(r);
+  }
+
+  /** 房主收到节点的 exec.event（ack / 心跳 / 阶段提示）。 */
+  private onNodeExecEvent(
+    r: RoomRecord,
+    userId: string,
+    p: RoomExecEventPayload,
+  ): void {
+    if (!p || typeof p.turnId !== "string") return;
+    const turn = r.remoteTurns?.get(p.turnId);
+    if (!turn || turn.executorUserId !== userId) {
+      // 对账：房主没有这轮（重启后丢了/已终态）→ 让节点停
+      if (p.phase === "accepted" || p.phase === "running") {
+        const ws = this.findGuestWsByUserId(r, userId);
+        if (ws) {
+          this.reply(ws, r, "exec.abort", {
+            turnId: p.turnId,
+            reason: "房主侧无此任务",
+          } satisfies RoomExecAbortPayload);
+        }
+        this.execLog(r, {
+          turnId: p.turnId,
+          dir: "in",
+          type: "exec.event",
+          state: "unknown-turn",
+          note: "对账失败，已回 abort",
+        });
+      }
+      return;
+    }
+    if (!this.isTurnActive(turn)) return;
+    turn.lastEventAt = Date.now();
+    if (p.phase === "note") {
+      // 二期：流式进度进快照（轻量广播，不落盘）
+      (r.liveExec ??= new Map()).set(turn.turnId, {
+        turnId: turn.turnId,
+        seatId: turn.seatId,
+        text: typeof p.text === "string" ? p.text : "",
+        ...(p.tool ? { tool: p.tool } : {}),
+        at: Date.now(),
+      });
+      this.pushLive(r);
+      return;
+    }
+    if (turn.state === "dispatched") {
+      turn.state = "running";
+      if (turn.ackTimer) {
+        clearTimeout(turn.ackTimer);
+        turn.ackTimer = undefined;
+      }
+      this.execLog(r, {
+        turnId: turn.turnId,
+        dir: "in",
+        type: "exec.event",
+        seatId: turn.seatId,
+        state: "running",
+      });
+    }
+  }
+
+  /** 房主收到节点的 exec.result（终态）。 */
+  private onNodeExecResult(
+    r: RoomRecord,
+    userId: string,
+    p: RoomExecResultPayload,
+  ): void {
+    if (!p || typeof p.turnId !== "string") return;
+    const turn = r.remoteTurns?.get(p.turnId);
+    // 结果必须来自该轮的执行节点，否则无法核实，丢弃
+    if (!turn || turn.executorUserId !== userId || !this.isTurnActive(turn)) {
+      return;
+    }
+    const seat = r.seats.find((s) => s.id === turn.seatId);
+    const nodeName = this.memberName(r, userId);
+    if (p.ok && typeof p.text === "string" && p.text.trim()) {
+      this.append(r, {
+        kind: "assistant",
+        seatId: turn.seatId,
+        authorLabel: seat?.name ?? "Agent",
+        text: p.text.trim(),
+      });
+    }
+    const changes =
+      Array.isArray(p.changes) && p.changes.length
+        ? `，改动：${p.changes.slice(0, 12).join("、")}`
+        : "";
+    // 二期：结构化改动进快照，各端变更栏只读查看（回滚只能节点本机）
+    if (Array.isArray(p.changesDetail) && p.changesDetail.length) {
+      const store = (r.remoteChanges ??= {});
+      const prev = store[turn.seatId] ?? [];
+      const byPath = new Map(prev.map((c) => [c.path, c]));
+      for (const c of p.changesDetail.slice(0, 8)) {
+        byPath.set(c.path, c);
+      }
+      // 每席位最多保留 12 个文件，超出按更新时间淘汰最旧
+      store[turn.seatId] = [...byPath.values()]
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .slice(0, 12);
+    }
+    this.append(r, {
+      kind: "tool",
+      seatId: turn.seatId,
+      text: p.ok
+        ? `「${nodeName}」的电脑执行完成${changes}（${turn.turnId.slice(0, 8)}）`
+        : `「${nodeName}」的电脑执行失败：${p.error ?? "未知错误"}（${turn.turnId.slice(0, 8)}）`,
+      authorLabel: "系统",
+    });
+    this.settleRemoteTurn(r, turn, p.ok ? "done" : "failed", p.error);
+    this.pushState(r);
+  }
+
+  /* ── 节点侧（成员机器）执行循环 ───────────────────────────────────── */
+
+  /** 节点收到房主的 exec.run：幂等接收，本机起会话执行。 */
+  private onExecRun(r: RoomRecord, p: RoomExecRunPayload): void {
+    if (!p || typeof p.turnId !== "string" || typeof p.seatId !== "string") {
+      return;
+    }
+    if (typeof p.text !== "string" || !p.text.trim()) return;
+    const turns = (r.nodeTurns ??= new Map());
+    if (turns.has(p.turnId)) {
+      // 重发的 exec.run：只重新 ack，不重复执行（turnId 幂等）
+      this.sendClient(r, "exec.event", {
+        turnId: p.turnId,
+        seatId: p.seatId,
+        phase: "accepted",
+      } satisfies RoomExecEventPayload);
+      return;
+    }
+    const fail = (error: string) => {
+      this.execLog(r, {
+        turnId: p.turnId,
+        dir: "in",
+        type: "exec.run",
+        seatId: p.seatId,
+        state: "failed",
+        note: error,
+      });
+      this.sendClient(r, "exec.result", {
+        turnId: p.turnId,
+        seatId: p.seatId,
+        ok: false,
+        error,
+      } satisfies RoomExecResultPayload);
+    };
+    const seat = r.seats.find((s) => s.id === p.seatId);
+    if (!seat || seat.kind !== "agent") return fail("席位不存在或不是 Agent");
+    if (seat.executorUserId && seat.executorUserId !== r.localUserId) {
+      return fail("该席位不在本机执行");
+    }
+    const cwd = this.settings.get().lastProjectPath;
+    if (!cwd) return fail("本机尚未打开项目，无法执行");
+    const nt: NodeTurn = {
+      turnId: p.turnId,
+      seatId: p.seatId,
+      heartbeat: null,
+      startedAt: Date.now(),
+      liveText: "",
+      lastLiveSendAt: 0,
+    };
+    turns.set(p.turnId, nt);
+    this.execLog(r, {
+      turnId: p.turnId,
+      dir: "in",
+      type: "exec.run",
+      seatId: p.seatId,
+      state: "accepted",
+    });
+    this.sendClient(r, "exec.event", {
+      turnId: p.turnId,
+      seatId: p.seatId,
+      phase: "accepted",
+    } satisfies RoomExecEventPayload);
+    nt.heartbeat = setInterval(() => {
+      this.sendClient(r, "exec.event", {
+        turnId: nt.turnId,
+        seatId: nt.seatId,
+        phase: "running",
+      } satisfies RoomExecEventPayload);
+    }, EXEC_HEARTBEAT_INTERVAL_MS);
+    nt.heartbeat.unref?.();
+    void this.runNodeTurn(r, nt, seat, p.text, cwd);
+  }
+
+  private async runNodeTurn(
+    r: RoomRecord,
+    nt: NodeTurn,
+    seat: RoomSeat,
+    text: string,
+    cwd: string,
+  ): Promise<void> {
+    const seatSessions = (r.nodeSeatSessions ??= new Map());
+    const prevSession = seatSessions.get(nt.seatId);
+    // 席位模型在节点本机校验：未配置则回落本机默认，回复里注明。
+    const em = this.effectiveSeatModel(seat);
+    const modelNote = em.fallbackFrom
+      ? `> 席位模型「${em.fallbackFrom}」在本机网关未配置，已改用本机默认模型\n\n`
+      : "";
+    const prompt = {
+      text: prevSession ? text : `${this.agentSeatPrefix(seat)}\n${text}`,
+      attachments: [],
+    };
+    const extras = {
+      replaceExtras: true,
+      hiddenFromList: true,
+      ...(em.model ? { model: em.model } : {}),
+      // 会话条目一建好就拿到 id：流式事件映射 + 中途 abort 都靠它
+      onSessionId: (id: string) => {
+        nt.sessionId = id;
+      },
+    };
+    try {
+      let sid = prevSession;
+      if (!sid) {
+        sid = await this.sessions.start(prompt, cwd, extras);
+        seatSessions.set(nt.seatId, sid);
+      } else {
+        await this.sessions.continue(sid, prompt, extras);
+      }
+      nt.sessionId = sid;
+      this.execLog(r, {
+        turnId: nt.turnId,
+        dir: "in",
+        type: "exec.run",
+        seatId: nt.seatId,
+        state: "running",
+        note: `localSession=${sid}`,
+      });
+      const items = this.sessions.getTranscript(sid);
+      const last = [...items]
+        .reverse()
+        .find((i) => i.kind === "text" && i.role === "assistant");
+      const reply = last && last.kind === "text" ? last.text.trim() : "";
+      const changed = this.sessions
+        .getChangesForSelect(sid)
+        .map((c) => c.path)
+        .slice(0, 12);
+      const changesDetail = this.turnChangesDetail(sid, nt.startedAt);
+      this.sendClient(r, "exec.result", {
+        turnId: nt.turnId,
+        seatId: nt.seatId,
+        ok: true,
+        text: modelNote ? modelNote + reply : reply,
+        ...(changed.length ? { changes: changed } : {}),
+        ...(changesDetail.length ? { changesDetail } : {}),
+      } satisfies RoomExecResultPayload);
+      this.execLog(r, {
+        turnId: nt.turnId,
+        dir: "out",
+        type: "exec.result",
+        seatId: nt.seatId,
+        state: "done",
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.sendClient(r, "exec.result", {
+        turnId: nt.turnId,
+        seatId: nt.seatId,
+        ok: false,
+        error: msg,
+      } satisfies RoomExecResultPayload);
+      this.execLog(r, {
+        turnId: nt.turnId,
+        dir: "out",
+        type: "exec.result",
+        seatId: nt.seatId,
+        state: "failed",
+        note: msg,
+      });
+    } finally {
+      if (nt.heartbeat) clearInterval(nt.heartbeat);
+      r.nodeTurns?.delete(nt.turnId);
+    }
+  }
+
+  /**
+   * 本轮改动（since 之后的事件）截断打包：最多 8 个文件、每文件留最新 3 个事件、
+   * hunk 文本截到 16k，防止 exec.result 撑爆帧上限。
+   */
+  private turnChangesDetail(sessionId: string, since: number): FileChange[] {
+    const all = this.sessions.getChangesForSelect(sessionId);
+    const out: FileChange[] = [];
+    for (const c of all) {
+      const events = c.events.filter((e) => e.at >= since).slice(-3);
+      if (!events.length) continue;
+      out.push({
+        path: c.path,
+        status: c.status,
+        hunks: c.hunks.slice(0, 16 * 1024),
+        updatedAt: c.updatedAt,
+        events: events.map((e) => ({
+          ...e,
+          hunk: e.hunk.slice(0, 16 * 1024),
+          canRestore: false, // 远端记录只读，回滚只能节点本机
+        })),
+      });
+      if (out.length >= 8) break;
+    }
+    return out;
+  }
+
+  /** 节点收到房主的 exec.abort：中止本机这轮。 */
+  private onExecAbort(r: RoomRecord, p: RoomExecAbortPayload): void {
+    if (!p || typeof p.turnId !== "string") return;
+    const nt = r.nodeTurns?.get(p.turnId);
+    if (!nt) return;
+    this.execLog(r, {
+      turnId: p.turnId,
+      dir: "in",
+      type: "exec.abort",
+      seatId: nt.seatId,
+      state: "aborted",
+      ...(p.reason ? { note: p.reason } : {}),
+    });
+    if (nt.sessionId) {
+      try {
+        this.sessions.abort(nt.sessionId);
+      } catch {
+        // ignore
+      }
+    }
+    // sessions.abort 会让 runNodeTurn 的 await 抛错，
+    // 由它的 catch/finally 回 exec.result(ok:false) 并清理心跳。
+    if (!nt.sessionId) {
+      if (nt.heartbeat) clearInterval(nt.heartbeat);
+      r.nodeTurns?.delete(nt.turnId);
+    }
+  }
+
+  /**
+   * 节点：SessionManager 事件流的水龙头（index.ts 的 emit 挂钩调这里）。
+   * 命中本机正在跑的远程轮时，把回复文本/工具行动态节流转发给房主。
+   */
+  onSessionEvent(event: SdkNormalizedEvent): void {
+    if (!("sessionId" in event) || !event.sessionId) return;
+    for (const r of this.rooms.values()) {
+      if (!r.nodeTurns?.size) continue;
+      for (const nt of r.nodeTurns.values()) {
+        if (nt.sessionId !== event.sessionId) continue;
+        if (event.type === "text_delta") {
+          nt.liveText += event.text;
+        } else if (event.type === "text_done") {
+          nt.liveText = event.text;
+        } else if (event.type === "tool_start") {
+          const t = event.tool;
+          nt.liveTool = `${t.name}${t.summary ? ` ${t.summary.slice(0, 80)}` : ""}`;
+        } else {
+          continue;
+        }
+        // 节流：文本增量 800ms 一帧攒着发；工具切换低频，立即发
+        const isTool = event.type === "tool_start";
+        const now = Date.now();
+        if (!isTool && now - nt.lastLiveSendAt < EXEC_LIVE_INTERVAL_MS) return;
+        nt.lastLiveSendAt = now;
+        this.sendClient(r, "exec.event", {
+          turnId: nt.turnId,
+          seatId: nt.seatId,
+          phase: "note",
+          text: nt.liveText.slice(-EXEC_LIVE_TEXT_TAIL),
+          ...(nt.liveTool ? { tool: nt.liveTool } : {}),
+        } satisfies RoomExecEventPayload);
+        return;
+      }
+    }
+  }
+
+  /** 清理所有远程执行定时器（关房 / dispose 时调）。 */
+  private disposeExecTurns(r: RoomRecord): void {
+    for (const turn of r.remoteTurns?.values() ?? []) {
+      this.clearRemoteTurnTimers(turn);
+    }
+    r.remoteTurns?.clear();
+    for (const nt of r.nodeTurns?.values() ?? []) {
+      if (nt.heartbeat) clearInterval(nt.heartbeat);
+    }
+    r.nodeTurns?.clear();
+  }
+
+  /** 房主：中止某席位名下所有在跑的远程轮（接管/踢人等）。 */
+  private abortRemoteTurnsForSeat(
+    r: RoomRecord,
+    seatId: string,
+    reason: string,
+  ): void {
+    if (!r.remoteTurns?.size) return;
+    for (const turn of r.remoteTurns.values()) {
+      if (turn.seatId !== seatId || !this.isTurnActive(turn)) continue;
+      const ws = this.findGuestWsByUserId(r, turn.executorUserId);
+      if (ws) {
+        this.reply(ws, r, "exec.abort", {
+          turnId: turn.turnId,
+          reason,
+        } satisfies RoomExecAbortPayload);
+      }
+      this.settleRemoteTurn(r, turn, "aborted", reason);
     }
   }
 
@@ -3155,6 +4018,25 @@ export function activate(ctx) {
           r.pendingByFp.delete(fp);
           this.emitPending(r);
         }
+      }
+      // 远程执行对账：掉线者名下在跑的轮次立即判失联（不等心跳超时）
+      const goneUserId = (ws as GuestWs).userId;
+      if (goneUserId && r.remoteTurns?.size) {
+        let settled = false;
+        for (const turn of r.remoteTurns.values()) {
+          if (turn.executorUserId !== goneUserId || !this.isTurnActive(turn)) {
+            continue;
+          }
+          this.settleRemoteTurn(r, turn, "failed", "节点断线");
+          this.append(r, {
+            kind: "tool",
+            seatId: turn.seatId,
+            text: `「${this.memberName(r, goneUserId)}」掉线，其电脑上的执行中断（${turn.turnId.slice(0, 8)}）`,
+            authorLabel: "系统",
+          });
+          settled = true;
+        }
+        if (settled) this.pushState(r);
       }
     });
   }
@@ -3499,6 +4381,66 @@ export function activate(ctx) {
     return { ok: true };
   }
 
+  /** Host renames the room; name rides the snapshot to every member. */
+  rename(
+    roomId: string,
+    name: string,
+  ): { ok: boolean; room?: RoomSnapshot; error?: string } {
+    const r = this.hostRoom(roomId);
+    if (!r.ok) return r;
+    const rec = r.room;
+    const next = name.trim().slice(0, 40);
+    if (!next) return { ok: false, error: "群聊名不能为空" };
+    if (next === rec.name) return { ok: true, room: this.snapshot(rec) };
+    const old = rec.name;
+    rec.name = next;
+    this.append(rec, {
+      kind: "system",
+      text: `群聊名称由「${old}」修改为「${next}」`,
+      authorLabel: "系统",
+    });
+    this.pushState(rec);
+    return { ok: true, room: this.snapshot(rec) };
+  }
+
+  /**
+   * 撤回一条消息：作者本人可撤自己的，房主可撤任何人的。
+   * 房主直接本地生效；客人发 chat.recall 帧，由房主校验后广播。
+   */
+  recall(roomId: string, itemId: string): { ok: boolean; error?: string } {
+    const r = this.rooms.get(roomId);
+    if (!r || r.status !== "open") return { ok: false, error: "群聊不可用" };
+    const item = r.items.find((i) => i.id === itemId);
+    if (!item) return { ok: false, error: "消息不存在" };
+    if (item.recalled) return { ok: true };
+    if (r.localRole !== "host") {
+      if (item.authorUserId !== r.localUserId) {
+        return { ok: false, error: "只能撤回自己的消息" };
+      }
+      if (!r.client || r.client.readyState !== WebSocket.OPEN) {
+        return { ok: false, error: "尚未连上主机，请等重连完成后再试" };
+      }
+      this.sendClient(r, "chat.recall", {
+        itemId,
+      } satisfies RoomChatRecallPayload);
+      return { ok: true };
+    }
+    this.applyRecall(r, itemId);
+    return { ok: true };
+  }
+
+  /** 标记撤回：清空正文与引用（不留在存储/快照里），各端渲染占位。 */
+  private applyRecall(r: RoomRecord, itemId: string): void {
+    const item = r.items.find((i) => i.id === itemId);
+    if (!item || item.recalled) return;
+    item.recalled = true;
+    item.text = "";
+    delete item.quote;
+    delete item.game;
+    this.persist(r);
+    this.pushState(r);
+  }
+
   /** Host: devices waiting for approval. */
   pendingDevices(roomId: string): {
     ok: boolean;
@@ -3746,6 +4688,7 @@ export function activate(ctx) {
         name?: string;
         protocol?: number;
         modChecksum?: string;
+        projectPath?: string | null;
       };
       if (p.protocol !== ROOM_PROTOCOL_VERSION) {
         this.reply(ws, r, "error", { message: "协议版本不兼容" });
@@ -3761,8 +4704,15 @@ export function activate(ctx) {
       }
       const userId = p.userId || randomUUID();
       const name = (p.name ?? "guest").trim() || "guest";
-      if (!r.members.some((m) => m.userId === userId)) {
-        r.members.push({ userId, name, role: "member" });
+      const projectPath =
+        typeof p.projectPath === "string" && p.projectPath.trim()
+          ? p.projectPath
+          : null;
+      const existing = r.members.find((m) => m.userId === userId);
+      if (existing) {
+        existing.projectPath = projectPath;
+      } else {
+        r.members.push({ userId, name, role: "member", projectPath });
       }
       if (!r.seats.some((s) => s.kind === "human" && s.occupantUserId === userId)) {
         r.seats.push({
@@ -3795,6 +4745,20 @@ export function activate(ctx) {
     const userId = (ws as GuestWs).userId;
     if (!userId) {
       this.reply(ws, r, "error", { message: "请先加入" });
+      return;
+    }
+
+    if (frame.type === "node.info") {
+      const p = frame.payload as RoomNodeInfoPayload | undefined;
+      const projectPath =
+        typeof p?.projectPath === "string" && p.projectPath.trim()
+          ? p.projectPath
+          : null;
+      const m = r.members.find((mm) => mm.userId === userId);
+      if (m && m.projectPath !== projectPath) {
+        m.projectPath = projectPath;
+        this.pushState(r);
+      }
       return;
     }
 
@@ -3872,11 +4836,27 @@ export function activate(ctx) {
       return;
     }
 
+    if (frame.type === "chat.recall") {
+      const p = frame.payload as RoomChatRecallPayload | undefined;
+      const itemId = typeof p?.itemId === "string" ? p.itemId : "";
+      if (!itemId) return;
+      // 客人只能撤回自己的消息（房主可撤任何人的，走本地 recall()）
+      const item = r.items.find((i) => i.id === itemId);
+      if (!item || item.recalled) return;
+      if (item.authorUserId !== userId) {
+        this.reply(ws, r, "error", { message: "只能撤回自己的消息" });
+        return;
+      }
+      this.applyRecall(r, itemId);
+      return;
+    }
+
     if (frame.type === "seat.takeover") {
       const p = frame.payload as { seatId?: string };
       const seat = r.seats.find((s) => s.id === p.seatId);
       if (!seat || seat.kind !== "agent") return;
       seat.takenOverBy = userId;
+      this.abortRemoteTurnsForSeat(r, seat.id, "席位被接管");
       if (seat.sessionId) {
         try {
           this.sessions.abort(seat.sessionId);
@@ -3901,15 +4881,39 @@ export function activate(ctx) {
         name?: string;
         agentName?: string;
         userId?: string;
+        agentPrompt?: string;
+        skillNames?: string[];
+        model?: string;
+        executorUserId?: string;
       };
       if (!p.userId) return;
       this.addSeatForMember(
         r,
         p.userId,
         p.kind === "agent" ? "agent" : "human",
-        p.name ?? "",
-        p.agentName,
+        typeof p.name === "string" ? p.name : "",
+        typeof p.agentName === "string" ? p.agentName : undefined,
+        {
+          agentPrompt:
+            typeof p.agentPrompt === "string" ? p.agentPrompt : undefined,
+          skillNames: Array.isArray(p.skillNames)
+            ? p.skillNames.filter((s): s is string => typeof s === "string")
+            : undefined,
+          model: typeof p.model === "string" ? p.model : undefined,
+          executorUserId:
+            typeof p.executorUserId === "string" ? p.executorUserId : undefined,
+        },
       );
+      return;
+    }
+
+    if (frame.type === "exec.event") {
+      this.onNodeExecEvent(r, userId, frame.payload as RoomExecEventPayload);
+      return;
+    }
+
+    if (frame.type === "exec.result") {
+      this.onNodeExecResult(r, userId, frame.payload as RoomExecResultPayload);
       return;
     }
 
@@ -4081,6 +5085,12 @@ export function activate(ctx) {
       members: r.members,
       seats: r.seats,
       items: r.items,
+      ...(r.liveExec?.size
+        ? { liveExec: [...r.liveExec.values()] }
+        : {}),
+      ...(r.remoteChanges && Object.keys(r.remoteChanges).length
+        ? { remoteChanges: r.remoteChanges }
+        : {}),
       localUserId: r.localUserId || undefined,
       kernel: r.localRole === "host" ? this.kernelProjection(r) : r.kernelProjection,
     };
@@ -4103,6 +5113,12 @@ export function activate(ctx) {
 
   private pushState(r: RoomRecord) {
     this.persist(r);
+    this.broadcast(r, "state.snapshot", this.snapshot(r));
+    this.emit(r);
+  }
+
+  /** 轻量广播：实时进度这类易失状态的推送不落盘。 */
+  private pushLive(r: RoomRecord) {
     this.broadcast(r, "state.snapshot", this.snapshot(r));
     this.emit(r);
   }
@@ -4163,6 +5179,34 @@ export function activate(ctx) {
       return;
     }
     r.client.send(JSON.stringify(frame));
+  }
+
+  /**
+   * 本机项目路径变化（打开/切换项目）时上报：自己是房主就改自己的成员
+   * 记录并广播快照；是客人就发 node.info 给房主，由房主记入成员列表后
+   * 随快照流回各端。项目切换是低频用户动作，不做去重以外的节流。
+   */
+  reportLocalProject(projectPath: string | null): void {
+    const normalized =
+      typeof projectPath === "string" && projectPath.trim()
+        ? projectPath
+        : null;
+    for (const r of this.rooms.values()) {
+      if (r.status !== "open") continue;
+      if (r.localRole === "host") {
+        const self = r.members.find((m) => m.userId === r.localUserId);
+        if (self && self.projectPath !== normalized) {
+          self.projectPath = normalized;
+          this.pushState(r);
+        }
+      } else {
+        const mirror = r.members.find((m) => m.userId === r.localUserId);
+        if (mirror && mirror.projectPath === normalized) continue;
+        this.sendClient(r, "node.info", {
+          projectPath: normalized,
+        } satisfies RoomNodeInfoPayload);
+      }
+    }
   }
 
   private emit(r: RoomRecord) {
@@ -4519,12 +5563,18 @@ export function activate(ctx) {
   }
 
   private applyGuestSnapshot(r: RoomRecord, snap: RoomSnapshot): void {
+    r.name = snap.name;
     r.members = snap.members;
     r.seats = snap.seats;
     r.items = snap.items;
     r.status = snap.status;
     r.modChecksum = snap.modChecksum;
     r.requireMods = snap.requireMods;
+    // 二期：实时进度与远端改动随快照覆盖
+    r.liveExec = snap.liveExec?.length
+      ? new Map(snap.liveExec.map((e) => [e.turnId, e]))
+      : undefined;
+    r.remoteChanges = snap.remoteChanges;
     if (r.joinInfo) r.joinInfo.modChecksum = snap.modChecksum;
     if (!snap.modChecksum) {
       r.modPublicView = undefined;
@@ -4581,7 +5631,7 @@ export function activate(ctx) {
   private async ingestUserChat(
     r: RoomRecord,
     env: ChatInEnvelope,
-    next: { runAgent: boolean },
+    next: { runAgent: boolean; attachments?: Attachment[] },
   ): Promise<void> {
     let current = env;
     if (r.kernel) {
@@ -4616,7 +5666,7 @@ export function activate(ctx) {
     this.pushState(r);
     if (!next.runAgent) return;
     const seat = r.seats.find((s) => s.id === current.seatId);
-    if (seat) void this.runAgentSeat(r, seat, current.text);
+    if (seat) void this.runAgentSeat(r, seat, current.text, undefined, next.attachments);
   }
 
   private disposeKernel(r: RoomRecord, deleteStore: boolean): void {

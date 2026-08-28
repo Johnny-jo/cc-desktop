@@ -1,12 +1,19 @@
 import { useSyncExternalStore } from "react";
 import type {
+  Attachment,
   ModOfferPayload,
   RoomListItem,
   RoomQuoteRef,
   RoomSnapshot,
 } from "@claude-desktop/shared";
 import { getDesktop, hasDesktopApi } from "../lib/desktop-api";
-import { clearActiveSession } from "./store";
+import {
+  isRoomMuted,
+  roomNotifyBody,
+  roomNotifyDecision,
+} from "../lib/room-notify";
+import { clearActiveSession, clearChangesSessionOverride, detachedWindowRoomId, detachedWindowSessionId } from "./store";
+import { syncRoomSeatSessions } from "./room-changes-bridge";
 
 export type RoomModState = {
   offer?: ModOfferPayload;
@@ -67,6 +74,8 @@ const pendingByRoom = new Map<
   string,
   { devices: RoomPendingDevice[]; fingerprintChanged: boolean }
 >();
+/** 每个房间已见过的最后一条时间线消息 id —— 桌面通知的新消息差分游标。 */
+const lastItemIdByRoom = new Map<string, string>();
 /** Bumped on every pending write so in-flight list fetches cannot clobber live events. */
 let pendingEpoch = 0;
 
@@ -79,6 +88,11 @@ function emit() {
 function set(patch: Partial<RoomUiState>) {
   Object.assign(state, patch);
   emit();
+}
+
+/** 在群聊侧栏显示一条错误（如旧主进程缺新 IPC 时的降级提示）。 */
+export function setRoomError(message: string | null): void {
+  set({ lastError: message });
 }
 
 export function useRoomStore<T>(sel: (s: RoomUiState) => T): T {
@@ -119,6 +133,10 @@ function pickDefaultSeat(room: RoomSnapshot | null | undefined): string | null {
 
 export function selectRoom(roomId: string | null): void {
   if (roomId) clearActiveSession();
+  if (!roomId) {
+    syncRoomSeatSessions(null, []);
+    clearChangesSessionOverride();
+  }
   const pending = roomId ? pendingByRoom.get(roomId) : undefined;
   set({
     activeRoomId: roomId,
@@ -134,6 +152,12 @@ export function selectRoom(roomId: string | null): void {
       .getRoom(roomId)
       .then((r) => {
         const room = r.room;
+        if (room) {
+          syncRoomSeatSessions(
+            room.roomId,
+            room.seats.map((s) => s.sessionId),
+          );
+        }
         set({
           activeRoom: room,
           selectedSeatId: state.selectedSeatId ?? pickDefaultSeat(room),
@@ -188,6 +212,66 @@ export async function refreshRooms(): Promise<void> {
     }
   } catch {
     // ignore
+  }
+}
+
+/**
+ * 桌面通知：对快照做尾部差分，别人发的新消息弹系统通知；
+ * @ 我时正文加 [有人@我] 前缀；免打扰房间只弹 @。
+ * 第一次见到某房间（入房/刷新）只记录游标，不补弹历史消息。
+ */
+function maybeNotifyRoomItems(room: RoomSnapshot): void {
+  // 分窗（会话窗/群聊窗）不弹：主窗口常驻，由它统一通知，避免双弹
+  if (detachedWindowSessionId() || detachedWindowRoomId()) return;
+  const items = room.items;
+  const cursor = lastItemIdByRoom.get(room.roomId);
+  const tail = items[items.length - 1];
+  if (!tail) return;
+  if (!cursor) {
+    lastItemIdByRoom.set(room.roomId, tail.id);
+    return;
+  }
+  if (cursor === tail.id) return;
+  const idx = items.findIndex((i) => i.id === cursor);
+  // 游标被 400 条窗口挤出去了：放弃差分，重置到队尾，避免历史消息刷屏
+  if (idx < 0) {
+    lastItemIdByRoom.set(room.roomId, tail.id);
+    return;
+  }
+  lastItemIdByRoom.set(room.roomId, tail.id);
+  if (typeof Notification === "undefined") return;
+  const fresh = items.slice(idx + 1);
+  if (!fresh.length) return;
+  const mySeatName =
+    room.seats.find(
+      (s) => s.kind === "human" && s.occupantUserId === room.localUserId,
+    )?.name ?? null;
+  const muted = isRoomMuted(room.roomId);
+  const activeFocused = state.activeRoomId === room.roomId && document.hasFocus();
+  for (const it of fresh) {
+    const d = roomNotifyDecision({
+      kind: it.kind,
+      authorUserId: it.authorUserId,
+      text: it.text,
+      recalled: it.recalled,
+      myUserId: room.localUserId,
+      mySeatName,
+      muted,
+      isActiveAndFocused: activeFocused,
+    });
+    if (!d.notify) continue;
+    try {
+      const n = new Notification(`${room.name} · ${it.authorLabel}`, {
+        body: roomNotifyBody(it.text, d.mention),
+        silent: false,
+      });
+      n.onclick = () => {
+        window.focus();
+        selectRoom(room.roomId);
+      };
+    } catch {
+      // 通知不可用（权限/平台）时静默跳过
+    }
   }
 }
 
@@ -251,6 +335,13 @@ export function bindRoomEvents(): () => void {
 
     if (!ev.room) return;
     set({ reconnectNote: null });
+    maybeNotifyRoomItems(ev.room);
+    if (state.activeRoomId === ev.roomId) {
+      syncRoomSeatSessions(
+        ev.roomId,
+        ev.room.seats.map((s) => s.sessionId),
+      );
+    }
     const rooms = state.rooms.filter((r) => r.roomId !== ev.roomId);
     const prev = state.rooms.find((r) => r.roomId === ev.roomId);
     rooms.unshift({
@@ -361,7 +452,12 @@ export async function addSeat(
   kind: "human" | "agent",
   name: string,
   agentName?: string,
-  extra?: { agentPrompt?: string; skillNames?: string[]; model?: string },
+  extra?: {
+    agentPrompt?: string;
+    skillNames?: string[];
+    model?: string;
+    executorUserId?: string;
+  },
 ): Promise<void> {
   const id = state.activeRoomId;
   if (!id || !hasDesktopApi("addRoomSeat")) return;
@@ -377,6 +473,7 @@ export async function updateSeat(
     agentPrompt?: string;
     skillNames?: string[];
     model?: string;
+    executorUserId?: string;
   },
 ): Promise<{ ok: boolean; error?: string }> {
   const id = state.activeRoomId;
@@ -422,14 +519,18 @@ export async function returnSeat(seatId: string): Promise<void> {
 export async function sendToSeat(
   text: string,
   quote?: RoomQuoteRef,
+  /** 显式目标席位（@提及路由）；缺省用当前选中席位。 */
+  targetSeatId?: string,
+  /** 拖拽/选择进来的附件；内容只在本机执行的席位上有意义。 */
+  attachments?: Attachment[],
 ): Promise<{ ok: boolean; error?: string }> {
   const id = state.activeRoomId;
-  const seatId = state.selectedSeatId;
+  const seatId = targetSeatId ?? state.selectedSeatId;
   if (!id || !seatId) return { ok: false, error: "请先选一个席位" };
   if (!hasDesktopApi("sendRoomMessage")) {
     return { ok: false, error: "请完全重启应用后再使用群聊" };
   }
-  const res = await getDesktop().sendRoomMessage(id, seatId, text, quote);
+  const res = await getDesktop().sendRoomMessage(id, seatId, text, quote, attachments);
   if (res.ok) set({ lastError: null });
   return res;
 }
@@ -483,6 +584,28 @@ export async function kickRoomMember(
     return { ok: false, error: "请完全重启应用后再使用群聊" };
   }
   return getDesktop().kickRoomMember(roomId, userId);
+}
+
+/** Host: rename the room; snapshot broadcast refreshes every client. */
+export async function renameRoom(
+  roomId: string,
+  name: string,
+): Promise<{ ok: boolean; error?: string }> {
+  if (!hasDesktopApi("renameRoom")) {
+    return { ok: false, error: "请完全重启应用后再使用群聊" };
+  }
+  return getDesktop().renameRoom(roomId, name);
+}
+
+/** Recall a message: own messages for anyone; the host can recall any. */
+export async function recallRoomMessage(
+  roomId: string,
+  itemId: string,
+): Promise<{ ok: boolean; error?: string }> {
+  if (!hasDesktopApi("recallRoomMessage")) {
+    return { ok: false, error: "请完全重启应用后再使用群聊" };
+  }
+  return getDesktop().recallRoomMessage(roomId, itemId);
 }
 
 /** Host: list devices waiting for approval. */

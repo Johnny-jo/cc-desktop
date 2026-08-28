@@ -8,9 +8,9 @@ import {
   TitlebarToggles,
   ThemeToggle,
   ChangelogToggle,
-  CliModeToggle,
   ResizeHandle,
 } from "./components/LayoutChrome";
+import { SideRail, type RailMode } from "./components/SideRail";
 import { ChangelogModal } from "./components/ChangelogModal";
 import { PermissionModal } from "./components/PermissionModal";
 import { UserPromptModal } from "./components/UserPromptModal";
@@ -26,6 +26,7 @@ import { getDesktop } from "./lib/desktop-api";
 import {
   bindRoomEvents,
   refreshRooms,
+  selectRoom,
   useRoomStore,
 } from "./state/room-store";
 import { usePanelLayout } from "./hooks/usePanelLayout";
@@ -37,6 +38,7 @@ import {
 } from "./lib/theme";
 import {
   bootstrapStore,
+  detachedWindowRoomId,
   detachedWindowSessionId,
   flushAllTranscripts,
   selectSession,
@@ -62,12 +64,17 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [changelogOpen, setChangelogOpen] = useState(false);
   const [fileSearchOpen, setFileSearchOpen] = useState(false);
+  // 左侧 icon 工具栏：chat = 会话侧栏；rooms = 群聊侧栏（项目行 + 群聊列表）
+  const [railMode, setRailMode] = useState<RailMode>("chat");
   const settings = useAppStore((s) => s.settings);
   const needsOnboarding = settings != null && !settings.hasToken;
   const activeSessionId = useAppStore((s) => s.activeSessionId);
   const cliMode = useAppStore((s) => s.cliMode);
   const activeRoomId = useRoomStore((s) => s.activeRoomId);
   const projectPath = useAppStore((s) => s.projectPath);
+  // AI 对话 / 群聊互斥：选中群聊（含通知点击跳转）时主区切群聊，
+  // rail 点「群聊」即使未选群也关 AI 对话页、显示群聊空态。
+  const effectiveMode: RailMode = railMode === "rooms" || activeRoomId ? "rooms" : railMode;
 
   // ---- File tree + multi-tab editor pane ----
   const [fileTreeOpen, setFileTreeOpen] = useState(false);
@@ -235,6 +242,9 @@ export function App() {
   useEffect(() => {
     void bootstrapStore();
     void refreshRooms();
+    // 独立群聊窗口（?detached=1&room=<id>）：进来就选中该群
+    const detachedRoom = detachedWindowRoomId();
+    if (detachedRoom) selectRoom(detachedRoom);
     return bindRoomEvents();
   }, []);
 
@@ -376,6 +386,39 @@ export function App() {
     );
   }
 
+  // Detached room window (double-click / drag-out): room-only shell.
+  if (detachedWindowRoomId()) {
+    return (
+      <div className="app app-detached">
+        <div className="app-titlebar">
+          <div className="titlebar-drag" aria-hidden />
+          <ThemeToggle
+            isLight={effectiveTheme(settings?.theme) === "light"}
+            onToggle={() => void setTheme(nextTheme(settings?.theme))}
+          />
+          <div className="titlebar-caption-space" aria-hidden />
+        </div>
+        <ErrorBanner />
+
+        <div className="workspace" style={workspaceStyle}>
+          <div className="main-row">
+            <main className="panel panel-chat">
+              <RoomStage />
+            </main>
+          </div>
+        </div>
+
+        <PermissionModal />
+        <UserPromptModal />
+        <OnboardingModal open={needsOnboarding} />
+        <SettingsDrawer
+          open={settingsOpen}
+          onClose={() => setSettingsOpen(false)}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="app">
       <div className="app-titlebar">
@@ -388,21 +431,7 @@ export function App() {
           onToggleChanges={toggleChanges}
           onToggleTerminal={toggleTerminal}
         />
-        <ThemeToggle
-          isLight={effectiveTheme(settings?.theme) === "light"}
-          onToggle={() => void setTheme(nextTheme(settings?.theme))}
-        />
         <div className="titlebar-right">
-          <CliModeToggle
-            active={cliMode}
-            onClick={() => {
-              const next = !cliMode;
-              toggleCliMode();
-              if (!next && activeSessionId) {
-                void selectSession(activeSessionId);
-              }
-            }}
-          />
           <ChangelogToggle onClick={() => setChangelogOpen(true)} />
         </div>
         <div className="titlebar-caption-space" aria-hidden />
@@ -419,6 +448,11 @@ export function App() {
         style={workspaceStyle}
       >
         <div className="main-row">
+          <SideRail
+            mode={effectiveMode}
+            onModeChange={setRailMode}
+            onOpenSettings={() => setSettingsOpen(true)}
+          />
           {layout.sidebarOpen ? (
             <>
               <aside
@@ -429,7 +463,7 @@ export function App() {
                 }}
               >
                 <SessionList
-                  onOpenSettings={() => setSettingsOpen(true)}
+                  railMode={effectiveMode === "rooms" ? "rooms" : "chat"}
                   fileTreeOpen={fileTreeOpen}
                   onToggleFileTree={() => setFileTreeOpen((v) => !v)}
                   selectedFile={selectedFile}
@@ -714,7 +748,7 @@ export function App() {
                       : { flex: "1 1 0" }
                   }
                 >
-                  {activeRoomId ? (
+                  {effectiveMode === "rooms" ? (
                     <RoomStage />
                   ) : (
                     <ChatPanel

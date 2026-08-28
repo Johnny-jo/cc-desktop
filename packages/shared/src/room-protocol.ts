@@ -1,5 +1,7 @@
 /** Room protocol v1 — transport-agnostic JSON frames. */
 
+import type { FileChange } from "./models";
+
 export const ROOM_PROTOCOL_VERSION = 1;
 export const ROOM_DEFAULT_PORT = 18765;
 export const MOD_HOST_API = 1;
@@ -44,6 +46,12 @@ export type RoomFrameType =
   | "seat.add"
   | "chat.user"
   | "chat.event"
+  | "chat.recall"
+  | "exec.run"
+  | "exec.event"
+  | "exec.result"
+  | "exec.abort"
+  | "node.info"
   | "game.dice"
   | "game.rps"
   | "state.snapshot"
@@ -116,6 +124,11 @@ export type RoomMember = {
   userId: string;
   name: string;
   role: RoomRole;
+  /**
+   * 成员当前打开的项目路径（随 join 上报、node.info 更新）。
+   * null/缺省 = 未开项目，远程执行席位选择时据此提示。
+   */
+  projectPath?: string | null;
 };
 
 export type RoomSeat = {
@@ -137,6 +150,53 @@ export type RoomSeat = {
   skillNames?: string[];
   /** Optional model override; omit = host default. */
   model?: string;
+  /**
+   * 远程执行（docs/room-remote-exec-design.md）：这个 Agent 席位在哪台机器上
+   * 运行——成员 userId。缺省 / null = 房主本机（现状行为）。
+   */
+  executorUserId?: string | null;
+};
+
+/** exec.run：房主 → 执行节点，请求跑一轮（turnId 全链路幂等键）。 */
+export type RoomExecRunPayload = {
+  turnId: string;
+  seatId: string;
+  text: string;
+};
+
+/** exec.event：节点 → 房主，ack / 15s 心跳 / 阶段提示 / 流式进度（二期）。 */
+export type RoomExecEventPayload = {
+  turnId: string;
+  seatId?: string;
+  phase: "accepted" | "running" | "note";
+  /** phase "note"：截至目前的回复全文（尾部截断），覆盖式更新。 */
+  text?: string;
+  /** phase "note"：最近在用的工具一行摘要（如 "Edit src/a.ts"）。 */
+  tool?: string;
+};
+
+/** exec.result：节点 → 房主，终态回报（ok:false 也走这里，含被中止）。 */
+export type RoomExecResultPayload = {
+  turnId: string;
+  seatId?: string;
+  ok: boolean;
+  text?: string;
+  error?: string;
+  /** 本轮改动文件（相对/绝对路径摘要，一期仅文本列举）。 */
+  changes?: string[];
+  /** 二期：结构化改动（截断后），各端变更栏只读查看。 */
+  changesDetail?: FileChange[];
+};
+
+/** exec.abort：房主 → 节点，中止一轮（接管/超时/对账失败）。 */
+export type RoomExecAbortPayload = {
+  turnId: string;
+  reason?: string;
+};
+
+/** node.info：客人 → 房主，上报本机当前项目路径变化（null = 未开项目）。 */
+export type RoomNodeInfoPayload = {
+  projectPath: string | null;
 };
 
 /** QQ-style quoted message reference (id + excerpt snapshot) */
@@ -159,6 +219,13 @@ export type RoomTimelineItem = {
   /** Host kernel railway / system note. Guests render as a badge only. */
   source?: "kernel";
   quote?: RoomQuoteRef;
+  /** 撤回标记：true 时 text 已清空，各端渲染为“已撤回”占位。 */
+  recalled?: boolean;
+};
+
+/** chat.recall：客人 → 房主，请求撤回自己的一条消息。 */
+export type RoomChatRecallPayload = {
+  itemId: string;
 };
 
 export type RoomSnapshot = {
@@ -176,6 +243,19 @@ export type RoomSnapshot = {
   members: RoomMember[];
   seats: RoomSeat[];
   items: RoomTimelineItem[];
+  /**
+   * 二期：远端执行中的实时进度（turnId → 截至目前的回复尾部/工具行），
+   * 只活在快照里，不入时间线、不持久化。
+   */
+  liveExec?: Array<{
+    turnId: string;
+    seatId: string;
+    text: string;
+    tool?: string;
+    at: number;
+  }>;
+  /** 二期：远端席位最近一轮的结构化改动（截断），各端只读查看。 */
+  remoteChanges?: Record<string, FileChange[]>;
   /** Whether room frames are AEAD-encrypted after the HMAC handshake. */
   encrypt: boolean;
   /** Host device fingerprint (64-hex); guests learn it from the handshake. */

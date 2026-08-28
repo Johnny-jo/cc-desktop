@@ -5,15 +5,14 @@ import { getDesktop } from "../lib/desktop-api";
 import {
   deleteSession,
   newChat,
+  openProject,
   renameSession,
   selectSession,
-  startCpa,
   toggleSessionPinned,
   useAppStore,
 } from "../state/store";
 import { selectRoom } from "../state/room-store";
 import { useI18n } from "../i18n/useI18n";
-import { StatusDot } from "./StatusDot";
 import { FileTree } from "./FileTree";
 import { RoomSidebar } from "./RoomSidebar";
 
@@ -372,7 +371,8 @@ function SessionItem({
 }
 
 export type SessionListProps = {
-  onOpenSettings: () => void;
+  /** 左侧 icon 工具栏模式：chat = 会话列表；rooms = 项目行 + 群聊列表 */
+  railMode: "chat" | "rooms";
   /** File tree (pull-up) panel state and callbacks */
   fileTreeOpen: boolean;
   onToggleFileTree: () => void;
@@ -384,7 +384,7 @@ export type SessionListProps = {
 };
 
 export function SessionList({
-  onOpenSettings,
+  railMode,
   fileTreeOpen,
   onToggleFileTree,
   selectedFile,
@@ -396,10 +396,13 @@ export function SessionList({
   const { t } = useI18n();
   const sessions = useAppStore((s) => s.sessions);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
-  const cpaStatus = useAppStore((s) => s.cpaStatus);
+  const projectPath = useAppStore((s) => s.projectPath);
   const [sessionLimit, setSessionLimit] = useState(SESSION_PAGE);
   const visibleSessions = sessions.slice(0, sessionLimit);
   const hiddenSessions = Math.max(0, sessions.length - sessionLimit);
+  const projectName = projectPath
+    ? (projectPath.replace(/[\\/]+$/, "").split(/[/\\]/).pop() ?? projectPath)
+    : null;
 
   return (
     <div className="session-list">
@@ -420,124 +423,134 @@ export function SessionList({
         <span className="brand-sub">Desktop</span>
       </div>
 
-      <button
-        type="button"
-        className="sidebar-new"
-        onClick={() => {
-          selectRoom(null);
-          newChat();
-        }}
-      >
-        <span className="sidebar-new-icon">+</span>
-        {t.sidebar.newChat}
-      </button>
-
-      <RoomSidebar />
-
-      <div className="sidebar-section-label">{t.sidebar.recent}</div>
-
-      <ul className="session-list-ul">
-        {sessions.length === 0 ? (
-          <li className="session-empty">{t.sidebar.noSessions}</li>
-        ) : (
-          <>
-          {visibleSessions.map((s) => (
-            <SessionItem key={s.id} s={s} active={s.id === activeSessionId} />
-          ))}
-          {hiddenSessions > 0 ? (
-            <li>
-              <button
-                type="button"
-                className="session-more"
-                onClick={() => setSessionLimit((n) => n + SESSION_PAGE)}
-              >
-                {t.sidebar.showMore}（还有 {hiddenSessions}）
-              </button>
-            </li>
-          ) : null}
-          </>
-        )}
-      </ul>
-
-      {/* 文件栏抽屉：收起时贴在底部（footer 上方）；展开时整栏顶到群聊下方，
-          文件树覆盖会话列表区域；再点收起回到原位 */}
-      <div className={`sidebar-files${fileTreeOpen ? " open" : ""}`}>
-        <div className="sidebar-files-head">
+      {railMode === "rooms" ? (
+        <>
+          {/* 项目行：显示当前选中的项目，点击可换 */}
           <button
             type="button"
-            className="sidebar-files-toggle"
-            onClick={onToggleFileTree}
-            aria-expanded={fileTreeOpen}
-            title={fileTreeOpen ? "收起文件结构" : "展开文件结构"}
+            className="sidebar-project"
+            title={projectPath ?? "选择项目文件夹"}
+            onClick={() => void openProject()}
           >
-            <span
-              className={`sidebar-files-chevron${fileTreeOpen ? " open" : ""}`}
+            <svg
+              className="sidebar-project-icon"
+              width="14"
+              height="14"
+              viewBox="0 0 16 16"
+              fill="none"
               aria-hidden
             >
-              <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-                <path
-                  d="M4 10l4-4 4 4"
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </svg>
+              <path
+                d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 2h4.5A1.5 1.5 0 0 1 14 6.5v5A1.5 1.5 0 0 1 12.5 13h-9A1.5 1.5 0 0 1 2 11.5v-7Z"
+                stroke="currentColor"
+                strokeWidth="1.3"
+                strokeLinejoin="round"
+              />
+            </svg>
+            <span className="sidebar-project-label">项目</span>
+            <span className="sidebar-project-name">
+              {projectName ?? "未选择"}
             </span>
-            <span className="sidebar-files-label">文件</span>
           </button>
-          {fileTreeOpen && selectedFile && !editorOpen ? (
-            <button
-              type="button"
-              className="pane-side-btn"
-              title="在编辑栏打开"
-              onClick={onToggleEditor}
-            >
-              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
-                <path
-                  d="M6 3l5 5-5 5"
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </svg>
-            </button>
-          ) : null}
-        </div>
-        {fileTreeOpen ? (
-          <div className="sidebar-files-body">
-            <FileTree
-              selected={selectedFile}
-              onSelectFile={onSelectFile}
-              onOpenFile={onOpenFile}
-            />
-          </div>
-        ) : null}
-      </div>
+          <RoomSidebar />
+        </>
+      ) : (
+        <>
+          <button
+            type="button"
+            className="sidebar-new"
+            onClick={() => {
+              selectRoom(null);
+              newChat();
+            }}
+          >
+            <span className="sidebar-new-icon">+</span>
+            {t.sidebar.newChat}
+          </button>
 
-      <div className="sidebar-footer">
-        <button
-          type="button"
-          className="sidebar-footer-row"
-          onClick={() => void startCpa()}
-          title={
-            cpaStatus.state === "error"
-              ? `CPA error: ${cpaStatus.message}`
-              : "Start / ensure CPA"
-          }
-        >
-          <StatusDot status={cpaStatus} compact />
-        </button>
-        <button
-          type="button"
-          className="sidebar-footer-row"
-          onClick={onOpenSettings}
-        >
-          <span className="sidebar-footer-icon">⚙</span>
-          <span className="sidebar-footer-text">{t.settings.title}</span>
-        </button>
-      </div>
+          <div className="sidebar-section-label">{t.sidebar.recent}</div>
+
+          <ul className="session-list-ul">
+            {sessions.length === 0 ? (
+              <li className="session-empty">{t.sidebar.noSessions}</li>
+            ) : (
+              <>
+              {visibleSessions.map((s) => (
+                <SessionItem key={s.id} s={s} active={s.id === activeSessionId} />
+              ))}
+              {hiddenSessions > 0 ? (
+                <li>
+                  <button
+                    type="button"
+                    className="session-more"
+                    onClick={() => setSessionLimit((n) => n + SESSION_PAGE)}
+                  >
+                    {t.sidebar.showMore}（还有 {hiddenSessions}）
+                  </button>
+                </li>
+              ) : null}
+              </>
+            )}
+          </ul>
+
+          {/* 文件栏抽屉：收起时贴在底部（footer 上方）；展开时整栏顶到群聊下方，
+              文件树覆盖会话列表区域；再点收起回到原位 */}
+          <div className={`sidebar-files${fileTreeOpen ? " open" : ""}`}>
+            <div className="sidebar-files-head">
+              <button
+                type="button"
+                className="sidebar-files-toggle"
+                onClick={onToggleFileTree}
+                aria-expanded={fileTreeOpen}
+                title={fileTreeOpen ? "收起文件结构" : "展开文件结构"}
+              >
+                <span
+                  className={`sidebar-files-chevron${fileTreeOpen ? " open" : ""}`}
+                  aria-hidden
+                >
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                    <path
+                      d="M4 10l4-4 4 4"
+                      stroke="currentColor"
+                      strokeWidth="1.8"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </span>
+                <span className="sidebar-files-label">文件</span>
+              </button>
+              {fileTreeOpen && selectedFile && !editorOpen ? (
+                <button
+                  type="button"
+                  className="pane-side-btn"
+                  title="在编辑栏打开"
+                  onClick={onToggleEditor}
+                >
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
+                    <path
+                      d="M6 3l5 5-5 5"
+                      stroke="currentColor"
+                      strokeWidth="1.8"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </button>
+              ) : null}
+            </div>
+            {fileTreeOpen ? (
+              <div className="sidebar-files-body">
+                <FileTree
+                  selected={selectedFile}
+                  onSelectFile={onSelectFile}
+                  onOpenFile={onOpenFile}
+                />
+              </div>
+            ) : null}
+          </div>
+        </>
+      )}
     </div>
   );
 }

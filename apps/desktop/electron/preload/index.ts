@@ -61,6 +61,13 @@ const desktop = {
       error?: string;
     }>,
 
+  /** Double-click / drag-out: open this room in its own window. */
+  openRoomWindow: (roomId: string) =>
+    ipcRenderer.invoke(IPC.windowOpenRoom, { roomId }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+
   selectSession: (sessionId: string, limit?: number) =>
     ipcRenderer.invoke(IPC.sessionSelect, { sessionId, limit }) as Promise<{
       sessionId: string;
@@ -445,7 +452,12 @@ const desktop = {
     kind: import("@claude-desktop/shared").RoomSeatKind,
     name: string,
     agentName?: string,
-    extra?: { agentPrompt?: string; skillNames?: string[]; model?: string },
+    extra?: {
+      agentPrompt?: string;
+      skillNames?: string[];
+      model?: string;
+      executorUserId?: string;
+    },
   ) =>
     ipcRenderer.invoke(IPC.roomAddSeat, {
       roomId,
@@ -467,6 +479,7 @@ const desktop = {
       agentPrompt?: string;
       skillNames?: string[];
       model?: string;
+      executorUserId?: string;
     },
   ) =>
     ipcRenderer.invoke(IPC.roomUpdateSeat, {
@@ -493,8 +506,9 @@ const desktop = {
     seatId: string,
     text: string,
     quote?: import("@claude-desktop/shared").RoomQuoteRef,
+    attachments?: import("@claude-desktop/shared").Attachment[],
   ) =>
-    ipcRenderer.invoke(IPC.roomSend, { roomId, seatId, text, quote }) as Promise<{
+    ipcRenderer.invoke(IPC.roomSend, { roomId, seatId, text, quote, attachments }) as Promise<{
       ok: boolean;
       error?: string;
     }>,
@@ -516,6 +530,17 @@ const desktop = {
     }>,
   kickRoomMember: (roomId: string, userId: string) =>
     ipcRenderer.invoke(IPC.roomKick, { roomId, userId }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+  renameRoom: (roomId: string, name: string) =>
+    ipcRenderer.invoke(IPC.roomRename, { roomId, name }) as Promise<{
+      ok: boolean;
+      room?: import("@claude-desktop/shared").RoomSnapshot;
+      error?: string;
+    }>,
+  recallRoomMessage: (roomId: string, itemId: string) =>
+    ipcRenderer.invoke(IPC.roomRecall, { roomId, itemId }) as Promise<{
       ok: boolean;
       error?: string;
     }>,
