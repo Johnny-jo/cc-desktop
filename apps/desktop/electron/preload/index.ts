@@ -584,6 +584,11 @@ const desktop = {
       ok: boolean;
       error?: string;
     }>,
+  stopRoomSeat: (roomId: string, seatId: string) =>
+    ipcRenderer.invoke(IPC.roomSeatStop, { roomId, seatId }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
   listRoomPending: (roomId: string) =>
     ipcRenderer.invoke(IPC.roomPending, { roomId }) as Promise<{
       ok: boolean;

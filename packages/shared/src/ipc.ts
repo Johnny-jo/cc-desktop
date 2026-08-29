@@ -189,6 +189,8 @@ export const IPC = {
   roomRename: "room:rename",
   /** Recall a timeline message (own messages; host can recall any) */
   roomRecall: "room:recall",
+  /** @agent /stop：停止席位正在跑的输出（本机/远程席位都走这里）。 */
+  roomSeatStop: "room:seat-stop",
   /** Host: list devices waiting for approval */
   roomPending: "room:pending",
   /** Debug: current process room transport counters (task 12) */
@@ -863,6 +865,10 @@ export type IpcInvokeMap = {
   };
   [IPC.roomRecall]: {
     args: [{ roomId: string; itemId: string }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.roomSeatStop]: {
+    args: [{ roomId: string; seatId: string }];
     result: { ok: boolean; error?: string };
   };
   [IPC.roomPending]: {

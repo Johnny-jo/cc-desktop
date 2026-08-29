@@ -48,6 +48,11 @@ import {
   watchClaudeCodeModel,
   writeClaudeCodeModel,
 } from "./claude-settings-sync";
+import {
+  acceptsRoom,
+  acceptsSession,
+  type RendererScope,
+} from "./renderer-routing";
 
 /** Match the renderer charcoal theme (`--bg-app`). */
 const APP_BG = "#141414";
@@ -65,6 +70,8 @@ let isQuitting = false;
  * removed while its page reloads / closes — blocks webContents.send storms.
  */
 const readyRenderers = new Set<number>();
+const rendererScopes = new Map<number, RendererScope>();
+let terminalHost: TerminalHost | null = null;
 
 /** Sync frameless window chrome (titleBarOverlay) with the UI theme. */
 function applyWindowTheme(theme: "dark" | "light"): void {
@@ -126,11 +133,17 @@ function createTray(): void {
  * before WebFrameMain could be accessed" and floods the console while
  * SessionManager is still streaming.
  */
-function sendToRenderer(channel: string, payload: unknown): void {
+function sendToMatchingRenderers(
+  channel: string,
+  payload: unknown,
+  accepts: (scope: RendererScope, webContentsId: number) => boolean,
+): void {
   for (const win of BrowserWindow.getAllWindows()) {
     if (win.isDestroyed()) continue;
     const wc = win.webContents;
     if (!wc || wc.isDestroyed() || !readyRenderers.has(wc.id)) continue;
+    const scope = rendererScopes.get(wc.id);
+    if (!scope || !accepts(scope, wc.id)) continue;
     try {
       if (typeof wc.getOSProcessId === "function" && wc.getOSProcessId() <= 0) {
         continue;
@@ -144,6 +157,47 @@ function sendToRenderer(channel: string, payload: unknown): void {
       readyRenderers.delete(wc.id);
     }
   }
+}
+
+function sendToRenderer(channel: string, payload: unknown): void {
+  sendToMatchingRenderers(channel, payload, () => true);
+}
+
+function sendToSessionRenderers(
+  sessionId: string,
+  channel: string,
+  payload: unknown,
+  relatedRoomId?: string,
+): void {
+  sendToMatchingRenderers(channel, payload, (scope) =>
+    acceptsSession(scope, sessionId, relatedRoomId),
+  );
+}
+
+function sendToRoomRenderers(
+  roomId: string,
+  channel: string,
+  payload: unknown,
+): void {
+  sendToMatchingRenderers(channel, payload, (scope) =>
+    acceptsRoom(scope, roomId),
+  );
+}
+
+function sendToRendererOwner(
+  ownerWebContentsId: number | undefined,
+  channel: string,
+  payload: unknown,
+): void {
+  if (ownerWebContentsId == null) {
+    sendToRenderer(channel, payload);
+    return;
+  }
+  sendToMatchingRenderers(
+    channel,
+    payload,
+    (_scope, webContentsId) => webContentsId === ownerWebContentsId,
+  );
 }
 
 /**
@@ -186,7 +240,11 @@ function wireRendererGate(win: BrowserWindow): void {
   win.webContents.on("did-finish-load", () => readyRenderers.add(id));
   win.webContents.on("dom-ready", () => readyRenderers.add(id));
   win.webContents.on("render-process-gone", () => readyRenderers.delete(id));
-  win.webContents.on("destroyed", () => readyRenderers.delete(id));
+  win.webContents.on("destroyed", () => {
+    readyRenderers.delete(id);
+    rendererScopes.delete(id);
+    terminalHost?.killOwnedBy(id);
+  });
 }
 
 function loadRenderer(
@@ -210,7 +268,11 @@ function loadRenderer(
 /** Loose PNG for the window / taskbar icon in dev; packaged builds bake it into the exe. */
 const WINDOW_ICON = path.join(__dirname, "../../build/icon.png");
 
-function buildWindow(width: number, height: number): BrowserWindow {
+function buildWindow(
+  width: number,
+  height: number,
+  scope: RendererScope,
+): BrowserWindow {
   const win = new BrowserWindow({
     width,
     height,
@@ -231,6 +293,7 @@ function buildWindow(width: number, height: number): BrowserWindow {
       nodeIntegration: false,
     },
   });
+  rendererScopes.set(win.webContents.id, scope);
   wireRendererGate(win);
   return win;
 }
@@ -239,7 +302,7 @@ function createWindow() {
   // Dark chrome to match the in-app charcoal UI (title bar / window frame).
   nativeTheme.themeSource = "dark";
 
-  mainWindow = buildWindow(1280, 800);
+  mainWindow = buildWindow(1280, 800, { kind: "main" });
 
   // Fully remove the default application menu (File / Edit / View / …).
   Menu.setApplicationMenu(null);
@@ -280,13 +343,13 @@ function createWindow() {
 
 /** Browser-style drag-out: a chat-only window bound to one session. */
 function createSessionWindow(sessionId: string) {
-  const win = buildWindow(960, 720);
+  const win = buildWindow(960, 720, { kind: "session", sessionId });
   loadRenderer(win, { detached: "1", session: sessionId });
 }
 
 /** Double-click / drag-out: a room-only window bound to one room. */
 function createRoomWindow(roomId: string) {
-  const win = buildWindow(960, 720);
+  const win = buildWindow(960, 720, { kind: "room", roomId });
   loadRenderer(win, { detached: "1", room: roomId });
 }
 
@@ -384,13 +447,23 @@ function bootstrap() {
       }
     },
     requestFromUi: (req: PermissionRequest) => {
-      sendToRenderer(IPC.permissionRequest, req);
+      sendToSessionRenderers(
+        req.sessionId,
+        IPC.permissionRequest,
+        req,
+        rooms?.roomIdForSession(req.sessionId),
+      );
     },
   });
 
   const userPrompts = new UserPromptBroker({
     requestFromUi: (req: UserPromptRequest) => {
-      sendToRenderer(IPC.userPromptRequest, req);
+      sendToSessionRenderers(
+        req.sessionId,
+        IPC.userPromptRequest,
+        req,
+        rooms?.roomIdForSession(req.sessionId),
+      );
     },
   });
 
@@ -418,18 +491,26 @@ function bootstrap() {
       () => settings.getToken(),
     ),
     emit: (event: SdkNormalizedEvent) => {
-      sendToRenderer(IPC.sessionEvent, event);
+      sendToSessionRenderers(event.sessionId, IPC.sessionEvent, event);
       // 远程执行节点：命中本机在跑的席位会话时节流转发进度给房主
       rooms?.onSessionEvent(event);
     },
     emitSession: (summary: SessionSummary) => {
-      sendToRenderer(IPC.sessionUpdated, summary);
+      sendToSessionRenderers(summary.id, IPC.sessionUpdated, summary);
     },
     emitDiff: (sessionId: string, changes: FileChange[]) => {
-      sendToRenderer(IPC.diffUpdated, { sessionId, changes });
+      sendToSessionRenderers(
+        sessionId,
+        IPC.diffUpdated,
+        { sessionId, changes },
+        rooms?.roomIdForSession(sessionId),
+      );
     },
     emitSlashCommands: (sessionId: string, commands: SlashCommandItem[]) => {
-      sendToRenderer(IPC.sessionSlashCommandsEvent, { sessionId, commands });
+      sendToSessionRenderers(sessionId, IPC.sessionSlashCommandsEvent, {
+        sessionId,
+        commands,
+      });
     },
     onNotification: (n) => {
       // Desktop notification only when the window isn't focused — when the
@@ -452,9 +533,16 @@ function bootstrap() {
   });
 
   const terminal = new TerminalHost(
-    (e) => sendToRenderer(IPC.terminalData, e),
-    (e) => sendToRenderer(IPC.terminalExit, e),
+    (event) => {
+      const { ownerWebContentsId, ...payload } = event;
+      sendToRendererOwner(ownerWebContentsId, IPC.terminalData, payload);
+    },
+    (event) => {
+      const { ownerWebContentsId, ...payload } = event;
+      sendToRendererOwner(ownerWebContentsId, IPC.terminalExit, payload);
+    },
   );
+  terminalHost = terminal;
 
   const autoUpdater = new AppAutoUpdater({
     getWindow: getMainWindow,
@@ -467,7 +555,21 @@ function bootstrap() {
   const roomArchive = new RoomArchive(userDataDir);
   const rooms = new RoomService({
     getWindow: getMainWindow,
-    sendToAllWindows: sendToRenderer,
+    sendToAllWindows: (channel, payload) => {
+      const roomId =
+        payload && typeof payload === "object"
+          ? (payload as { roomId?: unknown }).roomId
+          : undefined;
+      if (
+        (channel === IPC.roomEvent || channel === IPC.roomPermAsk) &&
+        typeof roomId === "string" &&
+        roomId
+      ) {
+        sendToRoomRenderers(roomId, channel, payload);
+        return;
+      }
+      sendToRenderer(channel, payload);
+    },
     sessions,
     settings,
     archive: roomArchive,
@@ -550,14 +652,8 @@ function bootstrap() {
     cpa.stopIfManaged();
     rooms.disposeAll();
     terminal.killAll();
-    // Close streaming sessions so consumers finish cleanly.
-    for (const s of sessions.list()) {
-      try {
-        sessions.closeSession(s.id);
-      } catch {
-        // ignore
-      }
-    }
+    // Flush delayed archives and close visible + hidden SDK sessions.
+    sessions.disposeAll();
   });
 }
 

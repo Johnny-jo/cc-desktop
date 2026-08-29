@@ -59,6 +59,7 @@ export type RoomFrameType =
   | "chat.user"
   | "chat.event"
   | "chat.recall"
+  | "seat.stop"
   | "exec.run"
   | "exec.event"
   | "exec.result"
@@ -189,6 +190,11 @@ export type RoomSeat = {
    * 在谁当前打开的项目里跑 Agent 循环。缺省 = executorUserId / 房主。
    */
   workspaceUserId?: string | null;
+  /**
+   * 席位会话的上下文占用，执行机每轮结束后更新（本机席位由房主直写，
+   * 远程席位随 exec.result 回传）。压缩后执行机回传 null，徽标清零。
+   */
+  contextUsage?: { ratio: number; usedTokens: number; limitTokens: number } | null;
 };
 
 /** exec.run：房主 → 执行节点，请求跑一轮（turnId 全链路幂等键）。 */
@@ -200,6 +206,11 @@ export type RoomExecRunPayload = {
   requesterUserId?: string | null;
 };
 
+/** seat.stop：成员 → 房主，请求停止某个 Agent 席位正在跑的输出。 */
+export type RoomSeatStopPayload = {
+  seatId: string;
+};
+
 /** exec.event：节点 → 房主，ack / 15s 心跳 / 阶段提示 / 流式进度（二期）。 */
 export type RoomExecEventPayload = {
   turnId: string;
@@ -207,6 +218,8 @@ export type RoomExecEventPayload = {
   phase: "accepted" | "running" | "note";
   /** phase "note"：截至目前的回复全文（尾部截断），覆盖式更新。 */
   text?: string;
+  /** phase "note"：截至目前的思考内容（覆盖式更新）。 */
+  thinking?: string;
   /** phase "note"：最近在用的工具一行摘要（如 "Edit src/a.ts"）。 */
   tool?: string;
 };
@@ -222,6 +235,13 @@ export type RoomExecResultPayload = {
   changes?: string[];
   /** 二期：结构化改动（截断后），各端变更栏只读查看。 */
   changesDetail?: FileChange[];
+  /**
+   * 执行节点每轮回报席位会话的上下文占用；null = 刚压缩过（房主清零徽标），
+   * 缺省 = 老版本节点，房主保持原值。
+   */
+  contextUsage?: { ratio: number; usedTokens: number; limitTokens: number } | null;
+  /** 本轮后执行机做了自动压缩（房主在时间线记一笔）。 */
+  compacted?: boolean;
 };
 
 /** exec.abort：房主 → 节点，中止一轮（接管/超时/对账失败）。 */
@@ -359,6 +379,8 @@ export type RoomSnapshot = {
     seatId: string;
     text: string;
     tool?: string;
+    /** 截至目前的思考内容（流式；思考完成后前端折叠展示）。 */
+    thinking?: string;
     at: number;
   }>;
   /** 二期：远端席位最近一轮的结构化改动（截断），各端只读查看。 */

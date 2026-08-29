@@ -7,11 +7,15 @@ export type TerminalOutputEvent = {
   id: string;
   stream: "stdout" | "stderr" | "system";
   data: string;
+  /** Main-process routing metadata; stripped before sending to the renderer. */
+  ownerWebContentsId?: number;
 };
 
 export type TerminalExitEvent = {
   id: string;
   code: number | null;
+  /** Main-process routing metadata; stripped before sending to the renderer. */
+  ownerWebContentsId?: number;
 };
 
 /**
@@ -25,6 +29,7 @@ export class TerminalHost {
       pty: pty.IPty;
       cwd: string;
       shellName: string;
+      ownerWebContentsId?: number;
     }
   >();
 
@@ -40,6 +45,7 @@ export class TerminalHost {
       args?: string[];
       env?: Record<string, string>;
       label?: string;
+      ownerWebContentsId?: number;
     },
   ): { id: string; cwd: string; shell: string } {
     const dir =
@@ -69,17 +75,33 @@ export class TerminalHost {
     });
 
     term.onData((data) => {
-      this.emitOutput({ id, stream: "stdout", data });
+      this.emitOutput({
+        id,
+        stream: "stdout",
+        data,
+        ...(opts?.ownerWebContentsId != null
+          ? { ownerWebContentsId: opts.ownerWebContentsId }
+          : {}),
+      });
     });
     term.onExit(({ exitCode }) => {
       this.sessions.delete(id);
-      this.emitExit({ id, code: exitCode });
+      this.emitExit({
+        id,
+        code: exitCode,
+        ...(opts?.ownerWebContentsId != null
+          ? { ownerWebContentsId: opts.ownerWebContentsId }
+          : {}),
+      });
     });
 
     this.sessions.set(id, {
       pty: term,
       cwd: dir,
       shellName: opts?.label || path.basename(shellPath),
+      ...(opts?.ownerWebContentsId != null
+        ? { ownerWebContentsId: opts.ownerWebContentsId }
+        : {}),
     });
 
     return { id, cwd: dir, shell: path.basename(shellPath) };
@@ -128,6 +150,13 @@ export class TerminalHost {
   killAll(): void {
     for (const id of [...this.sessions.keys()]) {
       this.kill(id);
+    }
+  }
+
+  /** Renderer windows own their PTYs; closing one must not leak shell children. */
+  killOwnedBy(ownerWebContentsId: number): void {
+    for (const [id, session] of this.sessions) {
+      if (session.ownerWebContentsId === ownerWebContentsId) this.kill(id);
     }
   }
 

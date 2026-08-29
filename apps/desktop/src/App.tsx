@@ -24,6 +24,7 @@ import { FileSearchModal } from "./components/FileSearchModal";
 import { RoomStage } from "./components/RoomStage";
 import { CliModePage } from "./components/CliModePage";
 import { getDesktop } from "./lib/desktop-api";
+import { dropEditorBuffer } from "./lib/editor-buffer-cache";
 import {
   bindRoomEvents,
   refreshRooms,
@@ -56,6 +57,8 @@ const EDITOR_SOFT_MIN = 0.22;
 const EDITOR_DEFAULT_RATIO = 0.5;
 /** Collapse-to-min when switching session while full-covered. */
 const EDITOR_MIN_RATIO = 0.35;
+/** Keep the active editor plus two warm neighbors; snapshots preserve the rest. */
+const MAX_MOUNTED_EDITOR_VIEWS = 3;
 
 function fileName(rel: string): string {
   return rel.split(/[/\\]/).pop() ?? rel;
@@ -82,6 +85,7 @@ export function App() {
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [editorTabs, setEditorTabs] = useState<string[]>([]);
   const [activeEditor, setActiveEditor] = useState<string | null>(null);
+  const [editorViewLru, setEditorViewLru] = useState<string[]>([]);
   /** Editor pane width as fraction of (chat+editor) area */
   const [editorRatio, setEditorRatio] = useState(EDITOR_DEFAULT_RATIO);
   const [editorFull, setEditorFull] = useState(false);
@@ -101,6 +105,52 @@ export function App() {
   const dragTabRef = useRef<string | null>(null);
 
   const editorOpen = editorTabs.length > 0 && activeEditor != null;
+  const mountedEditorOrder = activeEditor
+    ? [
+        activeEditor,
+        ...editorViewLru.filter(
+          (tab) => tab !== activeEditor && editorTabs.includes(tab),
+        ),
+      ].slice(0, MAX_MOUNTED_EDITOR_VIEWS)
+    : [];
+  const mountedEditorSet = new Set(mountedEditorOrder);
+
+  useEffect(() => {
+    setEditorViewLru((previous) => {
+      const next = activeEditor
+        ? [
+            activeEditor,
+            ...previous.filter(
+              (tab) => tab !== activeEditor && editorTabs.includes(tab),
+            ),
+          ].slice(0, MAX_MOUNTED_EDITOR_VIEWS)
+        : [];
+      return next.length === previous.length &&
+        next.every((tab, index) => tab === previous[index])
+        ? previous
+        : next;
+    });
+  }, [activeEditor, editorTabs]);
+
+  // A tab evicted only by the view LRU keeps its snapshot. A tab explicitly
+  // closed by the user must not resurrect an old unsaved buffer when reopened.
+  const previousEditorsRef = useRef<{
+    projectPath: string | null;
+    tabs: string[];
+  }>({ projectPath, tabs: [] });
+  useEffect(() => {
+    const previous = previousEditorsRef.current;
+    const closed =
+      previous.projectPath !== projectPath
+        ? previous.tabs
+        : previous.tabs.filter((tab) => !editorTabs.includes(tab));
+    if (previous.projectPath) {
+      for (const tab of closed) {
+        dropEditorBuffer(previous.projectPath, tab);
+      }
+    }
+    previousEditorsRef.current = { projectPath, tabs: editorTabs };
+  }, [editorTabs, projectPath]);
 
   // Horizontal wheel → scroll tabs (trackpad / mouse wheel)
   useEffect(() => {
@@ -625,14 +675,16 @@ export function App() {
                       ) : null}
                     </div>
 
-                    {editorTabs.map((tab) => (
-                      <FileEditor
-                        key={tab}
-                        rel={tab}
-                        hidden={tab !== activeEditor}
-                        onClose={() => closeEditorTab(tab)}
-                      />
-                    ))}
+                    {editorTabs
+                      .filter((tab) => mountedEditorSet.has(tab))
+                      .map((tab) => (
+                        <FileEditor
+                          key={tab}
+                          rel={tab}
+                          hidden={tab !== activeEditor}
+                          onClose={() => closeEditorTab(tab)}
+                        />
+                      ))}
                   </div>
 
                   {!editorFull && settingsOpen === false ? (

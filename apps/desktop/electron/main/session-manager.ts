@@ -199,6 +199,10 @@ type SessionEntry = {
   slashCommands: SlashCommandItem[];
   /** True while waiting for a result after push */
   turnActive: boolean;
+  /** Last time this SDK query was opened or reused. */
+  lastQueryUsedAt: number;
+  /** Parks an idle SDK query so old sessions do not retain Claude children. */
+  idleCloseTimer?: ReturnType<typeof setTimeout>;
   /**
    * Bumped whenever the live stream is replaced or aborted. consumeQuery
    * captures the value at start and ignores late events from a dead stream.
@@ -221,6 +225,8 @@ type SessionEntry = {
   /** In-memory transcript authority (hydrated from disk on demand). */
   items: ChatItem[];
   itemsHydrated: boolean;
+  /** LRU timestamp for full transcript hydration (page reads do not hydrate). */
+  lastTranscriptAccessAt: number;
   nextId: (prefix: string) => string;
   extraMcpServers?: Record<string, unknown>;
   extraAllowedTools?: string[];
@@ -231,6 +237,15 @@ type SessionEntry = {
   extraEnv?: Record<string, string>;
   skipCpa?: boolean;
 };
+
+/** Keep only a very small warm-query set; resume reopens parked sessions. */
+const MAX_LIVE_QUERIES = 2;
+export const MAX_HYDRATED_TRANSCRIPTS = 4;
+const IDLE_QUERY_TTL_MS = 60_000;
+const STREAM_FLUSH_MS = 40;
+const TOOL_PROGRESS_FLUSH_MS = 250;
+const TRANSCRIPT_SAVE_DELAY_MS = 750;
+const CHANGES_SAVE_DELAY_MS = 400;
 
 /**
  * Base tool set: use the full Claude Code preset so the agent gets Task/Agent,
@@ -481,6 +496,15 @@ export class SessionManager {
   private readonly sessions = new Map<string, SessionEntry>();
   private readonly compressor: ContextCompressor | undefined;
   private readonly snapshots: SessionManagerDeps["snapshots"];
+  private readonly pendingTranscriptSaves = new Map<string, ChatItem[]>();
+  private readonly transcriptSaveTimers = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
+  private readonly changesSaveTimers = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
 
   constructor(deps: SessionManagerDeps) {
     this.queryFn = deps.queryFn;
@@ -521,10 +545,12 @@ export class SessionManager {
           sdkSessionId: stored.sdkSessionId,
           slashCommands: [],
           turnActive: false,
+          lastQueryUsedAt: 0,
           streamGen: 0,
           compressed: false,
           items: [],
           itemsHydrated: false,
+          lastTranscriptAccessAt: 0,
           nextId: createIdFactory(),
         });
         const changes = this.archive.loadChanges(stored.id);
@@ -576,6 +602,77 @@ export class SessionManager {
     return { ...entry.summary };
   }
 
+  private clearIdleCloseTimer(entry: SessionEntry): void {
+    if (!entry.idleCloseTimer) return;
+    clearTimeout(entry.idleCloseTimer);
+    entry.idleCloseTimer = undefined;
+  }
+
+  /**
+   * Close the warm SDK stream without changing conversation state. A later
+   * continue() reopens it with resume=sdkSessionId.
+   */
+  private parkSession(entry: SessionEntry, force = false): void {
+    if (!force && entry.turnActive) return;
+    this.clearIdleCloseTimer(entry);
+    entry.streamGen += 1;
+    try {
+      entry.input?.end();
+    } catch {
+      // best effort
+    }
+    try {
+      entry.query?.close?.();
+    } catch {
+      // best effort
+    }
+    entry.abortController = null;
+    entry.input = undefined;
+    entry.query = undefined;
+    entry.consumer = undefined;
+  }
+
+  private scheduleIdleClose(entry: SessionEntry): void {
+    this.clearIdleCloseTimer(entry);
+    if (!entry.query || entry.turnActive) return;
+    const timer = setTimeout(() => {
+      entry.idleCloseTimer = undefined;
+      this.parkSession(entry);
+    }, IDLE_QUERY_TTL_MS);
+    timer.unref?.();
+    entry.idleCloseTimer = timer;
+    this.enforceLiveQueryCap(entry.summary.id);
+    this.enforceTranscriptCacheCap(entry.summary.id);
+  }
+
+  private enforceLiveQueryCap(preferredSessionId?: string): void {
+    const idle = [...this.sessions.values()]
+      .filter(
+        (entry) =>
+          Boolean(entry.query) &&
+          !entry.turnActive &&
+          entry.summary.id !== preferredSessionId,
+      )
+      .sort((a, b) => a.lastQueryUsedAt - b.lastQueryUsedAt);
+    const liveCount = [...this.sessions.values()].filter((entry) => entry.query).length;
+    let excess = Math.max(0, liveCount - MAX_LIVE_QUERIES);
+    for (const entry of idle) {
+      if (excess <= 0) break;
+      this.parkSession(entry);
+      excess -= 1;
+    }
+  }
+
+  private cancelPendingPersistence(sessionId: string): void {
+    const transcriptTimer = this.transcriptSaveTimers.get(sessionId);
+    if (transcriptTimer) clearTimeout(transcriptTimer);
+    this.transcriptSaveTimers.delete(sessionId);
+    this.pendingTranscriptSaves.delete(sessionId);
+    const changesTimer = this.changesSaveTimers.get(sessionId);
+    if (changesTimer) clearTimeout(changesTimer);
+    this.changesSaveTimers.delete(sessionId);
+  }
+
   /** Delete a session: abort any live turn, drop it, remove its files. */
   delete(sessionId: string): boolean {
     const entry = this.sessions.get(sessionId);
@@ -583,9 +680,9 @@ export class SessionManager {
     // Hide first so abort()'s session:updated broadcast can't resurrect it
     // in renderer lists mid-delete.
     entry.summary = { ...entry.summary, hiddenFromList: true };
-    if (entry.turnActive || entry.summary.status === "running") {
-      this.abort(sessionId);
-    }
+    if (entry.turnActive || entry.summary.status === "running") this.abort(sessionId);
+    else this.parkSession(entry, true);
+    this.cancelPendingPersistence(sessionId);
     this.sessions.delete(sessionId);
     this.archive?.remove(sessionId);
     return true;
@@ -644,8 +741,20 @@ export class SessionManager {
   ) {
     const entry = this.sessions.get(sessionId);
     if (entry) {
-      this.hydrateItems(entry);
-      return pageChatItems(entry.items, opts);
+      if (entry.itemsHydrated) {
+        this.touchTranscript(entry);
+        return pageChatItems(entry.items, opts);
+      }
+      // Renderer history restore should not pin the full conversation in the
+      // main process. The archive reads only chunks intersecting this page.
+      return (
+        this.archive?.loadItemsPage(sessionId, opts) ?? {
+          items: [],
+          total: 0,
+          hasMore: false,
+          hasNewer: false,
+        }
+      );
     }
     return (
       this.archive?.loadItemsPage(sessionId, opts) ?? {
@@ -664,15 +773,18 @@ export class SessionManager {
   ): void {
     const entry = this.sessions.get(sessionId);
     if (entry) {
-      if (opts?.replace) entry.items = items.slice();
-      else {
+      if (opts?.replace) {
+        entry.items = items.slice();
+        entry.itemsHydrated = true;
+      } else {
         this.hydrateItems(entry);
         entry.items = mergeTranscriptItems(entry.items, items);
       }
-      entry.itemsHydrated = true;
+      this.touchTranscript(entry);
     }
     if (!this.archive) return;
-    if (opts?.replace) this.archive.saveItems(sessionId, items);
+    if (entry) this.scheduleTranscriptPersist(sessionId, entry.items);
+    else if (opts?.replace) this.archive.saveItems(sessionId, items);
     else this.archive.mergeSaveItems(sessionId, items);
   }
 
@@ -681,9 +793,45 @@ export class SessionManager {
   }
 
   private hydrateItems(entry: SessionEntry): void {
-    if (entry.itemsHydrated) return;
-    entry.items = this.archive?.loadItems(entry.summary.id) ?? [];
-    entry.itemsHydrated = true;
+    if (!entry.itemsHydrated) {
+      entry.items = this.archive?.loadItems(entry.summary.id) ?? [];
+      entry.itemsHydrated = true;
+    }
+    this.touchTranscript(entry);
+  }
+
+  private touchTranscript(entry: SessionEntry): void {
+    entry.lastTranscriptAccessAt = Date.now();
+    this.enforceTranscriptCacheCap(entry.summary.id);
+  }
+
+  private enforceTranscriptCacheCap(preferredSessionId?: string): void {
+    const hydrated = [...this.sessions.values()].filter(
+      (entry) => entry.itemsHydrated,
+    );
+    let excess = hydrated.length - MAX_HYDRATED_TRANSCRIPTS;
+    if (excess <= 0) return;
+    const candidates = hydrated
+      .filter(
+        (entry) =>
+          entry.summary.id !== preferredSessionId &&
+          !entry.turnActive &&
+          entry.summary.status !== "running",
+      )
+      .sort((a, b) => a.lastTranscriptAccessAt - b.lastTranscriptAccessAt);
+    for (const entry of candidates) {
+      if (excess <= 0) break;
+      const sessionId = entry.summary.id;
+      const timer = this.transcriptSaveTimers.get(sessionId);
+      if (timer) clearTimeout(timer);
+      this.transcriptSaveTimers.delete(sessionId);
+      this.flushTranscriptPersist(sessionId);
+      entry.items = [];
+      entry.itemsHydrated = false;
+      entry.lastTranscriptAccessAt = 0;
+      this.archive?.releaseItems(sessionId);
+      excess -= 1;
+    }
   }
 
   private replaceTranscript(
@@ -693,10 +841,31 @@ export class SessionManager {
   ): void {
     entry.items = items;
     entry.itemsHydrated = true;
+    this.touchTranscript(entry);
     if (!opts.persist || !this.archive) return;
-    // Main holds the full transcript — write it directly. mergeSaveItems
-    // re-parses the whole file and was freezing 100+ turn sessions.
-    this.archive.saveItems(entry.summary.id, items);
+    // Main holds the full transcript. Delay and collapse writes so tool-heavy
+    // turns do not repeatedly stringify the same 100+ turn history.
+    this.scheduleTranscriptPersist(entry.summary.id, items);
+  }
+
+  private scheduleTranscriptPersist(sessionId: string, items: ChatItem[]): void {
+    if (!this.archive) return;
+    this.pendingTranscriptSaves.set(sessionId, items);
+    const previous = this.transcriptSaveTimers.get(sessionId);
+    if (previous) clearTimeout(previous);
+    const timer = setTimeout(() => {
+      this.transcriptSaveTimers.delete(sessionId);
+      this.flushTranscriptPersist(sessionId);
+    }, TRANSCRIPT_SAVE_DELAY_MS);
+    timer.unref?.();
+    this.transcriptSaveTimers.set(sessionId, timer);
+  }
+
+  private flushTranscriptPersist(sessionId: string): void {
+    const items = this.pendingTranscriptSaves.get(sessionId);
+    this.pendingTranscriptSaves.delete(sessionId);
+    if (!items || !this.archive) return;
+    this.archive.saveItems(sessionId, items);
   }
 
   private applyAndMaybePersist(
@@ -729,9 +898,49 @@ export class SessionManager {
     this.archive.upsertSummary(stored);
   }
 
-  private persistChanges(sessionId: string): void {
+  private scheduleChangesPersist(sessionId: string): void {
     if (!this.archive) return;
-    this.archive.saveChanges(sessionId, this.diffTracker.list(sessionId));
+    const previous = this.changesSaveTimers.get(sessionId);
+    if (previous) clearTimeout(previous);
+    const timer = setTimeout(() => {
+      this.changesSaveTimers.delete(sessionId);
+      this.archive?.saveChanges(sessionId, this.diffTracker.list(sessionId));
+    }, CHANGES_SAVE_DELAY_MS);
+    timer.unref?.();
+    this.changesSaveTimers.set(sessionId, timer);
+  }
+
+  /** Flush delayed transcript/diff writes before shutdown or deterministic tests. */
+  flushPendingPersistence(): void {
+    for (const timer of this.transcriptSaveTimers.values()) clearTimeout(timer);
+    this.transcriptSaveTimers.clear();
+    for (const sessionId of [...this.pendingTranscriptSaves.keys()]) {
+      this.flushTranscriptPersist(sessionId);
+    }
+    for (const [sessionId, timer] of this.changesSaveTimers) {
+      clearTimeout(timer);
+      this.archive?.saveChanges(sessionId, this.diffTracker.list(sessionId));
+    }
+    this.changesSaveTimers.clear();
+  }
+
+  /** Lightweight diagnostics for regression tests and future memory telemetry. */
+  getMemoryStats(): {
+    hydratedTranscripts: number;
+    hydratedItems: number;
+    liveQueries: number;
+  } {
+    let hydratedTranscripts = 0;
+    let hydratedItems = 0;
+    let liveQueries = 0;
+    for (const entry of this.sessions.values()) {
+      if (entry.itemsHydrated) {
+        hydratedTranscripts += 1;
+        hydratedItems += entry.items.length;
+      }
+      if (entry.query) liveQueries += 1;
+    }
+    return { hydratedTranscripts, hydratedItems, liveQueries };
   }
 
   /** Transcript + changes for IPC session:select (with canRestore flags). */
@@ -844,7 +1053,7 @@ export class SessionManager {
     this.diffTracker.markDeleted(sessionId, cwd);
     const list = this.listChanges(sessionId);
     this.emitDiff(sessionId, list);
-    this.persistChanges(sessionId);
+    this.scheduleChangesPersist(sessionId);
   }
 
   /** SDK skills / slash commands cached for a session (empty if none yet). */
@@ -1202,6 +1411,7 @@ export class SessionManager {
   abort(sessionId: string): void {
     const entry = this.sessions.get(sessionId);
     if (!entry) return;
+    this.clearIdleCloseTimer(entry);
 
     // Mark the turn done immediately so waitForTurnIdle / UI unlock.
     // Without this, a hung interrupt leaves turnActive=true forever and
@@ -1218,11 +1428,13 @@ export class SessionManager {
     }
 
     // Tell the renderer the turn ended (clears optimistic running / stop btn).
-    this.emit({
+    const resultEvent: SdkNormalizedEvent = {
       type: "result",
       sessionId,
       ok: true,
-    });
+    };
+    this.applyAndMaybePersist(entry, resultEvent);
+    this.emit(resultEvent);
 
     try {
       void entry.query?.interrupt?.();
@@ -1254,18 +1466,20 @@ export class SessionManager {
     entry.input = undefined;
     entry.query = undefined;
     entry.consumer = undefined;
+    this.enforceTranscriptCacheCap();
   }
 
   /** Close streaming input for a session (e.g. window quit). */
   closeSession(sessionId: string): void {
     const entry = this.sessions.get(sessionId);
     if (!entry) return;
-    try {
-      entry.input?.end();
-      entry.query?.close?.();
-    } catch {
-      // ignore
-    }
+    this.parkSession(entry, true);
+  }
+
+  /** Release every SDK child and flush delayed writes, including hidden room sessions. */
+  disposeAll(): void {
+    this.flushPendingPersistence();
+    for (const entry of this.sessions.values()) this.parkSession(entry, true);
   }
 
   /**
@@ -1438,10 +1652,12 @@ export class SessionManager {
       abortController: null,
       slashCommands: [],
       turnActive: true,
+      lastQueryUsedAt: now,
       streamGen: 0,
       compressed: false,
       items: [],
       itemsHydrated: true,
+      lastTranscriptAccessAt: now,
       nextId: createIdFactory(),
       extraMcpServers: opts?.extraMcpServers,
       extraAllowedTools: opts?.extraAllowedTools,
@@ -1478,6 +1694,8 @@ export class SessionManager {
     if (!entry) {
       throw new Error(`Unknown session: ${sessionId}`);
     }
+    this.clearIdleCloseTimer(entry);
+    entry.lastQueryUsedAt = Date.now();
     let reopenForExtras = false;
     if (opts?.model && opts.model !== entry.model) {
       entry.model = opts.model;
@@ -1820,6 +2038,8 @@ export class SessionManager {
   ): Promise<void> {
     const entry = this.sessions.get(sessionId);
     if (!entry) return;
+    this.clearIdleCloseTimer(entry);
+    entry.lastQueryUsedAt = Date.now();
 
     // Tear down any previous stream and invalidate its consumer via streamGen.
     entry.streamGen += 1;
@@ -1857,6 +2077,7 @@ export class SessionManager {
         options,
       });
       entry.query = q as QueryHandle & QueryControl;
+      this.enforceLiveQueryCap(sessionId);
 
       // Kick off consumer before first push so we don't miss early messages.
       entry.consumer = this.consumeQuery(sessionId, q, settings.defaultModel);
@@ -1897,6 +2118,42 @@ export class SessionManager {
     }
   }
 
+  private dispatchNormalizedEvent(
+    entry: SessionEntry,
+    event: SdkNormalizedEvent,
+    model: string,
+  ): void {
+    this.applyAndMaybePersist(entry, event);
+    this.emit(event);
+    if (event.type !== "result") return;
+
+    const settings = this.settings.get();
+    const catalog = this.cpa.getModelCatalog();
+    const usage = accumulateUsage(entry.summary.usage, event.usage);
+    const contextUsage =
+      computeContextUsage({
+        turn: event.usage,
+        modelId: model || settings.defaultModel,
+        settings: {
+          defaultContextLimit: settings.defaultContextLimit,
+          modelContextLimits: settings.modelContextLimits,
+        },
+        catalog,
+      }) ?? entry.summary.contextUsage;
+
+    entry.summary = {
+      ...entry.summary,
+      status: event.ok ? "idle" : "error",
+      updatedAt: Date.now(),
+      usage,
+      ...(contextUsage ? { contextUsage } : {}),
+    };
+    entry.turnActive = false;
+    this.emitSession({ ...entry.summary });
+    this.persistSummary(entry);
+    this.scheduleIdleClose(entry);
+  }
+
   private async consumeQuery(
     sessionId: string,
     stream: QueryHandle,
@@ -1906,6 +2163,65 @@ export class SessionManager {
     if (!entry) return;
     // Capture generation so a later abort/reopen can make us stop mutating state.
     const myGen = entry.streamGen;
+    let pendingText = "";
+    let textTimer: ReturnType<typeof setTimeout> | undefined;
+    const pendingToolProgress = new Map<string, SdkNormalizedEvent>();
+    let toolProgressTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const canDispatch = () =>
+      entry.streamGen === myGen && !entry.abortController?.signal.aborted;
+    const flushText = () => {
+      if (textTimer) clearTimeout(textTimer);
+      textTimer = undefined;
+      const text = pendingText;
+      pendingText = "";
+      if (!text || !canDispatch()) return;
+      this.dispatchNormalizedEvent(
+        entry,
+        { type: "text_delta", sessionId, text },
+        model,
+      );
+    };
+    const flushToolProgress = () => {
+      if (toolProgressTimer) clearTimeout(toolProgressTimer);
+      toolProgressTimer = undefined;
+      if (!canDispatch()) {
+        pendingToolProgress.clear();
+        return;
+      }
+      const events = [...pendingToolProgress.values()];
+      pendingToolProgress.clear();
+      for (const event of events) {
+        this.dispatchNormalizedEvent(entry, event, model);
+      }
+    };
+    const queueEvent = (event: SdkNormalizedEvent) => {
+      if (event.type === "text_delta") {
+        pendingText += event.text;
+        if (!textTimer) {
+          textTimer = setTimeout(flushText, STREAM_FLUSH_MS);
+          textTimer.unref?.();
+        }
+        return;
+      }
+      if (event.type === "tool_progress") {
+        pendingToolProgress.set(event.toolUseId, event);
+        if (!toolProgressTimer) {
+          toolProgressTimer = setTimeout(
+            flushToolProgress,
+            TOOL_PROGRESS_FLUSH_MS,
+          );
+          toolProgressTimer.unref?.();
+        }
+        return;
+      }
+      // Preserve stream ordering around settled text and tool completion.
+      flushText();
+      if (event.type === "tool_end" || event.type === "result") {
+        flushToolProgress();
+      }
+      this.dispatchNormalizedEvent(entry, event, model);
+    };
 
     try {
       for await (const msg of stream) {
@@ -1928,8 +2244,7 @@ export class SessionManager {
               sessionId,
               uuids: [...entry.sdkUserMsgIds],
             };
-            this.applyAndMaybePersist(entry, idsEvent);
-            this.emit(idsEvent);
+            queueEvent(idsEvent);
           }
         }
 
@@ -1937,39 +2252,7 @@ export class SessionManager {
 
         const events = normalizeSdkEvent(msg, sessionId);
         for (const event of events) {
-          this.applyAndMaybePersist(entry, event);
-          this.emit(event);
-          if (event.type === "result") {
-            const settings = this.settings.get();
-            const catalog = this.cpa.getModelCatalog();
-            const usage = accumulateUsage(
-              entry.summary.usage,
-              event.usage,
-            );
-            const contextUsage =
-              computeContextUsage({
-                turn: event.usage,
-                modelId: model || settings.defaultModel,
-                settings: {
-                  defaultContextLimit: settings.defaultContextLimit,
-                  modelContextLimits: settings.modelContextLimits,
-                },
-                catalog,
-              }) ?? entry.summary.contextUsage;
-
-            entry.summary = {
-              ...entry.summary,
-              status: event.ok ? "idle" : "error",
-              updatedAt: Date.now(),
-              usage,
-              ...(contextUsage ? { contextUsage } : {}),
-            };
-            entry.turnActive = false;
-            this.emitSession({ ...entry.summary });
-            this.persistSummary(entry);
-            // Auto-compress is triggered by the renderer after it has the full
-            // transcript in memory (main-side disk archive can lag and wipe history).
-          }
+          queueEvent(event);
         }
 
         // Also mark idle on bare result messages if normalize missed fields
@@ -1983,9 +2266,13 @@ export class SessionManager {
             };
             this.emitSession({ ...entry.summary });
             this.persistSummary(entry);
+            this.scheduleIdleClose(entry);
           }
         }
       }
+
+      flushText();
+      flushToolProgress();
 
       // Stream ended (input closed or process exit). Only touch state if we still
       // own this stream generation — abort() may already have opened a new one.
@@ -1998,10 +2285,13 @@ export class SessionManager {
           };
           this.emitSession({ ...entry.summary });
           this.persistSummary(entry);
+          this.scheduleIdleClose(entry);
         }
         entry.turnActive = false;
       }
     } catch (err) {
+      flushText();
+      flushToolProgress();
       if (entry.streamGen !== myGen) return;
       if (entry.abortController?.signal.aborted) {
         entry.turnActive = false;
@@ -2028,7 +2318,12 @@ export class SessionManager {
       };
       entry.turnActive = false;
       this.emitSession({ ...entry.summary });
+      this.scheduleIdleClose(entry);
     } finally {
+      if (textTimer) clearTimeout(textTimer);
+      if (toolProgressTimer) clearTimeout(toolProgressTimer);
+      pendingText = "";
+      pendingToolProgress.clear();
       // Only clear abortController if this consumer still owns the stream.
       if (entry.streamGen === myGen && entry.abortController) {
         entry.abortController = null;

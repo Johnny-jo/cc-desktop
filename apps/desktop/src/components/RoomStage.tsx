@@ -11,6 +11,7 @@ import {
   selectSeat,
   sendToSeat,
   setRoomAiShare,
+  stopRoomSeat,
   takeoverSeat,
   useRoomStore,
 } from "../state/room-store";
@@ -25,6 +26,11 @@ import { fillTemplate } from "../lib/room-mod-ui";
 import { getDesktop, hasDesktopApi } from "../lib/desktop-api";
 import { parseTrailingAt } from "../lib/at-mention";
 import { formatModBadge } from "../lib/room-mod-ui";
+import {
+  contextLevel,
+  formatContextPercent,
+  formatTokens,
+} from "../lib/format-usage";
 import { useI18n } from "../i18n/useI18n";
 import { ModPlayPanel } from "./ModPlayPanel";
 import { MarkdownBody } from "./MarkdownBody";
@@ -263,6 +269,25 @@ export function RoomStage() {
       if (seat.takenOverBy && seat.takenOverBy !== myUserId) return null;
       return seat;
     })();
+    // /stop 指令：@agent /stop 停止它正在跑的输出（没 @ 就停当前选中的席位）。
+    const isStop = /^\/stop\b/.test(t.replace(/@[^\s@]+/g, "").trim());
+    if (isStop) {
+      const target =
+        mentionSeat ?? (selected?.kind === "agent" ? selected : null);
+      if (!target) {
+        setErr("@某个 Agent 席位再加 /stop 才能停止它");
+        return;
+      }
+      const res = await stopRoomSeat(target.id);
+      if (!res.ok) {
+        setErr(res.error ?? "停止失败");
+        return;
+      }
+      setDraft("");
+      setQuote(null);
+      setAttachments([]);
+      return;
+    }
     const res = await sendToSeat(t, quote ?? undefined, mentionSeat?.id, attachments);
     if (!res.ok) {
       setErr(res.error ?? "发送失败");
@@ -551,13 +576,15 @@ export function RoomStage() {
           })
         )}
         {/* 工作动效：Agent 席位 running 时在时间线尾部挂打字气泡；
-            有实时进度的远端席位改挂流式气泡 */}
+            有实时进度（文本或思考）的席位改挂流式气泡 */}
         {room.seats
           .filter(
             (s) =>
               s.kind === "agent" &&
               s.running &&
-              !(room.liveExec ?? []).some((e) => e.seatId === s.id && e.text),
+              !(room.liveExec ?? []).some(
+                (e) => e.seatId === s.id && (e.text || e.thinking),
+              ),
           )
           .map((s) => (
             <div
@@ -580,7 +607,7 @@ export function RoomStage() {
             </div>
           ))}
         {(room.liveExec ?? [])
-          .filter((e) => e.text || e.tool)
+          .filter((e) => e.text || e.tool || e.thinking)
           .map((e) => {
             const seat = room.seats.find((s) => s.id === e.seatId);
             return (
@@ -593,8 +620,17 @@ export function RoomStage() {
                     <span className="room-msg-author">
                       {seat?.name ?? "Agent"}
                     </span>
-                    <span className="room-msg-source">远端实时</span>
+                    <span className="room-msg-source">实时</span>
                   </div>
+                  {e.thinking ? (
+                    <details
+                      className="room-live-thinking"
+                      open={!e.text}
+                    >
+                      <summary>思考过程</summary>
+                      <div className="room-live-thinking-body">{e.thinking}</div>
+                    </details>
+                  ) : null}
                   {e.text ? (
                     <div className="room-msg-text md room-live-text">
                       <MarkdownBody text={e.text} streaming />
@@ -712,7 +748,7 @@ export function RoomStage() {
             rows={2}
             placeholder={
               selected
-                ? `发给「${selected.name}」…  @ 提及，可拖文件进来，Enter 发送`
+                ? `发给「${selected.name}」…  @ 提及，/stop 停止，Enter 发送`
                 : "先在上方点一个席位再输入"
             }
             value={draft}
@@ -853,6 +889,14 @@ export function RoomStage() {
                       ) : null}
                       {s.takenOverBy ? (
                         <span className="room-seat-tag">接管中</span>
+                      ) : null}
+                      {s.kind === "agent" && s.contextUsage ? (
+                        <span
+                          className={`room-seat-tag ctx is-${contextLevel(s.contextUsage.ratio)}`}
+                          title={`席位上下文已用 ${formatContextPercent(s.contextUsage.ratio)}（${formatTokens(s.contextUsage.usedTokens)} / ${formatTokens(s.contextUsage.limitTokens)}）；超过 75% 会自动压缩`}
+                        >
+                          ctx {formatContextPercent(s.contextUsage.ratio)}
+                        </span>
                       ) : null}
                       {s.kind === "human" ? (
                         <span
@@ -998,6 +1042,9 @@ export function RoomStage() {
                       authorLabel: bubbleMenu.item.authorLabel,
                       text: bubbleMenu.item.text.slice(0, 120),
                     });
+                    // 引用顺带 @对方（已带同名 @ 就不重复加）
+                    const mention = `@${bubbleMenu.item.authorLabel} `;
+                    setDraft((d) => (d.startsWith(mention) ? d : mention + d));
                     setBubbleMenu(null);
                     inputRef.current?.focus();
                   }}

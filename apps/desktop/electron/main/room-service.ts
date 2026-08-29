@@ -28,6 +28,7 @@ import type {
   RoomRole,
   RoomSeat,
   RoomSeatKind,
+  RoomSeatStopPayload,
   RoomSeatUpdatePayload,
   RoomSnapshot,
   RoomTimelineItem,
@@ -185,6 +186,7 @@ const KNOWN_ROOM_FRAME_TYPES: ReadonlySet<string> = new Set<RoomFrameType>([
   "chat.user",
   "chat.event",
   "chat.recall",
+  "seat.stop",
   "exec.run",
   "exec.event",
   "exec.result",
@@ -230,6 +232,8 @@ const EXEC_HEARTBEAT_INTERVAL_MS = 15_000;
 const EXEC_HEARTBEAT_TIMEOUT_MS = 60_000;
 /** 单轮总时长上限。 */
 const EXEC_TOTAL_TIMEOUT_MS = 10 * 60_000;
+/** 席位会话上下文占用超过这个比例就自动压缩（与渲染端主会话的 0.75 一致）。 */
+const ROOM_AUTO_COMPACT_RATIO = 0.75;
 
 type RemoteTurnState =
   | "dispatched"
@@ -271,6 +275,8 @@ type NodeTurn = {
   startedAt: number;
   /** 二期：流式进度累计文本。 */
   liveText: string;
+  /** 流式思考内容（覆盖式发给房主）。 */
+  liveThinking?: string;
   /** 二期：最近工具一行摘要。 */
   liveTool?: string;
   /** 二期：上次向房主发进度的时间（节流）。 */
@@ -283,6 +289,7 @@ type LiveExecEntry = {
   seatId: string;
   text: string;
   tool?: string;
+  thinking?: string;
   at: number;
 };
 
@@ -993,6 +1000,23 @@ export function activate(ctx) {
       seats: stored.seats ?? [],
       items: stored.items ?? [],
     };
+  }
+
+  /** Resolve hidden seat/worker sessions for scoped renderer IPC routing. */
+  roomIdForSession(sessionId: string): string | undefined {
+    for (const room of this.rooms.values()) {
+      if (room.seats.some((seat) => seat.sessionId === sessionId)) {
+        return room.roomId;
+      }
+      if (
+        [...(room.nodeTurns?.values() ?? [])].some(
+          (turn) => turn.sessionId === sessionId,
+        )
+      ) {
+        return room.roomId;
+      }
+    }
+    return undefined;
   }
 
   invite(roomId: string) {
@@ -3370,6 +3394,10 @@ export function activate(ctx) {
       ...(this.turnPermissionMode(r, seat, requesterUserId)
         ? { permissionMode: this.turnPermissionMode(r, seat, requesterUserId) }
         : {}),
+      // start 一建条目就拿到 id：流式（文本/思考）进 liveExec 快照靠它匹配。
+      onSessionId: (id: string) => {
+        seat.sessionId = id;
+      },
     };
     try {
       Object.assign(extras, await this.borrowAiExtras(r, seat));
@@ -3402,6 +3430,20 @@ export function activate(ctx) {
       });
     } finally {
       seat.running = false;
+      // 清掉本机席位的流式气泡（远端席位由 settleRemoteTurn 清）。
+      r.liveExec?.delete(`local-${seat.id}`);
+      // 每轮结束刷新席位上下文占用（快照广播给全房间）；超阈值就地压缩。
+      const cu = this.seatContextUsage(seat.sessionId);
+      if (cu !== undefined) seat.contextUsage = cu;
+      if (await this.maybeCompactSeatSession(seat.sessionId, cu)) {
+        seat.contextUsage = null;
+        this.append(r, {
+          kind: "system",
+          seatId: seat.id,
+          text: `席位「${seat.name}」上下文占用 ${Math.round((cu?.ratio ?? 0) * 100)}%，已自动压缩历史`,
+          authorLabel: "系统",
+        });
+      }
       this.pushState(r);
     }
   }
@@ -3713,6 +3755,38 @@ export function activate(ctx) {
       authorLabel: "系统",
     });
     this.pushState(r);
+  }
+
+  /** 读席位会话当前的上下文占用（无会话/无数据时返回 undefined）。 */
+  private seatContextUsage(
+    sessionId: string | null | undefined,
+  ): { ratio: number; usedTokens: number; limitTokens: number } | undefined {
+    if (!sessionId || typeof this.sessions.getSummary !== "function") {
+      return undefined;
+    }
+    const cu = this.sessions.getSummary(sessionId)?.contextUsage;
+    if (!cu) return undefined;
+    return {
+      ratio: cu.ratio,
+      usedTokens: cu.usedTokens,
+      limitTokens: cu.limitTokens,
+    };
+  }
+
+  /**
+   * 占用超阈值（0.75，同主会话自动压缩）就压缩席位会话。不 autoContinue：
+   * 本轮任务已结束，下一轮带压缩后的历史起步即可。返回 true 表示压了。
+   */
+  private async maybeCompactSeatSession(
+    sessionId: string | null | undefined,
+    cu: { ratio: number } | undefined,
+  ): Promise<boolean> {
+    if (!sessionId || !cu || cu.ratio < ROOM_AUTO_COMPACT_RATIO) return false;
+    if (typeof this.sessions.compressSession !== "function") return false;
+    const res = await this.sessions.compressSession(sessionId, undefined, {
+      autoContinue: false,
+    });
+    return res.ok;
   }
 
   private async ensureAiProxy(r: RoomRecord): Promise<number> {
@@ -4225,6 +4299,9 @@ export function activate(ctx) {
         turnId: turn.turnId,
         seatId: turn.seatId,
         text: typeof p.text === "string" ? p.text : "",
+        ...(typeof p.thinking === "string" && p.thinking
+          ? { thinking: p.thinking }
+          : {}),
         ...(p.tool ? { tool: p.tool } : {}),
         at: Date.now(),
       });
@@ -4294,6 +4371,18 @@ export function activate(ctx) {
         : `「${nodeName}」的电脑执行失败：${p.error ?? "未知错误"}（${turn.turnId.slice(0, 8)}）`,
       authorLabel: "系统",
     });
+    // 节点回报的席位上下文占用：更新快照（null = 节点刚压缩过，清零徽标）。
+    if (seat && p.contextUsage !== undefined) {
+      seat.contextUsage = p.contextUsage;
+    }
+    if (seat && p.compacted) {
+      this.append(r, {
+        kind: "system",
+        seatId: turn.seatId,
+        text: `席位「${seat.name}」上下文占用过高，「${nodeName}」的电脑已自动压缩历史`,
+        authorLabel: "系统",
+      });
+    }
     this.settleRemoteTurn(r, turn, p.ok ? "done" : "failed", p.error);
     this.pushState(r);
   }
@@ -4465,6 +4554,9 @@ export function activate(ctx) {
         .map((c) => c.path)
         .slice(0, 12);
       const changesDetail = this.turnChangesDetail(sid, nt.startedAt);
+      // 上下文占用随结果回报给房主；超阈值先在本机压缩（回报 null 让房主清零徽标）。
+      const cu = this.seatContextUsage(sid);
+      const compacted = await this.maybeCompactSeatSession(sid, cu);
       this.sendClient(r, "exec.result", {
         turnId: nt.turnId,
         seatId: nt.seatId,
@@ -4472,6 +4564,11 @@ export function activate(ctx) {
         text: modelNote ? modelNote + reply : reply,
         ...(changed.length ? { changes: changed } : {}),
         ...(changesDetail.length ? { changesDetail } : {}),
+        ...(compacted
+          ? { contextUsage: null, compacted: true }
+          : cu !== undefined
+            ? { contextUsage: cu }
+            : {}),
       } satisfies RoomExecResultPayload);
       this.execLog(r, {
         turnId: nt.turnId,
@@ -4482,11 +4579,13 @@ export function activate(ctx) {
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      const cu = this.seatContextUsage(nt.sessionId ?? seatSessions.get(nt.seatId));
       this.sendClient(r, "exec.result", {
         turnId: nt.turnId,
         seatId: nt.seatId,
         ok: false,
         error: msg,
+        ...(cu !== undefined ? { contextUsage: cu } : {}),
       } satisfies RoomExecResultPayload);
       this.execLog(r, {
         turnId: nt.turnId,
@@ -4559,35 +4658,80 @@ export function activate(ctx) {
   /**
    * 节点：SessionManager 事件流的水龙头（index.ts 的 emit 挂钩调这里）。
    * 命中本机正在跑的远程轮时，把回复文本/工具行动态节流转发给房主。
+   * 房主本机席位（local- 前缀键）直接写 liveExec 进快照，不走网络。
    */
   onSessionEvent(event: SdkNormalizedEvent): void {
     if (!("sessionId" in event) || !event.sessionId) return;
     for (const r of this.rooms.values()) {
-      if (!r.nodeTurns?.size) continue;
-      for (const nt of r.nodeTurns.values()) {
-        if (nt.sessionId !== event.sessionId) continue;
-        if (event.type === "text_delta") {
-          nt.liveText += event.text;
-        } else if (event.type === "text_done") {
-          nt.liveText = event.text;
-        } else if (event.type === "tool_start") {
-          const t = event.tool;
-          nt.liveTool = `${t.name}${t.summary ? ` ${t.summary.slice(0, 80)}` : ""}`;
-        } else {
-          continue;
+      if (r.nodeTurns?.size) {
+        let matched = false;
+        for (const nt of r.nodeTurns.values()) {
+          if (nt.sessionId !== event.sessionId) continue;
+          if (event.type === "text_delta") {
+            nt.liveText += event.text;
+          } else if (event.type === "text_done") {
+            nt.liveText = event.text;
+          } else if (event.type === "thinking_delta") {
+            nt.liveThinking = (nt.liveThinking ?? "") + event.text;
+          } else if (event.type === "tool_start") {
+            const t = event.tool;
+            nt.liveTool = `${t.name}${t.summary ? ` ${t.summary.slice(0, 80)}` : ""}`;
+          } else {
+            continue;
+          }
+          matched = true;
+          // 节流：文本/思考增量 800ms 一帧攒着发；工具切换低频，立即发
+          const isTool = event.type === "tool_start";
+          const now = Date.now();
+          if (!isTool && now - nt.lastLiveSendAt < EXEC_LIVE_INTERVAL_MS) break;
+          nt.lastLiveSendAt = now;
+          this.sendClient(r, "exec.event", {
+            turnId: nt.turnId,
+            seatId: nt.seatId,
+            phase: "note",
+            text: nt.liveText.slice(-EXEC_LIVE_TEXT_TAIL),
+            ...(nt.liveThinking
+              ? { thinking: nt.liveThinking.slice(-EXEC_LIVE_TEXT_TAIL) }
+              : {}),
+            ...(nt.liveTool ? { tool: nt.liveTool } : {}),
+          } satisfies RoomExecEventPayload);
+          break;
         }
-        // 节流：文本增量 800ms 一帧攒着发；工具切换低频，立即发
-        const isTool = event.type === "tool_start";
+        if (matched) return;
+      }
+      // 房主本机席位：SessionManager 事件直接进 liveExec 快照。
+      if (r.localRole !== "host") continue;
+      for (const seat of r.seats) {
+        if (seat.kind !== "agent" || !seat.running) continue;
+        if (!seat.sessionId || seat.sessionId !== event.sessionId) continue;
+        const key = `local-${seat.id}`;
+        const store = (r.liveExec ??= new Map());
+        const entry = store.get(key) ?? {
+          turnId: key,
+          seatId: seat.id,
+          text: "",
+          at: 0,
+        };
+        let isTool = false;
+        if (event.type === "text_delta") {
+          entry.text += event.text;
+        } else if (event.type === "text_done") {
+          entry.text = event.text;
+        } else if (event.type === "thinking_delta") {
+          entry.thinking = (entry.thinking ?? "") + event.text;
+        } else if (event.type === "tool_start") {
+          const tl = event.tool;
+          entry.tool = `${tl.name}${tl.summary ? ` ${tl.summary.slice(0, 80)}` : ""}`;
+          isTool = true;
+        } else {
+          break;
+        }
+        store.set(key, entry);
+        // 同样节流广播；entry 已落 map，跳过广播也不丢内容
         const now = Date.now();
-        if (!isTool && now - nt.lastLiveSendAt < EXEC_LIVE_INTERVAL_MS) return;
-        nt.lastLiveSendAt = now;
-        this.sendClient(r, "exec.event", {
-          turnId: nt.turnId,
-          seatId: nt.seatId,
-          phase: "note",
-          text: nt.liveText.slice(-EXEC_LIVE_TEXT_TAIL),
-          ...(nt.liveTool ? { tool: nt.liveTool } : {}),
-        } satisfies RoomExecEventPayload);
+        if (!isTool && now - entry.at < EXEC_LIVE_INTERVAL_MS) return;
+        entry.at = now;
+        this.pushLive(r);
         return;
       }
     }
@@ -5208,6 +5352,58 @@ export function activate(ctx) {
     this.pushState(r);
   }
 
+  /**
+   * 停止某个 Agent 席位正在跑的输出（@agent /stop）。
+   * 房主直接本地生效；客人发 seat.stop 帧由房主执行。
+   */
+  stopSeat(roomId: string, seatId: string): { ok: boolean; error?: string } {
+    const r = this.rooms.get(roomId);
+    if (!r || r.status !== "open") return { ok: false, error: "群聊不可用" };
+    const seat = r.seats.find((s) => s.id === seatId);
+    if (!seat || seat.kind !== "agent") {
+      return { ok: false, error: "席位不存在或不是 Agent" };
+    }
+    if (r.localRole !== "host") {
+      if (!r.client || r.client.readyState !== WebSocket.OPEN) {
+        return { ok: false, error: "尚未连上主机，请等重连完成后再试" };
+      }
+      this.sendClient(r, "seat.stop", { seatId } satisfies RoomSeatStopPayload);
+      return { ok: true };
+    }
+    this.applySeatStop(r, seatId, r.localUserId);
+    return { ok: true };
+  }
+
+  /** 房主侧执行停止：本机席位直接 abort 会话，远程席位中止节点上的轮次。 */
+  private applySeatStop(
+    r: RoomRecord,
+    seatId: string,
+    byUserId: string,
+  ): void {
+    const seat = r.seats.find((s) => s.id === seatId);
+    if (!seat || seat.kind !== "agent") return;
+    if (!seat.running) return; // 幂等：没在跑就当成功
+    const who = this.memberName(r, byUserId);
+    if (this.seatExecutor(r, seat)) {
+      this.abortRemoteTurnsForSeat(r, seat.id, `「${who}」停止了输出`);
+    } else if (seat.sessionId) {
+      try {
+        this.sessions.abort(seat.sessionId);
+      } catch {
+        // ignore
+      }
+    }
+    seat.running = false;
+    r.liveExec?.delete(`local-${seat.id}`);
+    this.append(r, {
+      kind: "system",
+      seatId: seat.id,
+      text: `「${who}」停止了「${seat.name}」的输出`,
+      authorLabel: "系统",
+    });
+    this.pushState(r);
+  }
+
   /** Host: devices waiting for approval. */
   pendingDevices(roomId: string): {
     ok: boolean;
@@ -5646,6 +5842,15 @@ export function activate(ctx) {
         return;
       }
       this.applyRecall(r, itemId);
+      return;
+    }
+
+    if (frame.type === "seat.stop") {
+      const p = frame.payload as RoomSeatStopPayload | undefined;
+      const seatId = typeof p?.seatId === "string" ? p.seatId : "";
+      if (!seatId) return;
+      // 群聊里任何成员都可以喊停一个 Agent 席位（停止 ≠ 改配置）。
+      this.applySeatStop(r, seatId, userId);
       return;
     }
 

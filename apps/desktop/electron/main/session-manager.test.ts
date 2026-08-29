@@ -4,7 +4,11 @@ import path from "node:path";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import type { AppSettings, FileChange, SdkNormalizedEvent, SessionSummary } from "@claude-desktop/shared";
 import type { QueryFn } from "./session-manager";
-import { SessionManager, humanizeAgentError } from "./session-manager";
+import {
+  MAX_HYDRATED_TRANSCRIPTS,
+  SessionManager,
+  humanizeAgentError,
+} from "./session-manager";
 import type { PermissionBroker } from "./permission-broker";
 import type { DiffTracker } from "./diff-tracker";
 import type { CpaSupervisor } from "./cpa-supervisor";
@@ -180,6 +184,114 @@ describe("SessionManager", () => {
     );
     expect(ctx.emitted.some((e) => e.type === "tool_start")).toBe(true);
     expect(ctx.manager.list().some((s) => s.id === sessionId)).toBe(true);
+  });
+
+  it("coalesces adjacent text deltas and keeps only the latest tool progress", async () => {
+    const queryFn: QueryFn = async function* (args) {
+      await takeFirstUserText(args.prompt);
+      for (const text of ["a", "b", "c"]) {
+        yield {
+          type: "stream_event",
+          event: {
+            type: "content_block_delta",
+            delta: { type: "text_delta", text },
+          },
+        };
+      }
+      for (const elapsed_time_seconds of [1, 2, 3]) {
+        yield {
+          type: "tool_progress",
+          tool_use_id: "tool-1",
+          tool_name: "Bash",
+          elapsed_time_seconds,
+        };
+      }
+      yield { type: "result", subtype: "success", total_cost_usd: 0 };
+    };
+    const ctx = makeDeps({ queryFn });
+    await ctx.manager.start({ text: "go", attachments: [] }, "D:/p");
+
+    const deltas = ctx.emitted.filter((event) => event.type === "text_delta");
+    expect(deltas).toHaveLength(1);
+    expect(deltas[0]).toMatchObject({ text: "abc" });
+    const progress = ctx.emitted.filter((event) => event.type === "tool_progress");
+    expect(progress).toHaveLength(1);
+    expect(progress[0]).toMatchObject({ elapsedSeconds: 3 });
+  });
+
+  it("closes an idle live query when its session is deleted", async () => {
+    const close = vi.fn();
+    const queryFn: QueryFn = (args) => {
+      const gen = (async function* () {
+        await takeFirstUserText(args.prompt);
+        yield { type: "result", subtype: "success", total_cost_usd: 0 };
+        for await (const _ of args.prompt as AsyncIterable<unknown>) {
+          // Keep the streaming query warm across turns.
+        }
+      })();
+      return Object.assign(gen, { close }) as never;
+    };
+    const ctx = makeDeps({ queryFn });
+    const sessionId = await ctx.manager.start(
+      { text: "go", attachments: [] },
+      "D:/p",
+    );
+
+    expect(ctx.manager.delete(sessionId)).toBe(true);
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps at most two warm SDK queries", async () => {
+    const closes = [vi.fn(), vi.fn(), vi.fn()];
+    let opened = 0;
+    const queryFn: QueryFn = (args) => {
+      const close = closes[opened++];
+      const gen = (async function* () {
+        await takeFirstUserText(args.prompt);
+        yield { type: "result", subtype: "success", total_cost_usd: 0 };
+        for await (const _ of args.prompt as AsyncIterable<unknown>) {
+          // Keep the streaming query warm across turns.
+        }
+      })();
+      return Object.assign(gen, { close }) as never;
+    };
+    const ctx = makeDeps({ queryFn });
+    for (let i = 0; i < 3; i += 1) {
+      await ctx.manager.start(
+        { text: `go-${i}`, attachments: [] },
+        "D:/p",
+      );
+    }
+
+    expect(closes[0]).toHaveBeenCalledTimes(1);
+    expect(closes[1]).not.toHaveBeenCalled();
+    expect(closes[2]).not.toHaveBeenCalled();
+    ctx.manager.disposeAll();
+  });
+
+  it("collapses transcript persistence into one delayed write", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sess-save-batch-"));
+    const archive = new SessionArchive(dir);
+    const saveItems = vi.spyOn(archive, "saveItems");
+    const ctx = makeDeps();
+    const manager = new SessionManager({
+      queryFn: ctx.queryFn,
+      permissionBroker: ctx.permissionBroker,
+      diffTracker: ctx.diffTracker,
+      cpa: ctx.cpa as never,
+      settings: ctx.settings,
+      archive,
+      emit: ctx.emit,
+      emitSession: ctx.emitSession,
+      emitDiff: ctx.emitDiff,
+    });
+
+    await manager.start({ text: "go", attachments: [] }, "D:/p");
+    expect(saveItems).not.toHaveBeenCalled();
+    manager.flushPendingPersistence();
+    expect(saveItems).toHaveBeenCalledTimes(1);
+    manager.disposeAll();
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 
   it("passes expected options to queryFn", async () => {
@@ -828,6 +940,7 @@ describe("SessionManager", () => {
     expect(items.some((i) => i.kind === "text" && i.role === "assistant" && String((i as { text: string }).text).includes("Hi"))).toBe(true);
     expect(items.some((i) => i.kind === "tool")).toBe(true);
 
+    manager.flushPendingPersistence();
     const disk = archive.loadItems(sessionId);
     expect(disk.some((i) => i.kind === "text" && i.role === "user")).toBe(true);
     expect(disk.some((i) => i.kind === "text" && i.role === "assistant")).toBe(true);
@@ -986,6 +1099,7 @@ describe("SessionManager", () => {
       .map((i) => (i.kind === "text" ? i.text : ""));
     expect(texts).toContain("first");
     expect(texts).toContain("second");
+    manager.flushPendingPersistence();
     expect(
       archive
         .loadItems(sessionId)
@@ -1141,6 +1255,53 @@ describe("SessionManager", () => {
     );
   });
 
+  it("keeps page reads unhydrated and caps full transcript memory with LRU", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sess-lru-"));
+    const archive = new SessionArchive(dir);
+    const ids = Array.from(
+      { length: MAX_HYDRATED_TRANSCRIPTS + 2 },
+      (_, i) => `stored-${i}`,
+    );
+    for (const [i, id] of ids.entries()) {
+      archive.upsertSummary({
+        id,
+        title: id,
+        cwd: "D:/p",
+        updatedAt: i + 1,
+        status: "idle",
+      });
+      archive.saveItems(id, [
+        { kind: "text", id: `${id}-m`, role: "user", text: id },
+      ]);
+    }
+    const ctx = makeDeps();
+    const manager = new SessionManager({
+      queryFn: ctx.queryFn,
+      permissionBroker: ctx.permissionBroker,
+      diffTracker: ctx.diffTracker,
+      cpa: ctx.cpa as never,
+      settings: ctx.settings,
+      archive,
+      emit: ctx.emit,
+      emitSession: ctx.emitSession,
+      emitDiff: ctx.emitDiff,
+    });
+
+    for (const id of ids) {
+      expect(manager.getTranscriptPage(id, { limit: 1 }).items).toHaveLength(1);
+    }
+    expect(manager.getMemoryStats().hydratedTranscripts).toBe(0);
+
+    for (const id of ids) manager.getTranscript(id);
+    expect(manager.getMemoryStats()).toMatchObject({
+      hydratedTranscripts: MAX_HYDRATED_TRANSCRIPTS,
+      hydratedItems: MAX_HYDRATED_TRANSCRIPTS,
+    });
+
+    manager.disposeAll();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("persists sdkMsgId when user_msg_ids binds user turns", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sess-uuid-"));
     const archive = new SessionArchive(dir);
@@ -1170,6 +1331,7 @@ describe("SessionManager", () => {
       { text: "hello", attachments: [] },
       "D:/p",
     );
+    manager.flushPendingPersistence();
     const disk = archive.loadItems(sessionId);
     const user = disk.find((i) => i.kind === "text" && i.role === "user");
     expect(user && user.kind === "text" ? user.sdkMsgId : undefined).toBe(

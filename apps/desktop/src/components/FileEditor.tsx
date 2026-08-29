@@ -51,8 +51,14 @@ import {
   languageLabelForPath,
 } from "../lib/editor-language";
 import { createVscodeSearchPanel } from "../lib/editor-search-panel";
+import {
+  storeEditorBuffer,
+  takeEditorBuffer,
+} from "../lib/editor-buffer-cache";
 import { effectiveTheme } from "../lib/theme";
 import { useAppStore } from "../state/store";
+
+const EMPTY_CHANGES: readonly import("@claude-desktop/shared").FileChange[] = [];
 
 /** Encodings offered in the status bar (iconv labels). */
 export const FILE_ENCODINGS = [
@@ -178,15 +184,19 @@ export function FileEditor({
   const [readOnly, setReadOnly] = useState(false);
   const [encoding, setEncoding] = useState("utf-8");
   const [encMenuOpen, setEncMenuOpen] = useState(false);
-  const fsChangeTick = useAppStore((s) => s.fsChangeTick);
-  const activeSessionId = useAppStore((s) => s.activeSessionId);
-  const changesBySession = useAppStore((s) => s.changesBySession);
+  const fsChangeTick = useAppStore((s) => (hidden ? 0 : s.fsChangeTick));
+  const activeSessionId = useAppStore((s) =>
+    hidden ? null : s.activeSessionId,
+  );
+  const activeChanges = useAppStore((s) =>
+    !hidden && s.activeSessionId
+      ? (s.changesBySession[s.activeSessionId] ?? EMPTY_CHANGES)
+      : EMPTY_CHANGES,
+  );
 
   // Session diff hunks for this file (Cursor/Trae-style inline decorations).
   const changeHunks = useMemo(() => {
-    const changes = activeSessionId
-      ? (changesBySession[activeSessionId] ?? [])
-      : [];
+    const changes = activeChanges;
     if (!changes.length) return null;
     const norm = (p: string) =>
       p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
@@ -201,7 +211,7 @@ export function FileEditor({
       return norm(isAbs(cp) || !projectPath ? cp : `${projectPath}/${cp}`) === target;
     });
     return hit?.hunks ?? null;
-  }, [activeSessionId, changesBySession, projectPath, rel]);
+  }, [activeChanges, activeSessionId, projectPath, rel]);
 
   const langLabel = useMemo(() => languageLabelForPath(rel), [rel]);
   const canWrite = hasDesktopApi("writeProjectFile");
@@ -258,6 +268,8 @@ export function FileEditor({
   useEffect(() => {
     if (!projectPath || !rel || !hostRef.current) return;
     let cancelled = false;
+    const cached = takeEditorBuffer(projectPath, rel);
+    const restored = cached?.encoding === encoding ? cached : undefined;
 
     if (viewRef.current) {
       viewRef.current.destroy();
@@ -290,7 +302,9 @@ export function FileEditor({
           setLoading(false);
           return;
         }
-        const text = res.content ?? "";
+        const diskText = res.content ?? "";
+        const text = restored?.dirty ? restored.content : diskText;
+        const savedText = restored?.dirty ? restored.savedContent : diskText;
         const isTrunc = Boolean(res.truncated);
         setTruncated(isTrunc);
         setReadOnly(isTrunc || !canWrite);
@@ -298,7 +312,8 @@ export function FileEditor({
           setEncoding(res.encoding);
           encodingRef.current = res.encoding;
         }
-        savedContentRef.current = text;
+        savedContentRef.current = savedText;
+        setDirty(text !== savedText);
 
         const lang = languageForPath(rel);
         const saveKey = keymap.of([
@@ -391,6 +406,17 @@ export function FileEditor({
           parent: hostRef.current!,
         });
         viewRef.current = view;
+        if (restored) {
+          const docLength = view.state.doc.length;
+          const anchor = Math.min(Math.max(0, restored.anchor), docLength);
+          const head = Math.min(Math.max(0, restored.head), docLength);
+          view.dispatch({ selection: { anchor, head } });
+          window.requestAnimationFrame(() => {
+            if (cancelled || viewRef.current !== view) return;
+            view.scrollDOM.scrollTop = restored.scrollTop;
+            view.scrollDOM.scrollLeft = restored.scrollLeft;
+          });
+        }
         setLoading(false);
       } catch (err) {
         if (!cancelled) {
@@ -402,9 +428,28 @@ export function FileEditor({
 
     return () => {
       cancelled = true;
-      if (viewRef.current) {
-        viewRef.current.destroy();
+      const view = viewRef.current;
+      if (view) {
+        const selection = view.state.selection.main;
+        const content = view.state.doc.toString();
+        storeEditorBuffer(projectPath, rel, {
+          content,
+          savedContent: savedContentRef.current,
+          // Capture this effect's decoder, not the mutable ref already updated
+          // by a newly selected encoding before React runs cleanup.
+          encoding,
+          dirty: content !== savedContentRef.current,
+          anchor: selection.anchor,
+          head: selection.head,
+          scrollTop: view.scrollDOM.scrollTop,
+          scrollLeft: view.scrollDOM.scrollLeft,
+        });
+        view.destroy();
         viewRef.current = null;
+      } else if (restored) {
+        // The async disk probe may have been cancelled before CodeMirror was
+        // rebuilt; put the consumed snapshot back so unsaved text survives.
+        storeEditorBuffer(projectPath, rel, restored);
       }
     };
     // encoding change intentionally remounts to re-decode bytes
@@ -414,7 +459,7 @@ export function FileEditor({
   // Probe: file deleted/renamed on disk → swap content for a missing notice.
   // Dirty tabs keep their unsaved buffer untouched.
   useEffect(() => {
-    if (!projectPath || !rel || dirty || loading || error) return;
+    if (hidden || !projectPath || !rel || dirty || loading || error) return;
     let cancelled = false;
     void getDesktop()
       .readProjectFile(projectPath, rel, 1, encodingRef.current)
@@ -428,17 +473,18 @@ export function FileEditor({
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fsChangeTick]);
+  }, [fsChangeTick, hidden]);
 
   // Push session-change line marks into the editor; re-applied whenever the
   // diff updates (diff:updated) or the tab (re)mounts.
   useEffect(() => {
+    if (hidden) return;
     const view = viewRef.current;
     if (!view || loading || error || missing) return;
     view.dispatch({
       effects: setDiffMarks.of(changeHunks ? lineMarksFromHunks(changeHunks) : null),
     });
-  }, [changeHunks, loading, error, missing]);
+  }, [changeHunks, hidden, loading, error, missing]);
 
   const changeEncoding = async (next: string) => {
     if (next === encoding) {

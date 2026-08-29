@@ -1,14 +1,18 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { SessionArchive } from "./session-archive";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  SessionArchive,
+  TRANSCRIPT_CHUNK_ITEMS,
+} from "./session-archive";
 import type { ChatItem, FileChange } from "@claude-desktop/shared";
 
 describe("SessionArchive", () => {
   const dirs: string[] = [];
 
   afterEach(() => {
+    vi.restoreAllMocks();
     for (const d of dirs) {
       try {
         fs.rmSync(d, { recursive: true, force: true });
@@ -89,8 +93,44 @@ describe("SessionArchive", () => {
       streaming: false,
     });
     expect(loaded[1]).toMatchObject({ role: "assistant", text: "hello" });
-    const raw = fs.readFileSync(path.join(dir, "sessions", "s1.json"), "utf8");
+    const raw = fs.readFileSync(
+      path.join(dir, "sessions", "s1.transcript", "chunk-000000.json"),
+      "utf8",
+    );
     expect(raw.includes("\n  ")).toBe(false);
+    const manifest = JSON.parse(
+      fs.readFileSync(
+        path.join(dir, "sessions", "s1.transcript", "manifest.json"),
+        "utf8",
+      ),
+    ) as { version: number; total: number };
+    expect(manifest).toMatchObject({ version: 2, total: 2 });
+  });
+
+  it("loads legacy transcripts and migrates them on the next save", () => {
+    const dir = tmpDir();
+    const sessionsDir = path.join(dir, "sessions");
+    fs.mkdirSync(sessionsDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(sessionsDir, "legacy.json"),
+      JSON.stringify({
+        version: 1,
+        sessionId: "legacy",
+        items: [{ kind: "text", id: "m1", role: "user", text: "old" }],
+      }),
+      "utf8",
+    );
+
+    const arch = new SessionArchive(dir);
+    const items = arch.loadItems("legacy");
+    expect(items.map((item) => item.id)).toEqual(["m1"]);
+    arch.saveItems("legacy", items);
+
+    expect(fs.existsSync(path.join(sessionsDir, "legacy.json"))).toBe(false);
+    expect(
+      fs.existsSync(path.join(sessionsDir, "legacy.transcript", "manifest.json")),
+    ).toBe(true);
+    expect(arch.loadItems("legacy").map((item) => item.id)).toEqual(["m1"]);
   });
 
   it("returns empty for missing transcript", () => {
@@ -147,6 +187,69 @@ describe("SessionArchive", () => {
 
     const miss = arch.loadItemsPage("s1", { afterId: "nope", limit: 2 });
     expect(miss.items).toEqual([]);
+  });
+
+  it("reads only chunks intersecting a requested page", () => {
+    const dir = tmpDir();
+    const arch = new SessionArchive(dir);
+    const items: ChatItem[] = Array.from(
+      { length: TRANSCRIPT_CHUNK_ITEMS * 2 + 5 },
+      (_, i) => ({
+        kind: "text",
+        id: `m${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        text: String(i),
+      }),
+    );
+    arch.saveItems("s1", items);
+
+    // If paging loaded the whole transcript, the unrelated missing first chunk
+    // would make this fail. The tail lives entirely in chunk 2.
+    fs.rmSync(
+      path.join(
+        dir,
+        "sessions",
+        "s1.transcript",
+        "chunk-000000.json",
+      ),
+    );
+    const tail = arch.loadItemsPage("s1", { limit: 5 });
+    expect(tail.items.map((item) => item.id)).toEqual([
+      `m${TRANSCRIPT_CHUNK_ITEMS * 2}`,
+      `m${TRANSCRIPT_CHUNK_ITEMS * 2 + 1}`,
+      `m${TRANSCRIPT_CHUNK_ITEMS * 2 + 2}`,
+      `m${TRANSCRIPT_CHUNK_ITEMS * 2 + 3}`,
+      `m${TRANSCRIPT_CHUNK_ITEMS * 2 + 4}`,
+    ]);
+  });
+
+  it("rewrites only the dirty tail chunk when appending", () => {
+    const arch = new SessionArchive(tmpDir());
+    const items: ChatItem[] = Array.from(
+      { length: TRANSCRIPT_CHUNK_ITEMS + 2 },
+      (_, i) => ({
+        kind: "text",
+        id: `m${i}`,
+        role: "assistant",
+        text: String(i),
+      }),
+    );
+    arch.saveItems("s1", items);
+    const write = vi.spyOn(fs, "writeFileSync");
+
+    arch.saveItems("s1", [
+      ...items,
+      { kind: "text", id: "new", role: "assistant", text: "new" },
+    ]);
+
+    const writtenFiles = write.mock.calls.map(([file]) => String(file));
+    expect(writtenFiles.some((file) => file.includes("chunk-000001.json"))).toBe(
+      true,
+    );
+    expect(writtenFiles.some((file) => file.includes("chunk-000000.json"))).toBe(
+      false,
+    );
+    write.mockRestore();
   });
 
   it("mergeSaveItems updates the tail without wiping unread history", () => {
@@ -240,11 +343,12 @@ describe("SessionArchive", () => {
       { path: "a.ts", status: "M", hunks: "+x", updatedAt: 1, events: [] },
     ]);
     const sessDir = path.join(dir, "sessions");
-    expect(fs.existsSync(path.join(sessDir, "s1.json"))).toBe(true);
+    expect(fs.existsSync(path.join(sessDir, "s1.transcript"))).toBe(true);
 
     arch.remove("s1");
     expect(arch.loadIndex().map((s) => s.id)).toEqual(["s2"]);
     expect(fs.existsSync(path.join(sessDir, "s1.json"))).toBe(false);
+    expect(fs.existsSync(path.join(sessDir, "s1.transcript"))).toBe(false);
     expect(fs.existsSync(path.join(sessDir, "s1.changes.json"))).toBe(false);
     expect(fs.existsSync(path.join(sessDir, "s2.json"))).toBe(false);
   });

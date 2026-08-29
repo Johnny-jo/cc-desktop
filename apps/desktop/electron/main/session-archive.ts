@@ -17,8 +17,25 @@ type TranscriptFile = {
   items: ChatItem[];
 };
 
+type TranscriptManifest = {
+  version: 2;
+  sessionId: string;
+  total: number;
+  chunkSize: number;
+  ids: string[];
+};
+
+type TranscriptChunk = {
+  version: 2;
+  sessionId: string;
+  start: number;
+  items: ChatItem[];
+};
+
 /** First paint / each "load older" page. */
 export const TRANSCRIPT_PAGE = 40;
+/** Small enough for cheap tail rewrites, large enough to avoid tiny files. */
+export const TRANSCRIPT_CHUNK_ITEMS = 64;
 
 export type TranscriptPage = {
   items: ChatItem[];
@@ -107,6 +124,12 @@ type ChangesFile = {
 export class SessionArchive {
   private readonly root: string;
   private readonly indexPath: string;
+  /**
+   * Reference-only snapshots let append/stream saves locate the first dirty
+   * chunk without retaining a second deep copy of each transcript. The session
+   * manager releases these references whenever it evicts a hydrated transcript.
+   */
+  private readonly saveSnapshots = new Map<string, ChatItem[]>();
 
   constructor(userDataDir: string) {
     this.root = path.join(userDataDir, "sessions");
@@ -201,9 +224,14 @@ export class SessionArchive {
   remove(sessionId: string): void {
     const list = this.loadIndex().filter((s) => s.id !== sessionId);
     this.saveIndex(list);
-    for (const file of [this.transcriptPath(sessionId), this.changesPath(sessionId)]) {
+    this.releaseItems(sessionId);
+    for (const file of [
+      this.transcriptPath(sessionId),
+      this.changesPath(sessionId),
+      this.transcriptDir(sessionId),
+    ]) {
       try {
-        fs.rmSync(file, { force: true });
+        fs.rmSync(file, { recursive: true, force: true });
       } catch {
         // best effort
       }
@@ -223,17 +251,18 @@ export class SessionArchive {
   }
 
   loadItems(sessionId: string): ChatItem[] {
-    const file = this.transcriptPath(sessionId);
-    try {
-      if (!fs.existsSync(file)) return [];
-      const raw = fs.readFileSync(file, "utf8");
-      const data = JSON.parse(raw) as TranscriptFile;
-      if (!Array.isArray(data.items)) return [];
-      // Drop streaming flags on load
-      return data.items.map(stripStreaming);
-    } catch {
-      return [];
+    const manifest = this.readManifest(sessionId);
+    if (manifest) {
+      const items = this.readItemRange(sessionId, manifest, 0, manifest.total);
+      if (items) {
+        this.saveSnapshots.set(sessionId, [...items]);
+        return items;
+      }
     }
+
+    const legacy = this.loadLegacyItems(sessionId);
+    this.saveSnapshots.set(sessionId, [...legacy]);
+    return legacy;
   }
 
   /**
@@ -244,18 +273,135 @@ export class SessionArchive {
     sessionId: string,
     opts?: { beforeId?: string; afterId?: string; limit?: number },
   ): TranscriptPage {
-    return pageTranscriptItems(this.loadItems(sessionId), opts);
+    const manifest = this.readManifest(sessionId);
+    if (!manifest) {
+      return pageTranscriptItems(this.loadLegacyItems(sessionId), opts);
+    }
+
+    const total = manifest.total;
+    const limit = opts?.limit && opts.limit > 0 ? opts.limit : TRANSCRIPT_PAGE;
+    let start = 0;
+    let end = total;
+
+    if (opts?.afterId) {
+      const idx = manifest.ids.indexOf(opts.afterId);
+      if (idx < 0) {
+        return { items: [], total, hasMore: total > 0, hasNewer: total > 0 };
+      }
+      start = idx + 1;
+      end = Math.min(total, start + limit);
+    } else {
+      if (opts?.beforeId) {
+        const idx = manifest.ids.indexOf(opts.beforeId);
+        if (idx < 0) {
+          return { items: [], total, hasMore: total > 0, hasNewer: false };
+        }
+        end = idx;
+      }
+      start = Math.max(0, end - limit);
+    }
+
+    const items = this.readItemRange(sessionId, manifest, start, end) ?? [];
+    return {
+      items,
+      total,
+      hasMore: start > 0,
+      hasNewer: end < total,
+    };
   }
 
   saveItems(sessionId: string, items: ChatItem[]): void {
-    const file = this.transcriptPath(sessionId);
-    const payload: TranscriptFile = {
-      version: 1,
+    const oldManifest = this.readManifest(sessionId);
+    const previous = this.saveSnapshots.get(sessionId);
+    let firstChanged = 0;
+    if (previous) {
+      const shared = Math.min(previous.length, items.length);
+      while (
+        firstChanged < shared &&
+        previous[firstChanged] === items[firstChanged] &&
+        previous[firstChanged]?.id === items[firstChanged]?.id
+      ) {
+        firstChanged += 1;
+      }
+      if (
+        oldManifest &&
+        firstChanged === previous.length &&
+        firstChanged === items.length
+      ) {
+        this.saveSnapshots.set(sessionId, [...items]);
+        return;
+      }
+    }
+
+    if (!oldManifest || oldManifest.chunkSize !== TRANSCRIPT_CHUNK_ITEMS) {
+      firstChanged = 0;
+    }
+
+    const dir = this.transcriptDir(sessionId);
+    if (!oldManifest && fs.existsSync(dir)) {
+      // A corrupt/incomplete v2 directory must not leak stale chunks into the
+      // replacement transcript.
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+    fs.mkdirSync(dir, { recursive: true });
+
+    const startChunk = Math.floor(firstChanged / TRANSCRIPT_CHUNK_ITEMS);
+    const nextChunkCount = Math.ceil(items.length / TRANSCRIPT_CHUNK_ITEMS);
+    const oldChunkCount = oldManifest
+      ? Math.ceil(oldManifest.total / oldManifest.chunkSize)
+      : 0;
+
+    for (
+      let chunkIndex = startChunk;
+      chunkIndex < nextChunkCount;
+      chunkIndex += 1
+    ) {
+      const start = chunkIndex * TRANSCRIPT_CHUNK_ITEMS;
+      const payload: TranscriptChunk = {
+        version: 2,
+        sessionId,
+        start,
+        items: items
+          .slice(start, start + TRANSCRIPT_CHUNK_ITEMS)
+          .map(stripStreaming),
+      };
+      this.writeJsonAtomic(this.chunkPath(sessionId, chunkIndex), payload);
+    }
+
+    const manifest: TranscriptManifest = {
+      version: 2,
       sessionId,
-      items: items.map(stripStreaming),
+      total: items.length,
+      chunkSize: TRANSCRIPT_CHUNK_ITEMS,
+      ids: items.map((item) => item.id),
     };
-    fs.mkdirSync(this.root, { recursive: true });
-    fs.writeFileSync(file, JSON.stringify(payload), "utf8");
+    this.writeJsonAtomic(this.manifestPath(sessionId), manifest);
+
+    // Manifest no longer points at these files; clean them up after commit.
+    for (
+      let chunkIndex = nextChunkCount;
+      chunkIndex < oldChunkCount;
+      chunkIndex += 1
+    ) {
+      try {
+        fs.rmSync(this.chunkPath(sessionId, chunkIndex), { force: true });
+      } catch {
+        // best effort
+      }
+    }
+
+    // Successful v2 save completes transparent migration from the legacy file.
+    try {
+      fs.rmSync(this.transcriptPath(sessionId), { force: true });
+    } catch {
+      // best effort
+    }
+    this.saveSnapshots.set(sessionId, [...items]);
+  }
+
+  /** Drop reference snapshots when the manager evicts a hydrated transcript. */
+  releaseItems(sessionId: string): void {
+    this.saveSnapshots.delete(sessionId);
   }
 
   /** Persist a renderer window / live tail without wiping older disk rows. */
@@ -315,6 +461,104 @@ export class SessionArchive {
 
   private transcriptPath(sessionId: string): string {
     return path.join(this.root, `${this.safeId(sessionId)}.json`);
+  }
+
+  private transcriptDir(sessionId: string): string {
+    return path.join(this.root, `${this.safeId(sessionId)}.transcript`);
+  }
+
+  private manifestPath(sessionId: string): string {
+    return path.join(this.transcriptDir(sessionId), "manifest.json");
+  }
+
+  private chunkPath(sessionId: string, chunkIndex: number): string {
+    return path.join(
+      this.transcriptDir(sessionId),
+      `chunk-${String(chunkIndex).padStart(6, "0")}.json`,
+    );
+  }
+
+  private readManifest(sessionId: string): TranscriptManifest | undefined {
+    try {
+      const file = this.manifestPath(sessionId);
+      if (!fs.existsSync(file)) return undefined;
+      const data = JSON.parse(
+        fs.readFileSync(file, "utf8"),
+      ) as Partial<TranscriptManifest>;
+      if (
+        data.version !== 2 ||
+        !Number.isInteger(data.total) ||
+        Number(data.total) < 0 ||
+        !Number.isInteger(data.chunkSize) ||
+        Number(data.chunkSize) <= 0 ||
+        !Array.isArray(data.ids) ||
+        data.ids.length !== data.total ||
+        !data.ids.every((id) => typeof id === "string")
+      ) {
+        return undefined;
+      }
+      return data as TranscriptManifest;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private readItemRange(
+    sessionId: string,
+    manifest: TranscriptManifest,
+    start: number,
+    end: number,
+  ): ChatItem[] | undefined {
+    if (start >= end) return [];
+    const out: ChatItem[] = [];
+    const firstChunk = Math.floor(start / manifest.chunkSize);
+    const lastChunk = Math.floor((end - 1) / manifest.chunkSize);
+    try {
+      for (
+        let chunkIndex = firstChunk;
+        chunkIndex <= lastChunk;
+        chunkIndex += 1
+      ) {
+        const raw = fs.readFileSync(this.chunkPath(sessionId, chunkIndex), "utf8");
+        const data = JSON.parse(raw) as TranscriptChunk;
+        if (!Array.isArray(data.items)) return undefined;
+        const chunkStart = chunkIndex * manifest.chunkSize;
+        const from = Math.max(start, chunkStart) - chunkStart;
+        const to = Math.min(end, chunkStart + data.items.length) - chunkStart;
+        if (to > from) out.push(...data.items.slice(from, to).map(stripStreaming));
+      }
+      return out;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private loadLegacyItems(sessionId: string): ChatItem[] {
+    const file = this.transcriptPath(sessionId);
+    try {
+      if (!fs.existsSync(file)) return [];
+      const data = JSON.parse(fs.readFileSync(file, "utf8")) as TranscriptFile;
+      if (!Array.isArray(data.items)) return [];
+      return data.items.map(stripStreaming);
+    } catch {
+      return [];
+    }
+  }
+
+  private writeJsonAtomic(file: string, payload: unknown): void {
+    const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(payload), "utf8");
+    try {
+      fs.rmSync(file, { force: true });
+      fs.renameSync(tmp, file);
+    } catch (err) {
+      try {
+        fs.rmSync(tmp, { force: true });
+      } catch {
+        // best effort
+      }
+      throw err;
+    }
   }
 
   private changesPath(sessionId: string): string {

@@ -785,18 +785,20 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
 
   ipcMain.handle(
     IPC.terminalCreate,
-    async (_e, payload?: { cwd?: string }) => {
+    async (event, payload?: { cwd?: string }) => {
       const cwd =
         payload?.cwd?.trim() ||
         ctx.settings.get().lastProjectPath ||
         undefined;
-      return ctx.terminal.create(cwd);
+      return ctx.terminal.create(cwd, {
+        ownerWebContentsId: event.sender.id,
+      });
     },
   );
 
   ipcMain.handle(
     IPC.sessionAttachCli,
-    async (_e, payload?: { sessionId?: string | null }) => {
+    async (event, payload?: { sessionId?: string | null }) => {
       try {
         await ctx.cpa.ensureReady();
       } catch (err) {
@@ -817,6 +819,7 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
         args,
         env: attach.env,
         label: "claude",
+        ownerWebContentsId: event.sender.id,
       });
       return {
         ok: true,
@@ -981,6 +984,10 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
   ipcMain.handle(IPC.roomRecall, async (_e, { roomId, itemId }) => {
     if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.recall(roomId, itemId);
+  });
+  ipcMain.handle(IPC.roomSeatStop, async (_e, { roomId, seatId }) => {
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
+    return ctx.rooms.stopSeat(roomId, seatId);
   });
   ipcMain.handle(IPC.roomPending, async (_e, { roomId }) => {
     if (!ctx.rooms) return { ok: false, pending: [] };

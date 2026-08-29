@@ -57,12 +57,20 @@ function mockWindow(sent: Sent) {
     }) as never;
 }
 
-function mockSessions() {
+function mockSessions(overrides?: {
+  getSummary?: ReturnType<typeof vi.fn>;
+  compressSession?: ReturnType<typeof vi.fn>;
+}) {
   return {
     start: vi.fn().mockResolvedValue("sess-agent"),
     continue: vi.fn().mockResolvedValue(undefined),
     getTranscript: vi.fn().mockReturnValue([]),
     getChangesForSelect: vi.fn().mockReturnValue([]),
+    getSummary:
+      overrides?.getSummary ?? vi.fn().mockReturnValue(undefined),
+    compressSession:
+      overrides?.compressSession ??
+      vi.fn().mockResolvedValue({ ok: true }),
     abort: vi.fn(),
     syncExtras: vi.fn(),
   } as unknown as SessionManager;
@@ -293,6 +301,305 @@ describe("room turn ask (filePolicy = ask)", () => {
     const extras = (guest.sessions.start as ReturnType<typeof vi.fn>).mock
       .calls[0][2] as Record<string, unknown>;
     expect(extras.pathJail).toBe(guest.dir);
+  });
+});
+
+describe("席位上下文占用与自动压缩", () => {
+  const usage = (ratio: number) => ({
+    contextUsage: {
+      ratio,
+      usedTokens: Math.round(ratio * 100_000),
+      limitTokens: 100_000,
+      source: "default",
+      modelId: "m",
+      updatedAt: Date.now(),
+    },
+  });
+
+  it("每轮结束把席位占用写进快照（低于阈值不压缩）", async () => {
+    const getSummary = vi.fn().mockReturnValue(usage(0.4));
+    const compressSession = vi.fn().mockResolvedValue({ ok: true });
+    const host = makeService({
+      sessions: mockSessions({ getSummary, compressSession }),
+    });
+    const { roomId, port, hostFingerprint } = await createHost(host.svc);
+    const guest = makeService();
+    await joinGuest(guest.svc, port, hostFingerprint);
+
+    expect(host.svc.addSeat(roomId, "agent", "bot").ok).toBe(true);
+    const seatId = host.svc
+      .get(roomId)!
+      .seats.find((s) => s.name === "bot")!.id;
+    await vi.waitFor(() =>
+      expect(
+        guest.svc.get(roomId)!.seats.some((s) => s.name === "bot"),
+      ).toBe(true),
+    );
+
+    const sent = await guest.svc.send(roomId, seatId, "干点活");
+    expect(sent.ok).toBe(true);
+    await vi.waitFor(() => expect(lastAsk(host.sent)).toBeTruthy());
+    host.svc.respondTurnAsk(lastAsk(host.sent)!.requestId, true);
+
+    await vi.waitFor(() => {
+      const seat = host.svc
+        .get(roomId)!
+        .seats.find((s) => s.name === "bot");
+      expect(seat?.contextUsage?.ratio).toBe(0.4);
+    });
+    expect(compressSession).not.toHaveBeenCalled();
+    // 快照同步到客人端
+    await vi.waitFor(() => {
+      const seat = guest.svc
+        .get(roomId)!
+        .seats.find((s) => s.name === "bot");
+      expect(seat?.contextUsage?.ratio).toBe(0.4);
+    });
+  });
+
+  it("超过 0.75 自动压缩：徽标清零、时间线留记录", async () => {
+    const getSummary = vi.fn().mockReturnValue(usage(0.8));
+    const compressSession = vi.fn().mockResolvedValue({ ok: true });
+    const host = makeService({
+      sessions: mockSessions({ getSummary, compressSession }),
+    });
+    const { roomId, port, hostFingerprint } = await createHost(host.svc);
+    const guest = makeService();
+    await joinGuest(guest.svc, port, hostFingerprint);
+
+    expect(host.svc.addSeat(roomId, "agent", "bot").ok).toBe(true);
+    const seatId = host.svc
+      .get(roomId)!
+      .seats.find((s) => s.name === "bot")!.id;
+    await vi.waitFor(() =>
+      expect(
+        guest.svc.get(roomId)!.seats.some((s) => s.name === "bot"),
+      ).toBe(true),
+    );
+
+    const sent = await guest.svc.send(roomId, seatId, "继续");
+    expect(sent.ok).toBe(true);
+    await vi.waitFor(() => expect(lastAsk(host.sent)).toBeTruthy());
+    host.svc.respondTurnAsk(lastAsk(host.sent)!.requestId, true);
+
+    await vi.waitFor(() => {
+      expect(compressSession).toHaveBeenCalledTimes(1);
+      expect(compressSession.mock.calls[0][2]).toEqual({
+        autoContinue: false,
+      });
+    });
+    await vi.waitFor(() => {
+      const snap = host.svc.get(roomId)!;
+      const seat = snap.seats.find((s) => s.name === "bot");
+      expect(seat?.contextUsage ?? null).toBeNull();
+      expect(
+        snap.items.some(
+          (i) => i.kind === "system" && i.text.includes("已自动压缩历史"),
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it("远程席位：节点回报占用，超阈值在节点压缩、宿主时间线留记录", async () => {
+    const host = makeService();
+    const { roomId, port, hostFingerprint } = await createHost(host.svc);
+    const getSummary = vi.fn().mockReturnValue(usage(0.9));
+    const compressSession = vi.fn().mockResolvedValue({ ok: true });
+    const guest = makeService({
+      sessions: mockSessions({ getSummary, compressSession }),
+    });
+    const guestUserId = await joinGuest(guest.svc, port, hostFingerprint);
+
+    await guest.svc.addSeat(roomId, "agent", "远端 bot", undefined, {
+      executorUserId: guestUserId,
+    });
+    await vi.waitFor(() => {
+      const seat = host.svc
+        .get(roomId)!
+        .seats.find((s) => s.name === "远端 bot");
+      expect(seat?.executorUserId).toBe(guestUserId);
+    });
+    const seatId = host.svc
+      .get(roomId)!
+      .seats.find((s) => s.name === "远端 bot")!.id;
+
+    const sent = await host.svc.send(roomId, seatId, "跑一轮");
+    expect(sent.ok).toBe(true);
+    // 客人本机审批（默认 ask）→ 允许 → 执行 → 超阈值压缩 → exec.result 回报
+    await vi.waitFor(() => expect(lastAsk(guest.sent)).toBeTruthy());
+    guest.svc.respondTurnAsk(lastAsk(guest.sent)!.requestId, true);
+
+    await vi.waitFor(() =>
+      expect(compressSession).toHaveBeenCalledTimes(1),
+    );
+    await vi.waitFor(() => {
+      const snap = host.svc.get(roomId)!;
+      const seat = snap.seats.find((s) => s.name === "远端 bot");
+      expect(seat?.contextUsage ?? null).toBeNull();
+      expect(
+        snap.items.some(
+          (i) => i.kind === "system" && i.text.includes("已自动压缩历史"),
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it("远程席位：节点回报占用（未超阈值）→ 宿主快照显示徽标", async () => {
+    const host = makeService();
+    const { roomId, port, hostFingerprint } = await createHost(host.svc);
+    const getSummary = vi.fn().mockReturnValue(usage(0.5));
+    const guest = makeService({
+      sessions: mockSessions({ getSummary }),
+    });
+    const guestUserId = await joinGuest(guest.svc, port, hostFingerprint);
+
+    await guest.svc.addSeat(roomId, "agent", "远端 bot", undefined, {
+      executorUserId: guestUserId,
+    });
+    await vi.waitFor(() => {
+      expect(
+        host.svc
+          .get(roomId)!
+          .seats.some(
+            (s) => s.name === "远端 bot" && s.executorUserId === guestUserId,
+          ),
+      ).toBe(true);
+    });
+    const seatId = host.svc
+      .get(roomId)!
+      .seats.find((s) => s.name === "远端 bot")!.id;
+
+    const sent = await host.svc.send(roomId, seatId, "跑一轮");
+    expect(sent.ok).toBe(true);
+    await vi.waitFor(() => expect(lastAsk(guest.sent)).toBeTruthy());
+    guest.svc.respondTurnAsk(lastAsk(guest.sent)!.requestId, true);
+
+    await vi.waitFor(() => {
+      const seat = host.svc
+        .get(roomId)!
+        .seats.find((s) => s.name === "远端 bot");
+      expect(seat?.contextUsage?.ratio).toBe(0.5);
+    });
+  });
+});
+
+describe("seat stop 与本机流式", () => {
+  function pendingStart(id: string) {
+    let resolveStart!: (v: string) => void;
+    const start = vi.fn().mockImplementation(
+      (_p: unknown, _cwd: unknown, extras?: { onSessionId?: (x: string) => void }) => {
+        extras?.onSessionId?.(id);
+        return new Promise<string>((res) => {
+          resolveStart = res;
+        });
+      },
+    );
+    return { start, resolve: () => resolveStart(id) };
+  }
+
+  it("本机席位：stopSeat 中止输出并留时间线记录", async () => {
+    const { start, resolve } = pendingStart("sess-run");
+    const abort = vi.fn();
+    const sessions = { ...mockSessions(), start, abort } as unknown as SessionManager;
+    const host = makeService({ sessions });
+    const { roomId, port, hostFingerprint } = await createHost(host.svc);
+    const guest = makeService();
+    await joinGuest(guest.svc, port, hostFingerprint);
+
+    expect(host.svc.addSeat(roomId, "agent", "bot").ok).toBe(true);
+    const seatId = host.svc.get(roomId)!.seats.find((s) => s.name === "bot")!.id;
+    await vi.waitFor(() =>
+      expect(guest.svc.get(roomId)!.seats.some((s) => s.name === "bot")).toBe(true),
+    );
+
+    await guest.svc.send(roomId, seatId, "跑");
+    await vi.waitFor(() => expect(lastAsk(host.sent)).toBeTruthy());
+    host.svc.respondTurnAsk(lastAsk(host.sent)!.requestId, true);
+    await vi.waitFor(() =>
+      expect(host.svc.get(roomId)!.seats.find((s) => s.name === "bot")!.running).toBe(true),
+    );
+
+    expect(host.svc.stopSeat(roomId, seatId).ok).toBe(true);
+    expect(abort).toHaveBeenCalledWith("sess-run");
+    const snap = host.svc.get(roomId)!;
+    const seat = snap.seats.find((s) => s.name === "bot")!;
+    expect(seat.running).toBe(false);
+    expect(
+      snap.items.some((i) => i.kind === "system" && i.text.includes("停止了「bot」的输出")),
+    ).toBe(true);
+    resolve();
+  });
+
+  it("远程席位：房主 stopSeat → 节点 abort 本机会话", async () => {
+    const host = makeService();
+    const { roomId, port, hostFingerprint } = await createHost(host.svc);
+    const { start, resolve } = pendingStart("sess-remote");
+    const abort = vi.fn();
+    const guest = makeService({
+      sessions: { ...mockSessions(), start, abort } as unknown as SessionManager,
+    });
+    const guestUserId = await joinGuest(guest.svc, port, hostFingerprint);
+
+    await guest.svc.addSeat(roomId, "agent", "远端 bot", undefined, {
+      executorUserId: guestUserId,
+    });
+    await vi.waitFor(() => {
+      const seat = host.svc.get(roomId)!.seats.find((s) => s.name === "远端 bot");
+      expect(seat?.executorUserId).toBe(guestUserId);
+    });
+    const seatId = host.svc.get(roomId)!.seats.find((s) => s.name === "远端 bot")!.id;
+
+    await host.svc.send(roomId, seatId, "干活");
+    await vi.waitFor(() => expect(lastAsk(guest.sent)).toBeTruthy());
+    guest.svc.respondTurnAsk(lastAsk(guest.sent)!.requestId, true);
+    await vi.waitFor(() => expect(start).toHaveBeenCalledTimes(1));
+
+    expect(host.svc.stopSeat(roomId, seatId).ok).toBe(true);
+    await vi.waitFor(() => expect(abort).toHaveBeenCalledWith("sess-remote"));
+    await vi.waitFor(() => {
+      const snap = host.svc.get(roomId)!;
+      expect(
+        snap.items.some((i) => i.kind === "system" && i.text.includes("停止了「远端 bot」的输出")),
+      ).toBe(true);
+    });
+    resolve();
+  });
+
+  it("本机席位：thinking/text 增量流式进 liveExec，轮次结束后清除", async () => {
+    const { start, resolve } = pendingStart("sess-run");
+    const host = makeService({
+      sessions: { ...mockSessions(), start } as unknown as SessionManager,
+    });
+    const { roomId, port, hostFingerprint } = await createHost(host.svc);
+    const guest = makeService();
+    await joinGuest(guest.svc, port, hostFingerprint);
+
+    expect(host.svc.addSeat(roomId, "agent", "bot").ok).toBe(true);
+    const seatId = host.svc.get(roomId)!.seats.find((s) => s.name === "bot")!.id;
+    await vi.waitFor(() =>
+      expect(guest.svc.get(roomId)!.seats.some((s) => s.name === "bot")).toBe(true),
+    );
+
+    await guest.svc.send(roomId, seatId, "想想再答");
+    await vi.waitFor(() => expect(lastAsk(host.sent)).toBeTruthy());
+    host.svc.respondTurnAsk(lastAsk(host.sent)!.requestId, true);
+    await vi.waitFor(() =>
+      expect(host.svc.get(roomId)!.seats.find((s) => s.name === "bot")!.running).toBe(true),
+    );
+
+    host.svc.onSessionEvent({ type: "thinking_delta", sessionId: "sess-run", text: "先想想" });
+    host.svc.onSessionEvent({ type: "text_delta", sessionId: "sess-run", text: "答" });
+
+    const live = host.svc.get(roomId)!.liveExec ?? [];
+    const entry = live.find((e) => e.seatId === seatId);
+    expect(entry?.thinking).toBe("先想想");
+    expect(entry?.text).toBe("答");
+
+    resolve();
+    await vi.waitFor(() => {
+      const after = host.svc.get(roomId)!.liveExec ?? [];
+      expect(after.some((e) => e.seatId === seatId)).toBe(false);
+    });
   });
 });
 

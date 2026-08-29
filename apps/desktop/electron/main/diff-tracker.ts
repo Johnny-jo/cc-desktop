@@ -87,11 +87,18 @@ export class DiffTracker {
    */
   private readonly bashBaselines = new Map<
     string,
-    { cwd: string; at: number; mtimes: Map<string, number>; gen: number }
+    {
+      cwd: string;
+      at: number;
+      mtimes: Map<string, number>;
+      gen: number;
+      mode: "git" | "mtime";
+    }
   >();
   /** In-flight baseline walks, so refresh can wait without blocking the stream. */
   private readonly bashBaselineTasks = new Map<string, Promise<void>>();
   private readonly bashScanGen = new Map<string, number>();
+  private readonly gitRepoChecks = new Map<string, Promise<boolean>>();
   /**
    * Called for EVERY tracked write operation BEFORE its change event is
    * recorded — the main process snapshots the file's current (pre-op)
@@ -157,14 +164,34 @@ export class DiffTracker {
     cwd: string,
     gen: number,
   ): Promise<void> {
-    const mtimes = await walkMtimes(cwd);
+    const root = path.resolve(cwd);
+    const at = this.now();
+    const git = await this.isGitRepository(root);
+    const mtimes = git ? new Map<string, number>() : await walkMtimes(root);
     if ((this.bashScanGen.get(sessionId) ?? 0) !== gen) return;
     this.bashBaselines.set(sessionId, {
-      cwd: path.resolve(cwd),
-      at: this.now(),
+      cwd: root,
+      at,
       mtimes,
       gen,
+      mode: git ? "git" : "mtime",
     });
+  }
+
+  private isGitRepository(cwd: string): Promise<boolean> {
+    const root = path.resolve(cwd);
+    const cached = this.gitRepoChecks.get(root);
+    if (cached) return cached;
+    const check = new Promise<boolean>((resolve) => {
+      execFile(
+        "git",
+        ["-C", root, "rev-parse", "--is-inside-work-tree"],
+        { encoding: "utf8", timeout: 2000, windowsHide: true },
+        (err, stdout) => resolve(!err && stdout.trim() === "true"),
+      );
+    });
+    this.gitRepoChecks.set(root, check);
+    return check;
   }
 
   private onEditOrWrite(
@@ -420,7 +447,7 @@ export class DiffTracker {
     if (fromGit) {
       const out: Array<{ abs: string; status: "A" | "M" }> = [];
       let nowMtimes: Map<string, number> | null = null;
-      if (baseline && baseline.cwd === root) {
+      if (baseline?.mode === "mtime" && baseline.cwd === root) {
         try {
           nowMtimes = await walkMtimes(root);
         } catch {
@@ -428,7 +455,15 @@ export class DiffTracker {
         }
       }
       for (const item of fromGit) {
-        if (item.status === "A") {
+        if (baseline?.mode === "git" && baseline.cwd === root) {
+          try {
+            const st = await fs.promises.stat(item.abs);
+            // Allow for coarse filesystem timestamp precision on Windows.
+            if (st.mtimeMs >= baseline.at - 1_000) out.push(item);
+          } catch {
+            // Deleted/unreadable paths have no content to display.
+          }
+        } else if (item.status === "A") {
           out.push(item);
         } else if (nowMtimes && baseline) {
           const m = nowMtimes.get(item.abs);
@@ -442,7 +477,7 @@ export class DiffTracker {
       return out;
     }
 
-    if (!baseline || baseline.cwd !== root) {
+    if (!baseline || baseline.cwd !== root || baseline.mode !== "mtime") {
       // No baseline and no git — avoid marking the whole tree.
       return [];
     }

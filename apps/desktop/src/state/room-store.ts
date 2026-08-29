@@ -543,6 +543,18 @@ export async function sendToSeat(
   return res;
 }
 
+/** @agent /stop：停止某个 Agent 席位正在跑的输出。 */
+export async function stopRoomSeat(
+  seatId: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const id = state.activeRoomId;
+  if (!id) return { ok: false, error: "没有打开的房间" };
+  if (!hasDesktopApi("stopRoomSeat")) {
+    return { ok: false, error: "请完全重启应用后再使用" };
+  }
+  return getDesktop().stopRoomSeat(id, seatId);
+}
+
 /** Rejoin a room we dropped from (uses stored join info in main). */
 export async function rejoinRoom(
   roomId: string,

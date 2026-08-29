@@ -5425,6 +5425,23 @@ body.session-detaching {
   background: color-mix(in srgb, var(--warn, #b8860b) 12%, transparent);
 }
 
+/* 席位上下文占用徽标：随占用率变色（ok → warn → danger） */
+.room-seat-tag.ctx {
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--text-muted) 12%, transparent);
+  font-variant-numeric: tabular-nums;
+}
+
+.room-seat-tag.ctx.is-warn {
+  color: var(--warn, #b8860b);
+  background: color-mix(in srgb, var(--warn, #b8860b) 12%, transparent);
+}
+
+.room-seat-tag.ctx.is-danger {
+  color: var(--danger, #c0392b);
+  background: color-mix(in srgb, var(--danger, #c0392b) 12%, transparent);
+}
+
 .room-seat.is-mine {
   border-color: var(--ok);
 }
@@ -5503,6 +5520,13 @@ body.session-detaching {
 .room-msg-body {
   flex: 1;
   min-width: 0;
+}
+
+/* 自己的消息：内容整体靠右，气泡贴着右侧头像，不再漂到左边 */
+.room-msg.is-me .room-msg-body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
 }
 
 .room-msg-meta {
@@ -5627,6 +5651,32 @@ body.session-detaching {
   font-size: 0.846rem;
   color: var(--text-faint);
   font-family: var(--font-mono, monospace);
+}
+
+/* 流式思考：思考阶段默认展开，正文开始流式后自动折叠（open 受控） */
+.room-live-thinking {
+  margin: 0 0 4px;
+  font-size: 0.846rem;
+  color: var(--text-faint);
+}
+
+.room-live-thinking summary {
+  cursor: pointer;
+  user-select: none;
+  color: var(--text-faint);
+}
+
+.room-live-thinking-body {
+  margin-top: 4px;
+  padding: 6px 10px;
+  border-left: 3px solid var(--border-soft);
+  background: var(--bg-elevated);
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 220px;
+  overflow: auto;
+  font-style: italic;
 }
 
 /* 远端改动只读面板 */
