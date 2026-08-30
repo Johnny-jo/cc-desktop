@@ -1,9 +1,14 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, {
+  Suspense,
+  lazy,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { createPortal } from "react-dom";
 import { SessionList } from "./components/SessionList";
 import { ChatPanel } from "./components/ChatPanel";
-import { ChangesPanel } from "./components/ChangesPanel";
-import { TerminalPanel } from "./components/TerminalPanel";
 import {
   TitlebarToggles,
   ThemeToggle,
@@ -11,18 +16,12 @@ import {
   ResizeHandle,
 } from "./components/LayoutChrome";
 import { SideRail, type RailMode } from "./components/SideRail";
-import { ChangelogModal } from "./components/ChangelogModal";
 import { PermissionModal } from "./components/PermissionModal";
 import { RoomPermAskModal } from "./components/RoomPermAskModal";
 import { UserPromptModal } from "./components/UserPromptModal";
-import { SettingsDrawer } from "./components/SettingsDrawer";
 import { OnboardingModal } from "./components/OnboardingModal";
 import { ErrorBanner } from "./components/ErrorBanner";
 import { UpdateBanner } from "./components/UpdateBanner";
-import { FileEditor } from "./components/FileEditor";
-import { FileSearchModal } from "./components/FileSearchModal";
-import { RoomStage } from "./components/RoomStage";
-import { CliModePage } from "./components/CliModePage";
 import { getDesktop } from "./lib/desktop-api";
 import { dropEditorBuffer } from "./lib/editor-buffer-cache";
 import {
@@ -48,6 +47,47 @@ import {
   toggleCliMode,
   useAppStore,
 } from "./state/store";
+
+const ChangesPanel = lazy(() =>
+  import("./components/ChangesPanel").then((module) => ({
+    default: module.ChangesPanel,
+  })),
+);
+const TerminalPanel = lazy(() =>
+  import("./components/TerminalPanel").then((module) => ({
+    default: module.TerminalPanel,
+  })),
+);
+const ChangelogModal = lazy(() =>
+  import("./components/ChangelogModal").then((module) => ({
+    default: module.ChangelogModal,
+  })),
+);
+const SettingsDrawer = lazy(() =>
+  import("./components/SettingsDrawer").then((module) => ({
+    default: module.SettingsDrawer,
+  })),
+);
+const FileEditor = lazy(() =>
+  import("./components/FileEditor").then((module) => ({
+    default: module.FileEditor,
+  })),
+);
+const FileSearchModal = lazy(() =>
+  import("./components/FileSearchModal").then((module) => ({
+    default: module.FileSearchModal,
+  })),
+);
+const RoomStage = lazy(() =>
+  import("./components/RoomStage").then((module) => ({
+    default: module.RoomStage,
+  })),
+);
+const CliModePage = lazy(() =>
+  import("./components/CliModePage").then((module) => ({
+    default: module.CliModePage,
+  })),
+);
 
 /** Soft max editor share while chat stays visible (chat min 35%). */
 const EDITOR_SOFT_MAX = 0.65;
@@ -280,6 +320,10 @@ export function App() {
     setChangesWidth,
     setTerminalHeight,
   } = usePanelLayout();
+  // Keep PTYs alive after the panel has been opened once, while deferring the
+  // xterm bundle entirely for users who never open the terminal.
+  const terminalWasOpenedRef = useRef(false);
+  if (layout.terminalOpen) terminalWasOpenedRef.current = true;
 
   // Tool card "jump to change" → make sure the changes panel is visible.
   const revealChangeRequest = useAppStore((s) => s.revealChangeRequest);
@@ -430,10 +474,14 @@ export function App() {
         <RoomPermAskModal />
         <UserPromptModal />
         <OnboardingModal open={needsOnboarding} />
-        <SettingsDrawer
-          open={settingsOpen}
-          onClose={() => setSettingsOpen(false)}
-        />
+        {settingsOpen ? (
+          <Suspense fallback={null}>
+            <SettingsDrawer
+              open
+              onClose={() => setSettingsOpen(false)}
+            />
+          </Suspense>
+        ) : null}
       </div>
     );
   }
@@ -455,7 +503,9 @@ export function App() {
         <div className="workspace" style={workspaceStyle}>
           <div className="main-row">
             <main className="panel panel-chat">
-              <RoomStage />
+              <Suspense fallback={null}>
+                <RoomStage />
+              </Suspense>
             </main>
           </div>
         </div>
@@ -464,10 +514,14 @@ export function App() {
         <RoomPermAskModal />
         <UserPromptModal />
         <OnboardingModal open={needsOnboarding} />
-        <SettingsDrawer
-          open={settingsOpen}
-          onClose={() => setSettingsOpen(false)}
-        />
+        {settingsOpen ? (
+          <Suspense fallback={null}>
+            <SettingsDrawer
+              open
+              onClose={() => setSettingsOpen(false)}
+            />
+          </Suspense>
+        ) : null}
       </div>
     );
   }
@@ -545,7 +599,9 @@ export function App() {
           {changesFull ? null : (
           <main className="panel panel-chat">
             {cliMode ? (
-              <CliModePage />
+              <Suspense fallback={null}>
+                <CliModePage />
+              </Suspense>
             ) : (
             <div className="chat-editor-row">
               {editorOpen && activeEditor ? (
@@ -678,12 +734,13 @@ export function App() {
                     {editorTabs
                       .filter((tab) => mountedEditorSet.has(tab))
                       .map((tab) => (
-                        <FileEditor
-                          key={tab}
-                          rel={tab}
-                          hidden={tab !== activeEditor}
-                          onClose={() => closeEditorTab(tab)}
-                        />
+                        <Suspense key={tab} fallback={null}>
+                          <FileEditor
+                            rel={tab}
+                            hidden={tab !== activeEditor}
+                            onClose={() => closeEditorTab(tab)}
+                          />
+                        </Suspense>
                       ))}
                   </div>
 
@@ -804,7 +861,9 @@ export function App() {
                   }
                 >
                   {effectiveMode === "rooms" ? (
-                    <RoomStage />
+                    <Suspense fallback={null}>
+                      <RoomStage />
+                    </Suspense>
                   ) : (
                     <ChatPanel
                       onOpenSettings={() => setSettingsOpen(true)}
@@ -922,7 +981,9 @@ export function App() {
                       }
                 }
               >
-                <ChangesPanel onOpenFile={onOpenFile} />
+                <Suspense fallback={null}>
+                  <ChangesPanel onOpenFile={onOpenFile} />
+                </Suspense>
               </aside>
             </>
           ) : null}
@@ -943,10 +1004,14 @@ export function App() {
             />
           )}
         </div>
-        <TerminalPanel
-          open={layout.terminalOpen}
-          height={layout.terminalOpen ? layout.terminalHeight : 0}
-        />
+        {terminalWasOpenedRef.current ? (
+          <Suspense fallback={null}>
+            <TerminalPanel
+              open={layout.terminalOpen}
+              height={layout.terminalOpen ? layout.terminalHeight : 0}
+            />
+          </Suspense>
+        ) : null}
       </div>
 
       <PermissionModal />
@@ -1029,19 +1094,25 @@ export function App() {
           )
         : null}
       <OnboardingModal open={needsOnboarding} />
-      <SettingsDrawer
-        open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-      />
-      <FileSearchModal
-        open={fileSearchOpen}
-        onClose={() => setFileSearchOpen(false)}
-        onOpenFile={onOpenFile}
-      />
-      <ChangelogModal
-        open={changelogOpen}
-        onClose={() => setChangelogOpen(false)}
-      />
+      {settingsOpen ? (
+        <Suspense fallback={null}>
+          <SettingsDrawer open onClose={() => setSettingsOpen(false)} />
+        </Suspense>
+      ) : null}
+      {fileSearchOpen ? (
+        <Suspense fallback={null}>
+          <FileSearchModal
+            open
+            onClose={() => setFileSearchOpen(false)}
+            onOpenFile={onOpenFile}
+          />
+        </Suspense>
+      ) : null}
+      {changelogOpen ? (
+        <Suspense fallback={null}>
+          <ChangelogModal open onClose={() => setChangelogOpen(false)} />
+        </Suspense>
+      ) : null}
     </div>
   );
 }

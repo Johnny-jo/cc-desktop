@@ -3,6 +3,7 @@ import type {
   Attachment,
   ModOfferPayload,
   RoomListItem,
+  RoomLivePatch,
   RoomQuoteRef,
   RoomSnapshot,
 } from "@claude-desktop/shared";
@@ -125,7 +126,7 @@ function pickDefaultSeat(room: RoomSnapshot | null | undefined): string | null {
     room.seats.find(
       (s) => s.kind === "human" && (!mine || s.occupantUserId === mine),
     )?.id ??
-    room.seats.find((s) => s.kind === "agent" && !s.takenOverBy)?.id ??
+    room.seats.find((s) => s.kind === "agent")?.id ??
     room.seats[0]?.id ??
     null
   );
@@ -282,6 +283,7 @@ export function bindRoomEvents(): () => void {
       roomId: string;
       joining?: "pending-approval" | null;
       room?: RoomSnapshot;
+      livePatch?: RoomLivePatch;
       closed?: boolean;
       offline?: boolean;
       silent?: boolean;
@@ -297,6 +299,22 @@ export function bindRoomEvents(): () => void {
       set({ joinPhase: "pending-approval" });
     }
     if (!ev?.roomId) return;
+
+    // Streaming progress is intentionally a tiny patch: do not rebuild room
+    // lists, notifications, seat-session bridges, or the timeline here.
+    if (ev.livePatch) {
+      if (state.activeRoomId === ev.roomId && state.activeRoom) {
+        set({
+          activeRoom: {
+            ...state.activeRoom,
+            liveExec: ev.livePatch.liveExec.length
+              ? ev.livePatch.liveExec
+              : undefined,
+          },
+        });
+      }
+      return;
+    }
 
     // Host approval queue pushes arrive without a snapshot.
     if (ev.pending) {
@@ -464,11 +482,14 @@ export async function addSeat(
     aiUserId?: string;
     workspaceUserId?: string;
   },
-): Promise<void> {
+): Promise<{ ok: boolean; error?: string }> {
   const id = state.activeRoomId;
-  if (!id || !hasDesktopApi("addRoomSeat")) return;
+  if (!id || !hasDesktopApi("addRoomSeat")) {
+    return { ok: false, error: "请完全重启应用后再使用群聊" };
+  }
   const res = await getDesktop().addRoomSeat(id, kind, name, agentName, extra);
   if (res.room) set({ activeRoom: res.room });
+  return { ok: res.ok !== false, error: res.error };
 }
 
 export async function updateSeat(
@@ -509,19 +530,6 @@ export async function playRps(
   if (!id || !seatId) return { ok: false, error: "请先选一个席位" };
   if (!hasDesktopApi("roomRps")) return { ok: false, error: "请完全重启应用" };
   return getDesktop().roomRps(id, seatId, hand);
-}
-
-export async function takeoverSeat(seatId: string): Promise<void> {
-  const id = state.activeRoomId;
-  if (!id || !hasDesktopApi("takeoverSeat")) return;
-  await getDesktop().takeoverSeat(id, seatId);
-  set({ selectedSeatId: seatId });
-}
-
-export async function returnSeat(seatId: string): Promise<void> {
-  const id = state.activeRoomId;
-  if (!id || !hasDesktopApi("returnSeat")) return;
-  await getDesktop().returnSeat(id, seatId);
 }
 
 export async function sendToSeat(

@@ -61,14 +61,16 @@ export function RoomAddSeatModal({
   const [skills, setSkills] = useState<Array<{ name: string; scope: string }>>(
     [],
   );
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape" && !submitting) onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, submitting]);
 
   useEffect(() => {
     if (!hasDesktopApi("listSkills")) return;
@@ -101,9 +103,9 @@ export function RoomAddSeatModal({
     );
   };
 
-  const submit = () => {
+  const submit = async () => {
     const n = name.trim();
-    if (!n) return;
+    if (!n || submitting) return;
     const extra = {
       agentPrompt: agentPrompt.trim() || undefined,
       skillNames: skillNames.length ? skillNames : undefined,
@@ -112,51 +114,89 @@ export function RoomAddSeatModal({
       workspaceUserId: workspaceUserId || undefined,
       aiUserId: aiUserId || undefined,
     };
-    if (initial?.seatId) {
-      void updateSeat(initial.seatId, {
-        name: n,
-        agentName: agentName || n,
-        ...extra,
-      });
-    } else {
-      void addSeat("agent", n, agentName || undefined, extra);
+    setSubmitting(true);
+    setSubmitError(null);
+    try {
+      if (initial?.seatId) {
+        const result = await updateSeat(initial.seatId, {
+          name: n,
+          agentName: agentName || n,
+          ...extra,
+        });
+        if (!result.ok) {
+          setSubmitError(result.error ?? "保存席位失败");
+          return;
+        }
+      } else {
+        const result = await addSeat("agent", n, agentName || undefined, extra);
+        if (!result.ok) {
+          setSubmitError(result.error ?? "添加席位失败");
+          return;
+        }
+      }
+      onClose();
+    } catch (error) {
+      setSubmitError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSubmitting(false);
     }
-    onClose();
   };
 
   return createPortal(
-    <div className="room-modal-overlay" role="presentation" onClick={onClose}>
+    <div
+      className="room-modal-overlay"
+      role="presentation"
+      onClick={() => {
+        if (!submitting) onClose();
+      }}
+    >
       <div
-        className="room-modal"
+        className="room-modal room-seat-editor-modal"
         role="dialog"
+        aria-modal="true"
         aria-label={t.room.addSeatTitle}
         onClick={(e) => e.stopPropagation()}
       >
         <header className="room-modal-head">
-          <h3>{initial?.seatId ? t.room.seatSettings : t.room.addSeatTitle}</h3>
-          <button type="button" className="btn btn-ghost btn-sm" onClick={onClose}>
-            ×
+          <div className="room-modal-title">
+            <h3>{initial?.seatId ? t.room.seatSettings : t.room.addSeatTitle}</h3>
+            <p>配置角色、模型与实际执行工作区</p>
+          </div>
+          <button
+            type="button"
+            className="settings-close-btn"
+            aria-label={t.common.close}
+            disabled={submitting}
+            onClick={onClose}
+          >
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+              <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+            </svg>
           </button>
         </header>
-        <div className="room-modal-body">
-          <label className="settings-field">
+        <div className="room-modal-body room-seat-editor-body">
+          <div className="room-seat-form-heading">
+            <strong>基本信息</strong>
+            <span>名称用于群聊中识别席位；模板会带入已有 Agent 的说明。</span>
+          </div>
+          <label className="settings-field room-seat-half">
             {t.room.addSeatName}
             <input
               placeholder={t.room.addSeatNamePh}
               value={name}
               autoFocus
               onChange={(e) => setName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") submit();
-              }}
             />
           </label>
-          <label className="settings-field">
+          <label className="settings-field room-seat-half">
             {t.room.addSeatAgent}
             <select
               className="select"
               value={agentName}
-              onChange={(e) => setAgentName(e.target.value)}
+              onChange={(e) => {
+                setAgentName(e.target.value);
+                if (!name.trim() && e.target.value) setName(e.target.value);
+              }}
             >
               <option value="">{t.room.addSeatAgentNone}</option>
               {agents.map((a) => (
@@ -167,9 +207,9 @@ export function RoomAddSeatModal({
             </select>
           </label>
           {selected?.description ? (
-            <p className="settings-hint">{selected.description}</p>
+            <p className="room-seat-inline-note">{selected.description}</p>
           ) : null}
-          <label className="settings-field">
+          <label className="settings-field room-seat-full">
             {t.room.addSeatPrompt}
             <textarea
               rows={3}
@@ -178,8 +218,12 @@ export function RoomAddSeatModal({
               onChange={(e) => setAgentPrompt(e.target.value)}
             />
           </label>
+          <div className="room-seat-form-heading room-seat-full">
+            <strong>运行位置</strong>
+            <span>模型来源与文件工作区可以分别选择，远程执行会由对应成员确认。</span>
+          </div>
           {showAxes ? (
-            <label className="settings-field">
+            <label className="settings-field room-seat-half">
               AI 来源
               <select
                 className="select"
@@ -202,18 +246,18 @@ export function RoomAddSeatModal({
               </select>
             </label>
           ) : null}
-          {shareHint ? <p className="settings-hint">{shareHint}</p> : null}
+          {shareHint ? <p className="room-seat-inline-note is-warning">{shareHint}</p> : null}
           {aiMember && !aiMember.isSelf && aiMember.aiShare !== "on" ? (
             <button
               type="button"
-              className="btn btn-sm"
+              className="btn btn-sm room-seat-request"
               disabled={aiMember.aiShare === "pending"}
               onClick={() => onAskAiShare?.(aiMember.userId)}
             >
               {aiMember.aiShare === "pending" ? "等待同意" : "请求借用"}
             </button>
           ) : null}
-          <label className="settings-field">
+          <label className="settings-field room-seat-half">
             {t.room.addSeatModel}
             <select
               className="select"
@@ -230,7 +274,7 @@ export function RoomAddSeatModal({
             </select>
           </label>
           {showAxes ? (
-            <label className="settings-field">
+            <label className="settings-field room-seat-half">
               工作目录
               <select
                 className="select"
@@ -247,19 +291,19 @@ export function RoomAddSeatModal({
             </label>
           ) : null}
           {showAxes && aiUserId && workspaceUserId && aiUserId !== workspaceUserId ? (
-            <p className="settings-hint">
+            <p className="room-seat-inline-note">
               循环在文件主人电脑上跑，模型请求转到 AI 主人；写文件由文件主人确认。
             </p>
           ) : null}
           {wsMember && !wsMember.projectPath ? (
-            <p className="settings-hint">
+            <p className="room-seat-inline-note is-warning">
               {wsMember.isSelf
                 ? "当前没有打开项目，执行会失败。"
                 : "对方当前没有打开项目，现在发起执行会失败。"}
             </p>
           ) : null}
           {skills.length ? (
-            <fieldset className="settings-field">
+            <fieldset className="settings-field room-seat-full room-seat-skill-fieldset">
               <legend>{t.room.addSeatSkills}</legend>
               <div className="room-seat-skills">
                 {skills.map((s) => (
@@ -276,20 +320,30 @@ export function RoomAddSeatModal({
               </div>
             </fieldset>
           ) : (
-            <p className="settings-hint">{t.room.addSeatSkillsEmpty}</p>
+            <p className="settings-hint room-seat-full">{t.room.addSeatSkillsEmpty}</p>
           )}
+          {submitError ? <p className="room-err room-seat-full">{submitError}</p> : null}
         </div>
         <footer className="room-modal-foot">
-          <button type="button" className="btn btn-ghost btn-sm" onClick={onClose}>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            disabled={submitting}
+            onClick={onClose}
+          >
             {t.common.cancel}
           </button>
           <button
             type="button"
-            className="btn btn-sm"
-            disabled={!name.trim()}
-            onClick={submit}
+            className="btn btn-primary btn-sm"
+            disabled={!name.trim() || submitting}
+            onClick={() => void submit()}
           >
-            {initial?.seatId ? t.common.save : t.room.addSeatSubmit}
+            {submitting
+              ? "保存中…"
+              : initial?.seatId
+                ? t.common.save
+                : t.room.addSeatSubmit}
           </button>
         </footer>
       </div>

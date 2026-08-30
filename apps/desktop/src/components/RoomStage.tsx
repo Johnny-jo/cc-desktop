@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { Attachment, RoomQuoteRef, RoomTimelineItem } from "@claude-desktop/shared";
 import { formatFileSize } from "@claude-desktop/shared";
@@ -7,12 +7,10 @@ import {
   askRoomAiShare,
   recallRoomMessage,
   rejoinRoom,
-  returnSeat,
   selectSeat,
   sendToSeat,
   setRoomAiShare,
   stopRoomSeat,
-  takeoverSeat,
   useRoomStore,
 } from "../state/room-store";
 import {
@@ -33,31 +31,12 @@ import {
 } from "../lib/format-usage";
 import { useI18n } from "../i18n/useI18n";
 import { ModPlayPanel } from "./ModPlayPanel";
-import { MarkdownBody } from "./MarkdownBody";
 import { RoomAddSeatModal, type SeatDraft } from "./RoomAddSeatModal";
 import { RoomInviteModal } from "./RoomInviteModal";
 import { RoomPendingBanner } from "./RoomPendingBanner";
 import { RoomRemoteChanges } from "./RoomRemoteChanges";
 import { RoomSettingsModal } from "./RoomSettingsModal";
-
-function SeatAvatar({ kind }: { kind: "human" | "agent" }) {
-  if (kind === "agent") {
-    return (
-      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
-        <rect x="2.5" y="4" width="11" height="8" rx="2" stroke="currentColor" strokeWidth="1.4" />
-        <circle cx="6" cy="8" r="1" fill="currentColor" />
-        <circle cx="10" cy="8" r="1" fill="currentColor" />
-        <path d="M8 4V2" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-      </svg>
-    );
-  }
-  return (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
-      <circle cx="8" cy="5.5" r="2.5" stroke="currentColor" strokeWidth="1.4" />
-      <path d="M3.5 14c0-2.5 2-4 4.5-4s4.5 1.5 4.5 4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-    </svg>
-  );
-}
+import { RoomTimeline, SeatAvatar } from "./RoomTimeline";
 
 export function RoomStage() {
   const { t } = useI18n();
@@ -97,9 +76,20 @@ export function RoomStage() {
   const timelineRef = useRef<HTMLDivElement | null>(null);
   const lastItem = room?.items[room.items.length - 1];
   const runningCount = room?.seats.filter((s) => s.running).length ?? 0;
+  const livePinKey = (room?.liveExec ?? [])
+    .map((entry) =>
+      `${entry.turnId}:${entry.text.length}:${entry.thinking?.length ?? 0}:${entry.tool ?? ""}`,
+    )
+    .join("|");
   const timelinePinKey = lastItem
-    ? `${lastItem.id}:${lastItem.text?.length ?? 0}:${runningCount}`
-    : `0:${runningCount}`;
+    ? `${lastItem.id}:${lastItem.text?.length ?? 0}:${runningCount}:${livePinKey}`
+    : `0:${runningCount}:${livePinKey}`;
+  const openBubbleMenu = useCallback(
+    (item: RoomTimelineItem, x: number, y: number) => {
+      setBubbleMenu({ x, y, item });
+    },
+    [],
+  );
 
   useEffect(() => {
     const el = timelineRef.current;
@@ -137,7 +127,7 @@ export function RoomStage() {
           <p className="room-stage-empty">
             在左侧「群聊」里创建群聊，让局域网内的其他人加入；
             <br />
-            每个席位可以是一个 Agent，也可以由人随时接管。
+            每个席位可以是一个成员或 Agent，点击席位即可快速 @ 对方。
           </p>
         </div>
       </div>
@@ -152,6 +142,9 @@ export function RoomStage() {
   const canHost = myRole === "host";
   const myUserId = room.localUserId;
   const myMember = room.members.find((m) => m.userId === myUserId);
+  const myHumanSeat = room.seats.find(
+    (seat) => seat.kind === "human" && seat.occupantUserId === myUserId,
+  );
   const canManage = canHost || canManageSeats(myMember?.role);
   const hostMember = room.members.find((m) => m.role === "host");
   const hostUserId = hostMember?.userId ?? null;
@@ -196,42 +189,33 @@ export function RoomStage() {
     inputRef.current?.focus();
   };
 
-  // 渲染层 @名字 高亮：按席位名匹配，@自己加底色
-  const seatNames = room.seats
-    .map((s) => s.name)
-    .sort((a, b) => b.length - a.length);
-  const mySeatName =
-    room.seats.find(
-      (s) => s.kind === "human" && s.occupantUserId === myUserId,
-    )?.name ?? null;
-  const mentionRe = seatNames.length
-    ? new RegExp(
-        `@(${seatNames.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`,
-        "g",
-      )
-    : null;
-
-  const renderText = (text: string): React.ReactNode => {
-    if (!mentionRe) return text;
-    const out: React.ReactNode[] = [];
-    let last = 0;
-    let k = 0;
-    for (const m of text.matchAll(mentionRe)) {
-      if (m.index > last) out.push(text.slice(last, m.index));
-      const name = m[1];
-      out.push(
-        <span
-          key={k++}
-          className={`room-mention${name === mySeatName ? " is-me" : ""}`}
-        >
-          @{name}
-        </span>,
-      );
-      last = m.index + m[0].length;
+  const mentionFromSeat = (seat: (typeof room.seats)[number]) => {
+    selectSeat(seat.id);
+    if (seat.kind === "human" && seat.occupantUserId === myUserId) {
+      inputRef.current?.focus();
+      return;
     }
-    if (!out.length) return text;
-    if (last < text.length) out.push(text.slice(last));
-    return out;
+    const input = inputRef.current;
+    const selectionStart = input?.selectionStart ?? draft.length;
+    const selectionEnd = input?.selectionEnd ?? selectionStart;
+    let nextCaret = selectionStart;
+    setDraft((current) => {
+      const start = Math.min(selectionStart, current.length);
+      const end = Math.min(Math.max(selectionEnd, start), current.length);
+      const before = current.slice(0, start);
+      const after = current.slice(end);
+      const lead = before && !/\s$/.test(before) ? " " : "";
+      const tail = after && /^\s/.test(after) ? "" : " ";
+      const mention = `${lead}@${seat.name}${tail}`;
+      nextCaret = before.length + mention.length;
+      return `${before}${mention}${after}`;
+    });
+    setMentionIndex(0);
+    setMentionClosed(true);
+    requestAnimationFrame(() => {
+      inputRef.current?.focus();
+      inputRef.current?.setSelectionRange(nextCaret, nextCaret);
+    });
   };
 
   const addFiles = async (files: File[]) => {
@@ -259,21 +243,17 @@ export function RoomStage() {
     const t = draft.trim();
     if (!t && attachments.length === 0) return;
     setErr(null);
-    // @提及路由：文中 @了某个可对话的 Agent 席位时，直接发给该席位
-    // （群里任何人都能 @ 任何未被接管的 Agent，不限席位创建者）。
-    const mentionSeat = (() => {
-      const m = t.match(/@([^\s@]+)/);
-      if (!m) return null;
-      const seat = room.seats.find((s) => s.name === m[1]);
-      if (!seat || seat.kind !== "agent") return null;
-      if (seat.takenOverBy && seat.takenOverBy !== myUserId) return null;
-      return seat;
-    })();
+    // @Agent 直接触发对应 Agent；@成员则从自己的成员席位发出。
+    const mentionedSeat = [...room.seats]
+      .sort((a, b) => b.name.length - a.name.length)
+      .find((seat) => t.includes(`@${seat.name}`)) ?? null;
+    const mentionedAgent =
+      mentionedSeat?.kind === "agent" ? mentionedSeat : null;
     // /stop 指令：@agent /stop 停止它正在跑的输出（没 @ 就停当前选中的席位）。
-    const isStop = /^\/stop\b/.test(t.replace(/@[^\s@]+/g, "").trim());
+    const isStop = /(^|\s)\/stop\b/.test(t);
     if (isStop) {
       const target =
-        mentionSeat ?? (selected?.kind === "agent" ? selected : null);
+        mentionedAgent ?? (selected?.kind === "agent" ? selected : null);
       if (!target) {
         setErr("@某个 Agent 席位再加 /stop 才能停止它");
         return;
@@ -288,7 +268,9 @@ export function RoomStage() {
       setAttachments([]);
       return;
     }
-    const res = await sendToSeat(t, quote ?? undefined, mentionSeat?.id, attachments);
+    const targetSeatId = mentionedAgent?.id ??
+      (mentionedSeat?.kind === "human" ? myHumanSeat?.id : undefined);
+    const res = await sendToSeat(t, quote ?? undefined, targetSeatId, attachments);
     if (!res.ok) {
       setErr(res.error ?? "发送失败");
       return;
@@ -324,45 +306,63 @@ export function RoomStage() {
       {/* ── Header ── */}
       <header className="room-stage-head">
         <div className="room-stage-title">
-          <span className="chat-title">{room.name}</span>
-          <span
-            className={`room-dot${room.status === "open" ? " on" : ""}${pulseOn ? " is-pulse" : ""}`}
-            title={pulseOn ? t.room.pulseLive : undefined}
-            aria-label={pulseOn ? t.room.pulseLive : undefined}
-          />
-          <span className="room-meta">
-            {offline
-              ? t.room.offline
-              : room.status === "open"
-                ? fillTemplate(t.room.peopleOnline, {
-                    n: String(
-                      room.onlineCount ?? countOnlineMembers(room.members),
-                    ),
-                  })
-                : "已结束"}
-            {room.kernel?.mods.some((m) => m.state === "active")
-              ? ` · ${t.room.settingsExtensions} ${
-                  room.kernel.mods.filter((m) => m.state === "active").length
-                }`
-              : ""}
-          </span>
-          {stageBadge ? (
-            <span className="room-mod-badge" title={stageBadge}>
-              {stageBadge}
+          <div className="room-stage-name-row">
+            <span className="chat-title">{room.name}</span>
+            <span
+              className={`room-dot${room.status === "open" ? " on" : ""}${pulseOn ? " is-pulse" : ""}`}
+              title={pulseOn ? t.room.pulseLive : undefined}
+              aria-label={pulseOn ? t.room.pulseLive : undefined}
+            />
+          </div>
+          <div className="room-stage-meta-row">
+            <span className="room-meta">
+              {offline
+                ? t.room.offline
+                : room.status === "open"
+                  ? fillTemplate(t.room.peopleOnline, {
+                      n: String(
+                        room.onlineCount ?? countOnlineMembers(room.members),
+                      ),
+                    })
+                  : "已结束"}
+              {room.kernel?.mods.some((m) => m.state === "active")
+                ? ` · ${t.room.settingsExtensions} ${
+                    room.kernel.mods.filter((m) => m.state === "active").length
+                  }`
+                : ""}
             </span>
-          ) : null}
+            {stageBadge ? (
+              <span className="room-mod-badge" title={stageBadge}>
+                {stageBadge}
+              </span>
+            ) : null}
+          </div>
         </div>
         <div className="room-stage-actions">
           <button
             type="button"
-            className="btn btn-sm"
+            className="room-head-icon-btn"
+            title="群聊设置"
+            aria-label="群聊设置"
             onClick={() => setSettingsOpen(true)}
           >
-            {t.room.settings}
+            <svg width="17" height="17" viewBox="0 0 16 16" fill="none" aria-hidden>
+              <path d="M6.7 2.2h2.6l.4 1.45c.4.16.77.38 1.1.64l1.45-.38 1.3 2.25-1.05 1.07c.07.42.07.84 0 1.26l1.05 1.07-1.3 2.25-1.45-.38c-.33.26-.7.48-1.1.64l-.4 1.45H6.7l-.4-1.45a5.2 5.2 0 0 1-1.1-.64l-1.45.38-1.3-2.25L3.5 8.49a4 4 0 0 1 0-1.26L2.45 6.16l1.3-2.25 1.45.38c.33-.26.7-.48 1.1-.64l.4-1.45Z" stroke="currentColor" strokeWidth="1.25" strokeLinejoin="round" />
+              <circle cx="8" cy="7.86" r="1.75" stroke="currentColor" strokeWidth="1.25" />
+            </svg>
           </button>
           {canHost && room.status === "open" ? (
-            <button type="button" className="btn btn-sm" onClick={() => void onInvite()}>
-              邀请
+            <button
+              type="button"
+              className="room-head-icon-btn"
+              title="邀请成员"
+              aria-label="邀请成员"
+              onClick={() => void onInvite()}
+            >
+              <svg width="17" height="17" viewBox="0 0 16 16" fill="none" aria-hidden>
+                <circle cx="6" cy="5" r="2.3" stroke="currentColor" strokeWidth="1.35" />
+                <path d="M2.2 13c.2-2.3 1.7-3.8 3.8-3.8 1.4 0 2.5.6 3.2 1.5M12.2 4.2v5M9.7 6.7h5" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" />
+              </svg>
             </button>
           ) : null}
         </div>
@@ -488,162 +488,15 @@ export function RoomStage() {
       <div className="room-body">
         <div className="room-main">
           {/* ── Timeline ── */}
-          <div className="room-timeline" ref={timelineRef}>
-        {room.items.length === 0 ? (
-          <p className="room-stage-empty">还没有消息，选一个席位开始</p>
-        ) : (
-          room.items.map((it) => {
-            const seat = it.seatId ? room.seats.find((s) => s.id === it.seatId) : null;
-            const seatName = seat?.name ?? "";
-            const isMe = myUserId && it.authorUserId === myUserId;
-            const menuable =
-              (it.kind === "user" || it.kind === "assistant") && !it.recalled;
-            return (
-              <div
-                key={it.id}
-                className={`room-msg${isMe ? " is-me" : ""} kind-${it.kind}${it.seatId && it.seatId === selectedSeatId ? " focus" : ""}`}
-                onContextMenu={
-                  menuable
-                    ? (e) => {
-                        e.preventDefault();
-                        setBubbleMenu({ x: e.clientX, y: e.clientY, item: it });
-                      }
-                    : undefined
-                }
-              >
-                <div className="room-msg-avatar" aria-hidden>
-                  {seat ? <SeatAvatar kind={seat.kind} /> : <SeatAvatar kind="human" />}
-                </div>
-                <div className="room-msg-body">
-                  <div className="room-msg-meta">
-                    <span className="room-msg-author">{it.authorLabel}</span>
-                    {it.source === "kernel" ? (
-                      <span className="room-msg-source">扩展</span>
-                    ) : null}
-                    {seatName ? <span className="room-msg-seat">{seatName}</span> : null}
-                    <span className="room-msg-time">
-                      {new Date(it.at).toLocaleTimeString(undefined, {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })}
-                    </span>
-                  </div>
-                  {it.recalled ? (
-                    <div className="room-msg-text room-recalled">此消息已撤回</div>
-                  ) : (
-                    <>
-                      {it.quote ? (
-                        <div className="room-msg-quote">
-                          <span className="room-msg-quote-author">
-                            {it.quote.authorLabel}
-                          </span>
-                          <span className="room-msg-quote-text">{it.quote.text}</span>
-                        </div>
-                      ) : null}
-                      {it.kind === "game" && it.game ? (
-                        <div className="room-msg-game">
-                          <span className="room-game-icon">{it.game.value}</span>
-                          <span>{it.text}</span>
-                        </div>
-                      ) : it.kind === "assistant" ? (
-                        <div className="room-msg-text md">
-                          <MarkdownBody text={it.text} />
-                        </div>
-                      ) : (
-                        <div className="room-msg-text">{renderText(it.text)}</div>
-                      )}
-                      {/* {it.kind === "user" || it.kind === "assistant" ? (
-                        <button
-                          type="button"
-                          className="room-msg-quote-btn"
-                          title={t.room.quoteAction}
-                          onClick={() =>
-                            setQuote({
-                              id: it.id,
-                              authorLabel: it.authorLabel,
-                              text: it.text.slice(0, 120),
-                            })
-                          }
-                        >
-                          {t.room.quoteAction}
-                        </button>
-                      ) : null} */}
-                    </>
-                  )}
-                </div>
-              </div>
-            );
-          })
-        )}
-        {/* 工作动效：Agent 席位 running 时在时间线尾部挂打字气泡；
-            有实时进度（文本或思考）的席位改挂流式气泡 */}
-        {room.seats
-          .filter(
-            (s) =>
-              s.kind === "agent" &&
-              s.running &&
-              !(room.liveExec ?? []).some(
-                (e) => e.seatId === s.id && (e.text || e.thinking),
-              ),
-          )
-          .map((s) => (
-            <div
-              key={`typing-${s.id}`}
-              className="room-msg kind-assistant room-typing"
-            >
-              <div className="room-msg-avatar" aria-hidden>
-                <SeatAvatar kind="agent" />
-              </div>
-              <div className="room-msg-body">
-                <div className="room-msg-meta">
-                  <span className="room-msg-author">{s.name}</span>
-                </div>
-                <div className="room-typing-dots" aria-label="正在工作">
-                  <span />
-                  <span />
-                  <span />
-                </div>
-              </div>
-            </div>
-          ))}
-        {(room.liveExec ?? [])
-          .filter((e) => e.text || e.tool || e.thinking)
-          .map((e) => {
-            const seat = room.seats.find((s) => s.id === e.seatId);
-            return (
-              <div key={`live-${e.turnId}`} className="room-msg kind-assistant">
-                <div className="room-msg-avatar" aria-hidden>
-                  <SeatAvatar kind="agent" />
-                </div>
-                <div className="room-msg-body">
-                  <div className="room-msg-meta">
-                    <span className="room-msg-author">
-                      {seat?.name ?? "Agent"}
-                    </span>
-                    <span className="room-msg-source">实时</span>
-                  </div>
-                  {e.thinking ? (
-                    <details
-                      className="room-live-thinking"
-                      open={!e.text}
-                    >
-                      <summary>思考过程</summary>
-                      <div className="room-live-thinking-body">{e.thinking}</div>
-                    </details>
-                  ) : null}
-                  {e.text ? (
-                    <div className="room-msg-text md room-live-text">
-                      <MarkdownBody text={e.text} streaming />
-                    </div>
-                  ) : null}
-                  {e.tool ? (
-                    <div className="room-live-tool">🔧 {e.tool}</div>
-                  ) : null}
-                </div>
-              </div>
-            );
-          })}
-      </div>
+          <RoomTimeline
+            items={room.items}
+            seats={room.seats}
+            liveExec={room.liveExec}
+            selectedSeatId={selectedSeatId}
+            myUserId={myUserId}
+            timelineRef={timelineRef}
+            onOpenMenu={openBubbleMenu}
+          />
 
       {err || lastError ? <p className="room-err">{err || lastError}</p> : null}
 
@@ -824,16 +677,19 @@ export function RoomStage() {
           {sideOpen ? (
             <>
               <div className="room-side-head">
-                <span className="room-side-title">
-                  成员 {room.memberCount}
-                  {room.status === "open"
-                    ? ` · ${fillTemplate(t.room.peopleOnline, {
-                        n: String(
-                          room.onlineCount ?? countOnlineMembers(room.members),
-                        ),
-                      })}`
-                    : ""}
-                </span>
+                <div className="room-side-heading">
+                  <span className="room-side-title">席位 {room.seats.length}</span>
+                  <span className="room-side-subtitle">
+                    {room.memberCount} 位成员
+                    {room.status === "open"
+                      ? ` · ${fillTemplate(t.room.peopleOnline, {
+                          n: String(
+                            room.onlineCount ?? countOnlineMembers(room.members),
+                          ),
+                        })}`
+                      : ""}
+                  </span>
+                </div>
                 <button
                   type="button"
                   className="room-side-toggle"
@@ -852,28 +708,59 @@ export function RoomStage() {
                   </svg>
                 </button>
               </div>
-              <div className="room-side-list" role="tablist" aria-label="席位">
+              <div className="room-side-list" aria-label="席位">
                 {room.seats.map((s) => {
                   const active = s.id === selectedSeatId;
                   const isMine =
                     myUserId && s.kind === "human" && s.occupantUserId === myUserId;
+                  const seatMember =
+                    s.kind === "human"
+                      ? room.members.find((m) => m.userId === s.occupantUserId)
+                      : null;
+                  const seatOnline = s.kind === "human" && memberIsOnline(seatMember);
                   return (
                     <div
                       key={s.id}
-                      role="tab"
-                      aria-selected={active}
+                      role="button"
+                      aria-label={isMine ? `选择 ${s.name}` : `提及 ${s.name}`}
+                      tabIndex={0}
                       className={`room-seat${active ? " active" : ""}${s.kind === "agent" ? " is-agent" : ""}${s.running ? " is-running" : ""}${isMine ? " is-mine" : ""}`}
-                      onClick={() => selectSeat(s.id)}
+                      onClick={() => mentionFromSeat(s)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          mentionFromSeat(s);
+                        }
+                      }}
                     >
-                      <span className="room-seat-avatar" aria-hidden>
-                        <SeatAvatar kind={s.kind} />
-                      </span>
-                      <span className="room-seat-name">{s.name}</span>
-                      {s.running ? (
-                        <span className="room-seat-pulse" aria-hidden />
-                      ) : null}
-                      {s.kind === "agent" && hostUserId ? (
-                        <>
+                      <div className="room-seat-main-row">
+                        <span className="room-seat-avatar" aria-hidden>
+                          <SeatAvatar kind={s.kind} />
+                        </span>
+                        <span className="room-seat-copy">
+                          <span className="room-seat-name">{s.name}</span>
+                          <span className="room-seat-inline-tags">
+                            {s.kind === "human" && !seatOnline ? (
+                              <span className="room-seat-tag is-offline">{t.room.memberOffline}</span>
+                            ) : null}
+                            {isMine ? <span className="room-seat-tag mine">我</span> : null}
+                            {s.kind === "agent" && s.contextUsage ? (
+                              <span
+                                className={`room-seat-tag ctx is-${contextLevel(s.contextUsage.ratio)}`}
+                                title={`席位上下文已用 ${formatContextPercent(s.contextUsage.ratio)}（${formatTokens(s.contextUsage.usedTokens)} / ${formatTokens(s.contextUsage.limitTokens)}）；超过 75% 会自动压缩`}
+                              >
+                                ctx {formatContextPercent(s.contextUsage.ratio)}
+                              </span>
+                            ) : null}
+                          </span>
+                        </span>
+                        {s.running ? (
+                          <span className="room-seat-pulse" aria-hidden />
+                        ) : null}
+                      </div>
+                      <div className="room-seat-tags">
+                        {s.kind === "agent" && hostUserId ? (
+                          <>
                           {resolveWorkspaceUserId(s, hostUserId) !== hostUserId ? (
                             <span className="room-seat-tag remote">
                               文件·{room.members.find((m) => m.userId === resolveWorkspaceUserId(s, hostUserId))?.name ?? "成员"}
@@ -885,88 +772,39 @@ export function RoomStage() {
                               AI·{room.members.find((m) => m.userId === resolveAiUserId(s, hostUserId))?.name ?? "成员"}
                             </span>
                           ) : null}
-                        </>
-                      ) : null}
-                      {s.takenOverBy ? (
-                        <span className="room-seat-tag">接管中</span>
-                      ) : null}
-                      {s.kind === "agent" && s.contextUsage ? (
-                        <span
-                          className={`room-seat-tag ctx is-${contextLevel(s.contextUsage.ratio)}`}
-                          title={`席位上下文已用 ${formatContextPercent(s.contextUsage.ratio)}（${formatTokens(s.contextUsage.usedTokens)} / ${formatTokens(s.contextUsage.limitTokens)}）；超过 75% 会自动压缩`}
-                        >
-                          ctx {formatContextPercent(s.contextUsage.ratio)}
-                        </span>
-                      ) : null}
-                      {s.kind === "human" ? (
-                        <span
-                          className={`room-seat-tag${
-                            memberIsOnline(
-                              room.members.find(
-                                (m) => m.userId === s.occupantUserId,
-                              ),
-                            )
-                              ? ""
-                              : " is-offline"
-                          }`}
-                        >
-                          {memberIsOnline(
-                            room.members.find(
-                              (m) => m.userId === s.occupantUserId,
-                            ),
-                          )
-                            ? t.room.memberOnline
-                            : t.room.memberOffline}
-                        </span>
-                      ) : null}
-                      {isMine ? <span className="room-seat-tag mine">我</span> : null}
+                          </>
+                        ) : null}
+                      </div>
                       {s.kind === "agent" && room.status === "open" && canManage ? (
-                        <span
-                          className="room-seat-act"
-                          role="button"
-                          tabIndex={0}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            const ws = resolveWorkspaceUserId(s, hostUserId ?? defaultBindId);
-                            const ai = resolveAiUserId(s, hostUserId ?? defaultBindId);
-                            setEditSeat({
-                              seatId: s.id,
-                              name: s.name,
-                              agentName: s.agentName ?? "",
-                              agentPrompt: s.agentPrompt ?? "",
-                              skillNames: s.skillNames ?? [],
-                              model: s.model ?? "",
-                              executorUserId: ws,
-                              workspaceUserId: ws,
-                              aiUserId: ai,
-                            });
-                          }}
-                        >
-                          {t.room.seatSettings}
-                        </span>
-                      ) : null}
-                      {s.kind === "agent" && room.status === "open" ? (
-                        <span
-                          className="room-seat-act"
-                          role="button"
-                          tabIndex={0}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            void (s.takenOverBy
-                              ? returnSeat(s.id)
-                              : takeoverSeat(s.id));
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") {
+                        <div className="room-seat-actions">
+                          <button
+                            type="button"
+                            className="room-seat-act"
+                            title={t.room.seatSettings}
+                            aria-label={`${s.name} ${t.room.seatSettings}`}
+                            onClick={(e) => {
                               e.stopPropagation();
-                              void (s.takenOverBy
-                                ? returnSeat(s.id)
-                                : takeoverSeat(s.id));
-                            }
-                          }}
-                        >
-                          {s.takenOverBy ? "交还" : "接管"}
-                        </span>
+                              const ws = resolveWorkspaceUserId(s, hostUserId ?? defaultBindId);
+                              const ai = resolveAiUserId(s, hostUserId ?? defaultBindId);
+                              setEditSeat({
+                                seatId: s.id,
+                                name: s.name,
+                                agentName: s.agentName ?? "",
+                                agentPrompt: s.agentPrompt ?? "",
+                                skillNames: s.skillNames ?? [],
+                                model: s.model ?? "",
+                                executorUserId: ws,
+                                workspaceUserId: ws,
+                                aiUserId: ai,
+                              });
+                            }}
+                          >
+                            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
+                              <path d="M6.7 2.2h2.6l.4 1.45c.4.16.77.38 1.1.64l1.45-.38 1.3 2.25-1.05 1.07c.07.42.07.84 0 1.26l1.05 1.07-1.3 2.25-1.45-.38c-.33.26-.7.48-1.1.64l-.4 1.45H6.7l-.4-1.45a5.2 5.2 0 0 1-1.1-.64l-1.45.38-1.3-2.25L3.5 8.49a4 4 0 0 1 0-1.26L2.45 6.16l1.3-2.25 1.45.38c.33-.26.7-.48 1.1-.64l.4-1.45Z" stroke="currentColor" strokeWidth="1.25" strokeLinejoin="round" />
+                              <circle cx="8" cy="7.86" r="1.75" stroke="currentColor" strokeWidth="1.25" />
+                            </svg>
+                          </button>
+                        </div>
                       ) : null}
                     </div>
                   );
@@ -974,10 +812,10 @@ export function RoomStage() {
                 {room.status === "open" ? (
                   <button
                     type="button"
-                    className="room-seat add"
+                    className="room-seat add room-seat-add"
                     onClick={() => setAddOpen(true)}
                   >
-                    + 席位
+                    + 添加 Agent 席位
                   </button>
                 ) : null}
               </div>

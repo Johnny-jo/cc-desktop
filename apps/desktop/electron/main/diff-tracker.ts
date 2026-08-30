@@ -5,6 +5,7 @@ import {
   buildEditHunk,
   buildWriteHunk,
   changesToArray,
+  compactFileChange,
   newChangeEventId,
   truncateFileChange,
   upsertFileChange,
@@ -98,6 +99,7 @@ export class DiffTracker {
   /** In-flight baseline walks, so refresh can wait without blocking the stream. */
   private readonly bashBaselineTasks = new Map<string, Promise<void>>();
   private readonly bashScanGen = new Map<string, number>();
+  private bashScanSeq = 0;
   private readonly gitRepoChecks = new Map<string, Promise<boolean>>();
   /**
    * Called for EVERY tracked write operation BEFORE its change event is
@@ -150,7 +152,8 @@ export class DiffTracker {
    */
   captureBashBaseline(sessionId: string, cwd: string): Promise<void> {
     if (!cwd) return Promise.resolve();
-    const gen = (this.bashScanGen.get(sessionId) ?? 0) + 1;
+    this.bashScanSeq += 1;
+    const gen = this.bashScanSeq;
     this.bashScanGen.set(sessionId, gen);
     const task = this.captureBashBaselineNow(sessionId, cwd, gen).catch(
       () => undefined,
@@ -665,7 +668,7 @@ export class DiffTracker {
     const map = new Map<string, FileChange>();
     for (const c of changes) {
       if (!c?.path) continue;
-      map.set(c.path, {
+      map.set(c.path, compactFileChange({
         path: c.path,
         status:
           c.status === "A" || c.status === "M" || c.status === "D"
@@ -691,7 +694,7 @@ export class DiffTracker {
                 : {}),
             }))
           : [],
-      });
+      }));
     }
     this.sessions.set(sessionId, map);
   }
@@ -699,6 +702,8 @@ export class DiffTracker {
   clearSession(sessionId: string): void {
     this.sessions.delete(sessionId);
     this.bashBaselines.delete(sessionId);
+    this.bashBaselineTasks.delete(sessionId);
+    this.bashScanGen.delete(sessionId);
   }
 }
 

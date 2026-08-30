@@ -2,11 +2,12 @@ import fs from "node:fs";
 import { access } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import os from "node:os";
-import { app, dialog, ipcMain, shell, type BrowserWindow } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import iconv from "iconv-lite";
 import { IPC, validateMcpServers } from "@claude-desktop/shared";
 import type {
   AppSettings,
+  AppMemoryDiagnostics,
   Attachment,
   ChatItem,
   McpServersMap,
@@ -22,7 +23,7 @@ import type { SettingsStore } from "./settings-store";
 import type { CpaSupervisor } from "./cpa-supervisor";
 import type { DiffTracker } from "./diff-tracker";
 import type { SnapshotStore } from "./snapshot-store";
-import { listProjectFiles } from "./file-index";
+import { getFileIndexCacheStats, listProjectFiles } from "./file-index";
 import {
   deleteSkill,
   ensureSkillsDir,
@@ -856,6 +857,65 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
     (_e, { theme }: { theme: "dark" | "light" }) => {
       ctx.onThemeChanged?.(theme);
       return { ok: true };
+    },
+  );
+
+  ipcMain.handle(
+    IPC.appMemoryDiagnostics,
+    (event): AppMemoryDiagnostics => {
+      const main = process.memoryUsage();
+      const metrics = app.getAppMetrics();
+      const rendererPid = event.sender.getOSProcessId();
+      const rendererMetric = metrics.find((metric) => metric.pid === rendererPid);
+      const renderer: AppMemoryDiagnostics["renderer"] = rendererMetric
+        ? {
+            pid: rendererPid,
+            privateKb: rendererMetric.memory.privateBytes ?? 0,
+            residentSetKb: rendererMetric.memory.workingSetSize,
+            sharedKb: Math.max(
+              0,
+              rendererMetric.memory.workingSetSize -
+                (rendererMetric.memory.privateBytes ??
+                  rendererMetric.memory.workingSetSize),
+            ),
+          }
+        : null;
+      const processes = metrics
+        .map((metric) => ({
+          pid: metric.pid,
+          type: metric.type,
+          ...(metric.name ? { name: metric.name } : {}),
+          ...(metric.serviceName ? { serviceName: metric.serviceName } : {}),
+          workingSetKb: metric.memory.workingSetSize,
+          peakWorkingSetKb: metric.memory.peakWorkingSetSize,
+          ...(metric.memory.privateBytes !== undefined
+            ? { privateKb: metric.memory.privateBytes }
+            : {}),
+          cpuPercent: metric.cpu.percentCPUUsage,
+        }))
+        .sort((a, b) => b.workingSetKb - a.workingSetKb);
+
+      return {
+        sampledAt: Date.now(),
+        windows: BrowserWindow.getAllWindows().filter((win) => !win.isDestroyed())
+          .length,
+        main: {
+          pid: process.pid,
+          rssBytes: main.rss,
+          heapTotalBytes: main.heapTotal,
+          heapUsedBytes: main.heapUsed,
+          externalBytes: main.external,
+          arrayBuffersBytes: main.arrayBuffers,
+        },
+        renderer,
+        processes,
+        caches: {
+          sessions: ctx.sessions.getMemoryStats(),
+          rooms: ctx.rooms?.getMemoryStats() ?? null,
+          terminals: ctx.terminal.list().length,
+          fileIndex: getFileIndexCacheStats(),
+        },
+      };
     },
   );
 

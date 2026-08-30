@@ -46,6 +46,16 @@ export function clearFileIndexCache(): void {
   cache.clear();
 }
 
+/** Lightweight cache counters for the in-app memory diagnostics page. */
+export function getFileIndexCacheStats(): {
+  projects: number;
+  indexedFiles: number;
+} {
+  let indexedFiles = 0;
+  for (const entry of cache.values()) indexedFiles += entry.files.length;
+  return { projects: cache.size, indexedFiles };
+}
+
 async function walkProject(cwd: string): Promise<{ files: string[]; truncated: boolean }> {
   const files: string[] = [];
   const start = Date.now();

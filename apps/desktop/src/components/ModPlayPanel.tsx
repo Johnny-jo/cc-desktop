@@ -17,6 +17,7 @@ import {
   startRoomMod,
   useRoomStore,
 } from "../state/room-store";
+import { ToggleSwitch } from "./ToggleSwitch";
 
 function JsonCollapse({ value }: { value: unknown }) {
   return (
@@ -139,10 +140,23 @@ function ActionForm({
           <span className="room-mod-action-hint">{schema.hint}</span>
         ) : null}
       </div>
-      {fields.map((f) => (
-        <label key={f.name} className="settings-field">
-          {f.name}
-          {f.type === "enum" ? (
+      {fields.map((f) =>
+        f.type === "boolean" ? (
+          <div key={f.name} className="settings-toggle-row is-compact">
+            <span>{f.name}</span>
+            <ToggleSwitch
+              checked={Boolean(values[f.name])}
+              label={`${Boolean(values[f.name]) ? "停用" : "启用"}${f.name}`}
+              disabled={disabled}
+              onCheckedChange={(on) =>
+                setValues((prev) => ({ ...prev, [f.name]: on }))
+              }
+            />
+          </div>
+        ) : (
+          <label key={f.name} className="settings-field">
+            {f.name}
+            {f.type === "enum" ? (
             <select
               className="select"
               value={String(values[f.name] ?? "")}
@@ -157,15 +171,6 @@ function ActionForm({
                 </option>
               ))}
             </select>
-          ) : f.type === "boolean" ? (
-            <input
-              type="checkbox"
-              checked={Boolean(values[f.name])}
-              disabled={disabled}
-              onChange={(e) =>
-                setValues((prev) => ({ ...prev, [f.name]: e.target.checked }))
-              }
-            />
           ) : (
             <input
               type={f.type === "number" ? "number" : "text"}
@@ -176,8 +181,9 @@ function ActionForm({
               }
             />
           )}
-        </label>
-      ))}
+          </label>
+        ),
+      )}
       <button
         type="submit"
         className="btn btn-sm"

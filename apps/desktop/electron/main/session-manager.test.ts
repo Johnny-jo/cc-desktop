@@ -5,12 +5,13 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import type { AppSettings, FileChange, SdkNormalizedEvent, SessionSummary } from "@claude-desktop/shared";
 import type { QueryFn } from "./session-manager";
 import {
+  MAX_HYDRATED_CHANGES,
   MAX_HYDRATED_TRANSCRIPTS,
   SessionManager,
   humanizeAgentError,
 } from "./session-manager";
 import type { PermissionBroker } from "./permission-broker";
-import type { DiffTracker } from "./diff-tracker";
+import { DiffTracker } from "./diff-tracker";
 import type { CpaSupervisor } from "./cpa-supervisor";
 import type { SettingsStore } from "./settings-store";
 import { SessionArchive } from "./session-archive";
@@ -105,6 +106,8 @@ function makeDeps(overrides: {
     markDeleted: vi.fn().mockReturnValue(false),
     refreshBashWritesFromDisk: vi.fn().mockResolvedValue(undefined),
     captureBashBaseline: vi.fn().mockResolvedValue(undefined),
+    hydrate: vi.fn(),
+    clearSession: vi.fn(),
   } as unknown as DiffTracker;
 
   const ensureReady =
@@ -1297,6 +1300,65 @@ describe("SessionManager", () => {
       hydratedTranscripts: MAX_HYDRATED_TRANSCRIPTS,
       hydratedItems: MAX_HYDRATED_TRANSCRIPTS,
     });
+
+    manager.disposeAll();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("loads archived changes on demand and evicts them with LRU", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sess-changes-lru-"));
+    const archive = new SessionArchive(dir);
+    const ids = Array.from(
+      { length: MAX_HYDRATED_CHANGES + 1 },
+      (_, i) => `changes-${i}`,
+    );
+    for (const [i, id] of ids.entries()) {
+      archive.upsertSummary({
+        id,
+        title: id,
+        cwd: "D:/p",
+        updatedAt: i + 1,
+        status: "idle",
+      });
+      archive.saveChanges(id, [
+        {
+          path: `src/${i}.ts`,
+          status: "M",
+          hunks: `h${i}`,
+          updatedAt: i + 1,
+          events: [
+            { id: `ev-${i}`, tool: "Edit", at: i + 1, hunk: `h${i}` },
+          ],
+        },
+      ]);
+    }
+    const loadChanges = vi.spyOn(archive, "loadChanges");
+    const ctx = makeDeps();
+    const manager = new SessionManager({
+      queryFn: ctx.queryFn,
+      permissionBroker: ctx.permissionBroker,
+      diffTracker: new DiffTracker({ fileExists: () => true }),
+      cpa: ctx.cpa as never,
+      settings: ctx.settings,
+      archive,
+      emit: ctx.emit,
+      emitSession: ctx.emitSession,
+      emitDiff: ctx.emitDiff,
+    });
+
+    expect(loadChanges).not.toHaveBeenCalled();
+    expect(manager.getMemoryStats().hydratedChanges).toBe(0);
+    for (const [i, id] of ids.entries()) {
+      expect(manager.listChanges(id)[0]?.path).toBe(`src/${i}.ts`);
+    }
+    expect(manager.getMemoryStats()).toMatchObject({
+      hydratedChanges: MAX_HYDRATED_CHANGES,
+      trackedChangeFiles: MAX_HYDRATED_CHANGES,
+    });
+
+    // The least-recently used first session was evicted and is read again.
+    manager.listChanges(ids[0]!);
+    expect(loadChanges.mock.calls.filter(([id]) => id === ids[0])).toHaveLength(2);
 
     manager.disposeAll();
     fs.rmSync(dir, { recursive: true, force: true });

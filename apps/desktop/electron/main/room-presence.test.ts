@@ -87,6 +87,24 @@ async function createHost(svc: RoomService): Promise<{ roomId: string; port: num
 }
 
 describe("room presence", () => {
+  it("rejects the retired takeover action and keeps Agent seats autonomous", async () => {
+    const host = makeService();
+    const { roomId } = await createHost(host);
+    const added = host.addSeat(roomId, "agent", "Agent");
+    expect(added.ok).toBe(true);
+    const seat = host.get(roomId)!.seats.find((item) => item.kind === "agent")!;
+
+    expect(host.takeover(roomId, seat.id)).toEqual({
+      ok: false,
+      error: "接管功能已取消，请直接 @ 对应成员或 Agent",
+    });
+    expect(host.returnSeat(roomId, seat.id)).toEqual({
+      ok: false,
+      error: "接管功能已取消，请直接 @ 对应成员或 Agent",
+    });
+    expect(host.get(roomId)!.seats.find((item) => item.id === seat.id)?.takenOverBy).toBeNull();
+  });
+
   it("counts only connected members as online", async () => {
     const host = makeService();
     const { roomId, port } = await createHost(host);

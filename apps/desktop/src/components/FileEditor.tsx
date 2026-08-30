@@ -47,7 +47,7 @@ import {
   setDiffMarks,
 } from "../lib/editor-diff-deco";
 import {
-  languageForPath,
+  loadLanguageForPath,
   languageLabelForPath,
 } from "../lib/editor-language";
 import { createVscodeSearchPanel } from "../lib/editor-search-panel";
@@ -315,7 +315,8 @@ export function FileEditor({
         savedContentRef.current = savedText;
         setDirty(text !== savedText);
 
-        const lang = languageForPath(rel);
+        const lang = await loadLanguageForPath(rel);
+        if (cancelled) return;
         const saveKey = keymap.of([
           {
             key: "Mod-s",

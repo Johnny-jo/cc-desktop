@@ -2,7 +2,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { clearFileIndexCache, listProjectFiles } from "./file-index";
+import {
+  clearFileIndexCache,
+  getFileIndexCacheStats,
+  listProjectFiles,
+} from "./file-index";
 
 describe("file-index listProjectFiles", () => {
   const dirs: string[] = [];
@@ -99,5 +103,15 @@ describe("file-index listProjectFiles", () => {
     clearFileIndexCache();
     const third = await listProjectFiles(root);
     expect(third.files.some((f) => f.endsWith("b.ts"))).toBe(true);
+  });
+
+  it("reports bounded cache counters without exposing paths", async () => {
+    const root = tmpDir();
+    write(root, "src/a.ts");
+    write(root, "src/b.ts");
+
+    expect(getFileIndexCacheStats()).toEqual({ projects: 0, indexedFiles: 0 });
+    await listProjectFiles(root);
+    expect(getFileIndexCacheStats()).toEqual({ projects: 1, indexedFiles: 2 });
   });
 });

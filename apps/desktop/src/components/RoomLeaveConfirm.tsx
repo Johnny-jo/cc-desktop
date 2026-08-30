@@ -34,8 +34,16 @@ export function RoomLeaveConfirm({
       >
         <header className="room-modal-head">
           <h3>{isHost ? t.room.leaveConfirmTitleHost : t.room.leaveConfirmTitle}</h3>
-          <button type="button" className="btn btn-ghost btn-sm" onClick={onCancel}>
-            ×
+          <button
+            type="button"
+            className="settings-close-btn"
+            title={t.common.close}
+            aria-label={t.common.close}
+            onClick={onCancel}
+          >
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+              <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+            </svg>
           </button>
         </header>
         <div className="room-modal-body">

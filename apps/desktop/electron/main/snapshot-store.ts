@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
+const ABSENT_MARKER = "__ABSENT__";
+
 /**
  * Pre-edit content snapshots per write OPERATION, enabling per-step rollback.
  *
@@ -12,7 +14,8 @@ import path from "node:path";
  *
  * Snapshots persist under userData/snapshots/<sessionId>/ as
  * `<eventId>.snap` files with a JSON sidecar `<eventId>.json` holding the
- * file path, so rollback still works after an app restart.
+ * file path, so rollback still works after an app restart. Large snapshot
+ * payloads intentionally stay outside SQLite.
  */
 export class SnapshotStore {
   private readonly root: string;
@@ -75,7 +78,7 @@ export class SnapshotStore {
       try {
         data = fs.readFileSync(filePath);
       } catch {
-        data = Buffer.from("__ABSENT__", "utf8");
+        data = Buffer.from(ABSENT_MARKER, "utf8");
       }
       fs.writeFileSync(this.snapPath(sessionId, eventId), data);
       fs.writeFileSync(
@@ -114,7 +117,7 @@ export class SnapshotStore {
       const filePath = this.pathOf(sessionId, eventId);
       if (!filePath) return false;
       const data = fs.readFileSync(snap);
-      if (data.toString("utf8") === "__ABSENT__") {
+      if (data.toString("utf8") === ABSENT_MARKER) {
         try {
           fs.unlinkSync(filePath);
         } catch {

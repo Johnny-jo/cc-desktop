@@ -83,6 +83,8 @@ export const IPC = {
   appCompleteOnboarding: "app:complete-onboarding",
   /** Renderer → Main: current UI theme changed (sync window chrome) */
   appThemeChanged: "app:theme-changed",
+  /** Read-only process and bounded-cache memory diagnostics snapshot. */
+  appMemoryDiagnostics: "app:memory-diagnostics",
   /** List installed skills (user dir + project dir) */
   skillsList: "skills:list",
   /** Open the user skills directory in the OS file manager */
@@ -200,6 +202,57 @@ export const IPC = {
   modsOpenDir: "mods:open-dir",
   modsScaffold: "mods:scaffold",
 } as const;
+
+export type AppMemoryDiagnostics = {
+  sampledAt: number;
+  windows: number;
+  main: {
+    pid: number;
+    rssBytes: number;
+    heapTotalBytes: number;
+    heapUsedBytes: number;
+    externalBytes: number;
+    arrayBuffersBytes: number;
+  };
+  renderer: {
+    pid: number;
+    privateKb: number;
+    residentSetKb: number;
+    sharedKb: number;
+  } | null;
+  processes: Array<{
+    pid: number;
+    type: string;
+    name?: string;
+    serviceName?: string;
+    workingSetKb: number;
+    peakWorkingSetKb: number;
+    privateKb?: number;
+    cpuPercent: number;
+  }>;
+  caches: {
+    sessions: {
+      hydratedTranscripts: number;
+      hydratedItems: number;
+      hydratedChanges: number;
+      trackedChangeFiles: number;
+      liveQueries: number;
+    };
+    rooms: {
+      rooms: number;
+      timelineItems: number;
+      members: number;
+      connections: number;
+      liveExecutions: number;
+      pendingPersists: number;
+    } | null;
+    terminals: number;
+    fileIndex: {
+      projects: number;
+      indexedFiles: number;
+    };
+  };
+};
 
 export type IpcInvokeMap = {
   /** path optional: omit to show native openDirectory dialog */
@@ -462,6 +515,10 @@ export type IpcInvokeMap = {
   [IPC.appThemeChanged]: {
     args: [{ theme: "dark" | "light" }];
     result: { ok: boolean };
+  };
+  [IPC.appMemoryDiagnostics]: {
+    args: [];
+    result: AppMemoryDiagnostics;
   };
   [IPC.skillsList]: {
     args: [];
@@ -962,6 +1019,8 @@ export type IpcEventMap = {
      */
     joining?: "pending-approval" | null;
     room?: import("./room-protocol").RoomSnapshot;
+    /** High-frequency ephemeral state; never includes timeline/history. */
+    livePatch?: import("./room-protocol").RoomLivePatch;
     /** host left / room deleted — guest should alert and remove */
     closed?: boolean;
     /** guest dropped after reconnect retries — room kept locally, can rejoin */

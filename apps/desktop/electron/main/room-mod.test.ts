@@ -513,7 +513,7 @@ describe("room mod handshake + play loop", () => {
     ws.close();
   });
 
-  it("injects [room_mod] when shouldPromptAgent; skips when false or taken over", async () => {
+  it("injects [room_mod] when requested; a retired takeover request cannot suppress the Agent", async () => {
     const { rooms, sessions } = makeRooms();
     const pack = writeFixture(path.join(tmp(), "pack"));
     const { room } = await createHost(rooms);
@@ -545,12 +545,13 @@ describe("room mod handshake + play loop", () => {
       .get(room2.roomId)!
       .seats.find((s) => s.kind === "human")!;
     const calls = sess2.start.mock.calls.length + sess2.continue.mock.calls.length;
-    rooms2.takeover(room2.roomId, agentSeat.id);
+    expect(rooms2.takeover(room2.roomId, agentSeat.id).ok).toBe(false);
     await rooms2.modIntent(room2.roomId, humanSeat.id, "inc", {});
-    await new Promise((r) => setTimeout(r, 60));
-    expect(sess2.start.mock.calls.length + sess2.continue.mock.calls.length).toBe(
-      calls,
-    );
+    await vi.waitFor(() => {
+      expect(
+        sess2.start.mock.calls.length + sess2.continue.mock.calls.length,
+      ).toBeGreaterThan(calls);
+    });
   });
 
   it("lists shared-memory as kernel and projects it on the snapshot", async () => {

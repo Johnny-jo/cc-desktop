@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { Suspense, lazy, useEffect, useRef, useState } from "react";
 import type {
   AppSettings,
   McpServersMap,
@@ -23,6 +23,13 @@ import {
   useAppStore,
 } from "../state/store";
 import { RoomModsSettings } from "./settings/RoomModsSettings";
+import { ToggleSwitch } from "./ToggleSwitch";
+
+const MemoryDiagnostics = lazy(() =>
+  import("./settings/MemoryDiagnostics").then((module) => ({
+    default: module.MemoryDiagnostics,
+  })),
+);
 
 export type SettingsDrawerProps = {
   open: boolean;
@@ -33,6 +40,7 @@ type SettingsPage =
   | "general"
   | "room"
   | "cpa"
+  | "diagnostics"
   | "permissions"
   | "agents"
   | "skills"
@@ -310,6 +318,11 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   const [appVersion, setAppVersion] = useState<string>("");
   const [updateStatus, setUpdateStatus] = useState<UpdateStatusDto | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
+  const [savedFingerprint, setSavedFingerprint] = useState(() =>
+    JSON.stringify(fromSettings(settings)),
+  );
+  const [closePending, setClosePending] = useState(false);
+  const openedRef = useRef(false);
 
   async function refreshSkills() {
     try {
@@ -381,6 +394,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
 
   useEffect(() => {
     if (!open) {
+      openedRef.current = false;
       // Restore live-preview font if user closed without saving
       if (settings) {
         document.documentElement.style.setProperty(
@@ -390,7 +404,15 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
       }
       return;
     }
-    setForm(fromSettings(settings));
+    // Saving updates the global settings store while this dialog is open.
+    // Only initialise on the closed -> open transition so a successful save
+    // does not immediately wipe its own confirmation state or newer edits.
+    if (openedRef.current) return;
+    openedRef.current = true;
+    const initialForm = fromSettings(settings);
+    setForm(initialForm);
+    setSavedFingerprint(JSON.stringify(initialForm));
+    setClosePending(false);
     setLocalError(null);
     setSavedNote(null);
     setMcpNote(null);
@@ -412,6 +434,26 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, settings]);
+
+  useEffect(() => {
+    if (!savedNote) return;
+    const timer = window.setTimeout(() => setSavedNote(null), 2400);
+    return () => window.clearTimeout(timer);
+  }, [savedNote]);
+
+  const formFingerprint = JSON.stringify(form);
+  const dirty = formFingerprint !== savedFingerprint;
+
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || saving) return;
+      if (dirty) setClosePending(true);
+      else onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [dirty, onClose, open, saving]);
 
   /**
    * Load live MCP status: prefer the active session's control request;
@@ -507,7 +549,24 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
 
   if (!open) return null;
 
+  const requestClose = () => {
+    if (saving) return;
+    if (dirty) {
+      setClosePending(true);
+      return;
+    }
+    onClose();
+  };
+
+  const discardAndClose = () => {
+    setClosePending(false);
+    onClose();
+  };
+
   const setField = <K extends keyof FormState>(key: K, value: FormState[K]) => {
+    setClosePending(false);
+    setSavedNote(null);
+    setLocalError(null);
     setForm((prev) => ({ ...prev, [key]: value }));
   };
 
@@ -610,6 +669,9 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   }
 
   function updateMcpRow(id: string, patch: Partial<McpServerDraft>) {
+    setClosePending(false);
+    setSavedNote(null);
+    setLocalError(null);
     setForm((prev) => ({
       ...prev,
       mcpServers: prev.mcpServers.map((r) =>
@@ -618,7 +680,10 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
     }));
   }
 
-  function addMcpRow() {
+  function addMcpRow(type: McpServerDraft["type"] = "stdio") {
+    setClosePending(false);
+    setSavedNote(null);
+    setLocalError(null);
     setForm((prev) => ({
       ...prev,
       mcpServers: [
@@ -626,7 +691,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
         {
           id: newMcpDraftId(),
           name: "",
-          type: "stdio",
+          type,
           command: "",
           argsText: "",
           url: "",
@@ -638,6 +703,9 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   }
 
   function removeMcpRow(id: string) {
+    setClosePending(false);
+    setSavedNote(null);
+    setLocalError(null);
     setForm((prev) => ({
       ...prev,
       mcpServers: prev.mcpServers.filter((r) => r.id !== id),
@@ -678,14 +746,12 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
             >
               重连
             </button>
-            <button
-              type="button"
-              className="btn btn-ghost btn-sm"
+            <ToggleSwitch
+              checked={enabled}
+              label={enabled ? `停用 MCP ${row.name}` : `启用 MCP ${row.name}`}
               disabled={mcpBusy === row.name}
-              onClick={() => void onMcpToggle(row.name.trim(), !enabled)}
-            >
-              {enabled ? "停用" : "启用"}
-            </button>
+              onCheckedChange={(next) => void onMcpToggle(row.name.trim(), next)}
+            />
           </span>
         ) : null}
       </div>
@@ -731,6 +797,9 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   }
 
   function updateAgentRow(id: string, patch: Partial<AgentDraft>) {
+    setClosePending(false);
+    setSavedNote(null);
+    setLocalError(null);
     setForm((prev) => ({
       ...prev,
       agents: prev.agents.map((a) => (a.id === id ? { ...a, ...patch } : a)),
@@ -738,6 +807,9 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   }
 
   function addAgentRow() {
+    setClosePending(false);
+    setSavedNote(null);
+    setLocalError(null);
     setForm((prev) => ({
       ...prev,
       agents: [
@@ -755,6 +827,9 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   }
 
   function removeAgentRow(id: string) {
+    setClosePending(false);
+    setSavedNote(null);
+    setLocalError(null);
     setForm((prev) => ({
       ...prev,
       agents: prev.agents.filter((a) => a.id !== id),
@@ -763,68 +838,99 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
 
   function renderAgents() {
     return (
-      <div className="settings-mcp">
-        <div className="settings-context-limits-title">自定义 Agents</div>
-        <p className="settings-hint">
-          Task/Agent 工具可按名称调用的子代理。工具留空 = 继承全部；模型留空 = 主模型。新会话生效。
-        </p>
+      <div className="settings-mcp settings-collection">
+        <div className="settings-collection-head">
+          <div>
+            <h3>自定义 Agents</h3>
+            <p>
+              为重复工作预设角色、模型、工具和系统提示词；保存后在新会话中生效。
+            </p>
+          </div>
+          <span className="settings-count-badge">{form.agents.length}</span>
+        </div>
         {form.agents.length === 0 ? (
-          <p className="settings-hint">暂无自定义 Agent。</p>
+          <div className="settings-empty-state">
+            <strong>还没有自定义 Agent</strong>
+            <span>可以从一个名称和任务描述开始，模型与工具均可稍后补充。</span>
+          </div>
         ) : (
-          form.agents.map((a) => (
-            <div key={a.id} className="settings-mcp-row">
-              <div className="settings-mcp-row-head">
-                <input
-                  className="settings-mcp-name"
-                  placeholder="名称"
-                  value={a.name}
-                  spellCheck={false}
-                  onChange={(e) => updateAgentRow(a.id, { name: e.target.value })}
-                />
-                <input
-                  placeholder="模型（可选）"
-                  value={a.model}
-                  spellCheck={false}
-                  onChange={(e) => updateAgentRow(a.id, { model: e.target.value })}
-                />
+          form.agents.map((a, index) => (
+            <section key={a.id} className="settings-config-card">
+              <header className="settings-config-card-head">
+                <div className="settings-config-identity">
+                  <span className="settings-config-index">{index + 1}</span>
+                  <span>
+                    <strong>{a.name.trim() || "未命名 Agent"}</strong>
+                    <small>{a.model.trim() || "继承主模型"}</small>
+                  </span>
+                </div>
                 <button
                   type="button"
-                  className="btn btn-ghost btn-sm settings-mcp-remove"
-                  title="删除 agent"
+                  className="settings-card-remove"
+                  title="删除 Agent"
                   onClick={() => removeAgentRow(a.id)}
                 >
-                  ×
+                  删除
                 </button>
+              </header>
+              <div className="settings-config-grid">
+                <label className="settings-field">
+                  <span>名称</span>
+                  <input
+                    placeholder="例如 reviewer"
+                    value={a.name}
+                    spellCheck={false}
+                    onChange={(e) => updateAgentRow(a.id, { name: e.target.value })}
+                  />
+                </label>
+                <label className="settings-field">
+                  <span>模型（可选）</span>
+                  <input
+                    placeholder="留空则继承主模型"
+                    value={a.model}
+                    spellCheck={false}
+                    onChange={(e) => updateAgentRow(a.id, { model: e.target.value })}
+                  />
+                </label>
+                <label className="settings-field settings-config-wide">
+                  <span>任务描述</span>
+                  <input
+                    placeholder="告诉主 Agent 什么时候应该调用它"
+                    value={a.description}
+                    spellCheck={false}
+                    onChange={(e) =>
+                      updateAgentRow(a.id, { description: e.target.value })
+                    }
+                  />
+                </label>
+                <label className="settings-field settings-config-wide">
+                  <span>可用工具（可选）</span>
+                  <input
+                    placeholder="Read, Grep, Bash；留空则继承全部"
+                    value={a.toolsCsv}
+                    spellCheck={false}
+                    onChange={(e) =>
+                      updateAgentRow(a.id, { toolsCsv: e.target.value })
+                    }
+                  />
+                </label>
+                <label className="settings-field settings-config-wide">
+                  <span>系统提示词</span>
+                  <textarea
+                    rows={4}
+                    placeholder="定义这个 Agent 的职责、边界与输出格式"
+                    value={a.prompt}
+                    spellCheck={false}
+                    onChange={(e) => updateAgentRow(a.id, { prompt: e.target.value })}
+                  />
+                </label>
               </div>
-              <input
-                placeholder="描述（何时使用此 agent）"
-                value={a.description}
-                spellCheck={false}
-                onChange={(e) =>
-                  updateAgentRow(a.id, { description: e.target.value })
-                }
-              />
-              <input
-                placeholder="工具（逗号分隔，可选）"
-                value={a.toolsCsv}
-                spellCheck={false}
-                onChange={(e) =>
-                  updateAgentRow(a.id, { toolsCsv: e.target.value })
-                }
-              />
-              <textarea
-                rows={3}
-                placeholder="系统提示词"
-                value={a.prompt}
-                spellCheck={false}
-                onChange={(e) => updateAgentRow(a.id, { prompt: e.target.value })}
-              />
-            </div>
+            </section>
           ))
         )}
-        <div className="settings-inline-actions">
-          <button type="button" className="btn btn-sm" onClick={addAgentRow}>
-            + 添加 Agent
+        <div className="settings-collection-actions">
+          <button type="button" className="btn btn-primary" onClick={addAgentRow}>
+            添加 Agent
           </button>
         </div>
       </div>
@@ -948,104 +1054,144 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
 
   function renderMcpServers() {
     return (
-      <div className="settings-mcp">
-        <div className="settings-context-limits-title">MCP 服务器</div>
-        <p className="settings-hint">
-          stdio 运行本地命令；sse/http 连接 URL。env / headers：每行一个 KEY=VALUE。新会话生效；仅加载此处配置（项目的 .mcp.json 与用户级 MCP 设置会被忽略）。
-        </p>
+      <div className="settings-mcp settings-collection">
+        <div className="settings-collection-head">
+          <div>
+            <h3>MCP 服务器</h3>
+            <p>
+              本地服务使用 stdio 命令，远程服务使用 HTTP 或 SSE 地址。保存后可应用到当前会话。
+            </p>
+          </div>
+          <span className="settings-count-badge">{form.mcpServers.length}</span>
+        </div>
         {form.mcpServers.length === 0 ? (
-          <p className="settings-hint">尚未配置 MCP 服务器。</p>
+          <div className="settings-empty-state">
+            <strong>还没有 MCP 服务器</strong>
+            <span>添加本地命令，或连接一个远程 HTTP/SSE 服务。</span>
+          </div>
         ) : (
-          form.mcpServers.map((row) => (
-            <div key={row.id} className="settings-mcp-row">
-              <div className="settings-mcp-row-head">
-                <input
-                  className="settings-mcp-name"
-                  placeholder="名称"
-                  value={row.name}
-                  spellCheck={false}
-                  onChange={(e) => updateMcpRow(row.id, { name: e.target.value })}
-                />
-                <select
-                  className="select settings-mcp-type"
-                  value={row.type}
-                  onChange={(e) =>
-                    updateMcpRow(row.id, {
-                      type: e.target.value as McpServerDraft["type"],
-                    })
-                  }
-                >
-                  <option value="stdio">stdio</option>
-                  <option value="sse">sse</option>
-                  <option value="http">http</option>
-                </select>
+          form.mcpServers.map((row, index) => (
+            <section key={row.id} className="settings-config-card">
+              <header className="settings-config-card-head">
+                <div className="settings-config-identity">
+                  <span className="settings-config-index">{index + 1}</span>
+                  <span>
+                    <strong>{row.name.trim() || "未命名服务器"}</strong>
+                    <small>{row.type === "stdio" ? "本地命令" : `远程 ${row.type.toUpperCase()}`}</small>
+                  </span>
+                </div>
                 <button
                   type="button"
-                  className="btn btn-ghost btn-sm settings-mcp-remove"
+                  className="settings-card-remove"
                   title="删除服务器"
                   onClick={() => removeMcpRow(row.id)}
                 >
-                  ×
+                  删除
                 </button>
-              </div>
+              </header>
               {renderMcpStatus(row)}
-              {row.type === "stdio" ? (
-                <>
+              <div className="settings-config-grid">
+                <label className="settings-field">
+                  <span>服务器名称</span>
                   <input
-                    placeholder="命令（如 node）"
-                    value={row.command}
+                    placeholder="例如 github"
+                    value={row.name}
                     spellCheck={false}
+                    onChange={(e) => updateMcpRow(row.id, { name: e.target.value })}
+                  />
+                </label>
+                <label className="settings-field">
+                  <span>连接方式</span>
+                  <select
+                    className="select"
+                    value={row.type}
                     onChange={(e) =>
-                      updateMcpRow(row.id, { command: e.target.value })
+                      updateMcpRow(row.id, {
+                        type: e.target.value as McpServerDraft["type"],
+                      })
                     }
-                  />
-                  <input
-                    placeholder="参数（空格分隔）"
-                    value={row.argsText}
-                    spellCheck={false}
-                    onChange={(e) =>
-                      updateMcpRow(row.id, { argsText: e.target.value })
-                    }
-                  />
-                  <textarea
-                    rows={2}
-                    placeholder={"env（每行 KEY=VALUE，可选）"}
-                    value={row.envText}
-                    spellCheck={false}
-                    onChange={(e) =>
-                      updateMcpRow(row.id, { envText: e.target.value })
-                    }
-                  />
-                </>
-              ) : (
-                <>
-                  <input
-                    placeholder="url (https://…)"
-                    value={row.url}
-                    spellCheck={false}
-                    onChange={(e) => updateMcpRow(row.id, { url: e.target.value })}
-                  />
-                  <textarea
-                    rows={2}
-                    placeholder={"headers（每行 KEY=VALUE，可选）"}
-                    value={row.headersText}
-                    spellCheck={false}
-                    onChange={(e) =>
-                      updateMcpRow(row.id, { headersText: e.target.value })
-                    }
-                  />
-                </>
-              )}
-            </div>
+                  >
+                    <option value="stdio">本地命令 · stdio</option>
+                    <option value="http">远程服务 · HTTP</option>
+                    <option value="sse">远程服务 · SSE</option>
+                  </select>
+                </label>
+                {row.type === "stdio" ? (
+                  <>
+                    <label className="settings-field">
+                      <span>启动命令</span>
+                      <input
+                        placeholder="例如 npx"
+                        value={row.command}
+                        spellCheck={false}
+                        onChange={(e) =>
+                          updateMcpRow(row.id, { command: e.target.value })
+                        }
+                      />
+                    </label>
+                    <label className="settings-field">
+                      <span>命令参数</span>
+                      <input
+                        placeholder="例如 -y @modelcontextprotocol/server-filesystem"
+                        value={row.argsText}
+                        spellCheck={false}
+                        onChange={(e) =>
+                          updateMcpRow(row.id, { argsText: e.target.value })
+                        }
+                      />
+                    </label>
+                    <label className="settings-field settings-config-wide">
+                      <span>环境变量（可选）</span>
+                      <textarea
+                        rows={3}
+                        placeholder={"每行一个 KEY=VALUE"}
+                        value={row.envText}
+                        spellCheck={false}
+                        onChange={(e) =>
+                          updateMcpRow(row.id, { envText: e.target.value })
+                        }
+                      />
+                    </label>
+                  </>
+                ) : (
+                  <>
+                    <label className="settings-field settings-config-wide">
+                      <span>服务地址</span>
+                      <input
+                        placeholder="https://example.com/mcp"
+                        value={row.url}
+                        spellCheck={false}
+                        onChange={(e) => updateMcpRow(row.id, { url: e.target.value })}
+                      />
+                    </label>
+                    <label className="settings-field settings-config-wide">
+                      <span>请求头（可选）</span>
+                      <textarea
+                        rows={3}
+                        placeholder={"每行一个 KEY=VALUE，例如 Authorization=Bearer …"}
+                        value={row.headersText}
+                        spellCheck={false}
+                        onChange={(e) =>
+                          updateMcpRow(row.id, { headersText: e.target.value })
+                        }
+                      />
+                    </label>
+                  </>
+                )}
+              </div>
+            </section>
           ))
         )}
-        <div className="settings-inline-actions">
-          <button type="button" className="btn btn-sm" onClick={addMcpRow}>
-            + 添加 MCP 服务器
+        <div className="settings-collection-actions">
+          <button type="button" className="btn btn-primary" onClick={() => addMcpRow("stdio")}>
+            添加本地服务器
+          </button>
+          <button type="button" className="btn" onClick={() => addMcpRow("http")}>
+            添加远程服务器
           </button>
           <button
             type="button"
-            className="btn btn-ghost btn-sm"
+            className="btn btn-ghost settings-mcp-test"
             disabled={mcpProbing || form.mcpServers.length === 0}
             title="启动临时会话，测试表单中的所有服务器"
             onClick={() => void onMcpProbeDraft()}
@@ -1179,11 +1325,14 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
       patch.token = form.token.trim();
     }
 
+    const committedForm: FormState = { ...form, token: "" };
     setSaving(true);
     try {
       await saveSettings(patch);
-      setForm((prev) => ({ ...prev, token: "" }));
-      setSavedNote("Saved");
+      setForm(committedForm);
+      setSavedFingerprint(JSON.stringify(committedForm));
+      setClosePending(false);
+      setSavedNote("设置已保存");
 
       // Push the new MCP set into the running session so it takes effect
       // immediately (also persists — setMcpServers updates settings too).
@@ -1223,6 +1372,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
     { key: "general", label: "通用", sub: "模型 / 语言 / 字体 / 更新" },
     { key: "room", label: "群聊设置", sub: "Mod / 选集 / 制作" },
     { key: "cpa", label: "CPA 与上下文", sub: "exe / config / 端口 / 窗口" },
+    { key: "diagnostics", label: "内存诊断", sub: "进程 / 缓存 / JS 堆" },
     { key: "permissions", label: "权限规则", sub: "allow / deny" },
     { key: "agents", label: "自定义 Agents", sub: "Task 子代理" },
     {
@@ -1236,10 +1386,11 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   const activePage = pages.find((p) => p.key === page) ?? pages[0];
 
   return (
-    <div className="settings-overlay" role="presentation" onClick={onClose}>
+    <div className="settings-overlay" role="presentation" onClick={requestClose}>
       <div
         className="settings-modal"
         role="dialog"
+        aria-modal="true"
         aria-label="设置"
         onClick={(e) => e.stopPropagation()}
       >
@@ -1260,9 +1411,20 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
 
         <div className="settings-main">
           <header className="settings-header">
-            <h2>{activePage.label}</h2>
-            <button type="button" className="btn" onClick={onClose}>
-              关闭
+            <div>
+              <h2>{activePage.label}</h2>
+              <p>{activePage.sub}</p>
+            </div>
+            <button
+              type="button"
+              className="settings-close-btn"
+              title="关闭设置"
+              aria-label="关闭设置"
+              onClick={requestClose}
+            >
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+                <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+              </svg>
             </button>
           </header>
 
@@ -1615,16 +1777,25 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
 
               {renderContextLimitsTable()}
 
-              <label className="settings-check">
-                <input
-                  type="checkbox"
+              <div className="settings-toggle-row">
+                <div>
+                  <span>退出时关闭 CPA</span>
+                  <small>仅关闭由本应用启动的 CPA 进程</small>
+                </div>
+                <ToggleSwitch
                   checked={form.shutdownCpaOnQuit}
-                  onChange={(e) => setField("shutdownCpaOnQuit", e.target.checked)}
+                  label={form.shutdownCpaOnQuit ? "停用退出时关闭 CPA" : "启用退出时关闭 CPA"}
+                  onCheckedChange={(on) => setField("shutdownCpaOnQuit", on)}
                 />
-                退出时关闭 CPA（仅限本应用启动的）
-              </label>
+              </div>
             </>
           ) : null}
+
+            {page === "diagnostics" ? (
+              <Suspense fallback={<p className="settings-hint">正在加载诊断工具…</p>}>
+                <MemoryDiagnostics />
+              </Suspense>
+            ) : null}
 
             {page === "permissions" ? renderPermissions() : null}
 
@@ -1636,22 +1807,57 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
 
             {page === "mcp" ? renderMcpServers() : null}
 
-            {localError ? <p className="settings-error">{localError}</p> : null}
-            {savedNote ? <p className="settings-ok">{savedNote}</p> : null}
           </div>
 
-          {page !== "room" ? (
-            <footer className="settings-footer">
-              <button
-                type="button"
-                className="btn btn-primary"
-                disabled={saving}
-                onClick={() => void onSave()}
-              >
-                {saving ? "保存中…" : "保存"}
-              </button>
-            </footer>
-          ) : null}
+          <footer className={`settings-footer${closePending ? " is-confirming" : ""}`}>
+            <div className="settings-save-state" role="status" aria-live="polite">
+              {closePending ? (
+                <span className="settings-save-warning">放弃尚未保存的更改？</span>
+              ) : localError ? (
+                <span className="settings-error">{localError}</span>
+              ) : dirty ? (
+                <span>有未保存的更改</span>
+              ) : savedNote ? (
+                <span className="settings-ok">✓ {savedNote}</span>
+              ) : (
+                <span>所有更改均已保存</span>
+              )}
+            </div>
+            <div className="settings-footer-actions">
+              {closePending ? (
+                <>
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    onClick={() => setClosePending(false)}
+                  >
+                    继续编辑
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-danger"
+                    onClick={discardAndClose}
+                  >
+                    放弃并关闭
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button type="button" className="btn btn-ghost" onClick={requestClose}>
+                    {dirty ? "取消" : "关闭"}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={saving || !dirty}
+                    onClick={() => void onSave()}
+                  >
+                    {saving ? "保存中…" : "保存更改"}
+                  </button>
+                </>
+              )}
+            </div>
+          </footer>
         </div>
       </div>
     </div>

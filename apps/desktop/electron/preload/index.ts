@@ -375,6 +375,11 @@ const desktop = {
       ok: boolean;
     }>,
 
+  getMemoryDiagnostics: () =>
+    ipcRenderer.invoke(IPC.appMemoryDiagnostics) as Promise<
+      import("@claude-desktop/shared").AppMemoryDiagnostics
+    >,
+
   /** Hot update: current status / check / download / quit-and-install */
   getUpdateStatus: () =>
     ipcRenderer.invoke(IPC.appUpdateGetStatus) as Promise<

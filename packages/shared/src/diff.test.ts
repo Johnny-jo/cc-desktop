@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  DIFF_HISTORY_HUNK_CHARS,
+  DIFF_MAX_CHARS,
+  DIFF_MAX_EVENTS_PER_FILE,
   applyEditToContent,
   buildEditHunk,
   buildWriteHunk,
@@ -150,6 +153,31 @@ describe("upsertFileChange", () => {
     expect(item.events.map((e) => e.id)).toEqual(["ev-1", "ev-2"]);
     expect(item.hunks).toContain("h2");
     expect(item.status).toBe("M");
+  });
+
+  it("bounds event history while preserving the first rollback anchor", () => {
+    let map = new Map<string, FileChange>();
+    const total = DIFF_MAX_EVENTS_PER_FILE + 8;
+    for (let i = 0; i < total; i += 1) {
+      map = upsertFileChange(map, {
+        id: `ev-${i}`,
+        path: "src/large.ts",
+        tool: "Edit",
+        hunk: `${i}:${"x".repeat(DIFF_HISTORY_HUNK_CHARS + 100)}`,
+        at: i,
+        status: "M",
+      });
+    }
+
+    const item = map.get("src/large.ts")!;
+    expect(item.events).toHaveLength(DIFF_MAX_EVENTS_PER_FILE);
+    expect(item.events[0]!.id).toBe("ev-0");
+    expect(item.events.at(-1)!.id).toBe(`ev-${total - 1}`);
+    expect(item.events[0]!.hunk.length).toBeLessThanOrEqual(
+      DIFF_HISTORY_HUNK_CHARS,
+    );
+    expect(item.events.at(-1)!.hunk.length).toBeLessThanOrEqual(DIFF_MAX_CHARS);
+    expect(item.hunks).toContain(`${total - 1}:`);
   });
 });
 

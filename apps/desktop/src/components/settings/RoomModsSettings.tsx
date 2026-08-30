@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { getDesktop, hasDesktopApi } from "../../lib/desktop-api";
+import { ToggleSwitch } from "../ToggleSwitch";
 import {
   createModCollection,
   deleteModCollection,
@@ -201,14 +202,12 @@ function ModManageTab(props: {
               </span>
             </div>
             <div className="mods-row-actions">
-              <button
-                type="button"
-                className={`btn btn-sm${active ? " btn-primary" : ""}`}
+              <ToggleSwitch
+                checked={active}
+                label={active ? `停用 ${p.name}` : `启用 ${p.name}`}
                 disabled={!canHost || busyId === p.id}
-                onClick={() => void props.onToggle(p, !active)}
-              >
-                {active ? "已启用" : "启用"}
-              </button>
+                onCheckedChange={(next) => void props.onToggle(p, next)}
+              />
               <button
                 type="button"
                 className="btn btn-sm"

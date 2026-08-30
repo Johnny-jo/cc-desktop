@@ -43,6 +43,7 @@ import {
   setRoomError,
   useRoomStore,
 } from "../state/room-store";
+import { ToggleSwitch } from "./ToggleSwitch";
 
 /** 单个群聊行：单击进入，双击 / 拖出侧栏在独立窗口打开（参考会话行的拖出）。 */
 function RoomRow({ r, active }: { r: RoomListItem; active: boolean }) {
@@ -704,14 +705,14 @@ export function RoomSidebar() {
                     onChange={(e) => setPort(e.target.value)}
                   />
                 </label>
-                <label className="room-check">
-                  <input
-                    type="checkbox"
+                <div className="room-toggle-row">
+                  <span>{t.room.skipEncrypt}</span>
+                  <ToggleSwitch
                     checked={skipEncrypt}
-                    onChange={(e) => setSkipEncrypt(e.target.checked)}
+                    label={skipEncrypt ? `停用${t.room.skipEncrypt}` : `启用${t.room.skipEncrypt}`}
+                    onCheckedChange={setSkipEncrypt}
                   />
-                  {t.room.skipEncrypt}
-                </label>
+                </div>
                 {skipEncrypt ? (
                   <p
                     className={
@@ -723,22 +724,22 @@ export function RoomSidebar() {
                     {t.room.skipEncryptHint}
                   </p>
                 ) : null}
-                <label className="room-check">
-                  <input
-                    type="checkbox"
+                <div className="room-toggle-row">
+                  <span>自动放行新设备</span>
+                  <ToggleSwitch
                     checked={autoApprove}
-                    onChange={(e) => setAutoApprove(e.target.checked)}
+                    label={autoApprove ? "停用自动放行新设备" : "启用自动放行新设备"}
+                    onCheckedChange={setAutoApprove}
                   />
-                  自动放行新设备
-                </label>
-                <label className="room-check">
-                  <input
-                    type="checkbox"
+                </div>
+                <div className="room-toggle-row">
+                  <span>公网可达</span>
+                  <ToggleSwitch
                     checked={publicOn}
-                    onChange={(e) => setPublicOn(e.target.checked)}
+                    label={publicOn ? "停用公网可达" : "启用公网可达"}
+                    onCheckedChange={setPublicOn}
                   />
-                  公网可达
-                </label>
+                </div>
                 {publicOn ? (
                   <label className="settings-field">
                     <input
@@ -749,22 +750,22 @@ export function RoomSidebar() {
                     />
                   </label>
                 ) : null}
-                <label className="room-check">
-                  <input
-                    type="checkbox"
+                <div className="room-toggle-row">
+                  <span>{t.room.tunnel}</span>
+                  <ToggleSwitch
                     checked={tunnel}
-                    onChange={(e) => setTunnel(e.target.checked)}
+                    label={tunnel ? `停用${t.room.tunnel}` : `启用${t.room.tunnel}`}
+                    onCheckedChange={setTunnel}
                   />
-                  {t.room.tunnel}
-                </label>
-                <label className="room-check">
-                  <input
-                    type="checkbox"
+                </div>
+                <div className="room-toggle-row">
+                  <span>{t.room.relay}</span>
+                  <ToggleSwitch
                     checked={relayOn}
-                    onChange={(e) => setRelayOn(e.target.checked)}
+                    label={relayOn ? `停用${t.room.relay}` : `启用${t.room.relay}`}
+                    onCheckedChange={setRelayOn}
                   />
-                  {t.room.relay}
-                </label>
+                </div>
                 {relayOn ? (
                   <>
                     <label className="settings-field">

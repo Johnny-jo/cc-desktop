@@ -70,8 +70,16 @@ export function RoomInviteModal({
       >
         <header className="room-modal-head">
           <h3>{t.room.inviteTitle}</h3>
-          <button type="button" className="btn btn-ghost btn-sm" onClick={onClose}>
-            ×
+          <button
+            type="button"
+            className="settings-close-btn"
+            title={t.common.close}
+            aria-label={t.common.close}
+            onClick={onClose}
+          >
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+              <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+            </svg>
           </button>
         </header>
         <div className="room-modal-body">
@@ -82,8 +90,23 @@ export function RoomInviteModal({
               spellCheck={false}
               onFocus={(e) => e.target.select()}
             />
-            <button type="button" className="btn btn-sm" onClick={() => void copy()}>
-              {copied ? t.room.inviteCopied : t.common.copy}
+            <button
+              type="button"
+              className={`room-action-icon room-copy-icon${copied ? " is-active" : ""}`}
+              title={copied ? t.room.inviteCopied : t.common.copy}
+              aria-label={copied ? t.room.inviteCopied : t.common.copy}
+              onClick={() => void copy()}
+            >
+              {copied ? (
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+                  <path d="m3.2 8.3 3 3 6.6-6.6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              ) : (
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+                  <rect x="5" y="4.8" width="7.8" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.3" />
+                  <path d="M10.7 4.8V3.6c0-.8-.6-1.4-1.4-1.4H3.6c-.8 0-1.4.6-1.4 1.4v5.7c0 .8.6 1.4 1.4 1.4H5" stroke="currentColor" strokeWidth="1.3" />
+                </svg>
+              )}
             </button>
           </div>
           <p className="room-invite-encrypt">

@@ -3,10 +3,16 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  DIFF_HISTORY_HUNK_CHARS,
+  DIFF_MAX_CHARS,
+  DIFF_MAX_EVENTS_PER_FILE,
+  type ChatItem,
+  type FileChange,
+} from "@claude-desktop/shared";
+import {
   SessionArchive,
   TRANSCRIPT_CHUNK_ITEMS,
 } from "./session-archive";
-import type { ChatItem, FileChange } from "@claude-desktop/shared";
 
 describe("SessionArchive", () => {
   const dirs: string[] = [];
@@ -296,6 +302,46 @@ describe("SessionArchive", () => {
       status: "A",
     });
     expect(loaded[1].events[0]?.tool).toBe("Bash");
+  });
+
+  it("compacts oversized legacy change histories while loading", () => {
+    const dir = tmpDir();
+    const arch = new SessionArchive(dir);
+    const total = DIFF_MAX_EVENTS_PER_FILE + 9;
+    const events = Array.from({ length: total }, (_, i) => ({
+      id: `legacy-event-${i}`,
+      tool: "Edit" as const,
+      at: i + 1,
+      hunk: `${i}:${"x".repeat(
+        i === total - 1 ? DIFF_MAX_CHARS + 100 : DIFF_HISTORY_HUNK_CHARS + 100,
+      )}`,
+    }));
+    fs.writeFileSync(
+      path.join(dir, "sessions", "legacy.changes.json"),
+      JSON.stringify({
+        version: 1,
+        sessionId: "legacy",
+        changes: [
+          {
+            path: "large.ts",
+            status: "M",
+            hunks: events.at(-1)!.hunk,
+            updatedAt: total,
+            events,
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const [loaded] = arch.loadChanges("legacy");
+    expect(loaded.events).toHaveLength(DIFF_MAX_EVENTS_PER_FILE);
+    expect(loaded.events[0]!.id).toBe("legacy-event-0");
+    expect(loaded.events.at(-1)!.id).toBe(`legacy-event-${total - 1}`);
+    expect(loaded.events[0]!.hunk.length).toBeLessThanOrEqual(
+      DIFF_HISTORY_HUNK_CHARS,
+    );
+    expect(loaded.events.at(-1)!.hunk.length).toBeLessThanOrEqual(DIFF_MAX_CHARS);
   });
 
   it("persists pinned and sorts pinned sessions first", () => {

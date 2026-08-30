@@ -44,6 +44,7 @@ import { TerminalHost } from "./terminal-host";
 import { AppAutoUpdater } from "./auto-updater";
 import { RoomService } from "./room-service";
 import { RoomArchive } from "./room-archive";
+import { AppDatabase } from "./app-database";
 import {
   watchClaudeCodeModel,
   writeClaudeCodeModel,
@@ -72,6 +73,7 @@ let isQuitting = false;
 const readyRenderers = new Set<number>();
 const rendererScopes = new Map<number, RendererScope>();
 let terminalHost: TerminalHost | null = null;
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
 /** Sync frameless window chrome (titleBarOverlay) with the UI theme. */
 function applyWindowTheme(theme: "dark" | "light"): void {
@@ -327,7 +329,10 @@ function createWindow() {
       }
     }
   });
-  if (process.env.ELECTRON_RENDERER_URL) {
+  if (
+    process.env.ELECTRON_RENDERER_URL &&
+    process.env.CC_DESKTOP_OPEN_DEVTOOLS === "1"
+  ) {
     mainWindow.webContents.openDevTools({ mode: "detach" });
   }
 
@@ -356,6 +361,7 @@ function createRoomWindow(roomId: string) {
 function bootstrap() {
   const { encrypt, decrypt } = createTokenCrypto();
   const userDataDir = app.getPath("userData");
+  const database = AppDatabase.open(userDataDir);
   const settings = new SettingsStore({
     userDataDir,
     encrypt,
@@ -424,7 +430,7 @@ function bootstrap() {
   // 内置 skill（路径守卫说明等）随启动覆盖更新。
   ensureBuiltinSkills();
 
-  const archive = new SessionArchive(userDataDir);
+  const archive = new SessionArchive(userDataDir, database);
 
   const diffs = new DiffTracker({
     readFile: (filePath) => fs.readFileSync(filePath, "utf8"),
@@ -552,7 +558,7 @@ function bootstrap() {
       undefined,
   });
 
-  const roomArchive = new RoomArchive(userDataDir);
+  const roomArchive = new RoomArchive(userDataDir, database);
   const rooms = new RoomService({
     getWindow: getMainWindow,
     sendToAllWindows: (channel, payload) => {
@@ -654,17 +660,31 @@ function bootstrap() {
     terminal.killAll();
     // Flush delayed archives and close visible + hidden SDK sessions.
     sessions.disposeAll();
+    roomArchive.close();
   });
 }
 
-app.whenReady().then(bootstrap);
+if (!hasSingleInstanceLock) {
+  // Closing the window normally hides to tray, so launching the app again can
+  // otherwise create a second Chromium profile owner. Competing instances
+  // race on Cache/GPUCache and Windows reports access denied (0x5).
+  isQuitting = true;
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    // If bootstrap is still running the primary window will be shown normally.
+    if (mainWindow && !mainWindow.isDestroyed()) showMainWindow();
+  });
 
-app.on("window-all-closed", () => {
-  // Tray keeps the process alive so the main window can be restored.
-  if (tray && !tray.isDestroyed()) return;
-  if (process.platform !== "darwin") app.quit();
-});
+  app.whenReady().then(bootstrap);
 
-app.on("activate", () => {
-  showMainWindow();
-});
+  app.on("window-all-closed", () => {
+    // Tray keeps the process alive so the main window can be restored.
+    if (tray && !tray.isDestroyed()) return;
+    if (process.platform !== "darwin") app.quit();
+  });
+
+  app.on("activate", () => {
+    showMainWindow();
+  });
+}

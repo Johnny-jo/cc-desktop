@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   countOnlineMembers,
@@ -33,6 +33,7 @@ import {
 } from "../state/room-store";
 import { RoomLeaveConfirm } from "./RoomLeaveConfirm";
 import { isRoomMuted, setRoomMuted } from "../lib/room-notify";
+import { ToggleSwitch } from "./ToggleSwitch";
 
 type Props = {
   room: RoomSnapshot;
@@ -41,6 +42,42 @@ type Props = {
   offline?: boolean;
   onClose: () => void;
 };
+
+type RoomSettingsTab = "mods" | "improve" | "memory" | "overview";
+
+function RoomSettingsTabIcon({ tab }: { tab: RoomSettingsTab }) {
+  if (tab === "overview") {
+    return (
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden>
+        <circle cx="5.5" cy="5.2" r="2.2" stroke="currentColor" strokeWidth="1.35" />
+        <path d="M1.8 13c.2-2.2 1.7-3.6 3.7-3.6S9 10.8 9.2 13" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" />
+        <path d="M10.2 4.2h4M10.2 7h4M11.2 9.8h3" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  if (tab === "memory") {
+    return (
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden>
+        <ellipse cx="8" cy="3.8" rx="5" ry="2.1" stroke="currentColor" strokeWidth="1.35" />
+        <path d="M3 3.8v4c0 1.2 2.2 2.1 5 2.1s5-.9 5-2.1v-4M3 7.8v4c0 1.2 2.2 2.2 5 2.2s5-1 5-2.2v-4" stroke="currentColor" strokeWidth="1.35" />
+      </svg>
+    );
+  }
+  if (tab === "improve") {
+    return (
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden>
+        <path d="M8 1.8l1.2 3 3 .5-2.3 2.1.6 3L8 9l-2.5 1.4.6-3-2.3-2.1 3-.5L8 1.8Z" stroke="currentColor" strokeWidth="1.25" strokeLinejoin="round" />
+        <path d="M3.2 11.5 2.5 14l2.5-.8M12.8 11.5l.7 2.5-2.5-.8" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path d="m8 1.8 5.2 2.8v6.8L8 14.2l-5.2-2.8V4.6L8 1.8Z" stroke="currentColor" strokeWidth="1.25" strokeLinejoin="round" />
+      <path d="M2.9 4.8 8 7.6l5.1-2.8M8 7.6v6.3" stroke="currentColor" strokeWidth="1.25" strokeLinejoin="round" />
+    </svg>
+  );
+}
 
 export function RoomSettingsModal({
   room,
@@ -60,12 +97,30 @@ export function RoomSettingsModal({
   const [err, setErr] = useState<string | null>(null);
   // 概览页：改名草稿 + 退出/解散确认
   const [nameDraft, setNameDraft] = useState(room.name);
+  const [savedName, setSavedName] = useState(room.name);
   const [confirmLeave, setConfirmLeave] = useState(false);
+  const [closePending, setClosePending] = useState(false);
+  const [nameSaved, setNameSaved] = useState(false);
   // 消息免打扰：本机偏好（localStorage），普通消息不弹通知，@ 仍弹
   const [muted, setMutedState] = useState(() => isRoomMuted(room.roomId));
-  const [tab, setTab] = useState<"mods" | "improve" | "memory" | "overview">(
-    "mods",
+  const [tab, setTab] = useState<RoomSettingsTab>("overview");
+  const nameValid = Boolean(nameDraft.trim());
+  const nameDirty = Boolean(
+    canHost &&
+      room.status === "open" &&
+      nameDraft.trim() !== savedName,
   );
+  const requestClose = useCallback(() => {
+    if (confirmLeave) {
+      setConfirmLeave(false);
+      return;
+    }
+    if (nameDirty) {
+      setClosePending(true);
+      return;
+    }
+    onClose();
+  }, [confirmLeave, nameDirty, onClose]);
   const memoryOn = Boolean(
     room.kernel?.mods.some((m) => m.id === "shared-memory" && m.state === "active"),
   );
@@ -110,25 +165,34 @@ export function RoomSettingsModal({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") requestClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [requestClose]);
 
   // 改名成功后快照回流 → 草稿跟随最新名字
   useEffect(() => {
-    setNameDraft(room.name);
+    setNameDraft((current) => (current === savedName ? room.name : current));
+    setSavedName(room.name);
+    // savedName intentionally reflects the last snapshot seen by this modal.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [room.name]);
 
   const submitRename = async () => {
     const name = nameDraft.trim();
-    if (!name || name === room.name) return;
+    if (!name || name === savedName) return;
     setBusyId("rename");
     setErr(null);
     const res = await renameRoom(room.roomId, name);
     setBusyId(null);
-    if (!res.ok) setErr(res.error ?? t.common.error);
+    if (!res.ok) {
+      setErr(res.error ?? t.common.error);
+      return;
+    }
+    setSavedName(name);
+    setNameSaved(true);
+    setClosePending(false);
   };
 
   const playPacks = packs.filter((p) => p.hostApi !== 2);
@@ -289,7 +353,7 @@ export function RoomSettingsModal({
   const canRollback = new Set(improve?.canRollback ?? []);
 
   return createPortal(
-    <div className="room-modal-overlay" role="presentation" onClick={onClose}>
+    <div className="room-modal-overlay" role="presentation" onClick={requestClose}>
       <div
         className="room-modal room-settings-modal"
         role="dialog"
@@ -297,9 +361,20 @@ export function RoomSettingsModal({
         onClick={(e) => e.stopPropagation()}
       >
         <header className="room-modal-head">
-          <h3>{t.room.settingsTitle}</h3>
-          <button type="button" className="btn btn-ghost btn-sm" onClick={onClose}>
-            ×
+          <div className="room-modal-title">
+            <h3>{t.room.settingsTitle}</h3>
+            <p>{room.name}</p>
+          </div>
+          <button
+            type="button"
+            className="settings-close-btn"
+            title={t.common.close}
+            aria-label={t.common.close}
+            onClick={requestClose}
+          >
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+              <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+            </svg>
           </button>
         </header>
 
@@ -307,10 +382,10 @@ export function RoomSettingsModal({
           <nav className="settings-nav">
             {(
               [
+                ["overview", t.room.settingsOverview],
                 ["mods", t.room.settingsPlay],
                 ["improve", t.room.settingsImprove],
                 ["memory", t.room.settingsMemory],
-                ["overview", t.room.settingsOverview],
               ] as Array<[typeof tab, string]>
             ).map(([key, label]) => (
               <button
@@ -319,6 +394,9 @@ export function RoomSettingsModal({
                 className={`settings-nav-item${tab === key ? " active" : ""}`}
                 onClick={() => setTab(key)}
               >
+                <span className="room-settings-nav-icon">
+                  <RoomSettingsTabIcon tab={key} />
+                </span>
                 <span className="settings-nav-label">{label}</span>
               </button>
             ))}
@@ -327,177 +405,186 @@ export function RoomSettingsModal({
           <div className="room-modal-body room-settings-content">
           {tab === "overview" ? (
             <section className="room-settings-section room-overview">
-              <div className="room-overview-card room-overview-head">
-                <div className="room-overview-title">{room.name}</div>
-                <div className="room-overview-meta">
-                  {offline
-                    ? t.room.offline
-                    : room.status === "open"
-                      ? fillTemplate(t.room.peopleOnline, {
-                          n: String(
-                            room.onlineCount ??
-                              countOnlineMembers(room.members),
-                          ),
-                        })
-                      : "已结束"}{" "}
-                  · {t.room.settingsPort.replace("{port}", String(room.port))}
+              <div className="room-overview-identity">
+                <div className="room-overview-room-icon" aria-hidden>
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+                    <circle cx="9" cy="8" r="3" stroke="currentColor" strokeWidth="1.5" />
+                    <circle cx="16.5" cy="9.5" r="2.3" stroke="currentColor" strokeWidth="1.4" />
+                    <path d="M3.5 19c0-3 2.4-5 5.5-5s5.5 2 5.5 5M15.5 14.7c2.3.3 4 1.8 4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                  </svg>
                 </div>
-                {canHost && room.status === "open" ? (
-                  <div className="room-rename-row">
+                <div className="room-overview-identity-main">
+                  <label className="room-overview-card-title" htmlFor="room-name-input">
+                    群聊名称
+                  </label>
+                  {canHost && room.status === "open" ? (
                     <input
+                      id="room-name-input"
+                      className="room-name-input"
                       value={nameDraft}
                       maxLength={40}
-                      placeholder="群聊名"
-                      onChange={(e) => setNameDraft(e.target.value)}
+                      placeholder="群聊名称"
+                      onChange={(e) => {
+                        setNameDraft(e.target.value);
+                        setNameSaved(false);
+                        setClosePending(false);
+                      }}
                       onKeyDown={(e) => {
-                        if (e.key === "Enter") void submitRename();
+                        if (e.key === "Enter" && nameDirty && nameValid) void submitRename();
                       }}
                     />
-                    <button
-                      type="button"
-                      className="btn btn-sm"
-                      disabled={
-                        busyId === "rename" ||
-                        !nameDraft.trim() ||
-                        nameDraft.trim() === room.name
-                      }
-                      onClick={() => void submitRename()}
-                    >
-                      保存
-                    </button>
+                  ) : (
+                    <div className="room-overview-title">{room.name}</div>
+                  )}
+                  <div className="room-overview-meta">
+                    <span className={`room-state-pill${room.status === "open" && !offline ? " is-online" : ""}`}>
+                      {offline
+                        ? t.room.offline
+                        : room.status === "open"
+                          ? fillTemplate(t.room.peopleOnline, {
+                              n: String(room.onlineCount ?? countOnlineMembers(room.members)),
+                            })
+                          : "已结束"}
+                    </span>
+                    <span>{t.room.settingsPort.replace("{port}", String(room.port))}</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="room-overview-grid">
+                <div className="room-overview-card room-setting-card">
+                  <div className="room-setting-card-head">
+                    <span className="room-setting-card-icon" aria-hidden>
+                      <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                        <path d="M4 6.7c0-2.3 1.3-3.9 4-3.9s4 1.6 4 3.9v2.4l1.2 1.6H2.8L4 9.1V6.7Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+                        <path d="M6.3 12.4c.3.7.9 1 1.7 1s1.4-.3 1.7-1" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+                      </svg>
+                    </span>
+                    <div>
+                      <div className="room-setting-card-title">消息免打扰</div>
+                      <p>仍会提醒 @ 我的消息</p>
+                    </div>
+                    <ToggleSwitch
+                      checked={muted}
+                      label={muted ? "关闭消息免打扰" : "开启消息免打扰"}
+                      onCheckedChange={(on) => {
+                        setRoomMuted(room.roomId, on);
+                        setMutedState(on);
+                      }}
+                    />
+                  </div>
+                </div>
+
+                {room.status === "open" ? (
+                  <div className="room-overview-card room-permission-card">
+                    <div className="room-overview-card-title">我的项目权限</div>
+                    <div className="room-permission-options">
+                      {(["ask", "allow", "deny"] as const).map((p) => (
+                        <label key={p} className={`room-permission-option${filePolicy === p ? " active" : ""}`}>
+                          <input
+                            type="radio"
+                            name="file-policy"
+                            checked={filePolicy === p}
+                            onChange={() => void setRoomFilePolicy(room.roomId, p)}
+                          />
+                          {p === "allow" ? "允许" : p === "deny" ? "禁止" : "审批"}
+                        </label>
+                      ))}
+                    </div>
+                    <div className="room-ai-share-row">
+                      <span>允许席位借用我的 AI</span>
+                      <ToggleSwitch
+                        checked={aiShareOn}
+                        label={aiShareOn ? "停用 AI 借用" : "启用 AI 借用"}
+                        onCheckedChange={(on) => void setRoomAiShare(room.roomId, on)}
+                      />
+                    </div>
                   </div>
                 ) : null}
               </div>
 
-              <div className="room-overview-card">
-                <div className="room-overview-card-title">通知</div>
-                <label className="room-check room-mute-check">
-                  <input
-                    type="checkbox"
-                    checked={muted}
-                    onChange={(e) => {
-                      const on = e.target.checked;
-                      setRoomMuted(room.roomId, on);
-                      setMutedState(on);
-                    }}
-                  />
-                  消息免打扰
-                </label>
-                <p className="settings-hint room-mute-hint">
-                  普通消息不弹桌面通知，@ 我的仍会弹
-                </p>
-              </div>
-
-              <div className="room-overview-card">
-                <div className="room-overview-card-title">
-                  成员 {room.memberCount}
-                  {room.status === "open"
-                    ? ` · ${fillTemplate(t.room.peopleOnline, {
-                        n: String(
-                          room.onlineCount ?? countOnlineMembers(room.members),
-                        ),
-                      })}`
-                    : ""}
+              <div className="room-overview-card room-members-card">
+                <div className="room-members-head">
+                  <div>
+                    <div className="room-overview-card-title">成员</div>
+                    <p>{room.memberCount} 人 · {room.onlineCount ?? countOnlineMembers(room.members)} 在线</p>
+                  </div>
+                  <span className="room-members-count">{room.memberCount}</span>
                 </div>
                 <ul className="room-member-list">
-                  {room.members.map((m) => (
-                    <li key={m.userId} className="room-member-row">
-                      <span className="room-member-name">
-                        {m.name}
-                        {m.role === "host" ? (
-                          <span className="room-member-badge">群主</span>
-                        ) : m.role === "admin" ? (
-                          <span className="room-member-badge">管理员</span>
-                        ) : null}
-                        <span
-                          className={`room-member-badge${
-                            memberIsOnline(m) ? "" : " is-off"
-                          }`}
-                        >
-                          {memberIsOnline(m)
-                            ? t.room.memberOnline
-                            : t.room.memberOffline}
+                  {room.members.map((m) => {
+                    const online = memberIsOnline(m);
+                    const roleLabel = m.role === "host" ? "群主" : m.role === "admin" ? "管理员" : null;
+                    return (
+                      <li key={m.userId} className="room-member-row">
+                        <span className="room-member-avatar" aria-hidden>
+                          {m.name.trim().slice(0, 1).toUpperCase() || "?"}
+                          <span className={`room-member-presence${online ? " is-online" : ""}`} />
                         </span>
-                      </span>
-                      {canHost &&
-                      room.status === "open" &&
-                      m.role !== "host" &&
-                      m.userId !== room.localUserId ? (
-                        <button
-                          type="button"
-                          className="btn btn-ghost btn-sm"
-                          disabled={busyId === `role:${m.userId}`}
-                          onClick={() =>
-                            void changeRole(
-                              m.userId,
-                              m.role === "admin" ? "member" : "admin",
-                            )
-                          }
-                        >
-                          {m.role === "admin" ? "取消管理员" : "设为管理员"}
-                        </button>
-                      ) : null}
-                      {canKick &&
-                      m.role !== "host" &&
-                      !(me?.role === "admin" && m.role === "admin") &&
-                      m.userId !== room.localUserId ? (
-                        <button
-                          type="button"
-                          className="btn btn-ghost btn-sm"
-                          disabled={busyId === `kick:${m.userId}`}
-                          onClick={() => void kickMember(m.userId)}
-                        >
-                          {t.room.kick}
-                        </button>
-                      ) : null}
-                    </li>
-                  ))}
+                        <span className="room-member-main">
+                          <span className="room-member-name">
+                            {m.name}
+                            {m.userId === room.localUserId ? <span className="room-member-self">我</span> : null}
+                          </span>
+                          <span className="room-member-detail">
+                            {roleLabel ?? "成员"} · {online ? t.room.memberOnline : t.room.memberOffline}
+                          </span>
+                        </span>
+                        <span className="room-member-actions">
+                          {canHost && room.status === "open" && m.role !== "host" && m.userId !== room.localUserId ? (
+                            <button
+                              type="button"
+                              className={`room-action-icon${m.role === "admin" ? " is-active" : ""}`}
+                              title={m.role === "admin" ? "取消管理员" : "设为管理员"}
+                              aria-label={m.role === "admin" ? `取消 ${m.name} 的管理员` : `将 ${m.name} 设为管理员`}
+                              disabled={busyId === `role:${m.userId}`}
+                              onClick={() => void changeRole(m.userId, m.role === "admin" ? "member" : "admin")}
+                            >
+                              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+                                <path d="M8 1.8 13 4v3.4c0 3.1-2 5.5-5 6.8-3-1.3-5-3.7-5-6.8V4l5-2.2Z" stroke="currentColor" strokeWidth="1.35" strokeLinejoin="round" />
+                                <path d="m5.8 8 1.4 1.4 3-3" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />
+                              </svg>
+                            </button>
+                          ) : null}
+                          {canKick && m.role !== "host" && !(me?.role === "admin" && m.role === "admin") && m.userId !== room.localUserId ? (
+                            <button
+                              type="button"
+                              className="room-action-icon is-danger"
+                              title={t.room.kick}
+                              aria-label={`${t.room.kick} ${m.name}`}
+                              disabled={busyId === `kick:${m.userId}`}
+                              onClick={() => void kickMember(m.userId)}
+                            >
+                              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+                                <circle cx="6.2" cy="5" r="2.3" stroke="currentColor" strokeWidth="1.35" />
+                                <path d="M2.3 13c.2-2.2 1.7-3.6 3.9-3.6 1 0 1.9.3 2.5.8M10.5 8.8l3.2 3.2M13.7 8.8l-3.2 3.2" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" />
+                              </svg>
+                            </button>
+                          ) : null}
+                        </span>
+                      </li>
+                    );
+                  })}
                 </ul>
               </div>
 
-              {room.status === "open" ? (
-                <div className="room-overview-card">
-                  <div className="room-overview-card-title">我的项目权限</div>
-                  <p className="settings-hint">
-                    别人的 Agent 以你当前打开的项目为工作目录时
-                  </p>
-                  {(["ask", "allow", "deny"] as const).map((p) => (
-                    <label key={p} className="room-check">
-                      <input
-                        type="radio"
-                        name="file-policy"
-                        checked={filePolicy === p}
-                        onChange={() => void setRoomFilePolicy(room.roomId, p)}
-                      />
-                      {p === "allow"
-                        ? "完全允许操作"
-                        : p === "deny"
-                          ? "禁止操作"
-                          : "审批操作"}
-                    </label>
-                  ))}
-                  <label className="room-check" style={{ marginTop: 8 }}>
-                    <input
-                      type="checkbox"
-                      checked={aiShareOn}
-                      onChange={(e) =>
-                        void setRoomAiShare(room.roomId, e.target.checked)
-                      }
-                    />
-                    允许本房席位借用我的 AI（模型 / 额度）
-                  </label>
-                </div>
-              ) : null}
-
               <div className="room-danger-zone">
+                <div className="room-danger-copy">
+                  <span className="room-danger-title">
+                    {canHost && room.status === "open" ? "解散群聊" : "退出群聊"}
+                  </span>
+                  <span>{canHost && room.status === "open" ? "所有成员都会断开连接" : "本机将离开当前群聊"}</span>
+                </div>
                 <button
                   type="button"
-                  className="btn btn-sm btn-danger"
+                  className="room-action-icon is-danger room-leave-icon"
+                  title={canHost && room.status === "open" ? t.room.leaveConfirmYesHost : t.room.leaveConfirmYes}
+                  aria-label={canHost && room.status === "open" ? t.room.leaveConfirmYesHost : t.room.leaveConfirmYes}
                   onClick={() => setConfirmLeave(true)}
                 >
-                  {canHost && room.status === "open"
-                    ? t.room.leaveConfirmYesHost
-                    : t.room.leaveConfirmYes}
+                  <svg width="17" height="17" viewBox="0 0 16 16" fill="none" aria-hidden>
+                    <path d="M6.8 2.3H3.2v11.4h3.6M9.7 5.2 12.5 8l-2.8 2.8M5.8 8h6.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
                 </button>
               </div>
             </section>
@@ -528,14 +615,12 @@ export function RoomSettingsModal({
                           </span>
                         </div>
                         <div className="mods-row-actions">
-                          <button
-                            type="button"
-                            className={`btn btn-sm${on ? " btn-primary" : ""}`}
+                          <ToggleSwitch
+                            checked={on}
+                            label={on ? `停用 ${pack.name}` : `启用 ${pack.name}`}
                             disabled={!canHost || room.status !== "open" || busyId === "play"}
-                            onClick={() => void setPlayPack(on ? "" : pack.packDir)}
-                          >
-                            {on ? t.room.modDisable : t.room.modEnable}
-                          </button>
+                            onCheckedChange={(next) => void setPlayPack(next ? pack.packDir : "")}
+                          />
                         </div>
                       </div>
                     );
@@ -566,14 +651,12 @@ export function RoomSettingsModal({
                           </span>
                         </div>
                         <div className="mods-row-actions">
-                          <button
-                            type="button"
-                            className={`btn btn-sm${on ? " btn-primary" : ""}`}
+                          <ToggleSwitch
+                            checked={on}
+                            label={on ? `停用 ${pack.name}` : `启用 ${pack.name}`}
                             disabled={!canHost || room.status !== "open" || busyId === pack.id}
-                            onClick={() => void togglePack(pack, !on)}
-                          >
-                            {on ? t.room.modDisable : t.room.modEnable}
-                          </button>
+                            onCheckedChange={(next) => void togglePack(pack, next)}
+                          />
                         </div>
                       </div>
                     );
@@ -757,14 +840,51 @@ export function RoomSettingsModal({
             </section>
           ) : null}
 
-          {err ? <p className="room-err">{err}</p> : null}
           </div>
         </div>
 
-        <footer className="room-modal-foot">
-          <button type="button" className="btn btn-sm" onClick={onClose}>
-            {t.common.close}
-          </button>
+        <footer className={`room-modal-foot room-settings-foot${closePending ? " is-confirming" : ""}`}>
+          <div className="room-settings-save-state" role="status" aria-live="polite">
+            {closePending ? (
+              <span className="settings-save-warning">放弃未保存的群聊名称？</span>
+            ) : err ? (
+              <span className="settings-error">{err}</span>
+            ) : busyId === "rename" ? (
+              <span>正在保存…</span>
+            ) : nameDirty ? (
+              <span>群聊名称尚未保存</span>
+            ) : nameSaved ? (
+              <span className="settings-ok">✓ 已保存</span>
+            ) : (
+              <span>其他设置会立即生效</span>
+            )}
+          </div>
+          <div className="room-settings-foot-actions">
+            {closePending ? (
+              <>
+                <button type="button" className="btn btn-ghost" onClick={() => setClosePending(false)}>
+                  继续编辑
+                </button>
+                <button type="button" className="btn btn-danger" onClick={onClose}>
+                  放弃并关闭
+                </button>
+              </>
+            ) : (
+              <>
+                <button type="button" className="btn btn-ghost" onClick={requestClose}>
+                  {nameDirty ? "取消" : t.common.close}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={busyId === "rename" || !nameDirty || !nameValid}
+                  onClick={() => void submitRename()}
+                >
+                  {busyId === "rename" ? "保存中…" : "保存"}
+                </button>
+              </>
+            )}
+          </div>
         </footer>
       </div>
       {confirmLeave ? (

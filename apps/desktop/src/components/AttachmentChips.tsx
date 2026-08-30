@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import type { Attachment } from "@claude-desktop/shared";
 import { getDesktop, hasDesktopApi } from "../lib/desktop-api";
-import { languageForPath } from "../lib/editor-language";
+import { hasLanguageForPath } from "../lib/editor-language";
 import { createLru } from "../lib/lru";
 import { useAppStore } from "../state/store";
 
@@ -91,7 +91,7 @@ export function AttachmentChips({
       const root = norm(projectPath).replace(/\/+$/, "");
       if (p.toLowerCase().startsWith(root.toLowerCase() + "/")) {
         const rel = p.slice(root.length + 1);
-        if (languageForPath(rel)) {
+        if (hasLanguageForPath(rel)) {
           onOpenFile(rel);
           return;
         }

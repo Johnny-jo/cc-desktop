@@ -227,6 +227,10 @@ type SessionEntry = {
   itemsHydrated: boolean;
   /** LRU timestamp for full transcript hydration (page reads do not hydrate). */
   lastTranscriptAccessAt: number;
+  /** File changes are restored independently from transcript data. */
+  changesHydrated: boolean;
+  /** Monotonic LRU access order for hydrated file changes. */
+  lastChangesAccessAt: number;
   nextId: (prefix: string) => string;
   extraMcpServers?: Record<string, unknown>;
   extraAllowedTools?: string[];
@@ -241,6 +245,7 @@ type SessionEntry = {
 /** Keep only a very small warm-query set; resume reopens parked sessions. */
 const MAX_LIVE_QUERIES = 2;
 export const MAX_HYDRATED_TRANSCRIPTS = 4;
+export const MAX_HYDRATED_CHANGES = 2;
 const IDLE_QUERY_TTL_MS = 60_000;
 const STREAM_FLUSH_MS = 40;
 const TOOL_PROGRESS_FLUSH_MS = 250;
@@ -505,6 +510,7 @@ export class SessionManager {
     string,
     ReturnType<typeof setTimeout>
   >();
+  private changesAccessSeq = 0;
 
   constructor(deps: SessionManagerDeps) {
     this.queryFn = deps.queryFn;
@@ -524,7 +530,8 @@ export class SessionManager {
     this.isPackaged = Boolean(deps.isPackaged);
     this.claudeExecutablePath = deps.claudeExecutablePath;
 
-    // Hydrate session list + file changes from disk (no live query until continue).
+    // Restore only lightweight summaries. Transcripts and file changes hydrate
+    // independently on demand so historical sessions do not dominate startup.
     if (this.archive) {
       for (const stored of this.archive.loadIndex()) {
         this.sessions.set(stored.id, {
@@ -551,12 +558,10 @@ export class SessionManager {
           items: [],
           itemsHydrated: false,
           lastTranscriptAccessAt: 0,
+          changesHydrated: false,
+          lastChangesAccessAt: 0,
           nextId: createIdFactory(),
         });
-        const changes = this.archive.loadChanges(stored.id);
-        if (changes.length) {
-          this.diffTracker.hydrate(stored.id, changes);
-        }
       }
     }
   }
@@ -684,6 +689,7 @@ export class SessionManager {
     else this.parkSession(entry, true);
     this.cancelPendingPersistence(sessionId);
     this.sessions.delete(sessionId);
+    this.diffTracker.clearSession(sessionId);
     this.archive?.remove(sessionId);
     return true;
   }
@@ -834,6 +840,55 @@ export class SessionManager {
     }
   }
 
+  private hydrateChanges(sessionId: string): void {
+    const entry = this.sessions.get(sessionId);
+    if (!entry) return;
+    if (!entry.changesHydrated) {
+      this.diffTracker.hydrate(
+        sessionId,
+        this.archive?.loadChanges(sessionId) ?? [],
+      );
+      entry.changesHydrated = true;
+    }
+    this.touchChanges(entry);
+  }
+
+  private touchChanges(entry: SessionEntry): void {
+    this.changesAccessSeq += 1;
+    entry.lastChangesAccessAt = this.changesAccessSeq;
+    this.enforceChangesCacheCap(entry.summary.id);
+  }
+
+  private enforceChangesCacheCap(preferredSessionId?: string): void {
+    const hydrated = [...this.sessions.values()].filter(
+      (entry) => entry.changesHydrated,
+    );
+    let excess = hydrated.length - MAX_HYDRATED_CHANGES;
+    if (excess <= 0) return;
+    const candidates = hydrated
+      .filter(
+        (entry) =>
+          entry.summary.id !== preferredSessionId &&
+          !entry.turnActive &&
+          entry.summary.status !== "running",
+      )
+      .sort((a, b) => a.lastChangesAccessAt - b.lastChangesAccessAt);
+    for (const entry of candidates) {
+      if (excess <= 0) break;
+      const sessionId = entry.summary.id;
+      const timer = this.changesSaveTimers.get(sessionId);
+      if (timer) {
+        clearTimeout(timer);
+        this.changesSaveTimers.delete(sessionId);
+        this.archive?.saveChanges(sessionId, this.diffTracker.list(sessionId));
+      }
+      this.diffTracker.clearSession(sessionId);
+      entry.changesHydrated = false;
+      entry.lastChangesAccessAt = 0;
+      excess -= 1;
+    }
+  }
+
   private replaceTranscript(
     entry: SessionEntry,
     items: ChatItem[],
@@ -928,23 +983,38 @@ export class SessionManager {
   getMemoryStats(): {
     hydratedTranscripts: number;
     hydratedItems: number;
+    hydratedChanges: number;
+    trackedChangeFiles: number;
     liveQueries: number;
   } {
     let hydratedTranscripts = 0;
     let hydratedItems = 0;
+    let hydratedChanges = 0;
+    let trackedChangeFiles = 0;
     let liveQueries = 0;
     for (const entry of this.sessions.values()) {
       if (entry.itemsHydrated) {
         hydratedTranscripts += 1;
         hydratedItems += entry.items.length;
       }
+      if (entry.changesHydrated) {
+        hydratedChanges += 1;
+        trackedChangeFiles += this.diffTracker.list(entry.summary.id).length;
+      }
       if (entry.query) liveQueries += 1;
     }
-    return { hydratedTranscripts, hydratedItems, liveQueries };
+    return {
+      hydratedTranscripts,
+      hydratedItems,
+      hydratedChanges,
+      trackedChangeFiles,
+      liveQueries,
+    };
   }
 
   /** Transcript + changes for IPC session:select (with canRestore flags). */
   getChangesForSelect(sessionId: string): FileChange[] {
+    this.hydrateChanges(sessionId);
     const cwd = this.sessions.get(sessionId)?.summary.cwd;
     this.diffTracker.markDeleted(sessionId, cwd);
     return this.listChanges(sessionId);
@@ -952,6 +1022,7 @@ export class SessionManager {
 
   /** DiffTracker list + per-event canRestore flags from the snapshot store. */
   listChanges(sessionId: string): FileChange[] {
+    this.hydrateChanges(sessionId);
     const list = this.diffTracker.list(sessionId);
     if (!this.snapshots) return list;
     const snaps = this.snapshots;
@@ -982,6 +1053,7 @@ export class SessionManager {
     if (!this.snapshots.has(sessionId, eventId)) {
       return { ok: false, error: "No snapshot for this operation" };
     }
+    this.hydrateChanges(sessionId);
     const found = this.diffTracker.findByEvent(sessionId, eventId);
     if (!found) {
       return { ok: false, error: "No tracked change for this operation" };
@@ -1007,6 +1079,7 @@ export class SessionManager {
     path: string,
   ): { ok: boolean; error?: string } {
     if (!this.snapshots) return { ok: false, error: "Snapshots unavailable" };
+    this.hydrateChanges(sessionId);
     const change = this.diffTracker.list(sessionId).find((c) => c.path === path);
     const first = change?.events[0];
     if (!first || !this.snapshots.has(sessionId, first.id)) {
@@ -1025,6 +1098,7 @@ export class SessionManager {
   } {
     const restored: string[] = [];
     const failed: string[] = [];
+    this.hydrateChanges(sessionId);
     if (!this.snapshots) {
       return {
         restored,
@@ -1048,6 +1122,7 @@ export class SessionManager {
   }
 
   private emitDiffAndPersist(sessionId: string): void {
+    this.hydrateChanges(sessionId);
     // Sync deleted/reappeared files before pushing to the renderer.
     const cwd = this.sessions.get(sessionId)?.summary.cwd;
     this.diffTracker.markDeleted(sessionId, cwd);
@@ -1658,6 +1733,8 @@ export class SessionManager {
       items: [],
       itemsHydrated: true,
       lastTranscriptAccessAt: now,
+      changesHydrated: false,
+      lastChangesAccessAt: 0,
       nextId: createIdFactory(),
       extraMcpServers: opts?.extraMcpServers,
       extraAllowedTools: opts?.extraAllowedTools,
@@ -2393,6 +2470,7 @@ export class SessionManager {
         hasToolResult = true;
       }
       if (hasToolResult) {
+        this.hydrateChanges(sessionId);
         const entry = this.sessions.get(sessionId);
         const gen = entry?.streamGen;
         void this.diffTracker
@@ -2413,6 +2491,7 @@ export class SessionManager {
     const message = rec.message as Record<string, unknown> | undefined;
     if (!message || !Array.isArray(message.content)) return;
 
+    let changesReady = false;
     for (const block of message.content) {
       if (!isToolUseBlock(block)) continue;
       if (
@@ -2421,6 +2500,11 @@ export class SessionManager {
         block.name !== "Bash"
       ) {
         continue;
+      }
+
+      if (!changesReady) {
+        this.hydrateChanges(sessionId);
+        changesReady = true;
       }
 
       const input =

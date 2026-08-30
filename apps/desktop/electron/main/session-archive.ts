@@ -1,6 +1,15 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { ChatItem, FileChange, SessionSummary } from "@claude-desktop/shared";
+import {
+  DIFF_MAX_EVENTS_PER_FILE,
+  compactFileChange,
+  type ChatItem,
+  type FileChange,
+  type SessionSummary,
+} from "@claude-desktop/shared";
+import type { AppDatabase } from "./app-database";
+
+const LEGACY_SESSION_MIGRATION_KEY = "migration.sessions-json-v1";
 
 export type StoredSession = SessionSummary & {
   sdkSessionId?: string;
@@ -111,6 +120,49 @@ export function mergeTranscriptItems(
   return out;
 }
 
+function normalizeFileChanges(changes: FileChange[]): FileChange[] {
+  return changes
+    .filter((change) => change && typeof change.path === "string")
+    .map((change) => {
+      const sourceEvents = Array.isArray(change.events) ? change.events : [];
+      const selectedEvents =
+        sourceEvents.length <= DIFF_MAX_EVENTS_PER_FILE
+          ? sourceEvents
+          : [
+              sourceEvents[0]!,
+              ...sourceEvents.slice(-(DIFF_MAX_EVENTS_PER_FILE - 1)),
+            ];
+      return compactFileChange({
+        path: String(change.path),
+        status:
+          change.status === "A" ||
+          change.status === "M" ||
+          change.status === "D"
+            ? change.status
+            : "M",
+        hunks: String(change.hunks ?? ""),
+        updatedAt: Number(change.updatedAt) || Date.now(),
+        events: selectedEvents.map((event, index) => ({
+          id:
+            typeof event.id === "string" && event.id
+              ? event.id
+              : `legacy-${index}-${Number(event.at) || 0}`,
+          tool:
+            event.tool === "Edit" ||
+            event.tool === "Write" ||
+            event.tool === "Bash"
+              ? event.tool
+              : "Write",
+          at: Number(event.at) || Date.now(),
+          hunk: String(event.hunk ?? ""),
+          ...(typeof event.toolUseId === "string" && event.toolUseId
+            ? { toolUseId: event.toolUseId }
+            : {}),
+        })),
+      });
+    });
+}
+
 type ChangesFile = {
   version: 1;
   sessionId: string;
@@ -118,8 +170,8 @@ type ChangesFile = {
 };
 
 /**
- * Disk persistence for session list + per-session chat transcripts.
- * Lives under Electron userData/sessions/.
+ * Session persistence. Electron uses SQLite; JSON remains as a compatibility
+ * fallback and as the non-destructive source for one-time migration.
  */
 export class SessionArchive {
   private readonly root: string;
@@ -131,19 +183,29 @@ export class SessionArchive {
    */
   private readonly saveSnapshots = new Map<string, ChatItem[]>();
 
-  constructor(userDataDir: string) {
+  constructor(
+    userDataDir: string,
+    public readonly database: AppDatabase | null = null,
+  ) {
     this.root = path.join(userDataDir, "sessions");
     this.indexPath = path.join(this.root, "index.json");
     fs.mkdirSync(this.root, { recursive: true });
+    this.migrateLegacySessions();
   }
 
   loadIndex(): StoredSession[] {
     try {
-      if (!fs.existsSync(this.indexPath)) return [];
-      const raw = fs.readFileSync(this.indexPath, "utf8");
-      const data = JSON.parse(raw) as IndexFile;
-      if (!Array.isArray(data.sessions)) return [];
-      return data.sessions.map((s) => ({
+      let sessions: StoredSession[];
+      if (this.database) {
+        sessions = this.database.loadSessions<StoredSession>();
+      } else {
+        if (!fs.existsSync(this.indexPath)) return [];
+        const raw = fs.readFileSync(this.indexPath, "utf8");
+        const data = JSON.parse(raw) as IndexFile;
+        if (!Array.isArray(data.sessions)) return [];
+        sessions = data.sessions;
+      }
+      return sessions.map((s) => ({
         id: String(s.id),
         title: String(s.title ?? "Session"),
         cwd: String(s.cwd ?? ""),
@@ -216,14 +278,22 @@ export class SessionArchive {
         }))
         .sort((a, b) => Number(b.pinned ?? 0) - Number(a.pinned ?? 0) || b.updatedAt - a.updatedAt),
     };
+    if (this.database) {
+      this.database.replaceSessions(payload.sessions);
+      return;
+    }
     fs.mkdirSync(this.root, { recursive: true });
     fs.writeFileSync(this.indexPath, JSON.stringify(payload, null, 2), "utf8");
   }
 
   /** Remove a session from the index and delete its transcript / changes files. */
   remove(sessionId: string): void {
-    const list = this.loadIndex().filter((s) => s.id !== sessionId);
-    this.saveIndex(list);
+    if (this.database) {
+      this.database.removeSession(sessionId);
+    } else {
+      const list = this.loadIndex().filter((s) => s.id !== sessionId);
+      this.saveIndex(list);
+    }
     this.releaseItems(sessionId);
     for (const file of [
       this.transcriptPath(sessionId),
@@ -239,18 +309,27 @@ export class SessionArchive {
   }
 
   upsertSummary(summary: StoredSession): void {
-    const list = this.loadIndex();
-    const idx = list.findIndex((s) => s.id === summary.id);
     const next: StoredSession = {
       ...summary,
-      status: summary.status === "running" ? summary.status : summary.status,
+      status: summary.status === "running" ? "idle" : summary.status,
     };
+    if (this.database) {
+      this.database.upsertSession(next);
+      return;
+    }
+    const list = this.loadIndex();
+    const idx = list.findIndex((s) => s.id === summary.id);
     if (idx >= 0) list[idx] = { ...list[idx], ...next };
     else list.unshift(next);
     this.saveIndex(list);
   }
 
   loadItems(sessionId: string): ChatItem[] {
+    if (this.database) {
+      const items = this.database.loadSessionItems(sessionId).map(stripStreaming);
+      this.saveSnapshots.set(sessionId, [...items]);
+      return items;
+    }
     const manifest = this.readManifest(sessionId);
     if (manifest) {
       const items = this.readItemRange(sessionId, manifest, 0, manifest.total);
@@ -273,6 +352,10 @@ export class SessionArchive {
     sessionId: string,
     opts?: { beforeId?: string; afterId?: string; limit?: number },
   ): TranscriptPage {
+    if (this.database) {
+      const page = this.database.loadSessionItemsPage(sessionId, opts);
+      return { ...page, items: page.items.map(stripStreaming) };
+    }
     const manifest = this.readManifest(sessionId);
     if (!manifest) {
       return pageTranscriptItems(this.loadLegacyItems(sessionId), opts);
@@ -311,7 +394,6 @@ export class SessionArchive {
   }
 
   saveItems(sessionId: string, items: ChatItem[]): void {
-    const oldManifest = this.readManifest(sessionId);
     const previous = this.saveSnapshots.get(sessionId);
     let firstChanged = 0;
     if (previous) {
@@ -323,8 +405,11 @@ export class SessionArchive {
       ) {
         firstChanged += 1;
       }
+      const alreadyPersisted = this.database
+        ? items.length === 0 || this.database.hasSessionItems(sessionId)
+        : Boolean(this.readManifest(sessionId));
       if (
-        oldManifest &&
+        alreadyPersisted &&
         firstChanged === previous.length &&
         firstChanged === items.length
       ) {
@@ -332,6 +417,18 @@ export class SessionArchive {
         return;
       }
     }
+
+    if (this.database) {
+      this.database.saveSessionItems(
+        sessionId,
+        items.map(stripStreaming),
+        firstChanged,
+      );
+      this.saveSnapshots.set(sessionId, [...items]);
+      return;
+    }
+
+    const oldManifest = this.readManifest(sessionId);
 
     if (!oldManifest || oldManifest.chunkSize !== TRANSCRIPT_CHUNK_ITEMS) {
       firstChanged = 0;
@@ -411,48 +508,149 @@ export class SessionArchive {
   }
 
   loadChanges(sessionId: string): FileChange[] {
+    if (this.database) {
+      return normalizeFileChanges(this.database.loadSessionChanges(sessionId));
+    }
+    return this.loadLegacyChanges(sessionId);
+  }
+
+  private loadLegacyChanges(sessionId: string): FileChange[] {
     const file = this.changesPath(sessionId);
     try {
       if (!fs.existsSync(file)) return [];
       const raw = fs.readFileSync(file, "utf8");
       const data = JSON.parse(raw) as ChangesFile;
       if (!Array.isArray(data.changes)) return [];
-      return data.changes
-        .filter((c) => c && typeof c.path === "string")
-        .map((c) => ({
-          path: String(c.path),
-          status: c.status === "A" || c.status === "M" ? c.status : "M",
-          hunks: String(c.hunks ?? ""),
-          updatedAt: Number(c.updatedAt) || Date.now(),
-          events: Array.isArray(c.events)
-            ? c.events.map((e, i) => ({
-                id:
-                  typeof e.id === "string" && e.id
-                    ? e.id
-                    : `legacy-${i}-${Number(e.at) || 0}`,
-                tool:
-                  e.tool === "Edit" || e.tool === "Write" || e.tool === "Bash"
-                    ? e.tool
-                    : "Write",
-                at: Number(e.at) || Date.now(),
-                hunk: String(e.hunk ?? ""),
-              }))
-            : [],
-        }));
+      return normalizeFileChanges(data.changes);
     } catch {
       return [];
     }
   }
 
   saveChanges(sessionId: string, changes: FileChange[]): void {
+    const compacted = changes.map(compactFileChange);
+    if (this.database) {
+      this.database.saveSessionChanges(sessionId, compacted);
+      return;
+    }
     const file = this.changesPath(sessionId);
     const payload: ChangesFile = {
       version: 1,
       sessionId,
-      changes,
+      // Last line of defence: never persist an unbounded in-memory history.
+      changes: compacted,
     };
     fs.mkdirSync(this.root, { recursive: true });
-    fs.writeFileSync(file, JSON.stringify(payload, null, 2), "utf8");
+    fs.writeFileSync(file, JSON.stringify(payload), "utf8");
+  }
+
+  private migrateLegacySessions(): void {
+    if (
+      !this.database ||
+      this.database.getMeta(LEGACY_SESSION_MIGRATION_KEY)
+    ) {
+      return;
+    }
+    try {
+      const summaries = this.loadLegacySummariesForMigration();
+      const safeToSessionId = new Map(
+        summaries.map((summary) => [this.safeId(summary.id), summary.id]),
+      );
+      const sessionIds = new Set(summaries.map((summary) => summary.id));
+
+      for (const entry of fs.readdirSync(this.root, { withFileTypes: true })) {
+        let safeSessionId: string | null = null;
+        if (entry.isDirectory() && entry.name.endsWith(".transcript")) {
+          safeSessionId = entry.name.slice(0, -".transcript".length);
+        } else if (entry.isFile() && entry.name.endsWith(".changes.json")) {
+          safeSessionId = entry.name.slice(0, -".changes.json".length);
+        } else if (
+          entry.isFile() &&
+          entry.name.endsWith(".json") &&
+          entry.name !== "index.json"
+        ) {
+          safeSessionId = entry.name.slice(0, -".json".length);
+        }
+        if (safeSessionId) {
+          sessionIds.add(safeToSessionId.get(safeSessionId) ?? safeSessionId);
+        }
+      }
+
+      for (const summary of summaries) {
+        if (!this.database.hasSession(summary.id)) {
+          this.database.upsertSession({
+            ...summary,
+            status: summary.status === "running" ? "idle" : summary.status,
+          });
+        }
+      }
+
+      for (const sessionId of sessionIds) {
+        if (!this.database.hasSessionItems(sessionId)) {
+          const manifest = this.readManifest(sessionId);
+          let items: ChatItem[];
+          if (manifest) {
+            const loaded = this.readItemRange(
+              sessionId,
+              manifest,
+              0,
+              manifest.total,
+            );
+            if (!loaded) {
+              throw new Error(`Unreadable transcript chunks: ${sessionId}`);
+            }
+            items = loaded;
+          } else {
+            items = this.loadLegacyItems(sessionId);
+          }
+          if (items.length > 0) {
+            this.database.saveSessionItems(
+              sessionId,
+              items.map(stripStreaming),
+              0,
+            );
+          }
+        }
+
+        if (!this.database.hasSessionChanges(sessionId)) {
+          const changes = this.loadLegacyChanges(sessionId);
+          if (changes.length > 0) {
+            this.database.saveSessionChanges(sessionId, changes);
+          }
+        }
+      }
+
+      this.database.setMeta(LEGACY_SESSION_MIGRATION_KEY, String(Date.now()));
+    } catch {
+      // Keep the marker unset so the non-destructive migration can retry.
+    }
+  }
+
+  private loadLegacySummariesForMigration(): StoredSession[] {
+    try {
+      if (!fs.existsSync(this.indexPath)) return [];
+      const data = JSON.parse(
+        fs.readFileSync(this.indexPath, "utf8"),
+      ) as IndexFile;
+      if (!Array.isArray(data.sessions)) return [];
+      return data.sessions
+        .filter((summary) => summary && typeof summary.id === "string")
+        .map((summary) => ({
+          ...summary,
+          id: String(summary.id),
+          title: String(summary.title ?? "Session"),
+          cwd: String(summary.cwd ?? ""),
+          updatedAt: Number(summary.updatedAt) || Date.now(),
+          status:
+            summary.status === "error"
+              ? "error"
+              : summary.status === "running"
+                ? "idle"
+                : "idle",
+        }));
+    } catch {
+      return [];
+    }
   }
 
   private safeId(sessionId: string): string {

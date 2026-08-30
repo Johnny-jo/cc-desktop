@@ -19,6 +19,7 @@ export const ROOM_FRAME_LIMITS = {
   handshake: 8 * 1024,
   "chat.user": 64 * 1024,
   "chat.event": 64 * 1024,
+  "state.live": 256 * 1024,
   "state.snapshot": 2 * 1024 * 1024,
   "mod.bundle": MOD_BUNDLE_MAX_BYTES,
   envelope: 2 * 1024 * 1024 + 256,
@@ -67,6 +68,7 @@ export type RoomFrameType =
   | "node.info"
   | "game.dice"
   | "game.rps"
+  | "state.live"
   | "state.snapshot"
   | "room.closed"
   | "perm.ask"
@@ -348,6 +350,22 @@ export type RoomTimelineItem = {
   recalled?: boolean;
 };
 
+/** Ephemeral execution progress. Kept outside the persisted timeline. */
+export type RoomLiveExecEntry = {
+  turnId: string;
+  seatId: string;
+  text: string;
+  tool?: string;
+  /** Current streamed thinking tail. */
+  thinking?: string;
+  at: number;
+};
+
+/** Lightweight room patch used for high-frequency, non-durable state. */
+export type RoomLivePatch = {
+  liveExec: RoomLiveExecEntry[];
+};
+
 /** chat.recall：客人 → 房主，请求撤回自己的一条消息。 */
 export type RoomChatRecallPayload = {
   itemId: string;
@@ -374,15 +392,7 @@ export type RoomSnapshot = {
    * 二期：远端执行中的实时进度（turnId → 截至目前的回复尾部/工具行），
    * 只活在快照里，不入时间线、不持久化。
    */
-  liveExec?: Array<{
-    turnId: string;
-    seatId: string;
-    text: string;
-    tool?: string;
-    /** 截至目前的思考内容（流式；思考完成后前端折叠展示）。 */
-    thinking?: string;
-    at: number;
-  }>;
+  liveExec?: RoomLiveExecEntry[];
   /** 二期：远端席位最近一轮的结构化改动（截断），各端只读查看。 */
   remoteChanges?: Record<string, FileChange[]>;
   /** Whether room frames are AEAD-encrypted after the HMAC handshake. */

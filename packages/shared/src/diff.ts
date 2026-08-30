@@ -11,6 +11,55 @@ export function newChangeEventId(): string {
 export const DIFF_MAX_LINES = 800;
 export const DIFF_MAX_CHARS = 120_000;
 export const DIFF_PREVIEW_ROWS = 600;
+/** Keep the first rollback anchor plus the most recent per-file operations. */
+export const DIFF_MAX_EVENTS_PER_FILE = 32;
+/** Older operations only need a small preview; snapshots are keyed by event id. */
+export const DIFF_HISTORY_HUNK_CHARS = 8_000;
+
+const DIFF_TRUNCATED_NOTE = "\n# diff preview compacted to reduce memory";
+
+function capStoredHunk(value: unknown, maxChars: number): string {
+  const hunk = String(value ?? "");
+  if (hunk.length <= maxChars) return hunk;
+  const bodyChars = Math.max(0, maxChars - DIFF_TRUNCATED_NOTE.length);
+  return `${hunk.slice(0, bodyChars)}${DIFF_TRUNCATED_NOTE}`;
+}
+
+/**
+ * Bound one file's retained history while preserving its original rollback
+ * anchor and recent event ids. This also compacts legacy archives whose hunks
+ * predate the current preview limits.
+ */
+export function compactFileChange(change: FileChange): FileChange {
+  const source = Array.isArray(change.events) ? change.events : [];
+  const selected =
+    source.length <= DIFF_MAX_EVENTS_PER_FILE
+      ? source
+      : [source[0]!, ...source.slice(-(DIFF_MAX_EVENTS_PER_FILE - 1))];
+  const lastIndex = selected.length - 1;
+  const events = selected.map((event, index) => ({
+    ...event,
+    hunk: capStoredHunk(
+      event?.hunk,
+      index === lastIndex ? DIFF_MAX_CHARS : DIFF_HISTORY_HUNK_CHARS,
+    ),
+  }));
+  const latest = events[lastIndex];
+  const latestHunk = latest
+    ? latest.hunk
+    : capStoredHunk(change.hunks, DIFF_MAX_CHARS);
+  const compactedPrefix =
+    source.length > events.length
+      ? `# ${events.length} retained change(s) (older events compacted)\n`
+      : events.length > 1
+        ? `# ${events.length} change(s) in session (showing latest)\n`
+        : "";
+  return {
+    ...change,
+    hunks: `${compactedPrefix}${latestHunk}`,
+    events,
+  };
+}
 
 function truncateForDiff(
   text: string,
@@ -370,28 +419,23 @@ export function upsertFileChange(
     ...(event.toolUseId ? { toolUseId: event.toolUseId } : {}),
   };
   if (!prev) {
-    next.set(event.path, {
+    next.set(event.path, compactFileChange({
       path: event.path,
       status: event.status,
       hunks: event.hunk,
       updatedAt: event.at,
       events: [entry],
-    });
+    }));
     return next;
   }
   const events = [...prev.events, entry];
-  // MVP aggregate display: last event hunk + count header
-  const hunks = [
-    `# ${events.length} change(s) in session (showing latest)`,
-    event.hunk,
-  ].join("\n");
-  next.set(event.path, {
+  next.set(event.path, compactFileChange({
     path: event.path,
     status: prev.status === "A" || event.status === "A" ? "A" : "M",
-    hunks,
+    hunks: event.hunk,
     updatedAt: event.at,
     events,
-  });
+  }));
   return next;
 }
 

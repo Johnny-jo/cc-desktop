@@ -20,6 +20,7 @@ import type {
   RoomFilePolicy,
   RoomFilePolicyPayload,
   RoomListItem,
+  RoomLivePatch,
   RoomMember,
   RoomMemberKickPayload,
   RoomNodeInfoPayload,
@@ -194,6 +195,7 @@ const KNOWN_ROOM_FRAME_TYPES: ReadonlySet<string> = new Set<RoomFrameType>([
   "node.info",
   "game.dice",
   "game.rps",
+  "state.live",
   "state.snapshot",
   "room.closed",
   "perm.ask",
@@ -297,6 +299,8 @@ type LiveExecEntry = {
 const EXEC_LIVE_INTERVAL_MS = 800;
 /** 进度文本尾部保留长度。 */
 const EXEC_LIVE_TEXT_TAIL = 1500;
+/** Merge Room archive writes from append + pushState into one durable save. */
+export const ROOM_PERSIST_DEBOUNCE_MS = 400;
 
 /** Charge one abuse event to the connection's token bucket (spec §9). */
 function chargeAbuse(guard: ConnGuard | undefined): void {
@@ -523,7 +527,16 @@ function lanAddress(): string {
 }
 
 function displayName(): string {
-  return os.userInfo().username || "user";
+  try {
+    return (
+      os.userInfo().username ||
+      process.env.USERNAME ||
+      process.env.USER ||
+      "user"
+    );
+  } catch {
+    return process.env.USERNAME || process.env.USER || "user";
+  }
 }
 
 /** Wait until the WS server is actually accepting connections. */
@@ -572,6 +585,12 @@ function waitForListening(
 
 export class RoomService {
   private rooms = new Map<string, RoomRecord>();
+  private disposed = false;
+  private readonly pendingPersists = new Map<string, RoomRecord>();
+  private readonly persistTimers = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
   private readonly getWindow: () => BrowserWindow | null;
   /**
    * Multi-window push (main + detached room/session windows). When absent,
@@ -810,7 +829,11 @@ export function activate(ctx) {
           // 重启后没有活 socket：只有房主自己算在线，客人等手动重连。
           online: stored.role === "host" ? m.role === "host" : m.online,
         })),
-        seats: stored.seats ?? [],
+        // 接管功能已下线；旧存档里的接管状态不再恢复。
+        seats: (stored.seats ?? []).map((seat) => ({
+          ...seat,
+          takenOverBy: null,
+        })),
         items: stored.items ?? [],
         seq: 1,
         server: null,
@@ -873,6 +896,7 @@ export function activate(ctx) {
           text: `重启后自动恢复开房失败：${bound.error}。房间已标记为结束，可重新创建`,
           authorLabel: "系统",
         });
+        this.persistNow(r);
         this.emit(r);
         return;
       }
@@ -952,6 +976,7 @@ export function activate(ctx) {
         text: `重启后自动恢复开房失败：${err instanceof Error ? err.message : String(err)}`,
         authorLabel: "系统",
       });
+      this.persistNow(r);
       this.emit(r);
     }
   }
@@ -975,6 +1000,35 @@ export function activate(ctx) {
         if (a.status !== b.status) return a.status === "open" ? -1 : 1;
         return a.name.localeCompare(b.name);
       });
+  }
+
+  /** Bounded in-memory room state counters; never hydrates archived rooms. */
+  getMemoryStats(): {
+    rooms: number;
+    timelineItems: number;
+    members: number;
+    connections: number;
+    liveExecutions: number;
+    pendingPersists: number;
+  } {
+    let timelineItems = 0;
+    let members = 0;
+    let connections = 0;
+    let liveExecutions = 0;
+    for (const room of this.rooms.values()) {
+      timelineItems += room.items.length;
+      members += room.members.length;
+      connections += room.connections.size;
+      liveExecutions += room.liveExec?.size ?? 0;
+    }
+    return {
+      rooms: this.rooms.size,
+      timelineItems,
+      members,
+      connections,
+      liveExecutions,
+      pendingPersists: this.pendingPersists.size,
+    };
   }
 
   get(roomId: string): RoomSnapshot | null {
@@ -2255,6 +2309,7 @@ export function activate(ctx) {
     const info = old.joinInfo;
     const userId = old.localUserId || undefined;
     // Archive 保留；主机快照会把完整历史带回来
+    this.cancelPersist(roomId);
     this.rooms.delete(roomId);
     const res = await this.join({
       host: info.host,
@@ -2305,12 +2360,26 @@ export function activate(ctx) {
   private bindGuestSocket(r: RoomRecord, ws: WebSocket): void {
     const handle = (frame: RoomFrame) => {
       if (r.closing || r.client !== ws) return;
+      if (frame.type === "state.live") {
+        if (r.status !== "open") return;
+        r.seq = frame.seq;
+        const patch = frame.payload as RoomLivePatch;
+        this.applyGuestLivePatch(r, patch);
+        this.emitLive(r);
+        return;
+      }
       if (frame.type === "state.snapshot") {
         if (r.status !== "open") return;
         const snap = frame.payload as RoomSnapshot;
+        const rejoinConfigChanged =
+          r.modChecksum !== snap.modChecksum ||
+          r.requireMods !== snap.requireMods;
         r.seq = frame.seq;
         this.applyGuestSnapshot(r, snap);
-        this.persist(r);
+        // Mod requirements are rejoin credentials. Commit them before the UI
+        // observes the snapshot; ordinary timeline snapshots stay debounced.
+        if (rejoinConfigChanged) this.persistNow(r);
+        else this.persist(r);
         this.emit(r);
         return;
       }
@@ -2479,6 +2548,7 @@ export function activate(ctx) {
     r.server = null;
 
     if (shouldDelete) {
+      this.cancelPersist(roomId);
       this.archive?.removeRoom(roomId);
       this.rooms.delete(roomId);
       this.safeSend(IPC.roomEvent, {
@@ -2507,6 +2577,7 @@ export function activate(ctx) {
       // ignore
     }
     if (r) this.disposeKernel(r, true);
+    this.cancelPersist(roomId);
     this.rooms.delete(roomId);
     this.archive?.removeRoom(roomId);
     return { ok: true };
@@ -2774,51 +2845,19 @@ export function activate(ctx) {
   takeover(roomId: string, seatId: string) {
     const r = this.rooms.get(roomId);
     if (!r || r.status !== "open") return { ok: false, error: "群聊不可用" };
-    const seat = r.seats.find((s) => s.id === seatId);
-    if (!seat) return { ok: false, error: "席位不存在" };
-    if (seat.kind !== "agent") return { ok: false, error: "只能接管 Agent 席位" };
-    if (r.localRole === "host") {
-      seat.takenOverBy = r.localUserId;
-      this.abortRemoteTurnsForSeat(r, seat.id, "席位被接管");
-      if (seat.sessionId) {
-        try {
-          this.sessions.abort(seat.sessionId);
-        } catch {
-          // ignore
-        }
-        seat.running = false;
-      }
-      this.append(r, {
-        kind: "system",
-        seatId,
-        text: `${this.memberName(r, r.localUserId)} 接管了「${seat.name}」`,
-        authorLabel: "系统",
-      });
-      this.pushState(r);
-      return { ok: true };
+    if (!r.seats.some((s) => s.id === seatId)) {
+      return { ok: false, error: "席位不存在" };
     }
-    this.sendClient(r, "seat.takeover", { seatId, userId: r.localUserId });
-    return { ok: true };
+    return { ok: false, error: "接管功能已取消，请直接 @ 对应成员或 Agent" };
   }
 
   returnSeat(roomId: string, seatId: string) {
     const r = this.rooms.get(roomId);
     if (!r || r.status !== "open") return { ok: false, error: "群聊不可用" };
-    const seat = r.seats.find((s) => s.id === seatId);
-    if (!seat) return { ok: false, error: "席位不存在" };
-    if (r.localRole === "host") {
-      seat.takenOverBy = null;
-      this.append(r, {
-        kind: "system",
-        seatId,
-        text: `「${seat.name}」已交还 Agent`,
-        authorLabel: "系统",
-      });
-      this.pushState(r);
-      return { ok: true };
+    if (!r.seats.some((s) => s.id === seatId)) {
+      return { ok: false, error: "席位不存在" };
     }
-    this.sendClient(r, "seat.return", { seatId, userId: r.localUserId });
-    return { ok: true };
+    return { ok: false, error: "接管功能已取消，请直接 @ 对应成员或 Agent" };
   }
 
   enableKernelMod(
@@ -3155,7 +3194,11 @@ export function activate(ctx) {
     if (!r || r.status !== "open") return { ok: false, error: "群聊不可用" };
     if (r.localRole !== "host") return { ok: false, error: "只有群主可以启用扩展" };
     if (!r.kernelStore) {
-      r.kernelStore = new HostRoomKv(getKernelStorePath(this.pathEnv(), r.roomId));
+      r.kernelStore = new HostRoomKv(
+        getKernelStorePath(this.pathEnv(), r.roomId),
+        this.archive?.database,
+        r.roomId,
+      );
     }
     if (r.kernel) void r.kernel.dispose();
     r.kernel = new ModKernel(r.kernelStore);
@@ -3203,12 +3246,11 @@ export function activate(ctx) {
       }
       const canTalk =
         (seat.kind === "human" && seat.occupantUserId === r.localUserId) ||
-        (seat.kind === "agent" &&
-          (seat.takenOverBy === r.localUserId || !seat.takenOverBy));
+        seat.kind === "agent";
       if (!canTalk) {
         return {
           ok: false,
-          error: "当前不能在这个席位发言（选自己的人席，或先接管 Agent）",
+          error: "当前不能在这个成员席位发言，请选择自己的席位",
         };
       }
       this.sendClient(r, "chat.user", {
@@ -3221,9 +3263,8 @@ export function activate(ctx) {
     }
 
     const canTalk =
-      (seat.kind === "human" && seat.occupantUserId === r.localUserId) ||
-      (seat.kind === "agent" && seat.takenOverBy === r.localUserId);
-    if (!canTalk && seat.kind === "agent" && !seat.takenOverBy) {
+      seat.kind === "human" && seat.occupantUserId === r.localUserId;
+    if (seat.kind === "agent") {
       void this.enqueueInbound(r, () =>
         this.ingestUserChat(
           r,
@@ -3242,7 +3283,7 @@ export function activate(ctx) {
       return { ok: true };
     }
     if (!canTalk) {
-      return { ok: false, error: "当前不能在这个席位发言（先接管或选自己的人席）" };
+      return { ok: false, error: "当前不能在这个成员席位发言，请选择自己的席位" };
     }
 
     void this.enqueueInbound(r, () =>
@@ -3264,6 +3305,8 @@ export function activate(ctx) {
   }
 
   disposeAll(): void {
+    this.flushPendingPersists();
+    this.disposed = true;
     for (const r of this.rooms.values()) {
       this.cancelGuestReconnect(r);
       this.disposeModHost(r);
@@ -5803,12 +5846,11 @@ export function activate(ctx) {
         this.reply(ws, r, "error", { message: "请先选一个席位" });
         return;
       }
-      const taken = seat.takenOverBy === userId;
       const ownHuman = seat.kind === "human" && seat.occupantUserId === userId;
-      const toAgent = seat.kind === "agent" && !seat.takenOverBy;
-      if (!taken && !ownHuman && !toAgent) {
+      const toAgent = seat.kind === "agent";
+      if (!ownHuman && !toAgent) {
         this.reply(ws, r, "error", {
-          message: "当前不能在这个席位发言（选自己的人席，或先接管 Agent）",
+          message: "当前不能在这个成员席位发言，请选择自己的席位",
         });
         return;
       }
@@ -5855,26 +5897,9 @@ export function activate(ctx) {
     }
 
     if (frame.type === "seat.takeover") {
-      const p = frame.payload as { seatId?: string };
-      const seat = r.seats.find((s) => s.id === p.seatId);
-      if (!seat || seat.kind !== "agent") return;
-      seat.takenOverBy = userId;
-      this.abortRemoteTurnsForSeat(r, seat.id, "席位被接管");
-      if (seat.sessionId) {
-        try {
-          this.sessions.abort(seat.sessionId);
-        } catch {
-          // ignore
-        }
-        seat.running = false;
-      }
-      this.append(r, {
-        kind: "system",
-        seatId: seat.id,
-        text: `${this.memberName(r, userId)} 接管了「${seat.name}」`,
-        authorLabel: "系统",
+      this.reply(ws, r, "error", {
+        message: "接管功能已取消，请直接 @ 对应成员或 Agent",
       });
-      this.pushState(r);
       return;
     }
 
@@ -6039,18 +6064,10 @@ export function activate(ctx) {
     }
 
     if (frame.type === "seat.return") {
-      const p = frame.payload as { seatId?: string };
-      const seat = r.seats.find((s) => s.id === p.seatId);
-      if (!seat) return;
-      if (seat.takenOverBy !== userId) return;
-      seat.takenOverBy = null;
-      this.append(r, {
-        kind: "system",
-        seatId: seat.id,
-        text: `${this.memberName(r, userId)} 交还了「${seat.name}」`,
-        authorLabel: "系统",
+      this.reply(ws, r, "error", {
+        message: "接管功能已取消，请直接 @ 对应成员或 Agent",
       });
-      this.pushState(r);
+      return;
     }
   }
 
@@ -6074,8 +6091,28 @@ export function activate(ctx) {
     this.persist(r);
   }
 
+  /** Debounced persistence: append + pushState in the same turn become one write. */
   private persist(r: RoomRecord): void {
+    if (!this.archive || this.disposed) return;
+    const roomId = r.roomId;
+    this.pendingPersists.set(roomId, r);
+    const previous = this.persistTimers.get(roomId);
+    if (previous) clearTimeout(previous);
+    const timer = setTimeout(() => {
+      this.persistTimers.delete(roomId);
+      const pending = this.pendingPersists.get(roomId);
+      this.pendingPersists.delete(roomId);
+      // A deleted/replaced room must never be resurrected by an old timer.
+      if (!pending || this.rooms.get(roomId) !== pending) return;
+      this.persistNow(pending);
+    }, ROOM_PERSIST_DEBOUNCE_MS);
+    timer.unref?.();
+    this.persistTimers.set(roomId, timer);
+  }
+
+  private persistNow(r: RoomRecord): void {
     if (!this.archive) return;
+    this.cancelPersist(r.roomId);
     try {
       const stored: StoredRoom = {
         roomId: r.roomId,
@@ -6132,6 +6169,24 @@ export function activate(ctx) {
       this.archive.saveRoom(stored);
     } catch {
       // non-fatal
+    }
+  }
+
+  private cancelPersist(roomId: string): void {
+    const timer = this.persistTimers.get(roomId);
+    if (timer) clearTimeout(timer);
+    this.persistTimers.delete(roomId);
+    this.pendingPersists.delete(roomId);
+  }
+
+  private flushPendingPersists(): void {
+    const pending = [...this.pendingPersists.entries()];
+    for (const [roomId, room] of pending) {
+      const timer = this.persistTimers.get(roomId);
+      if (timer) clearTimeout(timer);
+      this.persistTimers.delete(roomId);
+      this.pendingPersists.delete(roomId);
+      if (this.rooms.get(roomId) === room) this.persistNow(room);
     }
   }
 
@@ -6205,7 +6260,7 @@ export function activate(ctx) {
       encrypt: r.encrypt,
       hostFingerprint: r.hostFingerprint || undefined,
       members: r.members,
-      seats: r.seats,
+      seats: r.seats.map((seat) => ({ ...seat, takenOverBy: null })),
       items: r.items,
       ...(r.liveExec?.size
         ? { liveExec: [...r.liveExec.values()] }
@@ -6241,8 +6296,11 @@ export function activate(ctx) {
 
   /** 轻量广播：实时进度这类易失状态的推送不落盘。 */
   private pushLive(r: RoomRecord) {
-    this.broadcast(r, "state.snapshot", this.snapshot(r));
-    this.emit(r);
+    const patch: RoomLivePatch = {
+      liveExec: r.liveExec?.size ? [...r.liveExec.values()] : [],
+    };
+    this.broadcast(r, "state.live", patch);
+    this.emitLive(r, patch);
   }
 
   private broadcast(r: RoomRecord, type: RoomFrame["type"], payload: unknown) {
@@ -6692,7 +6750,7 @@ export function activate(ctx) {
   private applyGuestSnapshot(r: RoomRecord, snap: RoomSnapshot): void {
     r.name = snap.name;
     r.members = snap.members;
-    r.seats = snap.seats;
+    r.seats = snap.seats.map((seat) => ({ ...seat, takenOverBy: null }));
     r.items = snap.items;
     r.status = snap.status;
     r.modChecksum = snap.modChecksum;
@@ -6712,6 +6770,21 @@ export function activate(ctx) {
       r.modOffer = undefined;
     }
     r.kernelProjection = snap.kernel;
+  }
+
+  private applyGuestLivePatch(r: RoomRecord, patch: RoomLivePatch): void {
+    r.liveExec = Array.isArray(patch.liveExec) && patch.liveExec.length
+      ? new Map(patch.liveExec.map((entry) => [entry.turnId, entry]))
+      : undefined;
+  }
+
+  private emitLive(
+    r: RoomRecord,
+    patch: RoomLivePatch = {
+      liveExec: r.liveExec?.size ? [...r.liveExec.values()] : [],
+    },
+  ): void {
+    this.safeSend(IPC.roomEvent, { roomId: r.roomId, livePatch: patch });
   }
 
   private onModFail(r: RoomRecord, message: string): void {

@@ -129,6 +129,26 @@ describe("borrow-ai protocol frames", () => {
   });
 });
 
+describe("room live patches", () => {
+  it("round-trips state.live without a full snapshot", () => {
+    const payload = {
+      liveExec: [
+        {
+          turnId: "turn-1",
+          seatId: "seat-1",
+          text: "working",
+          at: 1,
+        },
+      ],
+    };
+    const parsed = parseRoomFrame(
+      JSON.stringify(makeRoomFrame("room-1", 2, "state.live", payload)),
+    );
+    expect(parsed?.type).toBe("state.live");
+    expect(parsed?.payload).toEqual(payload);
+  });
+});
+
 describe("hashModFiles", () => {
   it("is deterministic, 64-char hex, and changes if either file changes", () => {
     const manifest = '{"id":"demo"}';
