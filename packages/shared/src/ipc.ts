@@ -23,6 +23,8 @@ export const IPC = {
   fileReadAttachment: "file:read-attachment",
   /** Renderer → Main: show native file picker and return selected paths */
   fileSelect: "file:select",
+  /** Renderer → Main: persist a pasted clipboard image to a temp file, return its attachment */
+  fileSaveClipboardImage: "file:save-clipboard-image",
   /** Renderer → Main: enumerate project files for @-mention autocomplete */
   projectListFiles: "project:list-files",
   sessionStart: "session:start",
@@ -270,6 +272,10 @@ export type IpcInvokeMap = {
   [IPC.fileSelect]: {
     args: [];
     result: { paths: string[] };
+  };
+  [IPC.fileSaveClipboardImage]: {
+    args: [{ dataBase64: string; mimeType: string }];
+    result: Attachment;
   };
   [IPC.projectListFiles]: {
     /** cwd must be the open project or an active session cwd; query filters by substring */

@@ -4114,6 +4114,29 @@ body.session-detaching {
   color: var(--on-accent);
 }
 
+.composer-attachment-thumb {
+  position: relative;
+  width: 72px;
+  height: 72px;
+  flex-shrink: 0;
+}
+
+.composer-attachment-thumb .attach-thumb {
+  width: 100%;
+  height: 100%;
+}
+
+.composer-attachment-thumb-remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 18px;
+  height: 18px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  z-index: 1;
+}
+
 .composer-attachment-error {
   padding: 6px 10px;
   background: rgba(248, 113, 113, 0.1);

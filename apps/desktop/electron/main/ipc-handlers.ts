@@ -2,6 +2,7 @@ import fs from "node:fs";
 import { access } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import os from "node:os";
+import path from "node:path";
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import iconv from "iconv-lite";
 import { IPC, validateMcpServers } from "@claude-desktop/shared";
@@ -16,6 +17,7 @@ import type {
   UserPrompt,
 } from "@claude-desktop/shared";
 import { attachmentFromFile, guessMimeType } from "@claude-desktop/shared";
+import { MAX_IMAGE_ATTACHMENT_SIZE } from "./attachment-reader";
 import type { SessionManager } from "./session-manager";
 import type { PermissionBroker } from "./permission-broker";
 import type { UserPromptBroker } from "./user-prompt-broker";
@@ -106,6 +108,53 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
         path,
         size: stats.size,
         type: guessMimeType(path),
+      });
+    },
+  );
+
+  ipcMain.handle(
+    IPC.fileSaveClipboardImage,
+    async (
+      _e,
+      { dataBase64, mimeType }: { dataBase64: string; mimeType: string },
+    ): Promise<Attachment> => {
+      const ext =
+        mimeType === "image/png"
+          ? "png"
+          : mimeType === "image/jpeg"
+            ? "jpg"
+            : mimeType === "image/gif"
+              ? "gif"
+              : mimeType === "image/webp"
+                ? "webp"
+                : null;
+      if (!ext) {
+        throw new Error(`Unsupported clipboard image type: ${mimeType}`);
+      }
+      const buf = Buffer.from(dataBase64, "base64");
+      if (!buf.length) {
+        throw new Error("Clipboard image is empty");
+      }
+      if (buf.length > MAX_IMAGE_ATTACHMENT_SIZE) {
+        throw new Error(
+          `Clipboard image exceeds ${MAX_IMAGE_ATTACHMENT_SIZE / 1024 / 1024} MB`,
+        );
+      }
+      const dir = path.join(app.getPath("temp"), "cc-desktop-clipboard");
+      await fs.promises.mkdir(dir, { recursive: true });
+      const stamp = new Date()
+        .toISOString()
+        .replace(/[:.]/g, "-")
+        .replace("T", "_")
+        .slice(0, 19);
+      const name = `pasted-${stamp}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+      const filePath = path.join(dir, name);
+      await fs.promises.writeFile(filePath, buf);
+      return attachmentFromFile({
+        name,
+        path: filePath,
+        size: buf.length,
+        type: mimeType,
       });
     },
   );

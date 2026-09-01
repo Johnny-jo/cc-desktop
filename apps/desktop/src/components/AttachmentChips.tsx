@@ -9,7 +9,7 @@ import { useAppStore } from "../state/store";
 /** data URLs are large; cap so old previews can GC. */
 const imageCache = createLru<string, string | null>(12);
 
-function useImageDataUrl(path: string): string | null {
+export function useImageDataUrl(path: string): string | null {
   const [url, setUrl] = useState<string | null>(imageCache.get(path) ?? null);
   useEffect(() => {
     const cached = imageCache.get(path);
@@ -56,7 +56,7 @@ function FileIcon() {
 }
 
 /** Fullscreen image preview (click / Esc to close). */
-function Lightbox({ url, name, onClose }: { url: string; name: string; onClose: () => void }) {
+export function Lightbox({ url, name, onClose }: { url: string; name: string; onClose: () => void }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();

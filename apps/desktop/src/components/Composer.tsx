@@ -31,6 +31,7 @@ import {
   parseLeadingSlash,
 } from "../lib/slash-commands";
 import { parseTrailingAt } from "../lib/at-mention";
+import { Lightbox, useImageDataUrl } from "./AttachmentChips";
 
 /** Join a project-relative path onto the project root, tolerating either separator. */
 function joinProjectPath(root: string, rel: string): string {
@@ -93,6 +94,62 @@ function validateAttachment(a: Attachment): string | null {
   return null;
 }
 
+/** Image attachment in the composer: thumbnail, click to enlarge, × to remove. */
+function ComposerImageThumb({
+  att,
+  onPreview,
+  onRemove,
+}: {
+  att: Attachment;
+  onPreview: (url: string) => void;
+  onRemove: () => void;
+}) {
+  const url = useImageDataUrl(att.path);
+  if (!url) {
+    // 读不到内容时退化为普通文件 chip
+    return (
+      <div className="composer-attachment">
+        <span className="composer-attachment-name" title={att.path}>
+          {att.name}
+        </span>
+        <span className="composer-attachment-meta">
+          {formatFileSize(att.size)} · {att.kind}
+        </span>
+        <button
+          type="button"
+          className="composer-attachment-remove"
+          onClick={onRemove}
+          title="Remove file"
+          aria-label={`Remove ${att.name}`}
+        >
+          ×
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div className="composer-attachment-thumb">
+      <button
+        type="button"
+        className="attach-thumb"
+        title={`${att.name}（点击放大）`}
+        onClick={() => onPreview(url)}
+      >
+        <img src={url} alt={att.name} loading="lazy" />
+      </button>
+      <button
+        type="button"
+        className="composer-attachment-remove composer-attachment-thumb-remove"
+        onClick={onRemove}
+        title="Remove image"
+        aria-label={`Remove ${att.name}`}
+      >
+        ×
+      </button>
+    </div>
+  );
+}
+
 /** Build the /mcp help note: configured servers + live status when a session is running. */
 async function buildMcpNote(): Promise<string> {
   const desktop = getDesktopOrNull();
@@ -143,6 +200,9 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
   const [helpNote, setHelpNote] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [lightbox, setLightbox] = useState<{ url: string; name: string } | null>(
+    null,
+  );
   const [isDragging, setIsDragging] = useState(false);
   const [atIndex, setAtIndex] = useState(0);
   const [atMatches, setAtMatches] = useState<string[]>([]);
@@ -349,6 +409,47 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
   const removeAttachment = useCallback(
     (path: string) => {
       validateAndSetAttachments(attachments.filter((a) => a.path !== path));
+    },
+    [attachments, validateAndSetAttachments],
+  );
+
+  // Paste images straight from the clipboard (screenshots etc.): save them
+  // via the main process and attach; plain-text paste stays untouched.
+  const handlePaste = useCallback(
+    async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      const items = Array.from(e.clipboardData?.items ?? []);
+      const imageItems = items.filter(
+        (item) => item.kind === "file" && item.type.startsWith("image/"),
+      );
+      if (!imageItems.length) return;
+      e.preventDefault();
+      const desktop = getDesktopOrNull();
+      if (!desktop) return;
+      const added: Attachment[] = [];
+      for (const item of imageItems) {
+        const file = item.getAsFile();
+        if (!file) continue;
+        try {
+          const dataUrl = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result));
+            reader.onerror = () => reject(reader.error);
+            reader.readAsDataURL(file);
+          });
+          const dataBase64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
+          const attachment = await desktop.saveClipboardImage(
+            dataBase64,
+            file.type,
+          );
+          added.push(attachment);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          setAttachmentError(message);
+        }
+      }
+      if (added.length) {
+        validateAndSetAttachments([...attachments, ...added]);
+      }
     },
     [attachments, validateAndSetAttachments],
   );
@@ -666,28 +767,12 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
         <div className="composer-attachment-error">{attachmentError}</div>
       ) : null}
 
-      {attachments.length > 0 ? (
-        <div className="composer-attachments">
-          {attachments.map((a) => (
-            <div key={a.path} className="composer-attachment">
-              <span className="composer-attachment-name" title={a.path}>
-                {a.name}
-              </span>
-              <span className="composer-attachment-meta">
-                {formatFileSize(a.size)} · {a.kind}
-              </span>
-              <button
-                type="button"
-                className="composer-attachment-remove"
-                onClick={() => removeAttachment(a.path)}
-                title="Remove file"
-                aria-label={`Remove ${a.name}`}
-              >
-                ×
-              </button>
-            </div>
-          ))}
-        </div>
+      {lightbox ? (
+        <Lightbox
+          url={lightbox.url}
+          name={lightbox.name}
+          onClose={() => setLightbox(null)}
+        />
       ) : null}
 
       <div
@@ -696,6 +781,38 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
         onDragLeave={onDragLeave}
         onDrop={onDrop}
       >
+        {attachments.length > 0 ? (
+          <div className="composer-attachments">
+            {attachments.map((a) =>
+              a.kind === "image" ? (
+                <ComposerImageThumb
+                  key={a.path}
+                  att={a}
+                  onPreview={(url) => setLightbox({ url, name: a.name })}
+                  onRemove={() => removeAttachment(a.path)}
+                />
+              ) : (
+                <div key={a.path} className="composer-attachment">
+                  <span className="composer-attachment-name" title={a.path}>
+                    {a.name}
+                  </span>
+                  <span className="composer-attachment-meta">
+                    {formatFileSize(a.size)} · {a.kind}
+                  </span>
+                  <button
+                    type="button"
+                    className="composer-attachment-remove"
+                    onClick={() => removeAttachment(a.path)}
+                    title="Remove file"
+                    aria-label={`Remove ${a.name}`}
+                  >
+                    ×
+                  </button>
+                </div>
+              ),
+            )}
+          </div>
+        ) : null}
         <textarea
           ref={textareaRef}
           className="composer-input"
@@ -712,6 +829,7 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
             setAtIndex(0);
           }}
           onKeyDown={onKeyDown}
+          onPaste={(e) => void handlePaste(e)}
         />
         <div className="composer-bar">
           <div className="composer-left">

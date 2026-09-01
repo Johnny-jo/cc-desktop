@@ -243,6 +243,13 @@ const desktop = {
   readAttachment: (path: string) =>
     ipcRenderer.invoke(IPC.fileReadAttachment, { path }) as Promise<Attachment>,
 
+  /** Persist a pasted clipboard image; returns the saved file's attachment. */
+  saveClipboardImage: (dataBase64: string, mimeType: string) =>
+    ipcRenderer.invoke(IPC.fileSaveClipboardImage, {
+      dataBase64,
+      mimeType,
+    }) as Promise<Attachment>,
+
   selectFiles: () =>
     ipcRenderer.invoke(IPC.fileSelect) as Promise<{ paths: string[] }>,
 
