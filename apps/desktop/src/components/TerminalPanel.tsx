@@ -73,9 +73,23 @@ const XTERM_THEME_LIGHT = {
 };
 
 function xtermTheme() {
-  return document.documentElement.dataset.theme === "light"
-    ? XTERM_THEME_LIGHT
-    : XTERM_THEME_DARK;
+  const explicit = document.documentElement.dataset.theme;
+  const light = explicit === "light" ||
+    (explicit !== "dark" && window.matchMedia("(prefers-color-scheme: light)").matches);
+  if (!light) return XTERM_THEME_DARK;
+  const rootStyle = getComputedStyle(document.documentElement);
+  const background = rootStyle.getPropertyValue("--bg-terminal").trim() || "#ffffff";
+  const foreground = rootStyle.getPropertyValue("--text").trim() || "#1c1c1e";
+  return {
+    ...XTERM_THEME_LIGHT,
+    background,
+    foreground,
+    cursor: foreground,
+    cursorAccent: background,
+    black: foreground,
+    white: foreground,
+    brightWhite: foreground,
+  };
 }
 
 /** One xterm instance bound to a PTY session (kept alive across tab switches). */

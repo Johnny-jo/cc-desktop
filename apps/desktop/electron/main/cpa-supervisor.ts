@@ -1,8 +1,13 @@
 import fs from "node:fs";
 import net from "node:net";
 import { spawn, type ChildProcess } from "node:child_process";
-import type { AppSettings, CpaStatus, ModelInfo } from "@claude-desktop/shared";
-import { parseModelContextLimit } from "@claude-desktop/shared";
+import type { AppSettings, CpaStatus, ModelInfo, ModelQuotaInfo } from "@claude-desktop/shared";
+import {
+  parseModelContextLimit,
+  parseModelDefaultReasoningEffort,
+  parseModelReasoningEfforts,
+} from "@claude-desktop/shared";
+import { parseCpaQuotaObservation } from "./cpa-quota";
 export type SpawnedProcess = {
   pid?: number;
   kill: (signal?: NodeJS.Signals | number) => boolean;
@@ -17,7 +22,7 @@ export type CpaSupervisorDeps = {
   spawnProcess?: (
     command: string,
     args: string[],
-    options?: { stdio?: "ignore" | "inherit" | "pipe" },
+    options?: { stdio?: "ignore" | "inherit" | "pipe"; env?: NodeJS.ProcessEnv },
   ) => SpawnedProcess;
   onStatusChange?: (status: CpaStatus) => void;
   /** poll interval while waiting for port after spawn (ms) */
@@ -29,6 +34,12 @@ export type CpaSupervisorDeps = {
 const DEFAULT_POLL_MS = 250;
 const DEFAULT_READY_TIMEOUT_MS = 10_000;
 const DEFAULT_PROBE_TIMEOUT_MS = 300;
+
+function modelsMatch(a: string, b: string): boolean {
+  const left = a.trim().toLowerCase();
+  const right = b.trim().toLowerCase();
+  return left === right || left.endsWith(`/${right}`) || right.endsWith(`/${left}`);
+}
 
 export function defaultProbePort(
   port: number,
@@ -56,12 +67,13 @@ export function defaultProbePort(
 function defaultSpawnProcess(
   command: string,
   args: string[],
-  options?: { stdio?: "ignore" | "inherit" | "pipe" },
+  options?: { stdio?: "ignore" | "inherit" | "pipe"; env?: NodeJS.ProcessEnv },
 ): SpawnedProcess {
   return spawn(command, args, {
     stdio: options?.stdio ?? "ignore",
     windowsHide: true,
     detached: false,
+    env: options?.env,
   }) as ChildProcess as SpawnedProcess;
 }
 
@@ -116,9 +128,14 @@ export class CpaSupervisor {
   }
 
   /**
-   * Fetch OpenAI-compatible /v1/models and cache ModelInfo with context limits.
+   * Fetch CPA's live model registry and cache its exact model capabilities.
+   * CPA 7.2.146+ exposes registry ModelInfo (including Thinking.Levels) through
+   * the Grok Shell catalog selected by User-Agent. Older CPA versions safely
+   * fall back to the four-field OpenAI list and therefore advertise no guessed
+   * effort levels.
+   *
    * Prefers unprefixed aliases for the returned ids, but keeps the best available
-   * context limit (preferring direct rows, then any prefixed sibling).
+   * metadata from provider-prefixed siblings.
    */
   async listModelCatalog(): Promise<ModelInfo[]> {
     const settings = this.getSettings();
@@ -131,6 +148,9 @@ export class CpaSupervisor {
     const res = await fetch(url, {
       headers: {
         Authorization: `Bearer ${token}`,
+        // CPA routes this catalog from the live registry and preserves exact
+        // reasoning_efforts. This is not a model-name heuristic.
+        "User-Agent": "grok-shell/0.2.119 cc-desktop/0.3",
       },
     });
     if (!res.ok) {
@@ -149,39 +169,65 @@ export class CpaSupervisor {
       const id = (item as { id?: unknown }).id;
       if (typeof id !== "string" || !id) continue;
       const contextLimit = parseModelContextLimit(item);
+      const reasoningEfforts = parseModelReasoningEfforts(item);
+      const defaultReasoningEffort = parseModelDefaultReasoningEffort(item);
       const next: ModelInfo = {
         id,
         ...(contextLimit != null ? { contextLimit } : {}),
+        ...(reasoningEfforts?.length ? { reasoningEfforts } : {}),
+        ...(defaultReasoningEffort ? { defaultReasoningEffort } : {}),
       };
       const prev = byId.get(id);
       if (!prev) {
         byId.set(id, next);
-      } else if (next.contextLimit != null && prev.contextLimit == null) {
-        byId.set(id, next);
-      } else if (
-        next.contextLimit != null &&
-        prev.contextLimit != null &&
-        next.contextLimit > prev.contextLimit
-      ) {
-        byId.set(id, next);
+      } else {
+        const mergedEfforts = [
+          ...(prev.reasoningEfforts ?? []),
+          ...(next.reasoningEfforts ?? []),
+        ];
+        byId.set(id, {
+          id,
+          contextLimit:
+            next.contextLimit != null &&
+            (prev.contextLimit == null || next.contextLimit > prev.contextLimit)
+              ? next.contextLimit
+              : prev.contextLimit,
+          ...(mergedEfforts.length
+            ? { reasoningEfforts: [...new Set(mergedEfforts)] }
+            : {}),
+          ...(prev.defaultReasoningEffort || next.defaultReasoningEffort
+            ? {
+                defaultReasoningEffort:
+                  prev.defaultReasoningEffort ?? next.defaultReasoningEffort!,
+              }
+            : {}),
+        });
       }
     }
 
     const ids = preferUnprefixedModels([...byId.keys()]);
     const catalog: ModelInfo[] = ids.map((id) => {
-      // Prefer unprefixed row; fall back to any prefixed sibling's limit
+      // Prefer an exact row; otherwise inherit all available metadata from a
+      // provider-prefixed sibling of the same model.
+      const candidates = [...byId].filter(([key]) => key === id || key.endsWith(`/${id}`));
       const direct = byId.get(id);
-      if (direct?.contextLimit != null) {
-        return { id, contextLimit: direct.contextLimit };
-      }
-      for (const [k, v] of byId) {
-        if (k === id || k.endsWith(`/${id}`)) {
-          if (v.contextLimit != null) {
-            return { id, contextLimit: v.contextLimit };
-          }
-        }
-      }
-      return { id };
+      const contextLimit = candidates.reduce<number | undefined>(
+        (best, [, info]) =>
+          info.contextLimit != null && (best == null || info.contextLimit > best)
+            ? info.contextLimit
+            : best,
+        undefined,
+      );
+      const reasoningEfforts = [...new Set(candidates.flatMap(([, info]) => info.reasoningEfforts ?? []))];
+      const defaultReasoningEffort =
+        direct?.defaultReasoningEffort ??
+        candidates.find(([, info]) => info.defaultReasoningEffort)?.[1].defaultReasoningEffort;
+      return {
+        id,
+        ...(contextLimit != null ? { contextLimit } : {}),
+        ...(reasoningEfforts.length ? { reasoningEfforts } : {}),
+        ...(defaultReasoningEffort ? { defaultReasoningEffort } : {}),
+      };
     });
 
     this.modelCatalog = catalog;
@@ -189,7 +235,116 @@ export class CpaSupervisor {
   }
 
   getModelCatalog(): ModelInfo[] {
-    return this.modelCatalog.map((m) => ({ ...m }));
+    return this.modelCatalog.map((m) => ({
+      ...m,
+      ...(m.reasoningEfforts ? { reasoningEfforts: [...m.reasoningEfforts] } : {}),
+    }));
+  }
+
+  /** Return only quota CPA actually observed in provider response headers. */
+  async getModelQuota(modelId: string): Promise<ModelQuotaInfo | null> {
+    const token = this.getToken();
+    if (!token || !modelId.trim()) return null;
+    const origin = `http://127.0.0.1:${this.getSettings().cpaPort}`;
+    const headers = { Authorization: `Bearer ${token}` };
+    const response = await fetch(`${origin}/v0/management/auth-files`, { headers });
+    if (!response.ok) return null;
+    const payload = (await response.json()) as { files?: unknown[] };
+    const files = Array.isArray(payload.files) ? payload.files : [];
+    const candidates: Array<{
+      provider: string;
+      parsed: NonNullable<ReturnType<typeof parseCpaQuotaObservation>>;
+    }> = [];
+
+    for (const raw of files) {
+      if (!raw || typeof raw !== "object") continue;
+      const entry = raw as Record<string, unknown>;
+      const provider = typeof entry.provider === "string" ? entry.provider : "";
+      if (provider !== "claude" && provider !== "codex") continue;
+      const modelQuotas = entry.model_quotas && typeof entry.model_quotas === "object"
+        ? entry.model_quotas as Record<string, unknown>
+        : {};
+      const exactQuota = Object.entries(modelQuotas).find(([id]) => modelsMatch(id, modelId))?.[1];
+      let observation = exactQuota as Parameters<typeof parseCpaQuotaObservation>[1];
+
+      if (!observation) {
+        const generic = entry.quota as Parameters<typeof parseCpaQuotaObservation>[1];
+        if (!parseCpaQuotaObservation(provider, generic)) continue;
+        const name = typeof entry.name === "string"
+          ? entry.name
+          : typeof entry.id === "string" ? entry.id : "";
+        if (!name) continue;
+        const modelsResponse = await fetch(
+          `${origin}/v0/management/auth-files/models?name=${encodeURIComponent(name)}`,
+          { headers },
+        );
+        if (!modelsResponse.ok) continue;
+        const modelsPayload = (await modelsResponse.json()) as { models?: unknown[] };
+        const supportsModel = (modelsPayload.models ?? []).some((item) => {
+          if (!item || typeof item !== "object") return false;
+          const id = (item as { id?: unknown }).id;
+          return typeof id === "string" && modelsMatch(id, modelId);
+        });
+        if (!supportsModel) continue;
+        observation = generic;
+      }
+
+      const parsed = parseCpaQuotaObservation(provider, observation);
+      if (parsed) candidates.push({ provider, parsed });
+    }
+
+    if (!candidates.length) return null;
+    candidates.sort((a, b) =>
+      Math.max(...a.parsed.windows.map((w) => w.usedPercent)) -
+      Math.max(...b.parsed.windows.map((w) => w.usedPercent)),
+    );
+    const best = candidates[0]!;
+    return {
+      modelId,
+      provider: best.provider,
+      ...best.parsed,
+      accountCount: candidates.length,
+    };
+  }
+
+  /**
+   * Fill capability gaps from Claude Agent SDK initialize. Exact levels already
+   * returned by CPA's live registry remain authoritative; the SDK must not
+   * replace them with its generic proxy fallback.
+   */
+  mergeSdkModelCapabilities(
+    models: Array<{
+      value?: string;
+      resolvedModel?: string;
+      supportsEffort?: boolean;
+      supportedEffortLevels?: string[];
+    }>,
+  ): void {
+    this.modelCatalog = this.modelCatalog.map((model) => {
+      if (model.reasoningEfforts?.length) return model;
+      const matches = models.filter((candidate) => {
+        const ids = [candidate.value, candidate.resolvedModel].filter(
+          (id): id is string => typeof id === "string" && id.length > 0,
+        );
+        return ids.some(
+          (id) =>
+            id === model.id ||
+            id.endsWith(`/${model.id}`) ||
+            model.id.endsWith(`/${id}`),
+        );
+      });
+      const exact = matches.find(
+        (candidate) =>
+          candidate.value === model.id || candidate.resolvedModel === model.id,
+      );
+      const source = exact ?? matches[0];
+      if (!source) return model;
+      if (source.supportsEffort === false) return model;
+      const reasoningEfforts = parseModelReasoningEfforts(source);
+      return reasoningEfforts?.length
+        ? { ...model, reasoningEfforts }
+        : model;
+    });
   }
 
   async listModels(): Promise<string[]> {
@@ -268,7 +423,12 @@ export class CpaSupervisor {
       this.child = this.spawnProcess(
         exe,
         ["--config", settings.cpaConfigPath],
-        { stdio: "pipe" },
+        {
+          stdio: "pipe",
+          ...(this.getToken()
+            ? { env: { ...process.env, MANAGEMENT_PASSWORD: this.getToken()! } }
+            : {}),
+        },
       );
       this.managedByApp = true;
 

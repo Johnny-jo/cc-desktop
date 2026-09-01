@@ -13,11 +13,12 @@
   color: #e8e8e8;
 
   --bg-app: #141414;
-  --bg-sidebar: #111111;
+  /* Night mode: rail + session sidebar share one surface, lifted a touch brighter. */
+  --bg-sidebar: #242428;
   --bg-elevated: #1a1a1a;
   --bg-panel: #161616;
-  --bg-hover: #222222;
-  --bg-active: #2a2a2a;
+  --bg-hover: #29292e;
+  --bg-active: #323238;
   --bg-input: #242424;
   --bg-bubble-user: #2c2c2c;
   --bg-bubble-assistant: transparent;
@@ -78,21 +79,21 @@
 
 [data-theme="light"] {
   color-scheme: light;
-  background: #f7f7f8;
+  background: #ffffff;
   color: #1c1c1e;
 
-  --bg-app: #f7f7f8;
-  --bg-sidebar: #efeff1;
+  --bg-app: #ffffff;
+  --bg-sidebar: #f9f9f9;
   --bg-elevated: #ffffff;
-  --bg-panel: #f2f2f4;
-  --bg-hover: #e4e4e8;
-  --bg-active: #d8d8de;
+  --bg-panel: #f9f9f9;
+  --bg-hover: #ededf0;
+  --bg-active: #e3e3e8;
   --bg-input: #ffffff;
   --bg-bubble-user: #e8e8ec;
   --bg-bubble-assistant: transparent;
-  --bg-terminal: #f4f4f6;
-  --bg-terminal-tab: #f4f4f6;
-  --bg-code: #ececf0;
+  --bg-terminal: #ffffff;
+  --bg-terminal-tab: #ffffff;
+  --bg-code: #f1f1f4;
   --code-text: #111;
   --border: #d9d9de;
   --border-soft: #e6e6ea;
@@ -129,20 +130,20 @@
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]):not([data-theme="light"]) {
     color-scheme: light;
-    background: #f7f7f8;
+    background: #ffffff;
     color: #1c1c1e;
 
-    --bg-app: #f7f7f8;
-    --bg-sidebar: #efeff1;
+    --bg-app: #ffffff;
+    --bg-sidebar: #f9f9f9;
     --bg-elevated: #ffffff;
-    --bg-panel: #f2f2f4;
-    --bg-hover: #e4e4e8;
-    --bg-active: #d8d8de;
+    --bg-panel: #ffffff;
+    --bg-hover: #ededf0;
+    --bg-active: #e3e3e8;
     --bg-input: #ffffff;
     --bg-bubble-user: #e8e8ec;
-    --bg-terminal: #f4f4f6;
-    --bg-terminal-tab: #f4f4f6;
-    --bg-code: #ececf0;
+    --bg-terminal: #ffffff;
+    --bg-terminal-tab: #ffffff;
+    --bg-code: #f1f1f4;
     --code-text: #111;
     --border: #d9d9de;
     --border-soft: #e6e6ea;
@@ -449,7 +450,8 @@ textarea {
 }
 
 .panel-sessions {
-  background: color-mix(in srgb, var(--bg-sidebar) 64%, transparent);
+  /* Keep the session pane and the icon rail on one continuous surface. */
+  background: var(--bg-sidebar);
   backdrop-filter: blur(28px) saturate(1.4);
   border-right: 1px solid var(--border-soft);
   flex: 0 0 auto;
@@ -464,10 +466,32 @@ textarea {
   align-items: center;
   justify-content: space-between;
   padding: 8px 0 10px;
-  background: color-mix(in srgb, var(--bg-sidebar) 52%, transparent);
+  background: var(--bg-sidebar);
   backdrop-filter: blur(28px) saturate(1.4);
   border-right: 1px solid var(--border-soft);
   user-select: none;
+}
+
+/* Day mode: keep the narrow tool rail pure white beside the gray session pane. */
+[data-theme="light"] .side-rail {
+  background: #ffffff;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]):not([data-theme="light"]) .side-rail {
+    background: #ffffff;
+  }
+}
+
+/* Night mode keeps the narrow tool rail at the app charcoal level. */
+[data-theme="dark"] .side-rail {
+  background: #141414;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not([data-theme="dark"]) .side-rail {
+    background: #141414;
+  }
 }
 
 .side-rail-top,
@@ -2323,7 +2347,7 @@ body.is-resizing-row * {
   height: 100%;
   min-height: 0;
   overflow: hidden;
-  padding: var(--space-3);
+  padding: 4px;
   gap: var(--space-2);
 }
 
@@ -2406,7 +2430,11 @@ body.is-resizing-row * {
 .session-list-ul {
   list-style: none;
   margin: 0;
-  padding: 0;
+  /* Let the scrollbar sit on the panel edge while keeping row content on the
+     same inset as the rest of the sidebar. */
+  margin-inline-end: calc(0px - var(--space-3));
+  /* Only reserve the narrow scrollbar plus a small breathing gap. */
+  padding: 0 1px 0 0;
   overflow-x: hidden;
   overflow-y: auto;
   flex: 1 1 0;
@@ -2425,19 +2453,19 @@ body.is-resizing-row * {
 }
 
 .session-list-ul::-webkit-scrollbar {
-  width: 10px;
+  width: 5px;
 }
 
 .session-list-ul::-webkit-scrollbar-thumb {
   background: transparent;
   border-radius: 999px;
-  border: 2px solid transparent;
+  border: 0;
   background-clip: padding-box;
 }
 
 .session-list-ul:hover::-webkit-scrollbar-thumb {
   background: color-mix(in srgb, var(--text-faint) 38%, transparent);
-  border: 2px solid transparent;
+  border: 0;
   background-clip: padding-box;
 }
 
@@ -2484,7 +2512,7 @@ body.is-resizing-row * {
 
 /* Reserve the ⋯ button's space so a long title never runs underneath it. */
 .session-list-item .session-item {
-  padding-right: 38px;
+  padding-right: 36px;
 }
 
 .session-list-item:hover .session-item-more,
@@ -2677,7 +2705,7 @@ body.session-detaching {
   background: transparent;
   border: none;
   border-radius: var(--radius-md);
-  padding: 10px 12px;
+  padding: 8px 10px;
   cursor: pointer;
   display: flex;
   flex-direction: column;
@@ -2967,13 +2995,26 @@ body.session-detaching {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  /* The transcript scrollbar belongs to the whole chat pane, while the
+     message content remains centered at --chat-max. */
+  container-type: inline-size;
+  --chat-content-inset: max(
+    var(--space-5),
+    calc((100cqw - var(--chat-max)) / 2 + var(--space-5))
+  );
 }
 
 .chat-body > .chat-inner {
   flex: 1 1 0;
   min-height: 0;
+  max-width: none;
+  padding-inline: 0;
   display: flex;
   flex-direction: column;
+}
+
+.chat-body > .chat-inner > .context-banner {
+  margin-inline: calc(var(--chat-content-inset) + var(--space-4));
 }
 
 .chat-composer {
@@ -2990,14 +3031,272 @@ body.session-detaching {
 }
 
 /* Messages — this is the transcript scroller (not .chat-body). */
+.message-list-shell {
+  position: relative;
+  display: flex;
+  flex: 1 1 0;
+  width: 100%;
+  min-height: 0;
+  isolation: isolate;
+}
+
 .message-list {
   display: flex;
   flex-direction: column;
   flex: 1 1 0;
+  width: 100%;
   overflow: auto;
   gap: var(--space-4);
-  padding: var(--space-5) 0 var(--space-6);
+  padding: var(--space-5) max(var(--chat-content-inset), 54px) var(--space-6);
   min-height: 0;
+}
+
+/* Codex-style transcript overview. Each tick targets a real ChatItem id. */
+.conversation-navigator {
+  position: absolute;
+  z-index: 4;
+  left: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 34px;
+  max-height: min(70%, 340px);
+  padding: 4px 0;
+}
+
+.conversation-nav-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1 1 5px;
+  min-height: 1px;
+  max-height: 13px;
+  width: 32px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.conversation-nav-tick {
+  display: block;
+  width: 9px;
+  height: 1px;
+  border-radius: 99px;
+  background: color-mix(in srgb, var(--text-faint) 58%, transparent);
+  transition:
+    width 120ms ease,
+    height 120ms ease,
+    background 120ms ease;
+}
+
+.conversation-nav-item.role-user .conversation-nav-tick {
+  width: 17px;
+}
+
+.conversation-nav-item:hover .conversation-nav-tick,
+.conversation-nav-item:focus-visible .conversation-nav-tick {
+  width: 24px;
+  height: 2px;
+  background: var(--text-muted);
+}
+
+.conversation-nav-item.active .conversation-nav-tick {
+  width: 29px;
+  height: 2px;
+  background: var(--text);
+}
+
+.conversation-nav-preview {
+  position: absolute;
+  left: 38px;
+  top: 50%;
+  transform: translate(5px, -50%) scale(0.98);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  width: clamp(210px, 34vw, 360px);
+  padding: 8px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--bg-elevated) 94%, transparent);
+  box-shadow: var(--shadow-2);
+  color: var(--text-muted);
+  font-size: 0.885rem;
+  line-height: 1.45;
+  text-align: left;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  backdrop-filter: blur(18px) saturate(1.25);
+  transition:
+    opacity 120ms ease,
+    transform 150ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    visibility 0s linear 150ms;
+}
+
+.conversation-nav-preview-role {
+  color: var(--text-faint);
+  font-size: 0.769rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.conversation-nav-item:hover .conversation-nav-preview,
+.conversation-nav-item:focus-visible .conversation-nav-preview {
+  transform: translate(0, -50%) scale(1);
+  opacity: 1;
+  visibility: visible;
+  transition-delay: 0s;
+}
+
+/* Actual account quota observed by CPA; fill represents remaining allowance. */
+.model-quota-rail {
+  position: absolute;
+  z-index: 4;
+  right: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 112px;
+  outline: none;
+}
+
+.model-quota-rail-track {
+  position: relative;
+  display: block;
+  width: 5px;
+  height: 96px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-faint) 18%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--border) 55%, transparent);
+}
+
+.model-quota-rail-fill {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  min-height: 2px;
+  border-radius: inherit;
+  background: var(--text-muted);
+  transition:
+    height 260ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    background 160ms ease;
+}
+
+.model-quota-rail-warn .model-quota-rail-fill {
+  background: var(--warn);
+}
+
+.model-quota-rail-danger .model-quota-rail-fill {
+  background: var(--danger);
+}
+
+.model-quota-rail-popover {
+  position: absolute;
+  right: 24px;
+  top: 50%;
+  transform: translate(5px, -50%) scale(0.98);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 142px;
+  padding: 9px 11px;
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-elevated) 94%, transparent);
+  box-shadow: var(--shadow-2);
+  color: var(--text-faint);
+  font-size: 0.769rem;
+  line-height: 1.35;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  backdrop-filter: blur(18px) saturate(1.25);
+  transition:
+    opacity 120ms ease,
+    transform 150ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    visibility 0s linear 150ms;
+}
+
+.model-quota-rail-popover strong {
+  color: var(--text);
+  font-size: 0.962rem;
+}
+
+.model-quota-rail:hover .model-quota-rail-popover,
+.model-quota-rail:focus-visible .model-quota-rail-popover {
+  transform: translate(0, -50%) scale(1);
+  opacity: 1;
+  visibility: visible;
+  transition-delay: 0s;
+}
+
+.scroll-to-bottom-btn {
+  position: absolute;
+  z-index: 5;
+  left: 50%;
+  bottom: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid var(--border-soft);
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--bg-elevated) 94%, transparent);
+  box-shadow: var(--shadow-2);
+  color: var(--text-muted);
+  cursor: pointer;
+  transform: translateX(-50%);
+  backdrop-filter: blur(18px) saturate(1.25);
+  animation: scroll-bottom-in 150ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.scroll-to-bottom-btn svg {
+  width: 19px;
+  height: 19px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.scroll-to-bottom-btn:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+.scroll-to-bottom-btn:active {
+  transform: translateX(-50%) scale(0.94);
+}
+
+.scroll-to-bottom-btn:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+@keyframes scroll-bottom-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 5px) scale(0.92);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+  }
 }
 
 .message-list.empty {
@@ -3824,61 +4123,183 @@ body.session-detaching {
   font-size: 0.923rem;
 }
 
-.composer-model-field {
-  display: inline-flex;
+.composer-model-menu {
+  position: relative;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.composer-model-menu-trigger {
+  height: 30px;
+  display: flex;
   align-items: center;
   gap: 6px;
-  min-width: 0;
-  max-width: 55%;
-  height: 30px;
-  color: var(--text-muted);
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
+  max-width: min(220px, 32vw);
+  padding: 0 6px;
+  border: 1px solid transparent;
   border-radius: var(--radius-pill);
-  padding: 0 8px 0 10px;
-  transition: background 140ms ease, border-color 140ms ease;
-}
-
-.composer-model-field:hover {
-  background: var(--bg-elevated);
-  border-color: var(--accent);
-  color: var(--accent);
-}
-
-.composer-model-prefix {
-  flex-shrink: 0;
-  font-size: 0.923rem;
-  color: var(--accent);
-  opacity: 1;
-}
-
-.composer-model-select {
-  max-width: 100%;
-  min-width: 0;
-  /* ghost inside the pill field — no own chrome */
-  padding: 4px 18px 4px 2px;
-  border: none;
   background: transparent;
-  font-size: 0.923rem;
   color: var(--text-muted);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+  transition: border-color 160ms ease, color 160ms ease, background 160ms ease,
+    box-shadow 160ms ease, transform 160ms ease;
 }
 
-.composer-model-select:hover:not(:disabled),
-.composer-model-field:hover .composer-model-select {
+.composer-model-menu-trigger:hover,
+.composer-model-menu-trigger[aria-expanded="true"] {
+  border-color: color-mix(in srgb, var(--accent) 72%, transparent);
+  background: color-mix(in srgb, var(--accent-soft) 72%, transparent);
   color: var(--text);
+}
+
+.composer-model-menu-trigger[aria-expanded="true"] {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent);
+  transform: translateY(-1px);
+}
+
+.composer-model-menu-model {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.846rem;
+}
+
+.composer-model-menu-effort {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  font-size: 0.846rem;
+}
+
+.composer-model-menu-trigger svg {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  transition: transform 140ms ease;
+}
+
+.composer-model-menu-trigger[aria-expanded="true"] > svg {
+  transform: rotate(180deg);
+}
+
+.composer-model-menu-panel {
+  position: absolute;
+  z-index: 30;
+  right: 0;
+  bottom: calc(100% + 8px);
+  width: min(260px, calc(100vw - 40px));
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--bg-elevated) 94%, transparent);
+  box-shadow: var(--shadow-2);
+  animation: composer-model-menu-pop 150ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@keyframes composer-model-menu-pop {
+  from {
+    opacity: 0;
+    transform: translateY(5px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.composer-model-menu-row {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(70px, 1fr) minmax(100px, 1.5fr) 12px;
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+  padding: 0 5px 0 8px;
+  border: none;
+  border-radius: var(--radius-sm);
   background: transparent;
-  border-color: transparent;
+  color: var(--text-muted);
+  font-size: 0.846rem;
+  text-align: left;
+  cursor: pointer;
 }
 
-.composer-model-select:focus-visible {
-  outline: none;
-  box-shadow: none;
+.composer-model-menu-row:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
 }
 
-.composer-model-field:focus-within {
-  background: var(--bg-elevated);
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
+.composer-model-menu-row:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.composer-model-menu-current {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-faint);
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-model-menu-back {
+  width: 100%;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 8px;
+  border: none;
+  border-bottom: 1px solid var(--border-soft);
+  background: transparent;
+  color: var(--text);
+  font-size: 0.846rem;
+  cursor: pointer;
+}
+
+.composer-model-menu-back:hover {
+  background: var(--bg-hover);
+}
+
+.composer-model-menu-options {
+  max-height: 248px;
+  overflow-y: auto;
+  padding-top: 4px;
+}
+
+.composer-model-menu-option {
+  width: 100%;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 9px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.846rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.composer-model-menu-option > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-model-menu-option:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.composer-model-menu-option[aria-checked="true"] {
+  color: var(--accent);
 }
 
 .composer-actions {
@@ -4675,14 +5096,48 @@ body.session-detaching {
 
 /* ── Room (LAN collaboration) ── */
 .sidebar-rooms {
-  flex-shrink: 0;
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .sidebar-rooms-body {
-  max-height: 28vh;
-  overflow: auto;
-  padding: 4px 0 8px;
+  flex: 1 1 0;
+  min-height: 0;
+  max-height: none;
+  overflow-x: hidden;
+  overflow-y: auto;
+  /* margin-inline-end: calc(0px - var(--space-3)); */
+  padding: 4px 1px 8px 0;
   border-bottom: 1px solid var(--border-soft);
+}
+
+/* Same slim hover-only scrollbar as the session list. */
+.sidebar-rooms-body {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+
+.sidebar-rooms-body:hover {
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+.sidebar-rooms-body::-webkit-scrollbar {
+  width: 3px;
+}
+
+.sidebar-rooms-body::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 999px;
+}
+
+.sidebar-rooms-body:hover::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--text-faint) 38%, transparent);
+}
+
+.sidebar-rooms-body::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 .sidebar-rooms-head {
@@ -5269,7 +5724,7 @@ body.session-detaching {
 
 .room-member-detail {
   color: var(--text-faint);
-  font-size: 0.72rem;
+  font-size: 0.8rem;
 }
 
 .room-member-actions {
@@ -5325,9 +5780,10 @@ body.session-detaching {
   flex-direction: column;
   gap: 10px;
   padding: 13px 14px;
-  border: 1px solid var(--border-soft);
+  border: 1px solid var(--border);
   border-radius: 12px;
-  background: color-mix(in srgb, var(--bg-panel) 86%, transparent);
+  background: transparent;
+  box-shadow: none;
 }
 
 .room-overview-identity {
@@ -5335,11 +5791,10 @@ body.session-detaching {
   align-items: flex-start;
   gap: 13px;
   padding: 16px;
-  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border-soft));
-  border-radius: 14px;
-  background:
-    radial-gradient(circle at 95% 0%, color-mix(in srgb, var(--accent) 14%, transparent), transparent 46%),
-    var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: transparent;
+  box-shadow: none;
 }
 
 .room-overview-room-icon {
@@ -5349,9 +5804,10 @@ body.session-detaching {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  border: 1px solid var(--border);
   border-radius: 12px;
   color: var(--accent);
-  background: var(--accent-soft);
+  background: transparent;
 }
 
 .room-overview-identity-main {
@@ -5363,7 +5819,7 @@ body.session-detaching {
 }
 
 .room-overview-card-title {
-  font-size: 0.72rem;
+  font-size: 0.9rem;
   font-weight: 650;
   color: var(--text-faint);
   letter-spacing: 0.035em;
@@ -5384,6 +5840,7 @@ body.session-detaching {
   height: 34px;
   padding: 4px 9px;
   border: 1px solid var(--border);
+  border-radius: 12px;
   background: var(--bg-input);
   font-size: 1rem;
   font-weight: 620;
@@ -5404,7 +5861,7 @@ body.session-detaching {
   display: flex;
   align-items: center;
   gap: 9px;
-  font-size: 0.74rem;
+  font-size: 0.85rem;
   color: var(--text-faint);
 }
 
@@ -5450,9 +5907,10 @@ body.session-detaching {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  border: 1px solid var(--border);
   border-radius: 9px;
   color: var(--text-muted);
-  background: var(--bg-input);
+  background: transparent;
 }
 
 .room-setting-card-head > div {
@@ -5462,7 +5920,7 @@ body.session-detaching {
 
 .room-setting-card-title {
   color: var(--text);
-  font-size: 0.82rem;
+  font-size: 0.9rem;
   font-weight: 600;
 }
 
@@ -5470,7 +5928,7 @@ body.session-detaching {
 .room-members-head p {
   margin: 2px 0 0;
   color: var(--text-faint);
-  font-size: 0.69rem;
+  font-size: 0.85rem;
 }
 
 .ui-switch {
@@ -5538,15 +5996,16 @@ body.session-detaching {
   grid-template-columns: repeat(3, 1fr);
   gap: 4px;
   padding: 3px;
+  border: 1px solid var(--border);
   border-radius: 9px;
-  background: var(--bg-input);
+  background: transparent;
 }
 
 .room-permission-option {
   padding: 5px 6px;
   border-radius: 7px;
   color: var(--text-faint);
-  font-size: 0.72rem;
+  font-size: 0.83rem;
   text-align: center;
   cursor: pointer;
 }
@@ -5557,9 +6016,9 @@ body.session-detaching {
 }
 
 .room-permission-option.active {
-  color: var(--text);
-  background: var(--bg-panel);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.16);
+  color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: none;
 }
 
 .room-ai-share-row,
@@ -5573,7 +6032,7 @@ body.session-detaching {
 
 .room-ai-share-row {
   color: var(--text-muted);
-  font-size: 0.72rem;
+  font-size: 0.83rem;
 }
 
 .room-toggle-row {
@@ -5600,9 +6059,10 @@ body.session-detaching {
   align-items: center;
   justify-content: center;
   padding: 0 7px;
+  border: 1px solid var(--border);
   border-radius: 999px;
   color: var(--text-muted);
-  background: var(--bg-input);
+  background: transparent;
   font-size: 0.72rem;
   font-weight: 650;
 }
@@ -5615,7 +6075,7 @@ body.session-detaching {
   padding: 11px 13px;
   border: 1px solid color-mix(in srgb, var(--danger) 24%, transparent);
   border-radius: 12px;
-  background: color-mix(in srgb, var(--danger) 5%, transparent);
+  background: transparent;
 }
 
 .room-danger-copy {
@@ -5624,12 +6084,12 @@ body.session-detaching {
   flex-direction: column;
   gap: 2px;
   color: var(--text-faint);
-  font-size: 0.7rem;
+  font-size: 0.8rem;
 }
 
 .room-danger-title {
   color: var(--danger);
-  font-size: 0.8rem;
+  font-size: 0.9rem;
   font-weight: 620;
 }
 
@@ -5638,7 +6098,7 @@ body.session-detaching {
   height: 32px;
   flex-basis: 32px;
   border-color: color-mix(in srgb, var(--danger) 20%, transparent);
-  background: color-mix(in srgb, var(--danger) 7%, transparent);
+  background: transparent;
 }
 
 /* Seat chips */
@@ -6927,6 +7387,141 @@ body.session-detaching {
   color: var(--text-muted);
 }
 
+.settings-model-empty {
+  padding: 12px;
+  color: var(--text-faint);
+  font-size: 0.846rem;
+  text-align: center;
+}
+
+.settings-model-list-dropdown {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  overflow: hidden;
+}
+
+.settings-model-list-trigger {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  color: var(--text);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.settings-model-list-trigger::-webkit-details-marker {
+  display: none;
+}
+
+.settings-model-list-trigger:hover {
+  background: var(--bg-hover);
+}
+
+.settings-model-list-trigger svg {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  transition: transform 160ms ease;
+}
+
+.settings-model-list-dropdown[open] .settings-model-list-trigger svg {
+  transform: rotate(180deg);
+}
+
+.settings-model-list-panel {
+  border-top: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+.settings-model-list-rows {
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.settings-model-list-row {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 8px 7px 11px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.settings-model-list-row > span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 0.846rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-model-delete {
+  flex: 0 0 auto;
+  padding: 4px 7px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 0.77rem;
+  cursor: pointer;
+}
+
+.settings-model-delete:hover {
+  background: color-mix(in srgb, var(--danger) 9%, transparent);
+  color: var(--danger);
+}
+
+.settings-model-add-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  padding: 9px;
+}
+
+.settings-model-add-row input {
+  min-width: 0;
+  height: 34px;
+}
+
+.settings-model-add-row .btn {
+  min-width: 58px;
+}
+
+.settings-model-select {
+  width: 100%;
+}
+
+.settings-model-select .themed-select-btn {
+  width: 100%;
+  min-height: 38px;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+}
+
+.settings-model-select .themed-select-btn:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+.settings-model-select .themed-select-btn:focus-visible {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+.settings-model-select .themed-select-menu {
+  width: 100%;
+  max-width: min(520px, 100%);
+}
+
 .room-settings-modal {
   width: min(760px, 94vw);
   max-height: min(86vh, 720px);
@@ -8148,6 +8743,11 @@ body.session-detaching {
 .cli-xterm .xterm {
   height: 100%;
   padding: 4px 8px 0;
+}
+.cli-xterm .xterm-viewport,
+.cli-xterm .xterm-screen,
+.cli-xterm .xterm-scrollable-element {
+  background: var(--bg-terminal) !important;
 }
 .cli-err { color: var(--danger); padding: 0 14px; font-size: 12px; }
 

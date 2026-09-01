@@ -4,6 +4,7 @@ import type {
   CpaStatus,
   FileChange,
   ModelInfo,
+  ModelQuotaInfo,
   PermissionDecision,
   PermissionMode,
   PermissionRequest,
@@ -49,6 +50,8 @@ export const IPC = {
   cpaSyncModels: "cpa:sync-models",
   /** Read-only cached CPA model catalog (ids + contextLimit) */
   cpaModelCatalog: "cpa:model-catalog",
+  /** Read CPA's real, passively observed provider quota for one model. */
+  cpaModelQuota: "cpa:model-quota",
   modelSet: "model:set",
   /** SDK skills / slash commands for a live session */
   sessionSlashCommands: "session:slash-commands",
@@ -382,6 +385,10 @@ export type IpcInvokeMap = {
   [IPC.cpaModelCatalog]: {
     args: [];
     result: ModelInfo[];
+  };
+  [IPC.cpaModelQuota]: {
+    args: [{ model: string }];
+    result: ModelQuotaInfo | null;
   };
   [IPC.modelSet]: { args: [{ model: string }]; result: { model: string } };
   [IPC.sessionSlashCommands]: {

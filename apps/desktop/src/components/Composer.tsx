@@ -1,12 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   Attachment,
+  ModelInfo,
   PermissionMode,
+  ReasoningEffort,
   SessionMcpServerStatus,
 } from "@claude-desktop/shared";
 import { formatFileSize, IMAGE_MIME_TYPES } from "@claude-desktop/shared";
 import { getDesktop } from "../lib/desktop-api";
-import { ThemedSelect } from "./Select";
 import {
   abortActiveSession,
   compressActiveSession,
@@ -15,6 +16,7 @@ import {
   newChat,
   openProject,
   sendMessage,
+  saveSettings,
   setModel,
   setPermissionMode,
   startCpa,
@@ -52,6 +54,23 @@ const PERMISSION_CYCLE: PermissionMode[] = [
   "plan",
   "auto",
 ];
+
+function reasoningEffortLabel(effort: ReasoningEffort | ""): string {
+  switch (effort) {
+    case "low":
+      return "低";
+    case "medium":
+      return "中";
+    case "high":
+      return "高";
+    case "xhigh":
+      return "超高";
+    case "max":
+      return "最大";
+    default:
+      return "默认";
+  }
+}
 
 function getDesktopOrNull() {
   try {
@@ -128,8 +147,14 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
   const [atIndex, setAtIndex] = useState(0);
   const [atMatches, setAtMatches] = useState<string[]>([]);
   const [atTruncated, setAtTruncated] = useState(false);
+  const [modelCatalog, setModelCatalog] = useState<ModelInfo[]>([]);
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [modelMenuPage, setModelMenuPage] = useState<"root" | "model" | "effort">(
+    "root",
+  );
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const modelMenuRef = useRef<HTMLDivElement | null>(null);
   const { t } = useI18n();
 
   const running = useAppStore((s) =>
@@ -150,6 +175,66 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
     : settings?.defaultModel
       ? [settings.defaultModel]
       : [];
+  const selectedModel = settings?.defaultModel ?? "";
+  const selectedModelInfo = modelCatalog.find((model) => model.id === selectedModel);
+  const availableReasoningEfforts = selectedModelInfo?.reasoningEfforts ?? [];
+  const selectedReasoningEffort =
+    settings?.modelEfforts?.[selectedModel] ??
+    selectedModelInfo?.defaultReasoningEffort ??
+    "";
+  const selectedReasoningEffortLabel = selectedReasoningEffort
+    ? reasoningEffortLabel(selectedReasoningEffort)
+    : availableReasoningEfforts.length
+      ? "默认"
+      : "未同步";
+
+  const refreshModelCatalog = useCallback(async () => {
+    const desktop = getDesktopOrNull();
+    if (!desktop) return;
+    try {
+      const catalog = await desktop.getModelCatalog();
+      setModelCatalog(Array.isArray(catalog) ? catalog : []);
+    } catch {
+      setModelCatalog([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshModelCatalog();
+  }, [refreshModelCatalog, settings?.models]);
+
+  useEffect(() => {
+    if (!modelMenuOpen) return;
+    const onPointerDown = (event: MouseEvent) => {
+      if (!modelMenuRef.current?.contains(event.target as Node)) {
+        setModelMenuOpen(false);
+        setModelMenuPage("root");
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setModelMenuOpen(false);
+        setModelMenuPage("root");
+      }
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown, true);
+    };
+  }, [modelMenuOpen]);
+
+  const setModelReasoningEffort = useCallback(
+    async (effort: ReasoningEffort | "") => {
+      if (!selectedModel) return;
+      const modelEfforts = { ...(settings?.modelEfforts ?? {}) };
+      if (effort) modelEfforts[selectedModel] = effort;
+      else delete modelEfforts[selectedModel];
+      await saveSettings({ modelEfforts });
+    },
+    [selectedModel, settings?.modelEfforts],
+  );
 
   const allSlashCommands = useMemo(() => {
     const sdk =
@@ -682,18 +767,120 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
                   : t.chat.pickProject}
               </span>
             </button>
-            <label className="composer-model-field" title="Model">
-              <span className="composer-model-prefix">✦</span>
-              <ThemedSelect
-                className="composer-model-select-wrap"
-                value={settings?.defaultModel ?? ""}
-                disabled={!settings || models.length === 0}
-                onChange={(v) => void setModel(v)}
-                options={models.map((m) => ({ value: m }))}
-              />
-            </label>
           </div>
           <div className="composer-actions">
+            <div ref={modelMenuRef} className="composer-model-menu">
+              <button
+                type="button"
+                className="composer-model-menu-trigger"
+                title={selectedModel ? "模型与推理强度" : "请先配置模型"}
+                aria-haspopup="menu"
+                aria-expanded={modelMenuOpen}
+                onClick={() => {
+                  if (!modelMenuOpen) void refreshModelCatalog();
+                  setModelMenuOpen((open) => !open);
+                  setModelMenuPage("root");
+                }}
+              >
+                <span className="composer-model-menu-model">
+                  {selectedModel || "选择模型"}
+                </span>
+                <span className="composer-model-menu-effort">
+                  {selectedReasoningEffortLabel}
+                </span>
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
+                  <path d="M3 4.5 6 7.5 9 4.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+              {modelMenuOpen ? (
+                <div className="composer-model-menu-panel" role="menu">
+                  {modelMenuPage === "root" ? (
+                    <>
+                      <button
+                        type="button"
+                        className="composer-model-menu-row"
+                        disabled={!settings || models.length === 0}
+                        onClick={() => setModelMenuPage("model")}
+                      >
+                        <span>模型</span>
+                        <span className="composer-model-menu-current" title={selectedModel}>
+                          {selectedModel || "未配置"}
+                        </span>
+                        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
+                          <path d="M4.5 3 7.5 6 4.5 9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      </button>
+                      <button
+                        type="button"
+                        className="composer-model-menu-row"
+                        disabled={!selectedModel || availableReasoningEfforts.length === 0}
+                        onClick={() => setModelMenuPage("effort")}
+                      >
+                        <span>推理强度</span>
+                        <span className="composer-model-menu-current">
+                          {selectedReasoningEffortLabel}
+                        </span>
+                        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
+                          <path d="M4.5 3 7.5 6 4.5 9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        className="composer-model-menu-back"
+                        onClick={() => setModelMenuPage("root")}
+                      >
+                        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
+                          <path d="M7.5 3 4.5 6l3 3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                        {modelMenuPage === "model" ? "选择模型" : "选择推理强度"}
+                      </button>
+                      <div className="composer-model-menu-options">
+                        {modelMenuPage === "model" ? (
+                          models.map((model) => (
+                            <button
+                              type="button"
+                              className="composer-model-menu-option"
+                              key={model}
+                              aria-checked={model === selectedModel}
+                              onClick={() => {
+                                void setModel(model);
+                                setModelMenuPage("root");
+                              }}
+                            >
+                              <span title={model}>{model}</span>
+                              {model === selectedModel ? <span aria-hidden>✓</span> : null}
+                            </button>
+                          ))
+                        ) : (
+                          ["", ...availableReasoningEfforts].map((effort) => (
+                            <button
+                              type="button"
+                              className="composer-model-menu-option"
+                              key={effort || "default"}
+                              aria-checked={effort === selectedReasoningEffort}
+                              onClick={() => {
+                                void setModelReasoningEffort(effort as ReasoningEffort | "");
+                                setModelMenuPage("root");
+                              }}
+                            >
+                              <span>
+                                {effort
+                                  ? reasoningEffortLabel(effort as ReasoningEffort)
+                                  : "模型默认"}
+                              </span>
+                              {effort === selectedReasoningEffort ? <span aria-hidden>✓</span> : null}
+                            </button>
+                          ))
+                        )}
+                      </div>
+                    </>
+                  )}
+                </div>
+              ) : null}
+            </div>
             <button
               type="button"
               className={

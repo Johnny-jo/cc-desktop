@@ -23,6 +23,7 @@ import {
   useAppStore,
 } from "../state/store";
 import { RoomModsSettings } from "./settings/RoomModsSettings";
+import { ThemedSelect } from "./Select";
 import { ToggleSwitch } from "./ToggleSwitch";
 
 const MemoryDiagnostics = lazy(() =>
@@ -94,8 +95,6 @@ type FormState = {
   /** Claude Code-style rules, one per line: Edit / Edit(src/**) / Bash(npm *) */
   permissionAllowText: string;
   permissionDenyText: string;
-  /** "" = model default */
-  effort: string;
   agents: AgentDraft[];
   /** local plugin dirs, one per line */
   pluginPathsText: string;
@@ -113,6 +112,19 @@ let mcpDraftSeq = 0;
 function newMcpDraftId(): string {
   mcpDraftSeq += 1;
   return `mcp-${Date.now()}-${mcpDraftSeq}`;
+}
+
+function parseModelIds(modelsCsv: string): string[] {
+  const seen = new Set<string>();
+  const ids: string[] = [];
+  for (const raw of modelsCsv.split(",")) {
+    const id = raw.trim();
+    if (id && !seen.has(id)) {
+      seen.add(id);
+      ids.push(id);
+    }
+  }
+  return ids;
 }
 
 function kvRecordToText(rec?: Record<string, string>): string {
@@ -214,7 +226,6 @@ function fromSettings(s: PublicSettings | null): FormState {
     mcpServers: mcpServersToDrafts(s?.mcpServers),
     permissionAllowText: (s?.permissionAllow ?? []).join("\n"),
     permissionDenyText: (s?.permissionDeny ?? []).join("\n"),
-    effort: s?.effort ?? "",
     agents: (s?.agents ?? []).map((a) => ({
       id: newAgentDraftId(),
       name: a.name,
@@ -298,6 +309,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   );
   const [form, setForm] = useState<FormState>(() => fromSettings(settings));
   const [catalog, setCatalog] = useState<ModelInfo[]>([]);
+  const [modelDraft, setModelDraft] = useState("");
   const [saving, setSaving] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
@@ -411,6 +423,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
     openedRef.current = true;
     const initialForm = fromSettings(settings);
     setForm(initialForm);
+    setModelDraft("");
     setSavedFingerprint(JSON.stringify(initialForm));
     setClosePending(false);
     setLocalError(null);
@@ -569,6 +582,43 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
     setLocalError(null);
     setForm((prev) => ({ ...prev, [key]: value }));
   };
+
+  const configuredModelIds = parseModelIds(form.modelsCsv);
+  const defaultModelOptions = [
+    {
+      value: "",
+      label: configuredModelIds.length ? "选择默认模型…" : "请先添加模型",
+    },
+    ...configuredModelIds.map((id) => ({ value: id })),
+  ];
+  const modelSuggestions = catalog.filter(
+    (model) => !configuredModelIds.includes(model.id),
+  );
+
+  function updateModelList(nextIds: string[]) {
+    const ids = parseModelIds(nextIds.join(","));
+    setClosePending(false);
+    setSavedNote(null);
+    setLocalError(null);
+    setForm((prev) => {
+      const currentDefault = prev.defaultModel.trim();
+      const defaultModel = ids.includes(currentDefault)
+        ? currentDefault
+        : ids[0] ?? "";
+      return {
+        ...prev,
+        modelsCsv: ids.join(", "),
+        defaultModel,
+      };
+    });
+  }
+
+  function addModel() {
+    const id = modelDraft.trim();
+    if (!id || configuredModelIds.includes(id)) return;
+    updateModelList([...configuredModelIds, id]);
+    setModelDraft("");
+  }
 
   function renderContextLimitsTable() {
     const ids = visibleModelIds(form.modelsCsv, catalog);
@@ -1313,13 +1363,8 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
       updateFeedUrl: form.updateFeedUrl.trim() || undefined,
       locale:
         form.locale === "zh" || form.locale === "en" ? form.locale : "system",
-      // null clears the override back to model default
-      effort:
-        form.effort === "low" ||
-        form.effort === "medium" ||
-        form.effort === "high"
-          ? form.effort
-          : null,
+      // Effort is no longer configurable here; clear any legacy override.
+      effort: null,
     };
     if (form.token.trim()) {
       patch.token = form.token.trim();
@@ -1434,21 +1479,86 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
           {/* ===== 基础：日常最常改的三件事 ===== */}
           <label className="settings-field">
             默认模型
-            <input
+            <ThemedSelect
+              className="settings-model-select"
               value={form.defaultModel}
-              onChange={(e) => setField("defaultModel", e.target.value)}
-              spellCheck={false}
+              options={defaultModelOptions}
+              disabled={configuredModelIds.length === 0}
+              onChange={(value) => setField("defaultModel", value)}
+              menuMaxHeight={260}
             />
           </label>
 
-          <label className="settings-field">
-            模型列表（逗号分隔）
-            <input
-              value={form.modelsCsv}
-              onChange={(e) => setField("modelsCsv", e.target.value)}
-              spellCheck={false}
-            />
-          </label>
+          <div className="settings-field">
+            <span>模型列表</span>
+            <details className="settings-model-list-dropdown">
+              <summary className="settings-model-list-trigger">
+                <span>
+                  {configuredModelIds.length
+                    ? `已配置 ${configuredModelIds.length} 个模型`
+                    : "还没有配置模型"}
+                </span>
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
+                  <path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </summary>
+              <div className="settings-model-list-panel">
+                <div className="settings-model-list-rows">
+                  {configuredModelIds.length === 0 ? (
+                    <div className="settings-model-empty">暂无模型，请在下方添加。</div>
+                  ) : (
+                    configuredModelIds.map((id) => (
+                      <div className="settings-model-list-row" key={id}>
+                        <span title={id}>{id}</span>
+                        <button
+                          type="button"
+                          className="settings-model-delete"
+                          aria-label={`删除模型 ${id}`}
+                          title={`删除 ${id}`}
+                          onClick={() =>
+                            updateModelList(configuredModelIds.filter((model) => model !== id))
+                          }
+                        >
+                          删除
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </div>
+                <div className="settings-model-add-row">
+                  <input
+                    type="text"
+                    list="settings-model-catalog"
+                    value={modelDraft}
+                    placeholder="输入模型 ID"
+                    spellCheck={false}
+                    onChange={(event) => setModelDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        addModel();
+                      }
+                    }}
+                  />
+                  <datalist id="settings-model-catalog">
+                    {modelSuggestions.map((model) => (
+                      <option key={model.id} value={model.id} />
+                    ))}
+                  </datalist>
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    disabled={
+                      !modelDraft.trim() || configuredModelIds.includes(modelDraft.trim())
+                    }
+                    onClick={addModel}
+                  >
+                    添加
+                  </button>
+                </div>
+              </div>
+            </details>
+          </div>
 
           <div className="settings-inline-actions">
             <button
@@ -1481,24 +1591,6 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
               {syncing ? "同步中…" : "从 CPA 同步模型"}
             </button>
           </div>
-
-          <label className="settings-field">
-            Effort
-            <select
-              className="select"
-              value={form.effort}
-              onChange={(e) => setField("effort", e.target.value)}
-            >
-              <option value="">模型默认</option>
-              <option value="low">low</option>
-              <option value="medium">medium</option>
-              <option value="high">high</option>
-            </select>
-            <p className="settings-hint">
-              high 会先做较长推理再出字，首次响应更慢；要更快出字用 medium / low
-              或「模型默认」。
-            </p>
-          </label>
 
           <label className="settings-field">
             网关 Token

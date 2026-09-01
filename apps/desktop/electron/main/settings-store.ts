@@ -3,6 +3,25 @@ import path from "node:path";
 import type { AppSettings, PermissionMode, PublicSettings } from "@claude-desktop/shared";
 import { normalizeRuleString, sanitizeMcpServers } from "@claude-desktop/shared";
 
+function sanitizeModelEfforts(raw: unknown): AppSettings["modelEfforts"] | undefined {
+  if (raw === undefined) return undefined;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: NonNullable<AppSettings["modelEfforts"]> = {};
+  for (const [model, effort] of Object.entries(raw as Record<string, unknown>)) {
+    if (!model.trim()) continue;
+    if (
+      effort === "low" ||
+      effort === "medium" ||
+      effort === "high" ||
+      effort === "xhigh" ||
+      effort === "max"
+    ) {
+      out[model] = effort;
+    }
+  }
+  return out;
+}
+
 /** Keep only syntactically valid, normalized rule strings. */
 function sanitizePermissionRules(raw: unknown): string[] | undefined {
   if (raw === undefined) return undefined;
@@ -75,6 +94,7 @@ const DEFAULTS: AppSettings = {
   shutdownCpaOnQuit: false,
   defaultContextLimit: 200_000,
   modelContextLimits: {},
+  modelEfforts: {},
   mcpServers: {},
   permissionAllow: [],
   permissionDeny: [],
@@ -149,6 +169,9 @@ export class SettingsStore {
     if (publicPatch.modelContextLimits) {
       publicPatch.modelContextLimits = { ...publicPatch.modelContextLimits };
     }
+    if (publicPatch.modelEfforts !== undefined) {
+      publicPatch.modelEfforts = sanitizeModelEfforts(publicPatch.modelEfforts);
+    }
     if (publicPatch.mcpServers) {
       publicPatch.mcpServers = { ...publicPatch.mcpServers };
     }
@@ -170,7 +193,9 @@ export class SettingsStore {
       publicPatch.effort !== null &&
       publicPatch.effort !== "low" &&
       publicPatch.effort !== "medium" &&
-      publicPatch.effort !== "high"
+      publicPatch.effort !== "high" &&
+      publicPatch.effort !== "xhigh" &&
+      publicPatch.effort !== "max"
     ) {
       delete publicPatch.effort;
     }
@@ -267,6 +292,7 @@ export class SettingsStore {
         models: rest.models ? [...rest.models] : [...DEFAULTS.models],
         defaultContextLimit,
         modelContextLimits: limits,
+        modelEfforts: sanitizeModelEfforts(rest.modelEfforts) ?? {},
         mcpServers: sanitizeMcpServers(rest.mcpServers),
         permissionAllow: sanitizePermissionRules(rest.permissionAllow) ?? [],
         permissionDeny: sanitizePermissionRules(rest.permissionDeny) ?? [],
@@ -281,7 +307,9 @@ export class SettingsStore {
         ),
         ...(rest.effort === "low" ||
         rest.effort === "medium" ||
-        rest.effort === "high"
+        rest.effort === "high" ||
+        rest.effort === "xhigh" ||
+        rest.effort === "max"
           ? { effort: rest.effort }
           : {}),
         ...(theme ? { theme } : {}),

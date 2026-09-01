@@ -103,10 +103,36 @@ export type ContextUsage = {
   updatedAt: number;
 };
 
+/** A provider quota window passively observed by CPA from upstream headers. */
+export type ModelQuotaWindow = {
+  label: string;
+  usedPercent: number;
+  resetAt?: number;
+  windowMinutes?: number;
+};
+
+/** Real account quota for a model; absent when CPA has no upstream signal. */
+export type ModelQuotaInfo = {
+  modelId: string;
+  provider: string;
+  observedAt?: number;
+  windows: ModelQuotaWindow[];
+  plan?: string;
+  creditsBalance?: number;
+  accountCount: number;
+};
+
+/** Exact effort levels accepted by the bundled Claude Agent SDK. */
+export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
+
 export type ModelInfo = {
   id: string;
   /** Parsed context window from CPA /v1/models; undefined if unknown */
   contextLimit?: number;
+  /** Reasoning strengths advertised by CPA for this model, when available. */
+  reasoningEfforts?: ReasoningEffort[];
+  /** CPA-advertised default reasoning strength, when available. */
+  defaultReasoningEffort?: ReasoningEffort;
 };
 
 export type AttachmentKind = "text" | "image" | "binary";
@@ -262,7 +288,9 @@ export type AppSettings = {
    * Reasoning effort passed to the SDK (omit = model default). Mapped to
    * the model by the gateway/CLI.
    */
-  effort?: "low" | "medium" | "high";
+  effort?: ReasoningEffort;
+  /** Per-model reasoning strength chosen from the composer. */
+  modelEfforts?: Record<string, ReasoningEffort>;
   /** UI theme: dark / light / follow system (omit = system). */
   theme?: "dark" | "light" | "system";
   /** UI language: zh / en / follow system (omit = system). */

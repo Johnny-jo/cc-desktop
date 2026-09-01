@@ -334,6 +334,11 @@ const desktop = {
       import("@claude-desktop/shared").ModelInfo[]
     >,
 
+  getModelQuota: (model: string) =>
+    ipcRenderer.invoke(IPC.cpaModelQuota, { model }) as Promise<
+      import("@claude-desktop/shared").ModelQuotaInfo | null
+    >,
+
   setModel: (model: string) =>
     ipcRenderer.invoke(IPC.modelSet, { model }) as Promise<{ model: string }>,
 

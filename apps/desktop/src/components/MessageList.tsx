@@ -1,5 +1,12 @@
-import React, { memo, useEffect, useRef, useState } from "react";
-import type { ChatItem } from "@claude-desktop/shared";
+import React, {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import type { ChatItem, ModelQuotaInfo } from "@claude-desktop/shared";
 import { ToolCard } from "./ToolCard";
 import { MarkdownBody } from "./MarkdownBody";
 import { AttachmentChips } from "./AttachmentChips";
@@ -8,9 +15,14 @@ import {
   loadNewerMessages,
   loadOlderMessages,
   rewindToMessage,
+  selectSession,
   useAppStore,
 } from "../state/store";
 import { useI18n } from "../i18n/useI18n";
+import {
+  buildConversationAnchors,
+  type ConversationAnchor,
+} from "../lib/conversation-navigation";
 
 /** Long skill / system dumps that slipped through as plain text. */
 function looksLikeSkillDump(text: string): boolean {
@@ -185,11 +197,102 @@ function lastItemStreaming(items: ChatItem[]): boolean {
 }
 
 const SCROLL_LOAD_PX = 80;
+const SHOW_JUMP_BOTTOM_PX = 160;
 
 function itemTop(list: HTMLElement, id: string): number | null {
   const node = list.querySelector(`[data-item-id="${CSS.escape(id)}"]`);
   if (!(node instanceof HTMLElement)) return null;
   return node.getBoundingClientRect().top;
+}
+
+function ConversationNavigator({
+  anchors,
+  activeId,
+  onNavigate,
+  label,
+  userLabel,
+  assistantLabel,
+}: {
+  anchors: ConversationAnchor[];
+  activeId: string | null;
+  onNavigate: (id: string) => void;
+  label: string;
+  userLabel: string;
+  assistantLabel: string;
+}) {
+  if (anchors.length < 2) return null;
+  return (
+    <nav
+      className="conversation-navigator"
+      aria-label={label}
+      style={{ height: `${Math.min(340, Math.max(24, anchors.length * 8))}px` }}
+    >
+      {anchors.map((anchor) => (
+        <button
+          key={anchor.id}
+          type="button"
+          className={`conversation-nav-item role-${anchor.role}${
+            anchor.id === activeId ? " active" : ""
+          }`}
+          aria-current={anchor.id === activeId ? "location" : undefined}
+          aria-label={`${label}: ${anchor.preview}`}
+          title={anchor.id}
+          onClick={() => onNavigate(anchor.id)}
+        >
+          <span className="conversation-nav-tick" aria-hidden />
+          <span className="conversation-nav-preview" role="tooltip">
+            <span className="conversation-nav-preview-role">
+              {anchor.role === "user" ? userLabel : assistantLabel}
+            </span>
+            <span>{anchor.preview}</span>
+          </span>
+        </button>
+      ))}
+    </nav>
+  );
+}
+
+function ModelQuotaRail({
+  quota,
+  label,
+}: {
+  quota: ModelQuotaInfo;
+  label: string;
+}) {
+  const limiting = quota.windows.reduce((worst, window) =>
+    window.usedPercent > worst.usedPercent ? window : worst,
+  );
+  const remaining = Math.max(0, Math.min(100, 100 - limiting.usedPercent));
+  const level = remaining <= 5 ? "danger" : remaining <= 20 ? "warn" : "ok";
+  return (
+    <div
+      className={`model-quota-rail model-quota-rail-${level}`}
+      role="meter"
+      tabIndex={0}
+      aria-label={label}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={Math.round(remaining)}
+    >
+      <span className="model-quota-rail-track" aria-hidden>
+        <span
+          className="model-quota-rail-fill"
+          style={{ height: `${remaining}%` }}
+        />
+      </span>
+      <span className="model-quota-rail-popover">
+        <strong>{Math.round(remaining)}% {label}</strong>
+        <span>{quota.modelId} · {quota.provider}</span>
+        {quota.windows.map((window) => (
+          <span key={window.label}>
+            {window.label}: {Math.round(100 - window.usedPercent)}%
+            {window.resetAt ? ` · ${new Date(window.resetAt).toLocaleString()}` : ""}
+          </span>
+        ))}
+        {quota.accountCount > 1 ? <span>{quota.accountCount} accounts</span> : null}
+      </span>
+    </div>
+  );
 }
 
 /** Skeleton bubbles shown while a session transcript loads from disk. */
@@ -218,6 +321,7 @@ export function MessageList({
   hasMore,
   hasNewer,
   loading,
+  modelQuota,
   onOpenFile,
 }: {
   items: ChatItem[];
@@ -226,6 +330,8 @@ export function MessageList({
   hasNewer?: boolean;
   /** Disk page in flight — show the skeleton instead of the empty hero. */
   loading?: boolean;
+  /** Actual provider quota passively observed by CPA for the selected model. */
+  modelQuota?: ModelQuotaInfo | null;
   /** Open a project-relative file in the in-app editor column. */
   onOpenFile?: (rel: string) => void;
 }) {
@@ -234,6 +340,9 @@ export function MessageList({
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [loadingNewer, setLoadingNewer] = useState(false);
   const loadingRef = useRef(false);
+  const [activeAnchorId, setActiveAnchorId] = useState<string | null>(null);
+  const [showJumpToBottom, setShowJumpToBottom] = useState(false);
+  const anchors = useMemo(() => buildConversationAnchors(items), [items]);
 
   const last = items[items.length - 1];
   const pinKey = last
@@ -252,6 +361,37 @@ export function MessageList({
     // pinKey already encodes last-item id / length / streaming.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pinKey, sessionId, hasNewer]);
+
+  const updateScrollUi = useCallback(() => {
+    const list = listRef.current;
+    if (!list) return;
+    const distBottom = list.scrollHeight - list.scrollTop - list.clientHeight;
+    const showBottom = Boolean(hasNewer) || distBottom > SHOW_JUMP_BOTTOM_PX;
+    setShowJumpToBottom((prev) => (prev === showBottom ? prev : showBottom));
+
+    if (anchors.length === 0) {
+      setActiveAnchorId(null);
+      return;
+    }
+    const listTop = list.getBoundingClientRect().top;
+    const focusY = listTop + Math.min(list.clientHeight * 0.32, 220);
+    let next = anchors[0]!.id;
+    for (const anchor of anchors) {
+      const node = list.querySelector(
+        `[data-item-id="${CSS.escape(anchor.id)}"]`,
+      );
+      if (!(node instanceof HTMLElement)) continue;
+      if (node.getBoundingClientRect().top <= focusY) next = anchor.id;
+      else break;
+    }
+    if (distBottom <= 8 && !hasNewer) next = anchors[anchors.length - 1]!.id;
+    setActiveAnchorId((prev) => (prev === next ? prev : next));
+  }, [anchors, hasNewer]);
+
+  useEffect(() => {
+    const frame = requestAnimationFrame(updateScrollUi);
+    return () => cancelAnimationFrame(frame);
+  }, [pinKey, sessionId, updateScrollUi]);
 
   const restoreAnchor = (anchorId: string, prevTop: number) => {
     requestAnimationFrame(() => {
@@ -299,6 +439,7 @@ export function MessageList({
     const list = listRef.current;
     if (!list) return;
     const onScroll = () => {
+      updateScrollUi();
       if (loadingRef.current) return;
       // Don't auto-page when the window fits on screen (opening a short tail
       // would otherwise fire both edges at scrollTop 0).
@@ -316,48 +457,122 @@ export function MessageList({
     return () => list.removeEventListener("scroll", onScroll);
     // Intentionally close over the latest loaders / flags.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, hasMore, hasNewer, items[0]?.id, items[items.length - 1]?.id]);
+  }, [
+    sessionId,
+    hasMore,
+    hasNewer,
+    items[0]?.id,
+    items[items.length - 1]?.id,
+    updateScrollUi,
+  ]);
+
+  const jumpToAnchor = useCallback((id: string) => {
+    const list = listRef.current;
+    if (!list) return;
+    const node = list.querySelector(`[data-item-id="${CSS.escape(id)}"]`);
+    if (!(node instanceof HTMLElement)) return;
+    const listTop = list.getBoundingClientRect().top;
+    const nodeTop = node.getBoundingClientRect().top;
+    list.scrollTo({
+      top:
+        list.scrollTop +
+        nodeTop -
+        listTop -
+        Math.min(96, list.clientHeight * 0.18),
+      behavior: "smooth",
+    });
+    setActiveAnchorId(id);
+  }, []);
+
+  const jumpToBottom = async () => {
+    if (hasNewer && sessionId) {
+      setLoadingNewer(true);
+      try {
+        // Selecting a history window that has newer pages reloads the live tail.
+        await selectSession(sessionId);
+      } finally {
+        setLoadingNewer(false);
+      }
+    }
+    requestAnimationFrame(() => {
+      const list = listRef.current;
+      list?.scrollTo({ top: list.scrollHeight, behavior: "smooth" });
+    });
+  };
 
   if (loading && items.length === 0) {
-    return <TranscriptSkeleton />;
+    return (
+      <div className="message-list-shell">
+        <TranscriptSkeleton />
+      </div>
+    );
   }
 
   if (items.length === 0) {
     return (
-      <div className="message-list empty">
-        <div className="empty-hero">
-          <div className="empty-hero-title">How can I help you today?</div>
-          <p className="empty-hero-sub">
-            Open a project, then send a message to start a session.
-          </p>
+      <div className="message-list-shell">
+        <div className="message-list empty">
+          <div className="empty-hero">
+            <div className="empty-hero-title">How can I help you today?</div>
+            <p className="empty-hero-sub">
+              Open a project, then send a message to start a session.
+            </p>
+          </div>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="message-list" ref={listRef}>
-      {hasMore && sessionId ? (
-        <button
-          type="button"
-          className="message-load-older"
-          disabled={loadingOlder}
-          onClick={() => void onLoadOlder()}
-        >
-          {loadingOlder ? t.common.loading : t.chat.loadOlder}
-        </button>
+    <div className="message-list-shell">
+      <div className="message-list" ref={listRef}>
+        {hasMore && sessionId ? (
+          <button
+            type="button"
+            className="message-load-older"
+            disabled={loadingOlder}
+            onClick={() => void onLoadOlder()}
+          >
+            {loadingOlder ? t.common.loading : t.chat.loadOlder}
+          </button>
+        ) : null}
+        {items.map((item) => (
+          <MessageRow key={item.id} item={item} onOpenFile={onOpenFile} />
+        ))}
+        {hasNewer && sessionId ? (
+          <button
+            type="button"
+            className="message-load-newer"
+            disabled={loadingNewer}
+            onClick={() => void onLoadNewer()}
+          >
+            {loadingNewer ? t.common.loading : t.chat.loadNewer}
+          </button>
+        ) : null}
+      </div>
+      <ConversationNavigator
+        anchors={anchors}
+        activeId={activeAnchorId}
+        onNavigate={jumpToAnchor}
+        label={t.chat.quickNavigation}
+        userLabel={t.chat.quickNavigationUser}
+        assistantLabel={t.chat.quickNavigationAssistant}
+      />
+      {modelQuota ? (
+        <ModelQuotaRail quota={modelQuota} label={t.chat.modelQuotaRemaining} />
       ) : null}
-      {items.map((item) => (
-        <MessageRow key={item.id} item={item} onOpenFile={onOpenFile} />
-      ))}
-      {hasNewer && sessionId ? (
+      {showJumpToBottom ? (
         <button
           type="button"
-          className="message-load-newer"
+          className="scroll-to-bottom-btn"
           disabled={loadingNewer}
-          onClick={() => void onLoadNewer()}
+          title={t.chat.scrollToBottom}
+          aria-label={t.chat.scrollToBottom}
+          onClick={() => void jumpToBottom()}
         >
-          {loadingNewer ? t.common.loading : t.chat.loadNewer}
+          <svg viewBox="0 0 24 24" aria-hidden>
+            <path d="M12 4v14m0 0 6-6m-6 6-6-6" />
+          </svg>
         </button>
       ) : null}
     </div>

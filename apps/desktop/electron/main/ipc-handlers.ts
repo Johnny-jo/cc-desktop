@@ -21,6 +21,7 @@ import type { PermissionBroker } from "./permission-broker";
 import type { UserPromptBroker } from "./user-prompt-broker";
 import type { SettingsStore } from "./settings-store";
 import type { CpaSupervisor } from "./cpa-supervisor";
+import { applyCpaModelCatalog } from "./cpa-model-sync";
 import type { DiffTracker } from "./diff-tracker";
 import type { SnapshotStore } from "./snapshot-store";
 import { getFileIndexCacheStats, listProjectFiles } from "./file-index";
@@ -59,6 +60,8 @@ export type IpcHandlerContext = {
   rooms?: import("./room-service").RoomService;
   /** Desktop UI changed defaultModel — persist into ~/.claude/settings.json */
   onDesktopModelChanged?: (model: string) => void;
+  /** Auto model sync changed settings — broadcast IPC.settingsUpdated */
+  onSettingsSynced?: () => void;
 };
 
 export function registerIpcHandlers(ctx: IpcHandlerContext): void {
@@ -762,20 +765,35 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
   ipcMain.handle(IPC.cpaSyncModels, async () => {
     await ctx.cpa.ensureReady();
     const catalog = await ctx.cpa.listModelCatalog();
-    const models = catalog.map((m) => m.id);
-    if (models.length === 0) {
+    if (catalog.length === 0) {
       throw new Error("CPA returned an empty model list");
     }
-    const current = ctx.settings.get();
-    const defaultModel = models.includes(current.defaultModel)
-      ? current.defaultModel
-      : models[0];
-    ctx.settings.update({ models, defaultModel });
+    applyCpaModelCatalog(catalog, ctx.settings);
+    const { models, defaultModel } = ctx.settings.get();
     return { models, defaultModel };
   });
 
   ipcMain.handle(IPC.cpaModelCatalog, async () => {
+    // Best-effort live refresh: keys/models newly added under CPA's
+    // openai-compatibility section (and their reasoning efforts) show up
+    // without a manual Settings → 从 CPA 同步模型 round-trip.
+    try {
+      const catalog = await ctx.cpa.listModelCatalog();
+      if (applyCpaModelCatalog(catalog, ctx.settings)) ctx.onSettingsSynced?.();
+    } catch {
+      // CPA offline or token missing — fall back to the cached catalog.
+    }
+    await ctx.sessions.refreshModelCatalog();
     return ctx.cpa.getModelCatalog();
+  });
+
+  ipcMain.handle(IPC.cpaModelQuota, async (_e, { model }: { model: string }) => {
+    try {
+      await ctx.cpa.ensureReady();
+      return await ctx.cpa.getModelQuota(model);
+    } catch {
+      return null;
+    }
   });
 
   ipcMain.handle(IPC.modelSet, async (_e, { model }: { model: string }) => {

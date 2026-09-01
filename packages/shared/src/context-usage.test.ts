@@ -3,6 +3,8 @@ import {
   computeContextUsage,
   extractUsedTokens,
   parseModelContextLimit,
+  parseModelDefaultReasoningEffort,
+  parseModelReasoningEfforts,
   resolveContextLimit,
 } from "./context-usage";
 import type { TurnUsage } from "./models";
@@ -79,6 +81,43 @@ describe("parseModelContextLimit", () => {
     expect(parseModelContextLimit({ metadata: { context_length: 99999 } })).toBe(
       99999,
     );
+  });
+});
+
+describe("model reasoning metadata", () => {
+  it("reads direct and nested CPA capability fields", () => {
+    expect(
+      parseModelReasoningEfforts({
+        supported_reasoning_efforts: ["low", "high", "max", "invalid"],
+      }),
+    ).toEqual(["low", "high", "max"]);
+    expect(
+      parseModelReasoningEfforts({
+        supportedEffortLevels: ["low", "xhigh", "max"],
+      }),
+    ).toEqual(["low", "xhigh", "max"]);
+    expect(
+      parseModelReasoningEfforts({
+        reasoning_efforts: [
+          { value: "low" },
+          { effort: "high" },
+          { level: "MAX" },
+        ],
+      }),
+    ).toEqual(["low", "high", "max"]);
+    expect(
+      parseModelReasoningEfforts({
+        thinking: { levels: ["low", "high", "max"] },
+      }),
+    ).toEqual(["low", "high", "max"]);
+    expect(
+      parseModelDefaultReasoningEffort({
+        capabilities: { default_reasoning_effort: "medium" },
+      }),
+    ).toBe("medium");
+    expect(
+      parseModelDefaultReasoningEffort({ default_reasoning_level: "HIGH" }),
+    ).toBe("high");
   });
 });
 

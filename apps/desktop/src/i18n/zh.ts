@@ -53,6 +53,12 @@ export const zh: Messages = {
     empty: "选一个会话或新建一个",
     loadOlder: "加载更早的消息",
     loadNewer: "加载更新的消息",
+    quickNavigation: "对话快速检查",
+    quickNavigationUser: "你",
+    quickNavigationAssistant: "AI",
+    contextUsage: "上下文用量",
+    modelQuotaRemaining: "额度剩余",
+    scrollToBottom: "滚动到底部",
   },
   changes: {
     title: "变更",

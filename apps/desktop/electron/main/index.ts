@@ -27,6 +27,7 @@ import { SnapshotStore } from "./snapshot-store";
 import { PermissionBroker } from "./permission-broker";
 import { UserPromptBroker } from "./user-prompt-broker";
 import { CpaSupervisor } from "./cpa-supervisor";
+import { applyCpaModelCatalog } from "./cpa-model-sync";
 import { SessionArchive } from "./session-archive";
 import { SessionManager, type QueryFn } from "./session-manager";
 import { createContextCompressor } from "./context-compressor";
@@ -473,13 +474,47 @@ function bootstrap() {
     },
   });
 
+  // Auto-sync CPA's model registry (incl. reasoning efforts of
+  // openai-compatibility keys) whenever CPA transitions into ready — no
+  // more manual Settings → 从 CPA 同步模型 round-trips.
+  let cpaPrevState: CpaStatus["state"] = "unknown";
+  let cpaModelSyncRunning = false;
+  let cpaModelSyncTimer: NodeJS.Timeout | null = null;
+
   const cpa = new CpaSupervisor({
     getSettings: () => settings.get(),
     getToken: () => settings.getToken(),
     onStatusChange: (status: CpaStatus) => {
       sendToRenderer(IPC.cpaStatusEvent, status);
+      const becameReady = status.state === "ready" && cpaPrevState !== "ready";
+      cpaPrevState = status.state;
+      if (!becameReady) return;
+      void autoSyncCpaModels();
+      // Providers (esp. openai-compatibility keys) may still be loading
+      // right after the port opens — one delayed pass catches late arrivals.
+      if (cpaModelSyncTimer) clearTimeout(cpaModelSyncTimer);
+      cpaModelSyncTimer = setTimeout(() => {
+        cpaModelSyncTimer = null;
+        void autoSyncCpaModels();
+      }, 15_000);
+      cpaModelSyncTimer.unref?.();
     },
   });
+
+  const autoSyncCpaModels = async (): Promise<void> => {
+    if (cpaModelSyncRunning) return;
+    cpaModelSyncRunning = true;
+    try {
+      const catalog = await cpa.listModelCatalog();
+      if (applyCpaModelCatalog(catalog, settings)) {
+        sendToRenderer(IPC.settingsUpdated, settings.getPublic());
+      }
+    } catch {
+      // best-effort — CPA may still be warming up its registry
+    } finally {
+      cpaModelSyncRunning = false;
+    }
+  };
 
   const sessions = new SessionManager({
     queryFn: realQueryFn,
@@ -617,6 +652,9 @@ function bootstrap() {
         // ignore — desktop setting already persisted
       }
     },
+    onSettingsSynced: () => {
+      sendToRenderer(IPC.settingsUpdated, settings.getPublic());
+    },
   });
 
   const stopClaudeSettingsWatch = watchClaudeCodeModel(applyCliModelToDesktop);
@@ -652,6 +690,7 @@ function bootstrap() {
 
   app.on("before-quit", () => {
     isQuitting = true;
+    if (cpaModelSyncTimer) clearTimeout(cpaModelSyncTimer);
     stopClaudeSettingsWatch();
     // stopIfManaged is a no-op unless this app spawned CPA.
     // Always call it so managed children are not orphaned on quit.

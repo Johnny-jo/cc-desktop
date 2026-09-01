@@ -129,6 +129,14 @@ export type SessionManagerDeps = {
 };
 
 type QueryControl = {
+  initializationResult?: () => Promise<{
+    models?: Array<{
+      value?: string;
+      resolvedModel?: string;
+      supportsEffort?: boolean;
+      supportedEffortLevels?: string[];
+    }>;
+  }>;
   supportedCommands?: () => Promise<
     Array<{
       name: string;
@@ -1940,7 +1948,11 @@ export class SessionManager {
       includePartialMessages: true,
       permissionMode: entry.permissionMode ?? settings.permissionMode,
       model: entry.model || settings.defaultModel,
-      ...(settings.effort ? { effort: settings.effort } : {}),
+      ...(() => {
+        const model = entry.model || settings.defaultModel;
+        const effort = settings.modelEfforts?.[model] ?? settings.effort;
+        return effort ? { effort } : {};
+      })(),
       ...(claudePath ? { pathToClaudeCodeExecutable: claudePath } : {}),
       env,
       tools: SESSION_TOOLS,
@@ -2448,6 +2460,24 @@ export class SessionManager {
       this.emitSlashCommands?.(sessionId, entry.slashCommands);
     } catch {
       // Control request may fail if CLI not ready; non-fatal.
+    }
+  }
+
+  /** Merge effort levels reported by a live SDK initialization into the catalog. */
+  async refreshModelCatalog(): Promise<void> {
+    const live = [...this.sessions.values()]
+      .filter((entry) => entry.query?.initializationResult)
+      .sort((a, b) => b.lastQueryUsedAt - a.lastQueryUsedAt);
+    for (const entry of live) {
+      try {
+        const initialized = await entry.query!.initializationResult!();
+        if (Array.isArray(initialized.models)) {
+          this.cpa.mergeSdkModelCapabilities(initialized.models);
+          return;
+        }
+      } catch {
+        // A cold or closing query can reject control calls; try another one.
+      }
     }
   }
 

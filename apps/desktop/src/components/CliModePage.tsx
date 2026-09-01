@@ -9,12 +9,20 @@ import { useAppStore } from "../state/store";
 import { useI18n } from "../i18n/useI18n";
 
 function xtermTheme() {
-  const light = document.documentElement.dataset.theme === "light";
+  const explicit = document.documentElement.dataset.theme;
+  const light = explicit
+    ? explicit === "light"
+    : window.matchMedia("(prefers-color-scheme: light)").matches;
+  const rootStyle = getComputedStyle(document.documentElement);
+  const background = rootStyle.getPropertyValue("--bg-terminal").trim() ||
+    (light ? "#ffffff" : "#0e0e0e");
+  const foreground = rootStyle.getPropertyValue("--text").trim() ||
+    (light ? "#1c1c1e" : "#d4d4d4");
   return {
-    background: light ? "#f4f4f6" : "#0e0e0e",
-    foreground: light ? "#2a2a2e" : "#d4d4d4",
-    cursor: light ? "#2a2a2e" : "#d4d4d4",
-    cursorAccent: light ? "#f4f4f6" : "#0e0e0e",
+    background,
+    foreground,
+    cursor: foreground,
+    cursorAccent: background,
     selectionBackground: light ? "#b6d3f8" : "#264f78",
   };
 }

@@ -1,5 +1,5 @@
-import React, { useState } from "react";
-import type { ChatItem, PermissionMode } from "@claude-desktop/shared";
+import React, { useEffect, useState } from "react";
+import type { ChatItem, ModelQuotaInfo, PermissionMode } from "@claude-desktop/shared";
 import { MessageList } from "./MessageList";
 import { Composer } from "./Composer";
 import { ThemedSelect } from "./Select";
@@ -12,6 +12,7 @@ import {
   formatContextUsageLine,
   formatTokens,
 } from "../lib/format-usage";
+import { getDesktop, hasDesktopApi } from "../lib/desktop-api";
 
 const PERMISSION_MODES: PermissionMode[] = [
   "default",
@@ -54,17 +55,38 @@ export function ChatPanel({ onOpenSettings, onOpenFile }: ChatPanelProps) {
   const [bannerDismissed, setBannerDismissed] = useState<Record<string, true>>(
     {},
   );
+  const [modelQuota, setModelQuota] = useState<ModelQuotaInfo | null>(null);
 
   const active = sessions.find((s) => s.id === activeSessionId);
   const ctx = active?.contextUsage;
   const level = ctx ? contextLevel(ctx.ratio) : "ok";
+  const fillPct = ctx ? Math.max(0, Math.min(100, ctx.ratio * 100)) : 0;
+  const quotaModel = ctx?.modelId ?? settings?.defaultModel ?? "";
   const showBanner =
     Boolean(activeSessionId) &&
     Boolean(ctx) &&
     ctx!.ratio >= 0.8 &&
     !bannerDismissed[activeSessionId!];
 
-  const fillPct = ctx ? Math.max(0, Math.min(100, ctx.ratio * 100)) : 0;
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = () => {
+      if (!quotaModel || !hasDesktopApi("getModelQuota")) {
+        setModelQuota(null);
+        return;
+      }
+      void getDesktop().getModelQuota(quotaModel).then(
+        (quota) => { if (!cancelled) setModelQuota(quota); },
+        () => { if (!cancelled) setModelQuota(null); },
+      );
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 60_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [quotaModel, active?.updatedAt]);
 
   return (
     <div className="chat-panel">
@@ -80,14 +102,9 @@ export function ChatPanel({ onOpenSettings, onOpenFile }: ChatPanelProps) {
               title={contextMeterTitle(ctx)}
             >
               <span className="context-meter-bar" aria-hidden>
-                <span
-                  className="context-meter-fill"
-                  style={{ width: `${fillPct}%` }}
-                />
+                <span className="context-meter-fill" style={{ width: `${fillPct}%` }} />
               </span>
-              <span className="context-meter-label">
-                {formatContextUsageLine(ctx)}
-              </span>
+              <span className="context-meter-label">{formatContextUsageLine(ctx)}</span>
             </span>
           ) : null}
         </div>
@@ -138,6 +155,7 @@ export function ChatPanel({ onOpenSettings, onOpenFile }: ChatPanelProps) {
             hasMore={hasMore}
             hasNewer={hasNewer}
             loading={transcriptLoading}
+            modelQuota={modelQuota}
             onOpenFile={onOpenFile}
           />
         </div>

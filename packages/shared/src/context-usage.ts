@@ -2,6 +2,7 @@ import type {
   ContextLimitSource,
   ContextUsage,
   ModelInfo,
+  ReasoningEffort,
   TurnUsage,
 } from "./models";
 
@@ -40,6 +41,87 @@ function positiveInt(v: unknown): number | undefined {
   if (typeof v !== "number" || !Number.isFinite(v)) return undefined;
   const n = Math.floor(v);
   return n > 0 ? n : undefined;
+}
+
+function reasoningEffort(v: unknown): ReasoningEffort | undefined {
+  const normalized = typeof v === "string" ? v.trim().toLowerCase() : "";
+  return normalized === "low" ||
+    normalized === "medium" ||
+    normalized === "high" ||
+    normalized === "xhigh" ||
+    normalized === "max"
+    ? normalized
+    : undefined;
+}
+
+function reasoningEffortEntry(v: unknown): ReasoningEffort | undefined {
+  const direct = reasoningEffort(v);
+  if (direct) return direct;
+  if (!v || typeof v !== "object") return undefined;
+  const o = v as Record<string, unknown>;
+  return (
+    reasoningEffort(o.value) ??
+    reasoningEffort(o.effort) ??
+    reasoningEffort(o.level) ??
+    reasoningEffort(o.name)
+  );
+}
+
+/** Parse model-specific reasoning capabilities exposed by CPA/OpenAI-style catalogs. */
+export function parseModelReasoningEfforts(raw: unknown): ReasoningEffort[] | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const o = raw as Record<string, unknown>;
+  for (const key of [
+    "reasoning_efforts",
+    "supported_reasoning_efforts",
+    "reasoning_levels",
+    "supported_reasoning_levels",
+    "reasoningEfforts",
+    "supportedReasoningEfforts",
+    "reasoningLevels",
+    "supportedReasoningLevels",
+    "effort_levels",
+    "supported_effort_levels",
+    "effortLevels",
+    "supportedEffortLevels",
+    "levels",
+  ]) {
+    const value = o[key];
+    const values = Array.isArray(value) ? value : [value];
+    const parsed = values
+      .map(reasoningEffortEntry)
+      .filter((effort): effort is ReasoningEffort => effort != null);
+    if (parsed.length) return [...new Set(parsed)];
+  }
+  for (const nestKey of ["thinking", "capabilities", "meta", "metadata", "info"]) {
+    const parsed = parseModelReasoningEfforts(o[nestKey]);
+    if (parsed?.length) return parsed;
+  }
+  return undefined;
+}
+
+/** Parse the model's default reasoning strength from CPA/OpenAI-style catalogs. */
+export function parseModelDefaultReasoningEffort(
+  raw: unknown,
+): ReasoningEffort | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const o = raw as Record<string, unknown>;
+  for (const key of [
+    "default_reasoning_effort",
+    "default_reasoning_level",
+    "reasoning_effort",
+    "defaultReasoningEffort",
+    "defaultReasoningLevel",
+    "reasoningEffort",
+  ]) {
+    const parsed = reasoningEffort(o[key]);
+    if (parsed) return parsed;
+  }
+  for (const nestKey of ["thinking", "capabilities", "meta", "metadata", "info"]) {
+    const parsed = parseModelDefaultReasoningEffort(o[nestKey]);
+    if (parsed) return parsed;
+  }
+  return undefined;
 }
 
 /** Pull context window from a CPA / OpenAI-style model object. */

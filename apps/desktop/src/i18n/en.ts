@@ -51,6 +51,12 @@ export const en = {
     empty: "Select a session or start a new one",
     loadOlder: "Load older messages",
     loadNewer: "Load newer messages",
+    quickNavigation: "Conversation quick navigation",
+    quickNavigationUser: "You",
+    quickNavigationAssistant: "AI",
+    contextUsage: "Context usage",
+    modelQuotaRemaining: "quota remaining",
+    scrollToBottom: "Scroll to bottom",
   },
   changes: {
     title: "Changes",
