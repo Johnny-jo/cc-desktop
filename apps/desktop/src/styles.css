@@ -58,6 +58,8 @@
   --radius-pill: 999px;
   --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.25);
   --shadow-2: 0 12px 40px rgba(0, 0, 0, 0.35);
+  --shadow-composer: 0 4px 16px rgba(0, 0, 0, 0.26);
+  --shadow-composer-focus: 0 6px 20px rgba(0, 0, 0, 0.36);
   --shadow-drawer: -16px 0 48px rgba(0, 0, 0, 0.45);
   --overlay-bg: rgba(0, 0, 0, 0.5);
   /* Match Electron titleBarOverlay height (Windows caption buttons). */
@@ -122,6 +124,8 @@
 
   --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.06);
   --shadow-2: 0 12px 40px rgba(0, 0, 0, 0.12);
+  --shadow-composer: 0 4px 14px rgba(0, 0, 0, 0.07);
+  --shadow-composer-focus: 0 6px 18px rgba(0, 0, 0, 0.11);
   --shadow-drawer: -16px 0 48px rgba(0, 0, 0, 0.16);
   --overlay-bg: rgba(30, 30, 36, 0.28);
   --focus-ring: 0 0 0 2px rgba(37, 99, 235, 0.25);
@@ -164,6 +168,8 @@
     --danger-border: #f2c4c4;
     --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.06);
     --shadow-2: 0 12px 40px rgba(0, 0, 0, 0.12);
+    --shadow-composer: 0 4px 14px rgba(0, 0, 0, 0.07);
+    --shadow-composer-focus: 0 6px 18px rgba(0, 0, 0, 0.11);
     --shadow-drawer: -16px 0 48px rgba(0, 0, 0, 0.16);
     --overlay-bg: rgba(30, 30, 36, 0.28);
     --diff-add: #047857;
@@ -1703,7 +1709,8 @@ textarea {
   margin: 0 -2px;
 }
 
-/* Center hairline */
+/* Center hairline — invisible at rest; the 10px hit area + resize cursor do
+   the work, accent line appears only on hover / while dragging. */
 .resize-handle-sidebar::after,
 .resize-handle-changes::after {
   content: "";
@@ -1715,7 +1722,7 @@ textarea {
   transform: translateX(-50%);
   border-radius: 1px;
   background: var(--border);
-  opacity: 0.55;
+  opacity: 0;
   pointer-events: none;
   transition: background 0.12s ease, opacity 0.12s ease, top 0.12s ease,
     bottom 0.12s ease;
@@ -1753,8 +1760,10 @@ body.is-resizing-col .resize-handle-changes::after {
   transform: translateY(-50%);
   border-radius: 1px;
   background: var(--border);
-  opacity: 0.55;
+  opacity: 0;
   pointer-events: none;
+  transition: background 0.12s ease, opacity 0.12s ease, left 0.12s ease,
+    right 0.12s ease;
 }
 
 .resize-handle-terminal:hover::after,
@@ -2276,22 +2285,21 @@ body.is-resizing-row * {
 }
 
 /* Ghost variants keep their own paddings */
+/* 标题栏右侧的权限（自主度）选择器：与 composer 的模型选择器一致的透明风格。 */
 .select-ghost-wrap .themed-select-btn {
-  padding: 5px 12px;
-  height: 30px;
-  background: color-mix(in srgb, var(--bg-elevated) 72%, transparent);
-  backdrop-filter: blur(12px) saturate(1.3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
+  border: none;
+  padding: 3px 8px;
   color: var(--text-muted);
-  transition: border-color 140ms ease, color 140ms ease,
-    background 140ms ease, box-shadow 140ms ease;
+  background: transparent;
 }
 
-.select-ghost-wrap .themed-select-btn:hover:not(:disabled) {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: color-mix(in srgb, var(--bg-elevated) 86%, transparent);
+.select-ghost-wrap .themed-select-btn:hover:not(:disabled),
+.select-ghost-wrap.open .themed-select-btn,
+.select-ghost-wrap .themed-select-btn:focus-visible {
+  background: transparent;
+  border: none;
+  color: var(--text);
+  box-shadow: none;
 }
 
 .composer-model-select-wrap {
@@ -2822,6 +2830,8 @@ body.session-detaching {
   height: 100%;
   width: 100%;
   overflow: hidden;
+  /* Anchor for the overlaid composer (--composer-h is set from ChatPanel). */
+  position: relative;
 }
 
 .chat-inner {
@@ -2844,6 +2854,11 @@ body.session-detaching {
   border-bottom: 1px solid var(--border-soft);
   background: color-mix(in srgb, var(--bg-app) 48%, transparent);
   backdrop-filter: blur(22px) saturate(1.5);
+  /* Keep header (and its dropdown menus) above the transcript: .chat-body is a
+     stacking context (container-type) later in DOM order, so without this it
+     paints over the permission-mode menu and swallows its clicks. */
+  position: relative;
+  z-index: 30;
 }
 
 .chat-header-left {
@@ -3018,15 +3033,14 @@ body.session-detaching {
 }
 
 .chat-composer {
-  flex: 0 0 auto;
+  /* Overlay at the bottom of the panel: the transcript scrolls full-height
+     behind the composer. Fully transparent — only the .composer box itself
+     is frosted glass; no blur/gradient strip around it. */
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
   padding: 0 0 var(--space-4);
-  /* Fade from transparent to app bg (works in both themes) */
-  background: linear-gradient(
-    180deg,
-    transparent 0%,
-    color-mix(in srgb, var(--bg-app) 58%, transparent) 38%
-  );
-  backdrop-filter: blur(22px) saturate(1.3);
   z-index: 2;
 }
 
@@ -3047,7 +3061,10 @@ body.session-detaching {
   width: 100%;
   overflow: auto;
   gap: var(--space-4);
-  padding: var(--space-5) max(var(--chat-content-inset), 54px) var(--space-6);
+  /* Bottom room = composer overlay height + generous blank, so the last
+     message can scroll fully clear of the frosted input box. */
+  padding: var(--space-5) max(var(--chat-content-inset), 54px)
+    calc(var(--composer-h, 140px) + 64px);
   min-height: 0;
 }
 
@@ -3246,7 +3263,8 @@ body.session-detaching {
   position: absolute;
   z-index: 5;
   left: 50%;
-  bottom: 14px;
+  /* Sit above the overlaid composer, not behind it. */
+  bottom: calc(var(--composer-h, 140px) + 14px);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -3935,16 +3953,17 @@ body.session-detaching {
 
 /* Floating composer shell */
 .composer-shell {
-  padding-top: var(--space-2);
+  padding-top: 0;
 }
 
 .composer {
-  background: color-mix(in srgb, var(--bg-input) 66%, transparent);
+  /* 微微毛玻璃：底色调淡，让背后的会话内容隐约透出。 */
+  background: color-mix(in srgb, var(--bg-input) 42%, transparent);
   backdrop-filter: blur(20px) saturate(1.35);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: 10px 12px 10px;
-  box-shadow: var(--shadow-2);
+  box-shadow: var(--shadow-composer);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -3953,8 +3972,9 @@ body.session-detaching {
 }
 
 .composer:focus-within {
-  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
+  /* 聚焦不再用蓝色光圈，只是边框稍亮 + 阴影灰度略深一点。 */
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-composer-focus);
 }
 
 .composer.dragging {
@@ -4187,13 +4207,14 @@ body.session-detaching {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 0.846rem;
+  font-size: 1rem;
+  color: var(--text);
 }
 
 .composer-model-menu-effort {
   flex: 0 0 auto;
   color: var(--text-faint);
-  font-size: 0.846rem;
+  font-size: 0.9rem;
 }
 
 .composer-model-menu-trigger svg {
@@ -4217,6 +4238,7 @@ body.session-detaching {
   border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--bg-elevated) 94%, transparent);
   box-shadow: var(--shadow-2);
+  font-size: 0.9rem;
   animation: composer-model-menu-pop 150ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
@@ -4243,7 +4265,7 @@ body.session-detaching {
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
-  font-size: 0.846rem;
+  font-size: 0.9rem;
   text-align: left;
   cursor: pointer;
 }
@@ -4304,7 +4326,7 @@ body.session-detaching {
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
-  font-size: 0.846rem;
+  font-size: 0.9rem;
   text-align: left;
   cursor: pointer;
 }

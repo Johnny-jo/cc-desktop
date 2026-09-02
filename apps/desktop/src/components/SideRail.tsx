@@ -152,6 +152,8 @@ export function SideRail({
   const isLight = effectiveTheme(settings?.theme) === "light";
 
   const cliDisabled = mode === "rooms";
+  /** CLI 会话独占主区时不允许切去群聊（反向限制：群聊下 CLI 也禁用）。 */
+  const roomsDisabled = cliMode;
   const onToggleCli = () => {
     if (cliDisabled) return;
     const next = !cliMode;
@@ -194,11 +196,15 @@ export function SideRail({
         </button>
         <button
           type="button"
-          className={`side-rail-btn${mode === "rooms" ? " active" : ""}`}
-          title="群聊"
+          className={`side-rail-btn${mode === "rooms" ? " active" : ""}${roomsDisabled ? " is-disabled" : ""}`}
+          title={roomsDisabled ? "CLI 模式下不可用" : "群聊"}
           aria-label="群聊"
           aria-pressed={mode === "rooms"}
-          onClick={() => onModeChange("rooms")}
+          aria-disabled={roomsDisabled}
+          onClick={() => {
+            if (roomsDisabled) return;
+            onModeChange("rooms");
+          }}
         >
           <IconRooms />
           {anyRoomOpen ? <span className="side-rail-dot" aria-hidden /> : null}

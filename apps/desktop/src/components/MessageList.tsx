@@ -255,9 +255,11 @@ function ConversationNavigator({
 function ModelQuotaRail({
   quota,
   label,
+  staleLabel,
 }: {
   quota: ModelQuotaInfo;
   label: string;
+  staleLabel: string;
 }) {
   const limiting = quota.windows.reduce((worst, window) =>
     window.usedPercent > worst.usedPercent ? window : worst,
@@ -283,6 +285,7 @@ function ModelQuotaRail({
       <span className="model-quota-rail-popover">
         <strong>{Math.round(remaining)}% {label}</strong>
         <span>{quota.modelId} · {quota.provider}</span>
+        {quota.stale ? <span>{staleLabel}</span> : null}
         {quota.windows.map((window) => (
           <span key={window.label}>
             {window.label}: {Math.round(100 - window.usedPercent)}%
@@ -330,7 +333,7 @@ export function MessageList({
   hasNewer?: boolean;
   /** Disk page in flight — show the skeleton instead of the empty hero. */
   loading?: boolean;
-  /** Actual provider quota passively observed by CPA for the selected model. */
+  /** Actual provider quota observed or queried through CPA for the selected model. */
   modelQuota?: ModelQuotaInfo | null;
   /** Open a project-relative file in the in-app editor column. */
   onOpenFile?: (rel: string) => void;
@@ -559,7 +562,11 @@ export function MessageList({
         assistantLabel={t.chat.quickNavigationAssistant}
       />
       {modelQuota ? (
-        <ModelQuotaRail quota={modelQuota} label={t.chat.modelQuotaRemaining} />
+        <ModelQuotaRail
+          quota={modelQuota}
+          label={t.chat.modelQuotaRemaining}
+          staleLabel={t.chat.modelQuotaStale}
+        />
       ) : null}
       {showJumpToBottom ? (
         <button

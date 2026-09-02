@@ -33,7 +33,11 @@ extraResources:
   - from: ../../vendor/win-x64/cpa
     to: bin/cpa
     filter:
-      - "**/*"
+      - cli-proxy-api.exe
+      - config.template.yaml
+      - static/**
+      - "!config.yaml"
+      - "!config.yml"
   # Optional cloudflared for T2 room tunnels. The dir may stay empty —
   # prepare-vendor.mjs creates it; the binary itself is never committed.
   - from: ../../vendor/win-x64/cloudflared
@@ -88,9 +92,11 @@ nsis:
 forceCodeSigning: false
 
 # Publish target for electron-updater (generic HTTP feed).
-# Intentionally blank — pack-time override only:
-#   set CLAUDE_DESKTOP_UPDATE_URL=https://your-feed/
-# Do NOT hardcode a public feed here.
+# Intentionally blank in this file — a missing env must not bake
+# "${env.CLAUDE_DESKTOP_UPDATE_URL}" into the installer.
+# Pack-time: set CLAUDE_DESKTOP_UPDATE_URL=https://your-feed/
+# afterPack writes resources/app-update.yml with that resolved URL.
+afterPack: ../../scripts/after-pack-app-update.cjs
 
 # electron-vite outputs
 extraMetadata:

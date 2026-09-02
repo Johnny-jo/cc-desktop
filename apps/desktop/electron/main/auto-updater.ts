@@ -1,6 +1,12 @@
+import fs from "node:fs";
+import path from "node:path";
 import { app, type BrowserWindow } from "electron";
 import { autoUpdater, type UpdateInfo } from "electron-updater";
 import { IPC } from "@claude-desktop/shared";
+import {
+  NO_UPDATE_FEED_MESSAGE,
+  resolveUpdateSource,
+} from "./auto-updater-source";
 
 export type UpdateStatus =
   | { state: "idle" }
@@ -14,7 +20,7 @@ export type UpdateStatus =
 
 export type AutoUpdaterHost = {
   getWindow: () => BrowserWindow | null;
-  /** Optional generic feed base URL (ends with /). Empty = use packaged app-update.yml. */
+  /** Optional generic feed base URL (ends with /). Empty = packaged yml or disabled. */
   getFeedUrl?: () => string | undefined;
 };
 
@@ -22,7 +28,9 @@ export type AutoUpdaterHost = {
  * Hot updates via electron-updater.
  * - Never touches AppData / CPA config / settings — only replaces app binaries.
  * - Disabled in dev (unpackaged).
- * - Feed URL: CLAUDE_DESKTOP_UPDATE_URL env, or settings updateFeedUrl, else app-update.yml.
+ * - Feed URL: CLAUDE_DESKTOP_UPDATE_URL env, or settings updateFeedUrl,
+ *   else packaged app-update.yml. If none of those exist, stay disabled
+ *   instead of throwing ENOENT on the missing yml.
  */
 export class AppAutoUpdater {
   private readonly host: AutoUpdaterHost;
@@ -92,28 +100,48 @@ export class AppAutoUpdater {
       this.setStatus({ state: "downloaded", version: info.version });
     });
     autoUpdater.on("error", (err) => {
-      this.setStatus({
-        state: "error",
-        message: err instanceof Error ? err.message : String(err),
-      });
+      const message = err instanceof Error ? err.message : String(err);
+      // Missing packaged yml is "no feed configured", not a hard failure.
+      if (/ENOENT/i.test(message) && /app-update\.yml/i.test(message)) {
+        this.setStatus({ state: "disabled", message: NO_UPDATE_FEED_MESSAGE });
+        return;
+      }
+      this.setStatus({ state: "error", message });
     });
 
-    this.applyFeedUrl();
+    if (this.applyFeedUrl() === "disabled") {
+      this.setStatus({ state: "disabled", message: NO_UPDATE_FEED_MESSAGE });
+      return;
+    }
     // Quiet startup check after a short delay so UI is ready.
     setTimeout(() => {
       void this.check().catch(() => undefined);
     }, 8_000);
   }
 
-  private applyFeedUrl(): void {
-    const fromEnv = process.env.CLAUDE_DESKTOP_UPDATE_URL?.trim();
-    const fromSettings = this.host.getFeedUrl?.()?.trim();
-    // No hardcoded public feed. Pack-time env or Settings only.
-    const url = fromEnv || fromSettings || "";
-    if (url) {
-      const base = url.endsWith("/") ? url : `${url}/`;
-      autoUpdater.setFeedURL({ provider: "generic", url: base });
+  private packagedYmlPath(): string {
+    const resources =
+      typeof process !== "undefined" ? process.resourcesPath ?? "" : "";
+    return path.join(resources, "app-update.yml");
+  }
+
+  /**
+   * Configure electron-updater, or report that updates are disabled.
+   * Must not call checkForUpdates() when this returns "disabled" — that
+   * is what produced ENOENT on resources/app-update.yml.
+   */
+  private applyFeedUrl(): "feed" | "packaged-yml" | "disabled" {
+    const source = resolveUpdateSource({
+      envUrl: process.env.CLAUDE_DESKTOP_UPDATE_URL,
+      settingsUrl: this.host.getFeedUrl?.(),
+      packagedYmlExists: fs.existsSync(this.packagedYmlPath()),
+    });
+    if (source.kind === "feed") {
+      autoUpdater.setFeedURL({ provider: "generic", url: source.url });
+      return "feed";
     }
+    if (source.kind === "packaged-yml") return "packaged-yml";
+    return "disabled";
   }
 
   async check(): Promise<UpdateStatus> {
@@ -124,14 +152,19 @@ export class AppAutoUpdater {
       });
       return this.status;
     }
-    this.applyFeedUrl();
+    if (this.applyFeedUrl() === "disabled") {
+      this.setStatus({ state: "disabled", message: NO_UPDATE_FEED_MESSAGE });
+      return this.status;
+    }
     try {
       await autoUpdater.checkForUpdates();
     } catch (err) {
-      this.setStatus({
-        state: "error",
-        message: err instanceof Error ? err.message : String(err),
-      });
+      const message = err instanceof Error ? err.message : String(err);
+      if (/ENOENT/i.test(message) && /app-update\.yml/i.test(message)) {
+        this.setStatus({ state: "disabled", message: NO_UPDATE_FEED_MESSAGE });
+      } else {
+        this.setStatus({ state: "error", message });
+      }
     }
     return this.status;
   }
@@ -139,6 +172,10 @@ export class AppAutoUpdater {
   async download(): Promise<UpdateStatus> {
     if (!app.isPackaged) {
       return this.getStatus();
+    }
+    if (this.applyFeedUrl() === "disabled") {
+      this.setStatus({ state: "disabled", message: NO_UPDATE_FEED_MESSAGE });
+      return this.status;
     }
     try {
       await autoUpdater.downloadUpdate();
@@ -154,8 +191,9 @@ export class AppAutoUpdater {
   /** Quit and install the downloaded update. */
   quitAndInstall(): void {
     if (!app.isPackaged) return;
-    // isSilent=false, isForceRunAfter=true
-    autoUpdater.quitAndInstall(false, true);
+    // Install in the background, then relaunch the updated app. The normal
+    // before-quit path stops managed CPA first; bootstrap starts it again.
+    autoUpdater.quitAndInstall(true, true);
   }
 
   private setStatus(next: UpdateStatus): void {

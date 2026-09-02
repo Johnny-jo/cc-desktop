@@ -52,7 +52,7 @@ export const IPC = {
   cpaSyncModels: "cpa:sync-models",
   /** Read-only cached CPA model catalog (ids + contextLimit) */
   cpaModelCatalog: "cpa:model-catalog",
-  /** Read CPA's real, passively observed provider quota for one model. */
+  /** Read CPA's real provider quota for one model. */
   cpaModelQuota: "cpa:model-quota",
   modelSet: "model:set",
   /** SDK skills / slash commands for a live session */

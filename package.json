@@ -11,6 +11,9 @@
     "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck",
     "prepare:vendor": "node scripts/prepare-vendor.mjs",
-    "package:win": "pnpm prepare:vendor && pnpm --filter @claude-desktop/desktop package:win"
+    "prepare:vendor:cpa": "node scripts/prepare-vendor.mjs --cpa-only",
+    "package:win": "pnpm prepare:vendor && pnpm --filter @claude-desktop/desktop package:win",
+    "package:win:app": "pnpm --filter @claude-desktop/desktop package:win",
+    "package:win:cpa": "pnpm prepare:vendor:cpa && pnpm --filter @claude-desktop/desktop package:win"
   }
 }

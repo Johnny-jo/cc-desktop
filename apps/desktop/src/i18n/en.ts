@@ -56,6 +56,7 @@ export const en = {
     quickNavigationAssistant: "AI",
     contextUsage: "Context usage",
     modelQuotaRemaining: "quota remaining",
+    modelQuotaStale: "Refresh failed; showing the last successful reading",
     scrollToBottom: "Scroll to bottom",
   },
   changes: {

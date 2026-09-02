@@ -118,7 +118,12 @@ export function App() {
   const projectPath = useAppStore((s) => s.projectPath);
   // AI 对话 / 群聊互斥：选中群聊（含通知点击跳转）时主区切群聊，
   // rail 点「群聊」即使未选群也关 AI 对话页、显示群聊空态。
-  const effectiveMode: RailMode = railMode === "rooms" || activeRoomId ? "rooms" : railMode;
+  // CLI 模式下锁死在 chat：侧栏不得切到群聊（含通知跳转触发的选中）。
+  const effectiveMode: RailMode = cliMode
+    ? "chat"
+    : railMode === "rooms" || activeRoomId
+      ? "rooms"
+      : railMode;
 
   // ---- File tree + multi-tab editor pane ----
   const [fileTreeOpen, setFileTreeOpen] = useState(false);

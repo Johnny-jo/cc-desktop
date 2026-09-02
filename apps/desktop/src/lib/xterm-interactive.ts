@@ -16,6 +16,19 @@ export function isPasteChord(e: PasteChord): boolean {
   return false;
 }
 
+/**
+ * Clipboard copy, not a TUI control char. Cmd+C and Ctrl/Cmd+Shift+C always
+ * copy; plain Ctrl+C copies only while a selection exists — without one it
+ * must reach the PTY as SIGINT.
+ */
+export function isCopyChord(e: PasteChord, hasSelection: boolean): boolean {
+  if (e.altKey) return false;
+  if (e.key.toLowerCase() !== "c") return false;
+  if (e.metaKey) return true;
+  if (!e.ctrlKey) return false;
+  return e.shiftKey || hasSelection;
+}
+
 export function quoteDroppedPath(p: string): string {
   const path = p.trim();
   if (!path) return "";
@@ -52,6 +65,16 @@ export function bindXtermInteractive(
         .catch(() => {
           // clipboard permission / empty
         });
+      return false;
+    }
+    if (isCopyChord(ev, term.hasSelection())) {
+      const selection = term.getSelection();
+      if (selection) {
+        ev.preventDefault();
+        void navigator.clipboard.writeText(selection).catch(() => {
+          // clipboard permission
+        });
+      }
       return false;
     }
     return true;

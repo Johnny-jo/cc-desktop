@@ -279,6 +279,10 @@ function buildWindow(
   const win = new BrowserWindow({
     width,
     height,
+    // Floor for window shrink: below this the chat column collapses and
+    // header/composer styles start overlapping.
+    minWidth: 960,
+    minHeight: 600,
     backgroundColor: APP_BG,
     ...(fs.existsSync(WINDOW_ICON) ? { icon: WINDOW_ICON } : {}),
     // No File/Edit/View menu bar — this is a desktop chat app, not an editor.
@@ -687,6 +691,9 @@ function bootstrap() {
   createTray();
   // Hot updates replace app binaries only — never AppData / CPA config.
   autoUpdater.start();
+  // NSIS upgrade taskkills cli-proxy-api.exe. Bring bundled CPA back up so
+  // the user is not left with a dead gateway after install/update.
+  void cpa.ensureReady().catch(() => undefined);
 
   app.on("before-quit", () => {
     isQuitting = true;

@@ -29,8 +29,14 @@ function changesMaxLimit(): number {
   return Math.max(CHANGES_MIN, window.innerWidth - 48);
 }
 const TERMINAL_MIN = 100;
-/** Cap so the chat composer is never fully covered. */
-const TERMINAL_MAX = 260;
+/**
+ * Cap so the chat composer is never fully covered: half the window height,
+ * never below the legacy 260px ceiling.
+ */
+function terminalMaxLimit(): number {
+  if (typeof window === "undefined") return 260;
+  return Math.max(260, Math.floor(window.innerHeight * 0.5));
+}
 
 function clamp(n: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, n));
@@ -58,7 +64,7 @@ function load(): PanelLayout {
       terminalHeight: clamp(
         Number(parsed.terminalHeight) || DEFAULTS.terminalHeight,
         TERMINAL_MIN,
-        TERMINAL_MAX,
+        terminalMaxLimit(),
       ),
     };
   } catch {
@@ -110,7 +116,7 @@ export function usePanelLayout() {
   const setTerminalHeight = useCallback((h: number) => {
     setLayout((prev) => ({
       ...prev,
-      terminalHeight: clamp(h, TERMINAL_MIN, TERMINAL_MAX),
+      terminalHeight: clamp(h, TERMINAL_MIN, terminalMaxLimit()),
     }));
   }, []);
 
@@ -135,7 +141,7 @@ export function usePanelLayout() {
       terminalHeight: clamp(
         prev.terminalHeight + dy,
         TERMINAL_MIN,
-        TERMINAL_MAX,
+        terminalMaxLimit(),
       ),
     }));
   }, []);
@@ -160,7 +166,9 @@ export function usePanelLayout() {
         return changesMaxLimit();
       },
       TERMINAL_MIN,
-      TERMINAL_MAX,
+      get TERMINAL_MAX() {
+        return terminalMaxLimit();
+      },
     },
   };
 }

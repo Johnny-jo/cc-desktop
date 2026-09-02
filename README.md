@@ -1,47 +1,110 @@
 # CC Desktop
 
-一个非官方的 Electron 桌面客户端，把 [Claude Code](https://docs.anthropic.com/en/docs/claude-code)（`@anthropic-ai/claude-agent-sdk`）包装成好用的图形界面，并可挂本机 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)（CPA）做模型路由。
+一个面向 Windows 的非官方 Claude Code 桌面客户端。它把 Claude Agent SDK、真实的 Claude Code CLI、代码工作区和本机 CLIProxyAPI（CPA）模型网关整合到同一个 Electron 应用中。
 
-**不是 Anthropic / OpenAI 官方产品，未获官方授权或背书。**
+> **非官方项目**：本项目与 Anthropic、OpenAI 或 CLIProxyAPI 没有隶属、赞助或授权关系，也不提供任何模型账号。
 
-## 解决什么问题
+当前主线版本：`0.3.5`
 
-Claude Code 本身是个终端 CLI：强，但没有图形界面——看历史对话、管理文件改动、多任务并行、多人共用一个会话都不直观。CC Desktop 把这些搬到桌面：
+## 为什么做 CC Desktop
 
-- 会话太多，终端里翻不动 → 侧栏会话列表 + 分页加载
-- 改了哪些文件、能不能回滚 → 变更栏按文件折叠、单步/全部回滚、消息级 rewind
-- 想在 CLI 和 GUI 之间切换 → 一键 CLI 模式（真正的 `claude` TUI，不是仿的）
-- 局域网里几个人想共用 / 围观一个 Agent → 协作房间（邀请码、席位、接管、小游戏）
-- 想用第三方模型 → 本机 CPA 网关统一成 OpenAI 兼容接口
+Claude Code 的能力很强，但纯终端工作流不适合所有场景：会话历史不易浏览，文件改动难以追踪，模型切换和多人协作也缺少统一界面。CC Desktop 试图保留 Claude Code 的 Agent 能力，同时提供可视化的桌面工作区：
 
-## 功能
+- 会话、对话和文件变更分栏展示
+- 直接查看、编辑、搜索和回滚项目文件
+- 桌面界面与原生 Claude Code TUI 之间快速切换
+- 从 CPA 同步模型及其真实可用的推理强度
+- 在局域网或中继网络中共享 Agent 会话
+- 在不丢失历史的前提下限制长会话内存和磁盘增长
 
-- **对话**：流式回复、工具卡片、权限弹窗（Ask/Allow once/Session/Deny）、`/` 斜杠命令、`@` 文件路径补全、拖拽附件
-- **变更栏**：Edit/Write/Bash 写操作按文件折叠，可查看 diff、单步回滚或全部回滚
-- **消息级 rewind**：回滚代码 + 对话到任意一条用户消息
-- **编辑器**：文件树、多标签 CodeMirror 编辑（js/vue/java/py/go/html/md/sql/xml/yml…）、编码切换（UTF-8/GBK…）、项目内搜索（Ctrl+Shift+F）
-- **上下文管理**：用量条、接近上限自动压缩、手动 `/compact`
-- **会话管理**：主进程累积落盘（渲染崩溃不丢对话）、长对话分页加载
-- **模型**：CPA 同步模型列表、下拉切换、TUI `/model` 与桌面双向同步
-- **多语言**：中文 / English / 跟随系统（Settings 里切换）
-- **其他**：MCP 服务器管理、自定义 Agents、Skills、热更新、深浅主题
+## 核心功能
 
-## 两种模式
+### 桌面对话
 
-| 桌面模式（默认） | CLI 模式（`Ctrl+Shift+L`） |
-|---|---|
-| 三栏 UI：会话 / 对话 / 变更 | 卸掉重 UI，只留真 `claude --resume` TUI |
-| 文件树 + 多标签编辑器 | 左侧会话栏、右侧变更栏仍可开 |
-| 权限弹窗、@ 补全 | 原生 TUI 快捷键、斜杠命令 |
-| 占用随会话变重 | 内存显著回落，主进程继续追踪 |
+- 流式文本和 thinking 展示
+- 工具调用卡片与权限流程（允许一次、允许本会话、拒绝等）
+- `/` 斜杠命令、`@` 项目路径补全、拖拽附件
+- 消息级 rewind：回退代码改动和对话上下文
+- 上下文用量显示、接近上限时自动压缩，也可手动执行 `/compact`
+- 底部模型选择器：模型和推理强度可在一次操作中切换
 
-CLI 模式进的是**真正的 Claude Code 终端界面**（PTY + xterm），斜杠命令、权限流都是原生的；进 CLI 会放开桌面 SDK 流，两边不抢同一条会话。
+### 会话与数据持久化
 
-## 安装
+- 会话由主进程累积落盘，渲染进程重启不会直接丢失对话
+- Electron 43+/Node 24 环境优先使用 `node:sqlite` 保存房间、会话、转录和变更数据
+- 旧版 JSON 归档可以迁移；SQLite 不可用时保留兼容回退路径
+- 长转录采用分页和分块读取，避免打开历史会话时一次性加载全部内容
+- 空闲会话会释放 SDK 查询；活跃 SDK 查询数量有上限，重新打开时按需恢复上下文
 
-### 源码启动（开发）
+### 代码工作区
 
-环境：Windows 10/11、Node.js 22.12+（推荐使用 `.nvmrc` 中的 24.18.1）、pnpm 9.15。
+- 项目文件树、多标签 CodeMirror 编辑器
+- 常见语言高亮（JavaScript、TypeScript、Vue、Java、Python、Go、HTML、Markdown、SQL、YAML 等）
+- UTF-8、GBK 等常见编码读取与保存
+- 项目内搜索（`Ctrl+Shift+F`）
+- Git 感知的文件变更追踪、逐文件 diff、单项或全部回滚
+- 编辑器缓冲区缓存，切换会话或标签页时减少重复读取
+
+### CLI 模式
+
+按 `Ctrl+Shift+L` 可以切换到 CLI 模式。这里运行的是实际的 `claude` TUI，通过 PTY + xterm.js 承载，不是模拟出来的终端界面；`--resume`、斜杠命令、权限交互和原生快捷键仍由 Claude Code 处理。切入 CLI 后，桌面 SDK 流会暂停，避免同一会话被两条执行链同时占用。
+
+### CPA 模型与配额
+
+- 连接本机 CPA 的 OpenAI 兼容端点（默认 `127.0.0.1:8317`）
+- 从 CPA `/v1/models` 自动同步模型目录
+- 读取模型目录公开的 `reasoning_efforts`、`reasoning_levels` 等字段，按模型显示真实可用的 `low`、`medium`、`high`、`max` 等推理强度；不会根据模型名称写死选项
+- 桌面选择与 Claude Code TUI 的 `/model` 选择互相同步
+- 配额条显示 CPA 观察到的窗口数据，并可通过订阅凭据主动刷新 Codex、Claude、Kimi、Grok 与 Antigravity 配额；没有真实上游信号时不虚构剩余额度
+
+CPA 的真实账号、API Key 和配置文件不会被提交到仓库，也不会由打包脚本复制进发布包。
+
+### 协作房间
+
+协作房间可以让多人共同查看或操作一个 Agent 会话：
+
+- 创建、加入、邀请和重连；默认端口 `18765`
+- 房主/成员/Agent 席位绑定与 presence 状态
+- 借用 AI、远程执行、消息流和 thinking 状态同步
+- AskUserQuestion 选择弹窗、权限审批、工作区路径保护和 Bash 限制
+- 房间消息、成员和变更归档；可打开独立房间窗口
+- 局域网直连，也支持自建 relay 或 cloudflared/tunnel 路径
+- Electron 与 Node 之间使用 AES-256-GCM 加密房间帧
+
+房间能力适合可信网络和可信成员。中继服务器、邀请链接和工作区权限仍需由部署者自行保护。
+
+### 扩展与界面
+
+- MCP 服务器、Agents、Skills 和可安装 Mod 包
+- Mod Kernel 提供共享记忆、群词典、入站守卫、心跳等房间扩展
+- 中文、English、跟随系统
+- 浅色、深色、跟随系统主题
+- 会话快速定位、滚动到底部、上下文用量和 CPA 配额提示
+
+## 应用结构
+
+```text
+apps/desktop/
+├── electron/main/       # Electron 主进程：SDK、CLI、CPA、SQLite、房间和 IPC
+└── src/                  # React 渲染进程：会话、对话、编辑器、设置和房间 UI
+packages/shared/         # 跨进程类型、IPC 契约、模型、房间协议和加密
+scripts/                 # vendor 准备、发布辅助脚本
+docs/                    # 项目规格、实现记录和问题记录
+vendor/                  # 本地准备的第三方二进制（不提交）
+apps/desktop/release/    # 本地构建产物（不提交）
+```
+
+主进程负责敏感配置、模型请求、终端进程、文件系统和数据库；渲染进程通过显式 IPC 契约访问这些能力，避免把凭据和高权限操作直接暴露给页面。
+
+## 环境要求
+
+- Windows 10/11（当前安装包目标为 Windows x64）
+- Node.js `>=22.12.0`，推荐使用仓库 `.nvmrc` 中的版本
+- pnpm `9.15.0`
+- Claude Code：开发时可使用本机 SDK/`claude.exe`；发布包需准备对应二进制
+- CPA：需要使用模型路由功能时安装并运行本机 CLIProxyAPI
+
+## 开发启动
 
 ```bash
 git clone <this-repo>
@@ -50,85 +113,90 @@ pnpm install
 pnpm dev
 ```
 
-### 打包成安装包（Windows）
+常用命令：
 
 ```bash
-pnpm prepare:vendor    # 拷本机 claude.exe + CPA 到 vendor/（不进 git）
-pnpm package:win       # 构建 + NSIS
+pnpm dev
+pnpm build
+pnpm test
+pnpm typecheck
+pnpm --filter @claude-desktop/desktop dist:dir
 ```
 
-产物在 `apps/desktop/release/`：便携版 `win-unpacked/`、安装包 `CC-Desktop-Setup-<ver>-x64.exe`。
+首次启动后，在设置或引导页配置 CPA 地址和网关 Token；默认端口是 `8317`。然后打开一个项目文件夹，并从设置中执行“从 CPA 同步模型”。不使用 CPA 时仍可使用本地 Claude Code 能力，但第三方模型目录和 CPA 配额不可用。
 
-## 使用
+## Windows 打包
 
-### 首次配置
+打包前需要把本机的 Claude CLI 和 CPA 二进制准备到临时 `vendor/` 目录。三条命令用途不同：
 
-1. 首次启动弹出三步向导：欢迎 → 网关 Token → 确认并启动
-2. 网关 Token 是本地 CPA 的 api-key / 管理页密码，**只存主进程**
-3. 默认端口 `8317`；已有 CPA 登录态（`~/.cli-proxy-api`）可直接复用
-4. cli模式 需要额外执行"pnpm prepare:vendor" 命令
-
-### 必须做的事
-
-1. **打开项目文件夹**（侧栏顶部）——不选项目就没有文件树 / 变更栏 / @ 补全
-2. **同步模型列表**——新安装默认不带模型：Settings →「从 CPA 同步模型」，或手填列表
-3. **选默认模型**——切换后下一轮生效
-
-### CPA 网关（推荐 OpenAI 兼容接入）
-
-CPA 把不同厂商模型统一成 OpenAI 兼容接口。推荐在 CPA 里用 **OpenAI 兼容** provider + API Key，CC Desktop 只认一种协议。CPA 只应绑 `127.0.0.1`，不要暴露到公网。
-
-### 协作房间
-
-局域网多人共用一个 Agent 会话：
-
-1. 创建：侧栏「房间 → 创建房间」，填名称、端口（默认 18765）、可选密码
-2. 邀请：房主点「邀请」，复制 `CDR1.` 邀请码给对方
-3. 加入：对方「加入房间」粘贴邀请码（防火墙放行该端口）
-4. 席位：人或 Agent，成员可加自己的席位，可接管 Agent
-5. 房主退出即解散；客人断线自动重连
-
-### 更新
-
-打包时用 `CLAUDE_DESKTOP_UPDATE_URL` 或 Settings「更新源」指定；**留空 = 不检查更新**。不要把更新源指向不可信的公网地址。更新只替换程序文件，不动 CPA 配置 / 设置 / 会话。
-
-## 开发命令
+| 命令 | 做什么 | 什么时候用 |
+|---|---|---|
+| `pnpm package:win` | 全量刷新 `claude.exe` + CPA exe，再打 NSIS | 两个二进制都要更新 |
+| `pnpm package:win:cpa` | **只换 CPA exe**（保留已有 `claude.exe`），再打包 | 升级 CPA 版本，不动用户配置 |
+| `pnpm package:win:app` | 不碰 `vendor/`，只打应用代码 | CPA / Claude 二进制都不用变 |
 
 ```bash
-pnpm install      # 安装依赖
-pnpm dev          # Electron + Vite
-pnpm test         # 全仓测试
-pnpm typecheck    # 类型检查
-pnpm package:win  # 打包
+pnpm package:win
+# 或只更新 CPA 二进制后打包：
+pnpm package:win:cpa
 ```
 
-## 仓库结构
+发布产物位于 `apps/desktop/release/`，包括 `win-unpacked/` 和 NSIS 安装包。
 
+`pnpm --filter @claude-desktop/desktop package:win` 等价于 `package:win:app`：**不会**刷新 CPA。旧的 `vendor/win-x64/cpa/cli-proxy-api.exe` 会原样打进安装包。
+
+默认脚本从 `D:\gitrep\CC\CPA` 查找 CPA。若 CPA 位于其他目录，可指定：
+
+```powershell
+$env:CLAUDE_DESKTOP_CPA_DIST = 'D:\path\to\CLIProxyAPI'
+pnpm package:win:cpa
 ```
-.
-├── apps/desktop/          # Electron 主进程 + React 渲染进程
-├── packages/shared/       # 跨进程类型与 IPC 契约
-├── docs/                  # 规格与实现计划
-├── scripts/               # prepare-vendor、latest.yml
-├── LICENSE                # Apache License 2.0
-└── NOTICE.md              # 第三方归属
+
+只想跳过某个可选二进制时，可以使用 `SKIP_CPA=1` 或 `SKIP_CLAUDE=1`。跳过 Claude 会使 CLI 模式不可用；跳过 CPA 会使 CPA 模型路由不可用。注意：这两个变量仍会先清空整个 `vendor/`，只更新 CPA 时请用 `package:win:cpa`，不要用 `SKIP_CLAUDE=1`。
+
+换 CPA 二进制前请先退出 CC Desktop，并停掉正在跑的 `cli-proxy-api.exe`，否则 Windows 会锁住 exe，拷贝失败。
+
+准备脚本**只复制** `cli-proxy-api.exe` 和仓库里的 `config.template.yaml`，会主动拒绝复制本机 `config.yaml`、凭据、Token。安装/升级也不会改用户数据目录里的 `cpa/config.yaml`（首次启动才从模板生成一份）。请在目标机器上完成实际登录和配置，不要把本地 `vendor/`、用户数据或发布目录提交到 Git。
+
+热更新默认关闭（安装包里不带 `app-update.yml`）。用户可在设置里填写更新源；若希望安装包开箱即检查更新，打包时设置：
+
+```powershell
+$env:CLAUDE_DESKTOP_UPDATE_URL = 'https://your-feed.example.com/'
+pnpm package:win:cpa
 ```
 
-`vendor/`、`release/`、用户配置不要提交。
+这会把解析后的地址写入安装包的 `resources/app-update.yml`。未设置时启动不会再报 `ENOENT app-update.yml`。
 
-## 许可与声明
+## 数据位置与安全边界
 
-本项目源码以 **[Apache License 2.0](./LICENSE)** 发布——可自由使用、修改、分发（包括商用），需保留著作权与许可声明。作者保留本项目源码的著作权。
+Electron 用户数据目录中会保存：
 
-**第三方归属**（详见 [NOTICE.md](./NOTICE.md)）：
+- `cc-desktop.sqlite3`：会话、房间、转录和变更归档
+- `cpa/config.yaml`：本机 CPA 配置（如由应用管理）
+- `rooms/`、扩展缓存和其他运行时缓存
 
-- **Anthropic** — Claude / Claude Code / Agent SDK / `claude.exe`，按其自身条款
-- **OpenAI** — Codex 类桌面交互仅为观感参考，无其专有源码
-- **CLIProxyAPI（CPA）** — MIT 许可，见上游仓库
-- **Electron、React、CodeMirror、xterm.js、node-pty** 等 — 各包 LICENSE
+CPA 默认只绑定回环地址；如果自行改成局域网或公网监听，必须额外配置防火墙、认证和访问控制。网关 Token 在主进程中保存，并优先使用 Electron `safeStorage` 加密。项目尚未经过独立安全审计，请只连接自己信任的模型端点和 relay。
 
-**免责**：本项目与 Anthropic / OpenAI 无任何隶属、赞助或授权关系；不提供任何模型账号，使用者需自行遵守各服务商条款；`vendor/` 下的第三方二进制默认不进 git，再分发安装包前请自行确认其许可。若权利人认为某部分内容构成侵权，请开 Issue，我们会删除或替换。按「现状」提供，无任何担保。
+## 当前限制
+
+- 本项目仍处于快速迭代阶段，UI、IPC 和归档格式可能发生变化
+- CPA 只有在返回模型能力、上游配额响应头或受支持的订阅配额接口时，才能同步对应推理强度或配额；自定义兼容端点缺少这些字段时会显示为空或使用模型默认值
+- 旧版 JSON 数据迁移是兼容路径，升级前仍建议备份用户数据目录
+- 协作房间的 relay、NAT 穿透和多窗口场景依赖网络环境，建议先在局域网验证
+
+## 许可与第三方声明
+
+本项目源码以 **[Apache License 2.0](LICENSE)** 发布。第三方组件及归属见 [NOTICE.md](NOTICE.md)，包括 Claude Code / Agent SDK、CLIProxyAPI、Electron、React、CodeMirror、xterm.js 和 node-pty 等；它们分别受各自许可和服务条款约束。
+
+本项目不分发模型账号，不保证任何第三方服务持续可用。使用 Claude、CPA、上游模型、relay 或打包二进制时，请自行确认许可、隐私和服务商条款。
 
 ## 贡献
 
-欢迎 Issue / PR。提交即表示同意以 [Apache License 2.0](./LICENSE) 许可你的补丁。
+欢迎提交 Issue 和 Pull Request。提交代码前请至少运行：
+
+```bash
+pnpm typecheck
+pnpm test
+```
+
+提交补丁即表示你同意按 [Apache License 2.0](LICENSE) 授予相应许可。

@@ -9,10 +9,12 @@
  *   - Only ships the repo-tracked config.template.yaml (placeholders only).
  *   - Fails if forbidden filenames or secret-like strings appear in vendor/.
  *
- * Env:
+ * Env / flags:
  *   CLAUDE_DESKTOP_CPA_DIST  — dir containing cli-proxy-api.exe (default D:\gitrep\CC\CPA)
- *   SKIP_CLAUDE=1            — skip claude.exe copy
- *   SKIP_CPA=1               — skip CPA copy
+ *   SKIP_CLAUDE=1            — skip claude.exe (full prepare still wipes vendor first)
+ *   SKIP_CPA=1               — skip CPA (full prepare still wipes vendor first)
+ *   CPA_ONLY=1 / --cpa-only  — only refresh cli-proxy-api.exe + template;
+ *                              keeps claude.exe; NEVER copies config.yaml
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -28,6 +30,7 @@ const require = createRequire(import.meta.url);
 const CPA_ALLOWLIST = new Set([
   "cli-proxy-api.exe",
   "config.template.yaml",
+  "static",
 ]);
 
 /** Filenames that must never be copied into the package */
@@ -64,7 +67,18 @@ function copyFile(src, dest) {
     }
   }
   ensureDir(path.dirname(dest));
-  fs.copyFileSync(src, dest);
+  try {
+    fs.copyFileSync(src, dest);
+  } catch (err) {
+    const code = err && typeof err === "object" && "code" in err ? err.code : "";
+    if (code === "EBUSY" || code === "EPERM") {
+      throw new Error(
+        `Cannot replace ${dest} (file in use).\n` +
+          "Stop CC Desktop and any running cli-proxy-api.exe, then retry.",
+      );
+    }
+    throw err;
+  }
   console.log(`  ${src}`);
   console.log(
     `  → ${dest} (${(fs.statSync(dest).size / 1024 / 1024).toFixed(1)} MB)`,
@@ -113,6 +127,19 @@ function auditVendor() {
       if (FORBIDDEN_BASENAMES.has(name.toLowerCase())) {
         throw new Error(`SECURITY: forbidden file in vendor: ${name}`);
       }
+      if (name === "static") {
+        const staticDir = path.join(cpaDir, name);
+        if (!fs.statSync(staticDir).isDirectory()) {
+          throw new Error("SECURITY: vendor cpa/static must be a directory");
+        }
+        for (const inner of fs.readdirSync(staticDir)) {
+          if (inner !== "management.html") {
+            throw new Error(
+              `SECURITY: unexpected file in vendor cpa/static/: ${inner}`,
+            );
+          }
+        }
+      }
     }
   }
 
@@ -143,20 +170,114 @@ function auditVendor() {
   }
 }
 
+function parseFlags() {
+  const argv = new Set(process.argv.slice(2));
+  const cpaOnly =
+    argv.has("--cpa-only") || process.env.CPA_ONLY === "1";
+  return {
+    cpaOnly,
+    skipClaude: cpaOnly || process.env.SKIP_CLAUDE === "1",
+    skipCpa: process.env.SKIP_CPA === "1",
+  };
+}
+
+/** Drop leftover credential files so a stale vendor/ cannot ship them. */
+function sanitizeCpaVendorDir() {
+  const cpaDir = path.join(vendorRoot, "cpa");
+  if (!fs.existsSync(cpaDir)) return;
+  for (const name of fs.readdirSync(cpaDir)) {
+    if (name === "static") {
+      const staticDir = path.join(cpaDir, name);
+      if (!fs.statSync(staticDir).isDirectory()) {
+        fs.rmSync(staticDir, { force: true });
+        console.log(`Removed leftover from vendor cpa/: ${name}`);
+        continue;
+      }
+      for (const inner of fs.readdirSync(staticDir)) {
+        if (inner === "management.html") continue;
+        fs.rmSync(path.join(staticDir, inner), { recursive: true, force: true });
+        console.log(`Removed leftover from vendor cpa/static/: ${inner}`);
+      }
+      continue;
+    }
+    if (CPA_ALLOWLIST.has(name)) continue;
+    const p = path.join(cpaDir, name);
+    fs.rmSync(p, { recursive: true, force: true });
+    console.log(`Removed leftover from vendor cpa/: ${name}`);
+  }
+}
+
+function copyCpaBinary() {
+  const cpaDist =
+    process.env.CLAUDE_DESKTOP_CPA_DIST || "D:\\gitrep\\CC\\CPA";
+  const cpaExe = path.join(cpaDist, "cli-proxy-api.exe");
+  if (!fs.existsSync(cpaExe)) {
+    console.error(
+      `ERROR: CPA exe not found at ${cpaExe}\n` +
+        "Set CLAUDE_DESKTOP_CPA_DIST to a directory containing cli-proxy-api.exe",
+    );
+    process.exit(1);
+  }
+  // Explicitly refuse to touch the live local config next to the exe.
+  const liveConfig = path.join(cpaDist, "config.yaml");
+  if (fs.existsSync(liveConfig)) {
+    console.log(
+      `NOTE: local ${liveConfig} exists — intentionally NOT packing it.`,
+    );
+  }
+  console.log("CPA (binary only + repo template):");
+  copyFile(cpaExe, path.join(vendorRoot, "cpa", "cli-proxy-api.exe"));
+  const templateSrc = path.join(
+    root,
+    "apps",
+    "desktop",
+    "resources",
+    "cpa",
+    "config.template.yaml",
+  );
+  if (!fs.existsSync(templateSrc)) {
+    console.error("ERROR: missing config.template.yaml at", templateSrc);
+    process.exit(1);
+  }
+  copyFile(templateSrc, path.join(vendorRoot, "cpa", "config.template.yaml"));
+  const staticSrc = path.join(cpaDist, "static", "management.html");
+  if (fs.existsSync(staticSrc)) {
+    copyFile(
+      staticSrc,
+      path.join(vendorRoot, "cpa", "static", "management.html"),
+    );
+  } else {
+    console.warn(
+      "WARN: CPA static/management.html not found — panel may try GitHub on first start",
+    );
+  }
+}
+
 function main() {
+  const { cpaOnly, skipClaude, skipCpa } = parseFlags();
   console.log("prepare-vendor →", vendorRoot);
+  if (cpaOnly) console.log("mode: --cpa-only (refresh CPA exe, keep claude.exe)");
   console.log(
     "SECURITY: will NOT copy config.yaml / auth-dir / tokens from local CPA install.",
   );
 
-  // Clean slate so leftover credential files cannot linger in vendor/.
-  rmrf(vendorRoot);
-  ensureDir(vendorRoot);
-  // Reserve the (optional, possibly empty) cloudflared dir so the
-  // electron-builder extraResources bin/cloudflared/** entry always resolves.
-  ensureDir(path.join(vendorRoot, "cloudflared"));
+  if (cpaOnly) {
+    // Keep claude.exe / cloudflared; only refresh CPA binary + template.
+    ensureDir(vendorRoot);
+    ensureDir(path.join(vendorRoot, "cloudflared"));
+    sanitizeCpaVendorDir();
+  } else {
+    // Clean slate so leftover credential files cannot linger in vendor/.
+    // SKIP_CLAUDE / SKIP_CPA still wipe then recopy the other binary —
+    // use --cpa-only when you only want to bump CPA without touching claude.
+    rmrf(vendorRoot);
+    ensureDir(vendorRoot);
+    // Reserve the (optional, possibly empty) cloudflared dir so the
+    // electron-builder extraResources bin/cloudflared/** entry always resolves.
+    ensureDir(path.join(vendorRoot, "cloudflared"));
+  }
 
-  if (process.env.SKIP_CLAUDE !== "1") {
+  if (!skipClaude) {
     const claudeSrc = resolveSdkClaudeExe();
     if (!claudeSrc) {
       console.error(
@@ -166,43 +287,22 @@ function main() {
     }
     console.log("Claude CLI (third-party, not part of this repo):");
     copyFile(claudeSrc, path.join(vendorRoot, "claude", "claude.exe"));
+  } else if (cpaOnly) {
+    const existing = path.join(vendorRoot, "claude", "claude.exe");
+    if (!fs.existsSync(existing)) {
+      console.warn(
+        "WARN: --cpa-only but vendor/win-x64/claude/claude.exe is missing. CLI mode will be unavailable.",
+      );
+    } else {
+      console.log("Keeping existing claude.exe");
+    }
   } else {
     console.log("SKIP_CLAUDE=1 — skipping claude.exe");
   }
 
-  if (process.env.SKIP_CPA !== "1") {
-    const cpaDist =
-      process.env.CLAUDE_DESKTOP_CPA_DIST || "D:\\gitrep\\CC\\CPA";
-    const cpaExe = path.join(cpaDist, "cli-proxy-api.exe");
-    if (!fs.existsSync(cpaExe)) {
-      console.error(
-        `ERROR: CPA exe not found at ${cpaExe}\n` +
-          "Set CLAUDE_DESKTOP_CPA_DIST to a directory containing cli-proxy-api.exe",
-      );
-      process.exit(1);
-    }
-    // Explicitly refuse to touch the live local config next to the exe.
-    const liveConfig = path.join(cpaDist, "config.yaml");
-    if (fs.existsSync(liveConfig)) {
-      console.log(
-        `NOTE: local ${liveConfig} exists — intentionally NOT packing it.`,
-      );
-    }
-    console.log("CPA (binary only + repo template):");
-    copyFile(cpaExe, path.join(vendorRoot, "cpa", "cli-proxy-api.exe"));
-    const templateSrc = path.join(
-      root,
-      "apps",
-      "desktop",
-      "resources",
-      "cpa",
-      "config.template.yaml",
-    );
-    if (!fs.existsSync(templateSrc)) {
-      console.error("ERROR: missing config.template.yaml at", templateSrc);
-      process.exit(1);
-    }
-    copyFile(templateSrc, path.join(vendorRoot, "cpa", "config.template.yaml"));
+  if (!skipCpa) {
+    copyCpaBinary();
+    sanitizeCpaVendorDir();
   } else {
     console.log("SKIP_CPA=1 — skipping CPA");
   }

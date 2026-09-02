@@ -80,7 +80,14 @@ describe("CpaSupervisor", () => {
       paths.cpaExePath,
       ["--config", paths.cpaConfigPath],
       expect.objectContaining({
-        env: expect.objectContaining({ MANAGEMENT_PASSWORD: "tok" }),
+        cwd: path.dirname(paths.cpaConfigPath),
+        env: expect.objectContaining({
+          MANAGEMENT_PASSWORD: "tok",
+          MANAGEMENT_STATIC_PATH: path.join(
+            path.dirname(paths.cpaConfigPath),
+            "static",
+          ),
+        }),
       }),
     );
     // Timed out: managed child must be killed and ownership cleared.
@@ -182,6 +189,158 @@ describe("CpaSupervisor", () => {
     });
     expect(quota?.windows[0]?.usedPercent).toBe(28);
     expect(await cpa.getModelQuota("kimi-for-coding")).toBeNull();
+    vi.unstubAllGlobals();
+  });
+
+  it("actively refreshes Kimi quota and keeps the last value on failure", async () => {
+    let fail = false;
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (fail) return { ok: false, status: 503, json: async () => ({}) };
+      if (url.endsWith("/v0/management/auth-files")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            files: [{ name: "kimi.json", type: "kimi", auth_index: "kimi-1" }],
+          }),
+        };
+      }
+      if (url.includes("/auth-files/models?")) {
+        return { ok: true, status: 200, json: async () => ({ models: [{ id: "kimi-k3" }] }) };
+      }
+      const request = JSON.parse(String(init?.body)) as { url: string };
+      expect(request.url).toBe("https://api.kimi.com/coding/v1/usages");
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          status_code: 200,
+          body: { usage: { used: 20, limit: 100 } },
+        }),
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const cpa = new CpaSupervisor({
+      getSettings: () => ({ ...baseSettings }),
+      getToken: () => "tok",
+      probePort: async () => true,
+      spawnProcess: vi.fn(),
+    });
+
+    const fresh = await cpa.getModelQuota("kimi-k3");
+    expect(fresh).toMatchObject({ provider: "kimi", stale: false, accountCount: 1 });
+    expect(fresh?.windows[0]?.usedPercent).toBe(20);
+
+    fail = true;
+    const stale = await cpa.getModelQuota("kimi-k3");
+    expect(stale).toMatchObject({ provider: "kimi", stale: true });
+    expect(stale?.refreshFailedAt).toEqual(expect.any(Number));
+    vi.unstubAllGlobals();
+  });
+
+  it("actively refreshes xAI/Grok weekly billing", async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/v0/management/auth-files")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            files: [{ name: "grok.json", provider: "grok", authIndex: "xai-1" }],
+          }),
+        };
+      }
+      if (url.includes("/auth-files/models?")) {
+        return { ok: true, status: 200, json: async () => ({ models: [{ id: "grok-4.5" }] }) };
+      }
+      const request = JSON.parse(String(init?.body)) as { url: string };
+      const weekly = request.url.includes("format=credits");
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          status_code: 200,
+          body: {
+            config: {
+              currentPeriod: {
+                type: weekly ? "WEEKLY" : "MONTHLY",
+                start: "2026-09-01T00:00:00Z",
+                end: weekly ? "2026-09-08T00:00:00Z" : "2026-10-01T00:00:00Z",
+              },
+              creditUsagePercent: weekly ? 35 : 10,
+            },
+          },
+        }),
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const cpa = new CpaSupervisor({
+      getSettings: () => ({ ...baseSettings }),
+      getToken: () => "tok",
+      probePort: async () => true,
+      spawnProcess: vi.fn(),
+    });
+
+    const quota = await cpa.getModelQuota("grok-4.5");
+    expect(quota).toMatchObject({ provider: "xai", accountCount: 1 });
+    expect(quota?.windows[0]).toMatchObject({ label: "Weekly", usedPercent: 35 });
+    vi.unstubAllGlobals();
+  });
+
+  it("actively refreshes Antigravity quota for Gemini models", async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/v0/management/auth-files")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            files: [{
+              name: "antigravity.json",
+              type: "antigravity",
+              auth_index: "ag-1",
+              project_id: "project-1",
+            }],
+          }),
+        };
+      }
+      if (url.includes("/auth-files/models?")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ models: [{ id: "gemini-3-pro-high" }] }),
+        };
+      }
+      const request = JSON.parse(String(init?.body)) as { url: string; data: string };
+      expect(request.url).toContain("retrieveUserQuotaSummary");
+      expect(JSON.parse(request.data)).toEqual({ project: "project-1" });
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          status_code: 200,
+          body: {
+            groups: [{
+              displayName: "Gemini 3 Pro",
+              buckets: [{ window: "5h", remainingFraction: 0.8 }],
+            }, {
+              displayName: "Claude Sonnet 4.6",
+              buckets: [{ window: "5h", remainingFraction: 0.1 }],
+            }],
+          },
+        }),
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const cpa = new CpaSupervisor({
+      getSettings: () => ({ ...baseSettings }),
+      getToken: () => "tok",
+      probePort: async () => true,
+      spawnProcess: vi.fn(),
+    });
+
+    const quota = await cpa.getModelQuota("gemini-3-pro-high");
+    expect(quota).toMatchObject({ provider: "antigravity", accountCount: 1 });
+    expect(quota?.windows).toHaveLength(1);
+    expect(quota?.windows[0]?.usedPercent).toBeCloseTo(20);
     vi.unstubAllGlobals();
   });
 

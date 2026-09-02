@@ -111,7 +111,7 @@ export type ModelQuotaWindow = {
   windowMinutes?: number;
 };
 
-/** Real account quota for a model; absent when CPA has no upstream signal. */
+/** Real account quota for a model; absent when CPA has no upstream signal or quota API. */
 export type ModelQuotaInfo = {
   modelId: string;
   provider: string;
@@ -120,6 +120,9 @@ export type ModelQuotaInfo = {
   plan?: string;
   creditsBalance?: number;
   accountCount: number;
+  /** Last refresh failed; windows are the last successfully observed values. */
+  stale?: boolean;
+  refreshFailedAt?: number;
 };
 
 /** Exact effort levels accepted by the bundled Claude Agent SDK. */

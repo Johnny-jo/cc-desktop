@@ -214,6 +214,48 @@ export function getCpaUserConfigPath(env: RuntimePathEnv): string {
   return path.join(env.userDataDir, "cpa", "config.yaml");
 }
 
+/** Bundled management.html (CPA looks for static/ next to the config file). */
+export function getCpaManagementHtmlPath(env: RuntimePathEnv): string | null {
+  if (env.isPackaged) {
+    const p = path.join(
+      bundledBinRoot(env),
+      "cpa",
+      "static",
+      "management.html",
+    );
+    return fs.existsSync(p) ? p : null;
+  }
+  const root = env.projectRoot ?? findProjectRoot();
+  const vendor = path.join(
+    root,
+    "vendor",
+    "win-x64",
+    "cpa",
+    "static",
+    "management.html",
+  );
+  if (fs.existsSync(vendor)) return vendor;
+  return null;
+}
+
+/**
+ * Copy bundled management.html to userData/cpa/static/ if missing.
+ * CPA resolves static assets next to config.yaml (or MANAGEMENT_STATIC_PATH).
+ * Without this file it tries GitHub on first start, which often hangs in CN networks.
+ */
+export function materializeCpaManagementAsset(env: RuntimePathEnv): void {
+  const dest = path.join(env.userDataDir, "cpa", "static", "management.html");
+  try {
+    if (fs.existsSync(dest) && fs.statSync(dest).size > 0) return;
+    const src = getCpaManagementHtmlPath(env);
+    if (!src) return;
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.copyFileSync(src, dest);
+  } catch {
+    // non-fatal — CPA can still serve the API without the panel
+  }
+}
+
 export function getModCacheDir(env: RuntimePathEnv): string {
   return path.join(env.userDataDir, "mod-cache");
 }
@@ -298,6 +340,7 @@ export function materializeCpaConfig(
     });
     fs.writeFileSync(dest, body, "utf8");
   }
+  materializeCpaManagementAsset(env);
 
   return dest;
 }

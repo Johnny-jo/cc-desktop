@@ -77,6 +77,31 @@ describe("runtime-paths", () => {
     expect(fs.readFileSync(dest, "utf8")).toBe("keep\n");
   });
 
+  it("materializeCpaConfig copies management.html beside userData config", () => {
+    const root = tmp();
+    const vendorStatic = path.join(root, "vendor", "win-x64", "cpa", "static");
+    fs.mkdirSync(vendorStatic, { recursive: true });
+    fs.writeFileSync(path.join(vendorStatic, "management.html"), "PANEL", "utf8");
+    fs.mkdirSync(path.join(root, "apps", "desktop", "resources", "cpa"), {
+      recursive: true,
+    });
+    fs.writeFileSync(
+      path.join(root, "apps", "desktop", "resources", "cpa", "config.template.yaml"),
+      defaultTemplate(),
+      "utf8",
+    );
+    const e = env({
+      userDataDir: path.join(root, "ud"),
+      projectRoot: root,
+    });
+    const cfg = materializeCpaConfig(e);
+    const panel = path.join(path.dirname(cfg), "static", "management.html");
+    expect(fs.readFileSync(panel, "utf8")).toBe("PANEL");
+    fs.writeFileSync(panel, "KEEP", "utf8");
+    materializeCpaConfig(e);
+    expect(fs.readFileSync(panel, "utf8")).toBe("KEEP");
+  });
+
   it("applyCpaConfigDefaults forces localhost, panel, and secret-key", () => {
     const out = applyCpaConfigDefaults(
       'host: ""\nport: 1\nauth-dir: "x"\nremote-management:\n  allow-remote: false\n  secret-key: ""\n  disable-control-panel: true\napi-keys:\n  - a\n',

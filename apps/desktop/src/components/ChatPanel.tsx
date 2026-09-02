@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import type { ChatItem, ModelQuotaInfo, PermissionMode } from "@claude-desktop/shared";
 import { MessageList } from "./MessageList";
 import { Composer } from "./Composer";
@@ -62,34 +62,75 @@ export function ChatPanel({ onOpenSettings, onOpenFile }: ChatPanelProps) {
   const level = ctx ? contextLevel(ctx.ratio) : "ok";
   const fillPct = ctx ? Math.max(0, Math.min(100, ctx.ratio * 100)) : 0;
   const quotaModel = ctx?.modelId ?? settings?.defaultModel ?? "";
+  const activeRunning = active?.status === "running";
   const showBanner =
     Boolean(activeSessionId) &&
     Boolean(ctx) &&
     ctx!.ratio >= 0.8 &&
     !bannerDismissed[activeSessionId!];
 
+  const quotaRequestId = useRef(0);
+  const previousRun = useRef<{ sessionId: string | null; running: boolean }>({
+    sessionId: null,
+    running: false,
+  });
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const composerRef = useRef<HTMLDivElement | null>(null);
+  const refreshQuota = useCallback(() => {
+    const requestId = ++quotaRequestId.current;
+    if (!quotaModel || !hasDesktopApi("getModelQuota")) {
+      setModelQuota(null);
+      return;
+    }
+    void getDesktop().getModelQuota(quotaModel).then(
+      (quota) => {
+        if (requestId !== quotaRequestId.current) return;
+        setModelQuota(quota);
+      },
+      () => {
+        // A transient CPA/upstream failure must not erase the last good bar.
+      },
+    );
+  }, [quotaModel]);
+
   useEffect(() => {
-    let cancelled = false;
-    const refresh = () => {
-      if (!quotaModel || !hasDesktopApi("getModelQuota")) {
-        setModelQuota(null);
-        return;
-      }
-      void getDesktop().getModelQuota(quotaModel).then(
-        (quota) => { if (!cancelled) setModelQuota(quota); },
-        () => { if (!cancelled) setModelQuota(null); },
-      );
+    setModelQuota((current) => current?.modelId === quotaModel ? current : null);
+    refreshQuota();
+    const timer = window.setInterval(refreshQuota, 60_000);
+    return () => window.clearInterval(timer);
+  }, [quotaModel, refreshQuota]);
+
+  useEffect(() => {
+    const previous = previousRun.current;
+    if (
+      previous.sessionId === activeSessionId &&
+      previous.running &&
+      !activeRunning
+    ) {
+      // Generation responses carry the newest provider quota observations.
+      // Pull exactly once on the running -> idle/error transition.
+      refreshQuota();
+    }
+    previousRun.current = { sessionId: activeSessionId, running: activeRunning };
+  }, [activeRunning, activeSessionId, refreshQuota]);
+
+  // Track composer height so the transcript can scroll full-height behind the
+  // frosted composer overlay while keeping bottom room to clear it.
+  useEffect(() => {
+    const panel = panelRef.current;
+    const composer = composerRef.current;
+    if (!panel || !composer) return;
+    const update = () => {
+      panel.style.setProperty("--composer-h", `${composer.offsetHeight}px`);
     };
-    refresh();
-    const timer = window.setInterval(refresh, 60_000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [quotaModel, active?.updatedAt]);
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(composer);
+    return () => ro.disconnect();
+  }, []);
 
   return (
-    <div className="chat-panel">
+    <div className="chat-panel" ref={panelRef}>
       <header className="chat-header">
         <div className="chat-header-left">
           <span className="chat-title">
@@ -161,7 +202,7 @@ export function ChatPanel({ onOpenSettings, onOpenFile }: ChatPanelProps) {
         </div>
       </div>
 
-      <div className="chat-composer">
+      <div className="chat-composer" ref={composerRef}>
         <div className="chat-inner">
           <Composer onOpenSettings={onOpenSettings} />
         </div>

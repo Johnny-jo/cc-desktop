@@ -58,6 +58,7 @@ export const zh: Messages = {
     quickNavigationAssistant: "AI",
     contextUsage: "上下文用量",
     modelQuotaRemaining: "额度剩余",
+    modelQuotaStale: "刷新失败，显示上次成功获取的数据",
     scrollToBottom: "滚动到底部",
   },
   changes: {

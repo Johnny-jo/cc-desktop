@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   droppedPathsPayload,
+  isCopyChord,
   isPasteChord,
   quoteDroppedPath,
 } from "./xterm-interactive";
@@ -34,6 +35,32 @@ describe("isPasteChord", () => {
     expect(
       isPasteChord({ key: "v", ctrlKey: false, metaKey: false, shiftKey: false, altKey: false }),
     ).toBe(false);
+  });
+});
+
+describe("isCopyChord", () => {
+  const chord = (over: Partial<Parameters<typeof isCopyChord>[0]>) => ({
+    key: "c",
+    ctrlKey: true,
+    metaKey: false,
+    shiftKey: false,
+    altKey: false,
+    ...over,
+  });
+
+  it("treats Ctrl+Shift+C and Cmd+C as copy", () => {
+    expect(isCopyChord(chord({ shiftKey: true }), false)).toBe(true);
+    expect(isCopyChord(chord({ ctrlKey: false, metaKey: true }), false)).toBe(true);
+  });
+
+  it("treats plain Ctrl+C as copy only while a selection exists", () => {
+    expect(isCopyChord(chord({}), true)).toBe(true);
+    expect(isCopyChord(chord({}), false)).toBe(false);
+  });
+
+  it("ignores Alt+C and bare C", () => {
+    expect(isCopyChord(chord({ altKey: true }), true)).toBe(false);
+    expect(isCopyChord(chord({ ctrlKey: false }), true)).toBe(false);
   });
 });
 

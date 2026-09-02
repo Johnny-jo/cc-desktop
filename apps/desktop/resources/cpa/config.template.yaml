@@ -18,6 +18,8 @@ remote-management:
   allow-remote: false
   secret-key: "change-me"
   disable-control-panel: false
+  # Desktop ships management.html next to this config. Skip GitHub fetches.
+  disable-auto-update-panel: true
 
 # Reuse the same credential store as a standalone CPA install when present.
 auth-dir: "~/.cli-proxy-api"
