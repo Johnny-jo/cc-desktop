@@ -137,7 +137,14 @@ export function applySdkEvent(
     case "thinking_delta": {
       const last = items[items.length - 1];
       if (last?.kind === "text" && last.role === "assistant" && last.streaming) {
-        return state;
+        // Answer text already started (or thinking ended): ignore late deltas.
+        if (!last.thinking) return state;
+        if (!event.text) return state;
+        items[items.length - 1] = {
+          ...last,
+          thinkingText: (last.thinkingText ?? "") + event.text,
+        };
+        return { ...state, items };
       }
       items.push({
         kind: "text",
@@ -146,6 +153,7 @@ export function applySdkEvent(
         text: "",
         streaming: true,
         thinking: true,
+        ...(event.text ? { thinkingText: event.text } : {}),
       });
       return { ...state, items };
     }
@@ -272,7 +280,7 @@ export function applySdkEvent(
           item.role === "assistant" &&
           item.streaming
         ) {
-          if (item.thinking && !item.text) continue;
+          if (item.thinking && !item.text && !item.thinkingText) continue;
           settled.push({ ...item, streaming: false, thinking: undefined });
         } else {
           settled.push(item);

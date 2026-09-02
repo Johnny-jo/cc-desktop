@@ -1,4 +1,12 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { createPortal } from "react-dom";
 import type {
   Attachment,
   ModelInfo,
@@ -212,9 +220,17 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
   const [modelMenuPage, setModelMenuPage] = useState<"root" | "model" | "effort">(
     "root",
   );
+  // Fixed position (viewport coords) of the portaled model-menu panel.
+  const [modelMenuPos, setModelMenuPos] = useState<{
+    right: number;
+    bottom: number;
+  } | null>(null);
+  // The panel stays mounted briefly after close so the exit animation plays.
+  const [modelMenuPanelMounted, setModelMenuPanelMounted] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const modelMenuRef = useRef<HTMLDivElement | null>(null);
+  const modelMenuPanelRef = useRef<HTMLDivElement | null>(null);
   const { t } = useI18n();
 
   const running = useAppStore((s) =>
@@ -266,10 +282,15 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
   useEffect(() => {
     if (!modelMenuOpen) return;
     const onPointerDown = (event: MouseEvent) => {
-      if (!modelMenuRef.current?.contains(event.target as Node)) {
-        setModelMenuOpen(false);
-        setModelMenuPage("root");
+      const target = event.target as Node;
+      if (
+        modelMenuRef.current?.contains(target) ||
+        modelMenuPanelRef.current?.contains(target)
+      ) {
+        return;
       }
+      setModelMenuOpen(false);
+      setModelMenuPage("root");
     };
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
@@ -284,6 +305,43 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
       document.removeEventListener("keydown", onKeyDown, true);
     };
   }, [modelMenuOpen]);
+
+  // Keep the portaled panel anchored to the trigger on resize / scroll.
+  // Layout effect so the position is set before the first paint of the panel.
+  useLayoutEffect(() => {
+    if (!modelMenuOpen) return;
+    const anchor = () => {
+      const trigger =
+        modelMenuRef.current?.querySelector<HTMLButtonElement>(
+          ".composer-model-menu-trigger",
+        );
+      if (!trigger) return;
+      const rect = trigger.getBoundingClientRect();
+      setModelMenuPos({
+        right: window.innerWidth - rect.right,
+        bottom: window.innerHeight - rect.top + 8,
+      });
+    };
+    anchor();
+    window.addEventListener("resize", anchor);
+    window.addEventListener("scroll", anchor, true);
+    return () => {
+      window.removeEventListener("resize", anchor);
+      window.removeEventListener("scroll", anchor, true);
+    };
+  }, [modelMenuOpen]);
+
+  // Delay unmount so the panel's collapse animation can play (must outlast
+  // the CSS exit animation).
+  useEffect(() => {
+    if (modelMenuOpen) {
+      setModelMenuPanelMounted(true);
+      return;
+    }
+    if (!modelMenuPanelMounted) return;
+    const timer = window.setTimeout(() => setModelMenuPanelMounted(false), 170);
+    return () => window.clearTimeout(timer);
+  }, [modelMenuOpen, modelMenuPanelMounted]);
 
   const setModelReasoningEffort = useCallback(
     async (effort: ReasoningEffort | "") => {
@@ -506,7 +564,7 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
         case "model": {
           setText("");
           const btn = document.querySelector<HTMLButtonElement>(
-            ".composer-model-select-wrap .themed-select-btn",
+            ".composer-model-menu-trigger",
           );
           btn?.focus();
           btn?.click();
@@ -910,94 +968,105 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
                   <path d="M3 4.5 6 7.5 9 4.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
               </button>
-              {modelMenuOpen ? (
-                <div className="composer-model-menu-panel" role="menu">
-                  {modelMenuPage === "root" ? (
-                    <>
-                      <button
-                        type="button"
-                        className="composer-model-menu-row"
-                        disabled={!settings || models.length === 0}
-                        onClick={() => setModelMenuPage("model")}
-                      >
-                        <span>模型</span>
-                        <span className="composer-model-menu-current" title={selectedModel}>
-                          {selectedModel || "未配置"}
-                        </span>
-                        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
-                          <path d="M4.5 3 7.5 6 4.5 9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-                        </svg>
-                      </button>
-                      <button
-                        type="button"
-                        className="composer-model-menu-row"
-                        disabled={!selectedModel || availableReasoningEfforts.length === 0}
-                        onClick={() => setModelMenuPage("effort")}
-                      >
-                        <span>推理强度</span>
-                        <span className="composer-model-menu-current">
-                          {selectedReasoningEffortLabel}
-                        </span>
-                        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
-                          <path d="M4.5 3 7.5 6 4.5 9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-                        </svg>
-                      </button>
-                    </>
-                  ) : (
-                    <>
-                      <button
-                        type="button"
-                        className="composer-model-menu-back"
-                        onClick={() => setModelMenuPage("root")}
-                      >
-                        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
-                          <path d="M7.5 3 4.5 6l3 3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-                        </svg>
-                        {modelMenuPage === "model" ? "选择模型" : "选择推理强度"}
-                      </button>
-                      <div className="composer-model-menu-options">
-                        {modelMenuPage === "model" ? (
-                          models.map((model) => (
-                            <button
-                              type="button"
-                              className="composer-model-menu-option"
-                              key={model}
-                              aria-checked={model === selectedModel}
-                              onClick={() => {
-                                void setModel(model);
-                                setModelMenuPage("root");
-                              }}
-                            >
-                              <span title={model}>{model}</span>
-                              {model === selectedModel ? <span aria-hidden>✓</span> : null}
-                            </button>
-                          ))
-                        ) : (
-                          ["", ...availableReasoningEfforts].map((effort) => (
-                            <button
-                              type="button"
-                              className="composer-model-menu-option"
-                              key={effort || "default"}
-                              aria-checked={effort === selectedReasoningEffort}
-                              onClick={() => {
-                                void setModelReasoningEffort(effort as ReasoningEffort | "");
-                                setModelMenuPage("root");
-                              }}
-                            >
-                              <span>
-                                {effort
-                                  ? reasoningEffortLabel(effort as ReasoningEffort)
-                                  : "模型默认"}
-                              </span>
-                              {effort === selectedReasoningEffort ? <span aria-hidden>✓</span> : null}
-                            </button>
-                          ))
-                        )}
-                      </div>
-                    </>
-                  )}
-                </div>
-              ) : null}
+              {modelMenuPanelMounted && modelMenuPos
+                ? createPortal(
+                    <div
+                      ref={modelMenuPanelRef}
+                      className={`composer-model-menu-panel${modelMenuOpen ? "" : " closing"}`}
+                      role="menu"
+                      style={{
+                        right: modelMenuPos.right,
+                        bottom: modelMenuPos.bottom,
+                      }}
+                    >
+                      {modelMenuPage === "root" ? (
+                        <>
+                          <button
+                            type="button"
+                            className="composer-model-menu-row"
+                            disabled={!settings || models.length === 0}
+                            onClick={() => setModelMenuPage("model")}
+                          >
+                            <span>模型</span>
+                            <span className="composer-model-menu-current" title={selectedModel}>
+                              {selectedModel || "未配置"}
+                            </span>
+                            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
+                              <path d="M4.5 3 7.5 6 4.5 9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
+                          </button>
+                          <button
+                            type="button"
+                            className="composer-model-menu-row"
+                            disabled={!selectedModel || availableReasoningEfforts.length === 0}
+                            onClick={() => setModelMenuPage("effort")}
+                          >
+                            <span>推理强度</span>
+                            <span className="composer-model-menu-current">
+                              {selectedReasoningEffortLabel}
+                            </span>
+                            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
+                              <path d="M4.5 3 7.5 6 4.5 9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            className="composer-model-menu-back"
+                            onClick={() => setModelMenuPage("root")}
+                          >
+                            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
+                              <path d="M7.5 3 4.5 6l3 3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
+                            {modelMenuPage === "model" ? "选择模型" : "选择推理强度"}
+                          </button>
+                          <div className="composer-model-menu-options">
+                            {modelMenuPage === "model" ? (
+                              models.map((model) => (
+                                <button
+                                  type="button"
+                                  className="composer-model-menu-option"
+                                  key={model}
+                                  aria-checked={model === selectedModel}
+                                  onClick={() => {
+                                    void setModel(model);
+                                    setModelMenuPage("root");
+                                  }}
+                                >
+                                  <span title={model}>{model}</span>
+                                  {model === selectedModel ? <span aria-hidden>✓</span> : null}
+                                </button>
+                              ))
+                            ) : (
+                              ["", ...availableReasoningEfforts].map((effort) => (
+                                <button
+                                  type="button"
+                                  className="composer-model-menu-option"
+                                  key={effort || "default"}
+                                  aria-checked={effort === selectedReasoningEffort}
+                                  onClick={() => {
+                                    void setModelReasoningEffort(effort as ReasoningEffort | "");
+                                    setModelMenuPage("root");
+                                  }}
+                                >
+                                  <span>
+                                    {effort
+                                      ? reasoningEffortLabel(effort as ReasoningEffort)
+                                      : "模型默认"}
+                                  </span>
+                                  {effort === selectedReasoningEffort ? <span aria-hidden>✓</span> : null}
+                                </button>
+                              ))
+                            )}
+                          </div>
+                        </>
+                      )}
+                    </div>,
+                    document.body,
+                  )
+                : null}
             </div>
             <button
               type="button"

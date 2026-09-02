@@ -186,6 +186,12 @@ export type ChatItem =
       /** True while the model is producing a thinking/reasoning block (not answer text). */
       thinking?: boolean;
       /**
+       * Accumulated thinking/reasoning content for this turn. Shown live while
+       * `thinking` is true, then kept as a collapsed block once the answer
+       * text starts (and persisted with the transcript at text_done/result).
+       */
+      thinkingText?: string;
+      /**
        * SDK-persisted user message uuid (real user turns only). Bound by
        * ordinal matching against SDK user messages; enables message-level
        * rewind (code checkpoint + conversation truncation).

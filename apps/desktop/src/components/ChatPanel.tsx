@@ -157,6 +157,8 @@ export function ChatPanel({ onOpenSettings, onOpenFile }: ChatPanelProps) {
               disabled={!settings}
               onChange={(v) => void setPermissionMode(v as PermissionMode)}
               title="Permission mode"
+              align="right"
+              stretchOnOpen
               options={PERMISSION_MODES.map((m) => ({ value: m }))}
             />
           </label>

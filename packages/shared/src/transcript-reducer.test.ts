@@ -89,6 +89,39 @@ describe("applySdkEvent", () => {
     expect(s.items[0]).not.toHaveProperty("thinking", true);
   });
 
+  it("accumulates thinkingText and keeps it collapsed after the answer starts", () => {
+    let s = apply(emptyTranscript(), {
+      type: "thinking_delta",
+      sessionId: "s",
+      text: "先想",
+    });
+    s = apply(s, { type: "thinking_delta", sessionId: "s", text: "一想" });
+    expect(s.items).toHaveLength(1);
+    expect(s.items[0]).toMatchObject({
+      role: "assistant",
+      thinking: true,
+      streaming: true,
+      thinkingText: "先想一想",
+    });
+    s = apply(s, { type: "text_delta", sessionId: "s", text: "答" });
+    expect(s.items[0]).toMatchObject({
+      text: "答",
+      thinkingText: "先想一想",
+      streaming: true,
+    });
+    expect(s.items[0]).not.toHaveProperty("thinking", true);
+    // Late thinking deltas after the answer started are ignored.
+    s = apply(s, { type: "thinking_delta", sessionId: "s", text: "迟到" });
+    expect(s.items[0]).toMatchObject({ thinkingText: "先想一想" });
+    // Result settles the turn but keeps the thinking content.
+    s = apply(s, { type: "result", sessionId: "s", ok: true });
+    expect(s.items[0]).toMatchObject({
+      text: "答",
+      thinkingText: "先想一想",
+      streaming: false,
+    });
+  });
+
   it("streams text_delta then settles on text_done", () => {
     let s = apply(emptyTranscript(), {
       type: "text_delta",

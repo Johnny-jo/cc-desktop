@@ -180,9 +180,20 @@ const MessageRow = memo(function MessageRow({
         <div className="bubble bubble-system">{item.text}</div>
       ) : (
         <div className="bubble bubble-assistant">
-          {item.thinking && item.streaming && !item.text ? (
-            <span className="thinking-indicator">思考中…</span>
-          ) : (
+          {item.thinkingText || (item.thinking && item.streaming) ? (
+            /* 思考阶段实时展开（open 受控，每次 delta 强制展开）；正文开始或
+               回合结束后自动折叠，保留内容可手动展开回看。 */
+            <details
+              className="msg-thinking"
+              open={Boolean(item.thinking && item.streaming)}
+            >
+              <summary>
+                {item.thinking && item.streaming ? "思考中…" : "思考过程"}
+              </summary>
+              <div className="msg-thinking-body">{item.thinkingText ?? ""}</div>
+            </details>
+          ) : null}
+          {item.thinking && item.streaming && !item.text ? null : (
             <MarkdownBody text={item.text} streaming={item.streaming} />
           )}
         </div>

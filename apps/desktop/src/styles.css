@@ -2197,19 +2197,18 @@ body.is-resizing-row * {
 }
 
 .themed-select-menu {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 0;
-  z-index: 300;
-  min-width: 100%;
+  /* 菜单 portal 到 body，fixed 定位；top/left/right/bottom/min-width 由内联样式给出 */
+  position: fixed;
+  z-index: 1100;
   width: max-content;
   max-width: 280px;
   margin: 0;
   padding: 5px;
   list-style: none;
-  background: color-mix(in srgb, var(--bg-elevated) 70%, transparent);
-  backdrop-filter: blur(24px) saturate(1.5);
-  border: 1px solid var(--border-strong);
+  /* 与 .composer 输入框一致的毛玻璃质感 */
+  background: color-mix(in srgb, var(--bg-input) 42%, transparent);
+  backdrop-filter: blur(20px) saturate(1.35);
+  border: 1px solid var(--border);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-2);
   overflow-y: auto;
@@ -2217,8 +2216,6 @@ body.is-resizing-row * {
 }
 
 .themed-select-menu.drop-up {
-  top: auto;
-  bottom: calc(100% + 6px);
   animation-name: select-menu-in-up;
 }
 
@@ -2241,6 +2238,37 @@ body.is-resizing-row * {
   to {
     opacity: 1;
     transform: translateY(0) scale(1);
+  }
+}
+
+/* 收回动效：与进入动画镜像 */
+.themed-select-menu.closing {
+  animation: select-menu-out 140ms cubic-bezier(0.4, 0, 0.6, 1) forwards;
+}
+
+.themed-select-menu.drop-up.closing {
+  animation-name: select-menu-out-up;
+}
+
+@keyframes select-menu-out {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+}
+
+@keyframes select-menu-out-up {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
   }
 }
 
@@ -2285,19 +2313,29 @@ body.is-resizing-row * {
 }
 
 /* Ghost variants keep their own paddings */
-/* 标题栏右侧的权限（自主度）选择器：与 composer 的模型选择器一致的透明风格。 */
+/* 标题栏右侧的权限（自主度）选择器：与 composer 输入框一致的毛玻璃风格，无边框。 */
 .select-ghost-wrap .themed-select-btn {
   border: none;
   padding: 3px 8px;
+  /* min-width 显式为 0：默认值 auto 无法过渡，展开/收回的宽度拉伸才有动画 */
+  min-width: 0;
   color: var(--text-muted);
-  background: transparent;
+  background: color-mix(in srgb, var(--bg-input) 42%, transparent);
+  backdrop-filter: blur(20px) saturate(1.35);
+  transition: background 140ms ease, border-color 140ms ease,
+    box-shadow 140ms ease, color 140ms ease,
+    min-width 240ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+/* Codex 式动效：展开时内容在拉伸后的框内居中 */
+.select-ghost-wrap.open .themed-select-btn {
+  justify-content: center;
 }
 
 .select-ghost-wrap .themed-select-btn:hover:not(:disabled),
 .select-ghost-wrap.open .themed-select-btn,
 .select-ghost-wrap .themed-select-btn:focus-visible {
-  background: transparent;
-  border: none;
+  background: color-mix(in srgb, var(--bg-input) 60%, transparent);
   color: var(--text);
   box-shadow: none;
 }
@@ -2321,10 +2359,6 @@ body.is-resizing-row * {
   border: none;
   color: var(--text);
   box-shadow: none;
-}
-
-.composer-model-select-wrap .themed-select-menu {
-  min-width: 200px;
 }
 
 .input {
@@ -2892,11 +2926,6 @@ body.session-detaching {
   margin-right: 10px;
 }
 
-.chat-header-field .themed-select-menu {
-  left: auto;
-  right: 0;
-}
-
 .badge {
   font-size: 0.769rem;
   font-weight: 500;
@@ -3273,12 +3302,13 @@ body.session-detaching {
   padding: 0;
   border: 1px solid var(--border-soft);
   border-radius: 50%;
-  background: color-mix(in srgb, var(--bg-elevated) 94%, transparent);
+  /* 与 .composer 输入框一致的毛玻璃质感 */
+  background: color-mix(in srgb, var(--bg-input) 42%, transparent);
   box-shadow: var(--shadow-2);
   color: var(--text-muted);
   cursor: pointer;
   transform: translateX(-50%);
-  backdrop-filter: blur(18px) saturate(1.25);
+  backdrop-filter: blur(20px) saturate(1.35);
   animation: scroll-bottom-in 150ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
@@ -3294,7 +3324,7 @@ body.session-detaching {
 
 .scroll-to-bottom-btn:hover {
   color: var(--text);
-  background: var(--bg-hover);
+  background: color-mix(in srgb, var(--bg-input) 60%, transparent);
 }
 
 .scroll-to-bottom-btn:active {
@@ -3506,6 +3536,38 @@ body.session-detaching {
   font-size: 0.92em;
   letter-spacing: 0.02em;
   animation: thinking-pulse 1.2s ease-in-out infinite;
+}
+
+/* 思考过程块：思考中实时展开，正文开始/回合结束后自动折叠（open 受控） */
+.msg-thinking {
+  margin: 0 0 6px;
+  font-size: 0.846rem;
+  color: var(--text-faint);
+}
+
+.msg-thinking summary {
+  cursor: pointer;
+  user-select: none;
+  color: var(--text-faint);
+  letter-spacing: 0.02em;
+}
+
+/* 思考中 summary 带呼吸感 */
+.msg-thinking[open] summary {
+  animation: thinking-pulse 1.2s ease-in-out infinite;
+}
+
+.msg-thinking-body {
+  margin-top: 4px;
+  padding: 6px 10px;
+  border-left: 3px solid var(--border-soft);
+  background: var(--bg-elevated);
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow: auto;
+  font-style: italic;
 }
 
 @keyframes thinking-pulse {
@@ -4026,19 +4088,18 @@ body.session-detaching {
   width: 30px;
   height: 30px;
   border-radius: 50%;
-  border: 1px solid var(--border);
-  background: var(--bg-elevated);
+  border: none;
+  background: transparent;
   color: var(--text-muted);
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  transition: border-color 120ms ease, color 120ms ease, background 120ms ease;
+  transition: color 120ms ease, background 120ms ease;
 }
 
 .composer-plus-btn:hover {
-  border-color: var(--accent);
   color: var(--accent);
 }
 
@@ -4048,15 +4109,15 @@ body.session-detaching {
   gap: 5px;
   max-width: 180px;
   height: 30px;
-  border: 1px solid var(--border);
+  border: none;
   border-radius: 999px;
-  background: var(--bg-elevated);
+  background: transparent;
   color: var(--text-muted);
-  font-size: 0.846rem;
+  font-size: 0.9rem;
   padding: 0 12px;
   cursor: pointer;
   flex-shrink: 0;
-  transition: border-color 120ms ease, color 120ms ease;
+  transition: color 120ms ease;
 }
 
 .composer-project-chip span {
@@ -4066,7 +4127,6 @@ body.session-detaching {
 }
 
 .composer-project-chip:hover {
-  border-color: var(--accent);
   color: var(--accent);
 }
 
@@ -4170,6 +4230,8 @@ body.session-detaching {
   position: relative;
   flex: 0 1 auto;
   min-width: 0;
+  /* 触发框展开时拉伸到的目标宽度，与上拉面板保持一致 */
+  --composer-model-menu-w: min(260px, calc(100vw - 40px));
 }
 
 .composer-model-menu-trigger {
@@ -4177,29 +4239,34 @@ body.session-detaching {
   display: flex;
   align-items: center;
   gap: 6px;
+  /* min-width 必须显式给 0：默认值 auto 无法参与过渡，展开拉伸会一步到位 */
+  min-width: 0;
   max-width: min(220px, 32vw);
-  padding: 0 6px;
-  border: 1px solid transparent;
+  padding: 1px 8px 3px 10px;
+  border: none;
   border-radius: var(--radius-pill);
+  /* 无背景设计 */
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
   list-style: none;
   user-select: none;
   transition: border-color 160ms ease, color 160ms ease, background 160ms ease,
-    box-shadow 160ms ease, transform 160ms ease;
+    min-width 240ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
+/* hover 与 .composer-project-chip 一致：只变色 */
 .composer-model-menu-trigger:hover,
 .composer-model-menu-trigger[aria-expanded="true"] {
-  border-color: color-mix(in srgb, var(--accent) 72%, transparent);
-  background: color-mix(in srgb, var(--accent-soft) 72%, transparent);
-  color: var(--text);
+  color: var(--accent);
 }
 
+/* Codex 式动效：展开时框宽度向左拉伸到与上拉面板一致，同时浮现输入框同款毛玻璃 */
 .composer-model-menu-trigger[aria-expanded="true"] {
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent);
-  transform: translateY(-1px);
+  min-width: var(--composer-model-menu-w);
+  max-width: var(--composer-model-menu-w);
+  background: color-mix(in srgb, var(--bg-input) 42%, transparent);
+  backdrop-filter: blur(20px) saturate(1.35);
 }
 
 .composer-model-menu-model {
@@ -4212,7 +4279,9 @@ body.session-detaching {
 }
 
 .composer-model-menu-effort {
-  flex: 0 0 auto;
+  /* 占据 model 名与右侧箭头之间的空间并居中，展开拉伸时 effort 停在正中间 */
+  flex: 1 0 auto;
+  text-align: center;
   color: var(--text-faint);
   font-size: 0.9rem;
 }
@@ -4228,15 +4297,16 @@ body.session-detaching {
 }
 
 .composer-model-menu-panel {
-  position: absolute;
-  z-index: 30;
-  right: 0;
-  bottom: calc(100% + 8px);
+  /* portal 到 body，fixed 定位；right/bottom 由内联样式锚定触发框 */
+  position: fixed;
+  z-index: 1100;
   width: min(260px, calc(100vw - 40px));
   padding: 6px;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--bg-elevated) 94%, transparent);
+  /* 与 .composer 输入框一致的毛玻璃质感 */
+  background: color-mix(in srgb, var(--bg-input) 42%, transparent);
+  backdrop-filter: blur(20px) saturate(1.35);
   box-shadow: var(--shadow-2);
   font-size: 0.9rem;
   animation: composer-model-menu-pop 150ms cubic-bezier(0.2, 0.8, 0.2, 1);
@@ -4250,6 +4320,22 @@ body.session-detaching {
   to {
     opacity: 1;
     transform: translateY(0) scale(1);
+  }
+}
+
+/* 收回动效：与 pop 进入动画镜像 */
+.composer-model-menu-panel.closing {
+  animation: composer-model-menu-out 160ms cubic-bezier(0.4, 0, 0.6, 1) forwards;
+}
+
+@keyframes composer-model-menu-out {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(5px) scale(0.98);
   }
 }
 
@@ -7560,11 +7646,6 @@ body.session-detaching {
 .settings-model-select .themed-select-btn:focus-visible {
   border-color: var(--accent);
   box-shadow: var(--focus-ring);
-}
-
-.settings-model-select .themed-select-menu {
-  width: 100%;
-  max-width: min(520px, 100%);
 }
 
 .room-settings-modal {
