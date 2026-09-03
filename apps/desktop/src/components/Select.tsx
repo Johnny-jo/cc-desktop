@@ -15,7 +15,7 @@ export type SelectOption = {
 /**
  * Theme-aware dropdown (native <select> renders an unthemed white list).
  * Button + fixed-position menu portaled to <body> (a portal is required:
- * backdrop-filter on an ancestor — e.g. .chat-header / .composer — makes it a
+ * backdrop-filter on an ancestor — e.g. .composer — makes it a
  * Backdrop Root, which caps any descendant's own backdrop-filter and the menu
  * would lose its frosted blur). Closes on outside click / Escape.
  */

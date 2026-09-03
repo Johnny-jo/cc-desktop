@@ -130,6 +130,11 @@ export function App() {
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [editorTabs, setEditorTabs] = useState<string[]>([]);
   const [activeEditor, setActiveEditor] = useState<string | null>(null);
+  const [editorReveal, setEditorReveal] = useState<{
+    rel: string;
+    line: number;
+    nonce: number;
+  } | null>(null);
   const [editorViewLru, setEditorViewLru] = useState<string[]>([]);
   /** Editor pane width as fraction of (chat+editor) area */
   const [editorRatio, setEditorRatio] = useState(EDITOR_DEFAULT_RATIO);
@@ -213,10 +218,17 @@ export function App() {
 
   const onSelectFile = (rel: string) => setSelectedFile(rel);
 
-  const onOpenFile = useCallback((rel: string) => {
+  const onOpenFile = useCallback((rel: string, line?: number) => {
     setSelectedFile(rel);
     setEditorTabs((tabs) => (tabs.includes(rel) ? tabs : [...tabs, rel]));
     setActiveEditor(rel);
+    if (line != null) {
+      setEditorReveal((previous) => ({
+        rel,
+        line: Math.max(1, Math.floor(line)),
+        nonce: (previous?.nonce ?? 0) + 1,
+      }));
+    }
     setEditorFull(false);
     setEditorRatio((r) =>
       r >= EDITOR_SOFT_MIN && r <= EDITOR_SOFT_MAX ? r : EDITOR_DEFAULT_RATIO,
@@ -743,6 +755,11 @@ export function App() {
                           <FileEditor
                             rel={tab}
                             hidden={tab !== activeEditor}
+                            reveal={
+                              tab === activeEditor && editorReveal?.rel === tab
+                                ? editorReveal
+                                : undefined
+                            }
                             onClose={() => closeEditorTab(tab)}
                           />
                         </Suspense>

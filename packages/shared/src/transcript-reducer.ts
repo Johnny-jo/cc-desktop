@@ -102,6 +102,7 @@ export function shouldPersistTranscript(event: SdkNormalizedEvent): boolean {
     event.type === "tool_start" ||
     event.type === "tool_end" ||
     event.type === "result" ||
+    event.type === "turn_changes" ||
     event.type === "items_replaced"
   );
 }
@@ -140,9 +141,15 @@ export function applySdkEvent(
         // Answer text already started (or thinking ended): ignore late deltas.
         if (!last.thinking) return state;
         if (!event.text) return state;
+        const previous = last.thinkingText ?? "";
         items[items.length - 1] = {
           ...last,
-          thinkingText: (last.thinkingText ?? "") + event.text,
+          // Final assistant frames may repeat the complete reasoning after
+          // partial deltas. Replace when the new payload already contains the
+          // accumulated prefix; otherwise treat it as a true delta.
+          thinkingText: event.text.startsWith(previous)
+            ? event.text
+            : previous + event.text,
         };
         return { ...state, items };
       }
@@ -200,6 +207,25 @@ export function applySdkEvent(
     }
     case "tool_start": {
       const tool = event.tool;
+      const last = items[items.length - 1];
+      if (
+        last?.kind === "text" &&
+        last.role === "assistant" &&
+        last.streaming &&
+        last.thinking
+      ) {
+        // Starting a tool is also a reasoning boundary: fold the preceding
+        // thought immediately instead of leaving "思考中…" open until result.
+        if (!last.text && !last.thinkingText) {
+          items.pop();
+        } else {
+          items[items.length - 1] = {
+            ...last,
+            streaming: false,
+            thinking: undefined,
+          };
+        }
+      }
       const existing = items.findIndex(
         (i) => i.kind === "tool" && i.tool.id === tool.id,
       );
@@ -303,6 +329,11 @@ export function applySdkEvent(
           usage: event.usage,
         });
       }
+      return { ...state, items };
+    }
+    case "turn_changes": {
+      if (items.some((item) => item.id === event.item.id)) return state;
+      items.push(event.item);
       return { ...state, items };
     }
     case "items_replaced":

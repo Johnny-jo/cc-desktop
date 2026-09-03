@@ -396,6 +396,17 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
   ipcMain.handle(IPC.sessionList, async () => ctx.sessions.list());
 
   ipcMain.handle(
+    IPC.sessionSearch,
+    async (_e, { query, limit }: { query: string; limit?: number }) => {
+      try {
+        return { results: ctx.sessions.searchTranscripts(query, limit) };
+      } catch {
+        return { results: [] };
+      }
+    },
+  );
+
+  ipcMain.handle(
     IPC.sessionSetPinned,
     async (_e, { sessionId, pinned }: { sessionId: string; pinned: boolean }) => {
       const session = ctx.sessions.setPinned(sessionId, pinned);

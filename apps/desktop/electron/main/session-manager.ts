@@ -7,6 +7,7 @@ import type {
   PermissionMode,
   SdkNormalizedEvent,
   SessionMcpServerStatus,
+  SessionSearchHit,
   SessionSummary,
   SessionUsage,
   SlashCommandItem,
@@ -31,6 +32,7 @@ import {
   computeContextUsage,
   createIdFactory,
   shouldPersistTranscript,
+  summarizeTurnFiles,
   type TranscriptState,
   type UserPrompt,
   type UserContentBlock,
@@ -518,6 +520,13 @@ export class SessionManager {
     string,
     ReturnType<typeof setTimeout>
   >();
+  /** Sessions whose current turn used a file-mutating tool. */
+  private readonly pendingTurnDiffs = new Set<string>();
+  /** Change-event ids and paths that already existed before this turn. */
+  private readonly turnChangeBaselines = new Map<
+    string,
+    { eventIds: Set<string>; paths: Set<string> }
+  >();
   private changesAccessSeq = 0;
 
   constructor(deps: SessionManagerDeps) {
@@ -698,6 +707,7 @@ export class SessionManager {
     this.cancelPendingPersistence(sessionId);
     this.sessions.delete(sessionId);
     this.diffTracker.clearSession(sessionId);
+    this.snapshots?.dropAll(sessionId);
     this.archive?.remove(sessionId);
     return true;
   }
@@ -778,6 +788,11 @@ export class SessionManager {
         hasNewer: false,
       }
     );
+  }
+
+  /** Sidebar search: full-text match over persisted transcript bodies. */
+  searchTranscripts(query: string, limit?: number): SessionSearchHit[] {
+    return this.archive?.database?.searchTranscripts(query, limit) ?? [];
   }
 
   saveTranscript(
@@ -1864,6 +1879,7 @@ export class SessionManager {
       !reopenForExtras
     ) {
       try {
+        this.snapshotTurnChangeBaseline(sessionId);
         entry.input.push(content, entry.sdkSessionId);
       } catch {
         // Stream closed between the check and push (e.g. concurrent abort) —
@@ -2171,6 +2187,7 @@ export class SessionManager {
       // Kick off consumer before first push so we don't miss early messages.
       entry.consumer = this.consumeQuery(sessionId, q, settings.defaultModel);
 
+      this.snapshotTurnChangeBaseline(sessionId);
       input.push(content, entry.sdkSessionId);
 
       // Control request on the same CLI competes with the first model call
@@ -2341,6 +2358,12 @@ export class SessionManager {
 
         const events = normalizeSdkEvent(msg, sessionId);
         for (const event of events) {
+          // File mutation snapshots are captured at tool_use time for rewind,
+          // but workspace/Git scanning and renderer updates happen once here,
+          // at the turn boundary.
+          if (event.type === "result") {
+            await this.finalizeTurnDiff(sessionId, myGen);
+          }
           queueEvent(event);
         }
 
@@ -2366,6 +2389,7 @@ export class SessionManager {
       // Stream ended (input closed or process exit). Only touch state if we still
       // own this stream generation — abort() may already have opened a new one.
       if (entry.streamGen === myGen) {
+        await this.finalizeTurnDiff(sessionId, myGen);
         if (entry.summary.status === "running") {
           entry.summary = {
             ...entry.summary,
@@ -2383,6 +2407,7 @@ export class SessionManager {
       flushToolProgress();
       if (entry.streamGen !== myGen) return;
       if (entry.abortController?.signal.aborted) {
+        await this.finalizeTurnDiff(sessionId, myGen);
         entry.turnActive = false;
         entry.summary = {
           ...entry.summary,
@@ -2394,6 +2419,7 @@ export class SessionManager {
       }
       const raw = err instanceof Error ? err.message : String(err);
       const message = humanizeAgentError(raw, model);
+      await this.finalizeTurnDiff(sessionId, myGen);
       this.emit({
         type: "result",
         sessionId,
@@ -2481,39 +2507,26 @@ export class SessionManager {
     }
   }
 
+  /** Snapshot change-event ids/paths before this turn's writes start. */
+  private snapshotTurnChangeBaseline(sessionId: string): void {
+    this.hydrateChanges(sessionId);
+    const changes = this.diffTracker.list(sessionId);
+    this.turnChangeBaselines.set(sessionId, {
+      eventIds: new Set(
+        changes.flatMap((change) => change.events.map((event) => event.id)),
+      ),
+      paths: new Set(changes.map((change) => change.path)),
+    });
+  }
+
   private handleToolUseForDiff(sessionId: string, msg: unknown): void {
     if (typeof msg !== "object" || msg === null) return;
     const rec = msg as Record<string, unknown>;
     const cwd = this.sessions.get(sessionId)?.summary.cwd;
 
-    // tool_result: after Bash (or any tool), refresh known Bash paths + scan
-    // the workspace for files scripts created that Edit/Write never saw.
-    // Run off the consumeQuery loop so sync/async IO cannot stall tokens.
+    // Results no longer trigger live scans. A single refresh is performed when
+    // this turn's result event arrives.
     if (rec.type === "user") {
-      const message = rec.message as Record<string, unknown> | undefined;
-      const content = message && Array.isArray(message.content) ? message.content : [];
-      let hasToolResult = false;
-      for (const block of content) {
-        if (typeof block !== "object" || block === null) continue;
-        const b = block as Record<string, unknown>;
-        if (b.type !== "tool_result") continue;
-        hasToolResult = true;
-      }
-      if (hasToolResult) {
-        this.hydrateChanges(sessionId);
-        const entry = this.sessions.get(sessionId);
-        const gen = entry?.streamGen;
-        void this.diffTracker
-          .refreshBashWritesFromDisk(sessionId, cwd)
-          .then(() => {
-            const cur = this.sessions.get(sessionId);
-            if (!cur || (gen != null && cur.streamGen !== gen)) return;
-            if (this.diffTracker.list(sessionId).length > 0) {
-              this.emitDiffAndPersist(sessionId);
-            }
-          })
-          .catch(() => undefined);
-      }
       return;
     }
 
@@ -2537,6 +2550,10 @@ export class SessionManager {
         changesReady = true;
       }
 
+      if (!this.turnChangeBaselines.has(sessionId)) {
+        this.snapshotTurnChangeBaseline(sessionId);
+      }
+
       const input =
         typeof block.input === "object" && block.input !== null
           ? (block.input as Record<string, unknown>)
@@ -2545,7 +2562,51 @@ export class SessionManager {
         cwd,
         toolUseId: typeof block.id === "string" ? block.id : undefined,
       });
+      this.pendingTurnDiffs.add(sessionId);
+    }
+  }
+
+  /** Scan the workspace and publish accumulated changes once per completed turn. */
+  private async finalizeTurnDiff(
+    sessionId: string,
+    streamGen: number,
+  ): Promise<void> {
+    if (!this.pendingTurnDiffs.delete(sessionId)) return;
+    const baseline = this.turnChangeBaselines.get(sessionId) ?? {
+      eventIds: new Set<string>(),
+      paths: new Set<string>(),
+    };
+    this.turnChangeBaselines.delete(sessionId);
+    const cwd = this.sessions.get(sessionId)?.summary.cwd;
+    this.hydrateChanges(sessionId);
+    try {
+      await this.diffTracker.refreshBashWritesFromDisk(sessionId, cwd);
+    } catch {
+      // Edit/Write snapshots are still useful even if the workspace scan fails.
+    }
+    const current = this.sessions.get(sessionId);
+    if (!current || current.streamGen !== streamGen) return;
+    const changes = this.diffTracker.list(sessionId);
+    if (changes.length > 0) {
       this.emitDiffAndPersist(sessionId);
+    }
+    const files = summarizeTurnFiles(changes, baseline.eventIds, {
+      baselinePaths: baseline.paths,
+    });
+    if (files.length > 0) {
+      const entry = this.sessions.get(sessionId);
+      if (!entry || entry.streamGen !== streamGen) return;
+      const event: SdkNormalizedEvent = {
+        type: "turn_changes",
+        sessionId,
+        item: {
+          kind: "changes",
+          id: entry.nextId("changes"),
+          files,
+        },
+      };
+      this.applyAndMaybePersist(entry, event);
+      this.emit(event);
     }
   }
 }

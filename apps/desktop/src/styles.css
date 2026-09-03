@@ -53,7 +53,7 @@
   --ui-font-size: 1rem;
 
   --radius-sm: 8px;
-  --radius-md: 12px;
+  --radius-md: 8px;
   --radius-lg: 18px;
   --radius-pill: 999px;
   --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.25);
@@ -654,16 +654,19 @@ textarea {
   border-radius: 0;
   background: transparent;
   overflow: hidden;
+  /* 与会话列表之间的分隔线，线上方带一点向上的淡阴影 */
+  border-top: 1px solid var(--border);
+  box-shadow: 0 -4px 10px -6px rgba(0, 0, 0, 0.12);
 }
 
-/* 展开：会话列表与「最近」标签让位，本栏占据剩余全部高度 */
+/* 展开：会话列表与「项目」节头让位，本栏占据剩余全部高度 */
 .sidebar-files.open {
   flex: 1 1 0;
   min-height: 0;
 }
 
 .session-list:has(.sidebar-files.open) .session-list-ul,
-.session-list:has(.sidebar-files.open) .sidebar-section-label {
+.session-list:has(.sidebar-files.open) .sidebar-section-head {
   display: none;
 }
 
@@ -672,6 +675,12 @@ textarea {
   align-items: center;
   gap: 4px;
   flex-shrink: 0;
+  /* 收起态保持紧凑；展开态再单独为下方分隔线留空间。 */
+  padding: 6px 6px 0 0;
+}
+
+.sidebar-files.open .sidebar-files-head {
+  padding-bottom: 5px;
 }
 
 .sidebar-files-toggle {
@@ -682,7 +691,10 @@ textarea {
   background: transparent;
   border: none;
   border-radius: var(--radius-md);
-  padding: 9px 12px;
+  /* hover 高度与同行的 .pane-side-btn（32px）对齐 */
+  min-height: 32px;
+  padding: 4px 12px;
+  box-sizing: border-box;
   cursor: pointer;
   color: var(--text-muted);
   font-size: 1.038rem;
@@ -768,7 +780,9 @@ textarea {
 }
 
 .sidebar-files-head .pane-side-btn {
-  margin-right: 6px;
+  width: 32px;
+  height: 32px;
+  margin-right: 0;
 }
 
 .pane-side-btn:hover {
@@ -2313,15 +2327,14 @@ body.is-resizing-row * {
 }
 
 /* Ghost variants keep their own paddings */
-/* 标题栏右侧的权限（自主度）选择器：与 composer 输入框一致的毛玻璃风格，无边框。 */
+/* composer 内的审批模式选择器：无背景，直接透出 composer 整体的毛玻璃。 */
 .select-ghost-wrap .themed-select-btn {
   border: none;
   padding: 3px 8px;
   /* min-width 显式为 0：默认值 auto 无法过渡，展开/收回的宽度拉伸才有动画 */
   min-width: 0;
   color: var(--text-muted);
-  background: color-mix(in srgb, var(--bg-input) 42%, transparent);
-  backdrop-filter: blur(20px) saturate(1.35);
+  background: transparent;
   transition: background 140ms ease, border-color 140ms ease,
     box-shadow 140ms ease, color 140ms ease,
     min-width 240ms cubic-bezier(0.2, 0.8, 0.2, 1);
@@ -2463,10 +2476,211 @@ body.is-resizing-row * {
 .sidebar-section-label {
   margin-top: 8px;
   padding: 4px 12px;
-  font-size: 0.846rem;
+  /* 与下方「文件」节头（.sidebar-files-toggle）字号一致 */
+  font-size: 1.038rem;
   color: var(--text-faint);
   text-transform: none;
   letter-spacing: 0.02em;
+}
+
+/* 「项目」节头行：label + 右侧 ⋯ / + 操作钮（⋯ 菜单相对本行定位） */
+.sidebar-section-head {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-top: 8px;
+  padding-right: 6px;
+}
+
+.sidebar-section-head .sidebar-section-label {
+  margin-top: 0;
+  flex: 1 1 auto;
+}
+
+.sidebar-section-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+/* 搜索入口与“新会话”同形，输入框放在点击后出现的浮层中。 */
+.sidebar-search-trigger {
+  margin-top: -4px;
+}
+
+.sidebar-search-trigger > svg {
+  box-sizing: content-box;
+  flex-shrink: 0;
+  width: 13px;
+  height: 13px;
+  padding: 3.5px;
+  border-radius: 6px;
+  background: var(--bg-active);
+}
+
+.sidebar-search-clear {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0;
+}
+
+.sidebar-search-clear:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+/* 会话搜索浮层：样式接近命令面板，但只保留聊天搜索。 */
+.session-search-overlay {
+  position: fixed;
+  inset: var(--titlebar-h) 0 0;
+  z-index: 520;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: min(9vh, 72px);
+  background: color-mix(in srgb, var(--overlay-bg) 68%, transparent);
+  backdrop-filter: blur(3px);
+  -webkit-app-region: no-drag;
+}
+
+.session-search-modal {
+  width: min(560px, calc(100vw - 36px));
+  max-height: min(640px, calc(100vh - 100px));
+  display: flex;
+  flex-direction: column;
+  padding: 10px;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--bg-elevated) 94%, transparent);
+  box-shadow: var(--shadow-2);
+  animation: modal-in 160ms ease;
+}
+
+.session-search-field {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 4px 6px 10px;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.session-search-field > svg {
+  flex-shrink: 0;
+}
+
+.session-search-field input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 4px 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 1rem;
+}
+
+.session-search-field input::placeholder {
+  color: var(--text-faint);
+}
+
+.session-search-section-label {
+  padding: 11px 8px 5px;
+  color: var(--text-faint);
+  font-size: 0.769rem;
+}
+
+.session-search-results {
+  min-height: 52px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+/* 搜索结果行：标题 + 项目名；内容命中时再显示片段。 */
+.session-search-hit {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 12px;
+  align-items: center;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.session-search-hit:hover {
+  background: var(--bg-hover);
+}
+
+.session-search-hit.active {
+  background: var(--bg-active);
+}
+
+.session-search-hit-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-search-hit-project {
+  max-width: 150px;
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: 0.769rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-search-hit-snippet {
+  grid-column: 1 / -1;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+/* 整个项目名称区域都可点击展开/收起。 */
+.session-project-toggle {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  align-self: stretch;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
+}
+
+.session-project-toggle:focus-visible {
+  outline: none;
+  border-radius: 5px;
+  box-shadow: var(--focus-ring);
 }
 
 .session-list-ul {
@@ -2485,17 +2699,20 @@ body.is-resizing-row * {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  /* Slim scrollbar; only visible on hover to keep the sidebar calm */
-  scrollbar-width: thin;
-  scrollbar-color: transparent transparent;
+  /* 新版 Electron 会让标准 scrollbar-width 覆盖 WebKit 自定义宽度；
+     保持默认值，尺寸交给下方 ::-webkit-scrollbar 控制。 */
+  scrollbar-width: auto;
+  scrollbar-color: auto;
+  /* 折叠项目导致滚动条消失时仍保留同宽槽位，避免列表横向跳动。 */
+  scrollbar-gutter: stable;
 }
 
 .session-list-ul:hover {
-  scrollbar-color: var(--border-strong) transparent;
+  scrollbar-color: auto;
 }
 
 .session-list-ul::-webkit-scrollbar {
-  width: 5px;
+  width: 12px;
 }
 
 .session-list-ul::-webkit-scrollbar-thumb {
@@ -2554,12 +2771,54 @@ body.is-resizing-row * {
 
 /* Reserve the ⋯ button's space so a long title never runs underneath it. */
 .session-list-item .session-item {
-  padding-right: 36px;
+  padding-right: 46px;
+}
+
+.session-item-tail {
+  position: absolute;
+  top: 50%;
+  right: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 24px;
+  transform: translateY(-50%);
+  color: var(--text-faint);
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.session-item-age {
+  font-size: 0.808rem;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+}
+
+.session-running-spinner {
+  width: 13px;
+  height: 13px;
+  border: 2px solid color-mix(in srgb, var(--text-faint) 34%, transparent);
+  border-top-color: var(--text);
+  border-right-color: var(--text-muted);
+  border-radius: 50%;
+  animation: session-spinner 0.8s linear infinite;
+}
+
+@keyframes session-spinner {
+  to { transform: rotate(360deg); }
+}
+
+.session-list-item:hover .session-item-tail,
+.session-list-item:focus-within .session-item-tail,
+.session-list-item:has(.session-menu) .session-item-tail,
+.session-list-item.menu-open .session-item-tail {
+  opacity: 0;
 }
 
 .session-list-item:hover .session-item-more,
 .session-item-more:focus-visible,
-.session-list-item:has(.session-menu) .session-item-more {
+.session-list-item:has(.session-menu) .session-item-more,
+.session-list-item.menu-open .session-item-more {
   opacity: 1;
 }
 
@@ -2573,6 +2832,132 @@ body.is-resizing-row * {
   vertical-align: -1px;
   margin-right: 5px;
   color: var(--accent);
+}
+
+/* 项目分组：项目行（图标 + 名称，hover 显示 ⋯ / +）+ 组内缩进的会话列表 */
+.session-project-group {
+  width: 100%;
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
+  flex-shrink: 0;
+}
+
+.session-project-group:has(.session-menu) {
+  position: relative;
+  z-index: 40;
+}
+
+.session-project-sessions-clip {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  display: grid;
+  grid-template-rows: 1fr;
+  opacity: 1;
+  visibility: visible;
+  transition:
+    grid-template-rows 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 140ms ease,
+    visibility 0s linear 0s;
+}
+
+.session-project-sessions-clip.collapsed {
+  grid-template-rows: 0fr;
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    grid-template-rows 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 120ms ease,
+    visibility 0s linear 180ms;
+}
+
+.session-project-sessions {
+  width: 100%;
+  box-sizing: border-box;
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.session-project-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px 4px 10px;
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+}
+
+.session-project-row:hover {
+  background: var(--bg-hover);
+}
+
+/* The ⋯ menu must escape the row's stacking context. */
+.session-project-row:has(.session-menu) {
+  z-index: 20;
+}
+
+.session-project-row.current .session-project-name {
+  color: var(--text);
+}
+
+.session-project-icon {
+  flex-shrink: 0;
+  color: var(--text-faint);
+}
+
+.session-project-name {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.923rem;
+  font-weight: 500;
+}
+
+.session-project-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.session-project-row:hover .session-project-actions,
+.session-project-row:focus-within .session-project-actions,
+.session-project-row:has(.session-menu) .session-project-actions,
+.session-project-row.menu-open .session-project-actions {
+  opacity: 1;
+}
+
+.session-project-action {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.session-project-action:hover {
+  background: var(--bg-active);
+  color: var(--text);
 }
 
 .session-menu {
@@ -2590,6 +2975,14 @@ body.is-resizing-row * {
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-2);
   animation: select-menu-in 130ms ease;
+}
+
+.session-menu-floating {
+  position: fixed;
+  top: auto;
+  right: auto;
+  bottom: auto;
+  z-index: 1000;
 }
 
 .session-menu button {
@@ -2816,27 +3209,6 @@ body.session-detaching {
   color: var(--text-faint);
 }
 
-.session-folder {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 1;
-  opacity: 0.9;
-}
-
-.session-status.status-running {
-  color: var(--warn);
-}
-
-.session-status.status-error {
-  color: var(--danger);
-}
-
-.session-status.status-idle {
-  color: var(--text-faint);
-}
-
 .status-dot-wrap {
   display: inline-flex;
   align-items: center;
@@ -2856,7 +3228,7 @@ body.session-detaching {
   font-size: 0.962rem;
 }
 
-/* Chat — header / scroll body / composer; composer always pinned to chat bottom */
+/* Chat — scroll body / composer; composer always pinned to chat bottom */
 .chat-panel {
   display: flex;
   flex-direction: column;
@@ -2876,33 +3248,6 @@ body.session-detaching {
   min-width: 0;
 }
 
-.chat-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-  padding: 0 var(--space-4);
-  min-height: 52px;
-  min-width: 0;
-  flex: 0 0 auto;
-  border-bottom: 1px solid var(--border-soft);
-  background: color-mix(in srgb, var(--bg-app) 48%, transparent);
-  backdrop-filter: blur(22px) saturate(1.5);
-  /* Keep header (and its dropdown menus) above the transcript: .chat-body is a
-     stacking context (container-type) later in DOM order, so without this it
-     paints over the permission-mode menu and swallows its clicks. */
-  position: relative;
-  z-index: 30;
-}
-
-.chat-header-left {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-width: 0;
-  flex: 1 1 auto;
-}
-
 .chat-title {
   font-size: 1.077rem;
   font-weight: 600;
@@ -2911,28 +3256,6 @@ body.session-detaching {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.chat-header-right {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
-  min-width: fit-content;
-}
-
-.chat-header-field {
-  display: inline-flex;
-  margin-right: 10px;
-}
-
-.badge {
-  font-size: 0.769rem;
-  font-weight: 500;
-  padding: 2px 8px;
-  border-radius: var(--radius-pill);
-  background: rgba(251, 191, 36, 0.12);
-  color: var(--warn);
 }
 
 .session-usage {
@@ -2954,54 +3277,6 @@ body.session-detaching {
   color: var(--text-faint);
   padding: 2px 0 8px;
   letter-spacing: 0.01em;
-}
-
-.context-meter {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 0.846rem;
-  color: var(--text-faint);
-  min-width: 0;
-  max-width: min(220px, 30vw);
-  flex-shrink: 1;
-}
-
-.context-meter-bar {
-  display: inline-block;
-  width: 48px;
-  height: 4px;
-  border-radius: 999px;
-  background: var(--bg-active);
-  overflow: hidden;
-  flex-shrink: 0;
-}
-
-.context-meter-fill {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
-  background: var(--text-muted);
-}
-
-.context-meter-warn {
-  color: var(--warn);
-}
-.context-meter-warn .context-meter-fill {
-  background: var(--warn);
-}
-
-.context-meter-danger {
-  color: var(--danger);
-}
-.context-meter-danger .context-meter-fill {
-  background: var(--danger);
-}
-
-.context-meter-label {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .context-banner {
@@ -3071,6 +3346,31 @@ body.session-detaching {
   bottom: 0;
   padding: 0 0 var(--space-4);
   z-index: 2;
+}
+
+/* 新建会话（未选中任何会话）：hero 标题与输入框作为一个整体水平居中、
+   垂直方向略低于正中；composer 由底部悬浮层回到正常文档流。 */
+.chat-panel.hero {
+  justify-content: center;
+  padding-top: 12vh;
+}
+
+.chat-panel.hero .chat-body {
+  flex: 0 0 auto;
+}
+
+.chat-panel.hero .chat-composer {
+  position: static;
+  padding-bottom: 0;
+}
+
+.chat-panel.hero .message-list {
+  overflow: visible;
+  padding-bottom: var(--space-5);
+}
+
+.chat-panel.hero .message-list.empty {
+  min-height: 0;
 }
 
 /* Messages — this is the transcript scroller (not .chat-body). */
@@ -3415,8 +3715,179 @@ body.session-detaching {
 .message-row.role-assistant,
 .message-row.role-system,
 .message-row.tool-row,
-.message-row.skill-row {
+.message-row.skill-row,
+.message-row.turn-changes-row {
   justify-content: flex-start;
+}
+
+.turn-changes-row {
+  width: 100%;
+}
+
+.turn-changes-card {
+  width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg-elevated);
+  color: var(--text);
+}
+
+.turn-changes-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 52px;
+  padding: 10px 14px 6px;
+}
+
+.turn-changes-icon {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  place-items: center;
+  border-radius: 10px;
+  background: var(--bg-hover);
+  color: var(--text-muted);
+}
+
+.turn-changes-icon svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.55;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.turn-changes-title {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.turn-changes-title strong {
+  font-size: 0.962rem;
+  font-weight: 600;
+}
+
+.turn-changes-view {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  width: fit-content;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.846rem;
+  cursor: pointer;
+}
+
+.turn-changes-view:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.turn-changes-view:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.turn-changes-view svg {
+  width: 11px;
+  height: 11px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.turn-changes-files {
+  padding: 6px 0;
+}
+
+.turn-change-file {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 12px;
+  border: 0;
+  padding: 6px 14px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.turn-change-file:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.turn-change-file:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.turn-change-path {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.885rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.turn-change-stats {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 4px;
+  font-variant-numeric: tabular-nums;
+  font-size: 0.885rem;
+}
+
+.turn-change-add {
+  color: var(--ok);
+}
+
+.turn-change-del {
+  color: var(--danger);
+}
+
+.turn-changes-collapse {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  padding: 6px 14px 10px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.846rem;
+  cursor: pointer;
+}
+
+.turn-changes-collapse:hover {
+  color: var(--text);
+}
+
+.turn-changes-collapse svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .bubble {
@@ -3538,22 +4009,40 @@ body.session-detaching {
   animation: thinking-pulse 1.2s ease-in-out infinite;
 }
 
-/* 思考过程块：思考中实时展开，正文开始/回合结束后自动折叠（open 受控） */
+/* 思考过程块：思考中实时展开，正文开始/回合结束后自动折叠。 */
 .msg-thinking {
   margin: 0 0 6px;
   font-size: 0.846rem;
   color: var(--text-faint);
 }
 
-.msg-thinking summary {
+.msg-thinking-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
   cursor: pointer;
   user-select: none;
   color: var(--text-faint);
   letter-spacing: 0.02em;
 }
 
-/* 思考中 summary 带呼吸感 */
-.msg-thinking[open] summary {
+.msg-thinking-toggle:hover {
+  color: var(--text-muted);
+}
+
+.msg-thinking-toggle:focus-visible {
+  outline: none;
+  border-radius: 4px;
+  box-shadow: var(--focus-ring);
+}
+
+/* 只让进行中的标题带呼吸感；手动回看已完成内容时保持稳定。 */
+.msg-thinking.active .msg-thinking-toggle {
   animation: thinking-pulse 1.2s ease-in-out infinite;
 }
 
@@ -3614,9 +4103,11 @@ body.session-detaching {
 .md-body h1 {
   font-size: 1.35em;
 }
+
 .md-body h2 {
   font-size: 1.2em;
 }
+
 .md-body h3 {
   font-size: 1.08em;
 }
@@ -4103,39 +4594,208 @@ body.session-detaching {
   color: var(--accent);
 }
 
-.composer-project-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  max-width: 180px;
-  height: 30px;
-  border: none;
-  border-radius: 999px;
-  background: transparent;
-  color: var(--text-muted);
-  font-size: 0.9rem;
-  padding: 0 12px;
-  cursor: pointer;
-  flex-shrink: 0;
-  transition: color 120ms ease;
-}
-
-.composer-project-chip span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.composer-project-chip:hover {
-  color: var(--accent);
-}
-
 .composer-file-input {
   position: absolute;
   width: 0;
   height: 0;
   opacity: 0;
   pointer-events: none;
+}
+
+/* 新建对话页：输入框下方的项目文件夹选择行（点击弹出最近项目上拉框） */
+.composer-project-wrap {
+  position: relative;
+}
+
+.composer-project-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin-top: 6px;
+  padding: 10px 14px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 1.05rem;
+  cursor: pointer;
+  transition: color 120ms ease;
+}
+
+.composer-project-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-project-chev {
+  flex-shrink: 0;
+  color: var(--text-faint);
+  transition: transform 160ms ease;
+}
+
+.composer-project-wrap.open .composer-project-chev {
+  transform: rotate(180deg);
+}
+
+.composer-project-row:hover {
+  color: var(--accent);
+}
+
+/* 项目选择上拉框：最近 5 个项目 + 底部自由选择 */
+.composer-project-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  min-width: 280px;
+  max-width: min(420px, 80vw);
+  padding: 6px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-composer);
+  z-index: 6;
+}
+
+.composer-project-menu-title {
+  padding: 4px 10px;
+  font-size: 0.85rem;
+  color: var(--text-faint);
+}
+
+.composer-project-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font-size: 0.95rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.composer-project-item:hover {
+  background: var(--bg-hover);
+}
+
+.composer-project-item.current {
+  background: var(--bg-active);
+}
+
+.composer-project-item > svg {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.composer-project-item-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.composer-project-item-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-project-item-path {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-project-item-check {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.composer-project-menu-divider {
+  height: 1px;
+  margin: 5px 8px;
+  background: var(--border-soft);
+}
+
+/* 上下文用量圆环：灰轨道 + 黑进度弧；hover 向上弹出明细 */
+.context-ring {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  color: var(--text-muted);
+  outline: none;
+}
+
+.context-ring:focus-visible {
+  box-shadow: var(--focus-ring);
+}
+
+.context-ring-track {
+  fill: none;
+  stroke: var(--border-strong);
+  stroke-width: 2;
+}
+
+.context-ring-fill {
+  fill: none;
+  stroke: var(--text);
+  stroke-width: 2;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 200ms ease;
+}
+
+.context-ring-popover {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  transform: translateY(4px) scale(0.98);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 142px;
+  padding: 9px 11px;
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-elevated) 94%, transparent);
+  box-shadow: var(--shadow-2);
+  color: var(--text-faint);
+  font-size: 0.769rem;
+  line-height: 1.35;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  backdrop-filter: blur(18px) saturate(1.25);
+  transition:
+    opacity 120ms ease,
+    transform 150ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    visibility 0s linear 150ms;
+}
+
+.context-ring-popover strong {
+  color: var(--text);
+  font-size: 0.962rem;
+}
+
+.context-ring:hover .context-ring-popover,
+.context-ring:focus-visible .context-ring-popover {
+  transform: translateY(0) scale(1);
+  opacity: 1;
+  visibility: visible;
+  transition-delay: 0s;
 }
 
 .composer-attachments {
@@ -4255,7 +4915,7 @@ body.session-detaching {
     min-width 240ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
-/* hover 与 .composer-project-chip 一致：只变色 */
+/* hover 与原先的项目 chip 一致：只变色 */
 .composer-model-menu-trigger:hover,
 .composer-model-menu-trigger[aria-expanded="true"] {
   color: var(--accent);
@@ -5672,6 +6332,144 @@ body.session-detaching {
 
 .room-leave-modal {
   width: min(380px, 100%);
+}
+
+/* Workspace removal follows the compact, borderless confirmation style. */
+.workspace-remove-modal {
+  width: min(420px, 100%);
+  min-height: 218px;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--bg-elevated) 94%, transparent);
+  box-shadow: var(--shadow-2);
+  animation: modal-in 160ms ease;
+}
+
+.room-modal-overlay:has(.workspace-remove-modal) {
+  background: rgba(0, 0, 0, 0.3);
+  backdrop-filter: blur(2px);
+}
+
+.workspace-remove-modal .room-modal-head {
+  padding: 16px 20px 0;
+  border: none;
+}
+
+.workspace-remove-modal .room-modal-head h3 {
+  font-size: 1.077rem;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
+.workspace-remove-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin: -3px -3px 0 0;
+  padding: 0;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.workspace-remove-close svg {
+  width: 16px;
+  height: 16px;
+}
+
+.workspace-remove-close:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.workspace-remove-close:focus-visible,
+.workspace-remove-cancel:focus-visible,
+.workspace-remove-confirm:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.workspace-remove-modal .room-modal-body {
+  flex: 1 1 auto;
+  padding: 36px 24px 10px;
+  overflow: hidden;
+}
+
+.workspace-remove-prompt {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 1rem;
+  line-height: 1.5;
+}
+
+.workspace-remove-modal .room-modal-foot {
+  gap: 10px;
+  padding: 0 28px 22px;
+  border: none;
+}
+
+.workspace-remove-cancel,
+.workspace-remove-confirm {
+  min-width: 78px;
+  height: 35px;
+  padding: 0 16px;
+  border-radius: 9px;
+  font: inherit;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.workspace-remove-cancel {
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elevated);
+  color: var(--text);
+}
+
+.workspace-remove-cancel:hover {
+  background: var(--bg-hover);
+}
+
+.workspace-remove-confirm {
+  border: none;
+  background: var(--danger);
+  color: #fff;
+}
+
+.workspace-remove-confirm:hover {
+  filter: brightness(0.94);
+}
+
+.workspace-remove-close:disabled,
+.workspace-remove-cancel:disabled,
+.workspace-remove-confirm:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+@media (max-width: 620px) {
+  .workspace-remove-modal {
+    min-height: 202px;
+    border-radius: 16px;
+  }
+
+  .workspace-remove-modal .room-modal-head {
+    padding: 22px 24px 0;
+  }
+
+  .workspace-remove-modal .room-modal-body {
+    padding: 28px 24px 20px;
+  }
+
+  .workspace-remove-modal .room-modal-foot {
+    padding: 0 24px 22px;
+  }
 }
 
 .room-leave-text {
@@ -8849,6 +9647,7 @@ body.session-detaching {
   min-height: 0;
   background: var(--bg-app);
 }
+
 .cli-head {
   display: flex;
   align-items: center;
@@ -8857,6 +9656,7 @@ body.session-detaching {
   border-bottom: 1px solid var(--border);
   -webkit-app-region: no-drag;
 }
+
 .cli-title { font-weight: 600; }
 .cli-meta { color: var(--text-muted); font-size: 12px; }
 .cli-xterm {
@@ -8866,15 +9666,18 @@ body.session-detaching {
   -webkit-app-region: no-drag;
   app-region: no-drag;
 }
+
 .cli-xterm .xterm {
   height: 100%;
   padding: 4px 8px 0;
 }
+
 .cli-xterm .xterm-viewport,
 .cli-xterm .xterm-screen,
 .cli-xterm .xterm-scrollable-element {
   background: var(--bg-terminal) !important;
 }
+
 .cli-err { color: var(--danger); padding: 0 14px; font-size: 12px; }
 
 @media (prefers-reduced-motion: reduce) {

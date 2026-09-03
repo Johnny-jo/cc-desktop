@@ -81,4 +81,42 @@ describe("SettingsStore", () => {
     // public view exposes config (no secrets-redaction layer for env/headers in v1)
     expect(Object.keys(again.getPublic().mcpServers ?? {})).toEqual(["fs", "api"]);
   });
+
+  it("loads legacy settings.json without a projects field", () => {
+    const crypto = {
+      encrypt: (s: string) => Buffer.from(s, "utf8").toString("base64"),
+      decrypt: (s: string) => Buffer.from(s, "base64").toString("utf8"),
+    };
+    // Simulate a settings.json written before the projects field existed.
+    fs.writeFileSync(
+      path.join(dir, "settings.json"),
+      JSON.stringify({ defaultModel: "kimi-for-coding", models: ["kimi-for-coding"] }),
+      "utf8",
+    );
+    const store = new SettingsStore({ userDataDir: dir, ...crypto });
+    expect(store.get().projects).toEqual([]);
+    expect(store.get().defaultModel).toBe("kimi-for-coding");
+  });
+
+  it("persists and reloads projects, dropping non-string entries", () => {
+    const crypto = {
+      encrypt: (s: string) => Buffer.from(s, "utf8").toString("base64"),
+      decrypt: (s: string) => Buffer.from(s, "base64").toString("utf8"),
+    };
+    const store = new SettingsStore({ userDataDir: dir, ...crypto });
+    expect(store.get().projects).toEqual([]);
+
+    store.update({ projects: ["D:\\proj\\a", "D:\\proj\\b"] });
+    const again = new SettingsStore({ userDataDir: dir, ...crypto });
+    expect(again.get().projects).toEqual(["D:\\proj\\a", "D:\\proj\\b"]);
+    expect(again.getPublic().projects).toEqual(["D:\\proj\\a", "D:\\proj\\b"]);
+
+    fs.writeFileSync(
+      path.join(dir, "settings.json"),
+      JSON.stringify({ projects: ["D:\\proj\\c", 42, "", null] }),
+      "utf8",
+    );
+    const dirty = new SettingsStore({ userDataDir: dir, ...crypto });
+    expect(dirty.get().projects).toEqual(["D:\\proj\\c"]);
+  });
 });

@@ -34,6 +34,12 @@ const desktop = {
 
   listSessions: () => ipcRenderer.invoke(IPC.sessionList),
 
+  /** Full-text search over persisted session transcript content. */
+  searchSessions: (query: string, limit?: number) =>
+    ipcRenderer.invoke(IPC.sessionSearch, { query, limit }) as Promise<{
+      results: import("@claude-desktop/shared").SessionSearchHit[];
+    }>,
+
   setSessionPinned: (sessionId: string, pinned: boolean) =>
     ipcRenderer.invoke(IPC.sessionSetPinned, { sessionId, pinned }) as Promise<{
       ok: boolean;

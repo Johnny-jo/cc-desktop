@@ -139,7 +139,13 @@ export class DiffTracker {
       return;
     }
     if (toolName === "Bash") {
-      if (opts?.cwd) {
+      // One baseline per turn is enough. It is consumed by the single
+      // end-of-turn refresh, instead of being replaced for every Bash call.
+      if (
+        opts?.cwd &&
+        !this.bashBaselines.has(sessionId) &&
+        !this.bashBaselineTasks.has(sessionId)
+      ) {
         void this.captureBashBaseline(sessionId, opts.cwd);
       }
       this.onBashWrite(sessionId, input, opts?.cwd);
@@ -372,42 +378,44 @@ export class DiffTracker {
     if (this.readFile) {
       const map = this.sessions.get(sessionId);
       if (map) {
-        let next = map;
+        const next = new Map(map);
         for (const [filePath, change] of map) {
-          const fromBash = change.events.some((e) => e.tool === "Bash");
-          if (!fromBash) continue;
+          const lastBash = [...change.events]
+            .reverse()
+            .find((event) => event.tool === "Bash");
+          if (!lastBash) continue;
           let content: string;
           try {
             content = this.readFile(filePath);
           } catch {
             continue;
           }
-          const status = change.status;
-          const prevForHunk =
-            status === "A" ? null : change.events.length > 1 ? null : null;
-          const hunk = buildWriteHunk({
+          const hunk = `${buildWriteHunk({
             path: filePath,
-            previousContent: prevForHunk,
+            previousContent: change.status === "A" ? null : "",
             nextContent: content,
-          });
-          const eventId = newChangeEventId();
-          this.notifyBeforeWrite(sessionId, filePath, eventId);
-          next = upsertFileChange(next, {
-            id: eventId,
-            path: filePath,
-            tool: "Bash",
-            hunk: `${hunk}\n# via Bash (disk)`,
-            at: this.now(),
-            status,
-          });
+          })}\n# via Bash (disk)`;
+          const events = change.events.map((event) =>
+            event.id === lastBash.id ? { ...event, hunk } : event,
+          );
+          next.set(
+            filePath,
+            compactFileChange({
+              ...change,
+              hunks: hunk,
+              events,
+            }),
+          );
         }
         this.sessions.set(sessionId, next);
       }
     }
 
+    // Only walk the worktree when this turn actually ran Bash. Edit/Write
+    // turns must not re-import the whole dirty tree as "this turn".
     const scanCwd =
       cwd || this.bashBaselines.get(sessionId)?.cwd || undefined;
-    if (scanCwd) {
+    if (scanCwd && this.bashBaselines.has(sessionId)) {
       await this.scanWorkspaceAfterBash(sessionId, scanCwd);
     }
     this.bashBaselines.delete(sessionId);
@@ -498,9 +506,28 @@ export class DiffTracker {
     return out;
   }
 
+  private findTrackedChange(
+    sessionId: string,
+    absPath: string,
+  ): FileChange | undefined {
+    const map = this.sessions.get(sessionId);
+    if (!map) return undefined;
+    const direct = map.get(absPath);
+    if (direct) return direct;
+    const normalized = path.normalize(absPath);
+    const normalizedLc = normalized.toLowerCase();
+    for (const [tracked, change] of map) {
+      const trackedNorm = path.normalize(tracked);
+      if (trackedNorm === normalized || trackedNorm.toLowerCase() === normalizedLc) {
+        return change;
+      }
+    }
+    return undefined;
+  }
+
   /**
    * Record a path found by post-Bash scan. Returns false when skipped
-   * (binary, already tracked by Edit/Write, unreadable).
+   * (binary, already tracked, unreadable).
    */
   private recordScannedPath(
     sessionId: string,
@@ -510,11 +537,11 @@ export class DiffTracker {
     if (!this.readFile) return false;
     if (looksBinaryPath(absPath)) return false;
 
-    const existing = this.sessions.get(sessionId)?.get(absPath);
+    const existing = this.findTrackedChange(sessionId, absPath);
     if (existing) {
-      // Already tracked by Edit/Write — don't double-count as Bash scan.
-      const onlyBash = existing.events.every((e) => e.tool === "Bash");
-      if (!onlyBash) return false;
+      // Already in the session change set — never append a scan event that
+      // would make a previous-turn file look new.
+      return false;
     }
 
     let content: string;
@@ -538,13 +565,7 @@ export class DiffTracker {
       this.sessions.set(sessionId, map);
     }
 
-    // Prefer "A" when scan says untracked/new; otherwise M.
-    // If we already had a Bash entry for this path, keep its status unless
-    // the scan upgrades A→M (shouldn't) or confirms A.
-    let status: "A" | "M" = statusHint;
-    if (existing?.status === "M") status = "M";
-    if (existing?.status === "A" && statusHint === "A") status = "A";
-
+    const status: "A" | "M" = statusHint;
     // For scan-discovered files we don't have pre-bash content in memory;
     // treat as full-file write for the hunk (A = new file, M = whole content).
     const previousContent = status === "A" ? null : "";

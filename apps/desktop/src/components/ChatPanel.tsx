@@ -1,32 +1,22 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import type { ChatItem, ModelQuotaInfo, PermissionMode } from "@claude-desktop/shared";
+import type { ChatItem, ModelQuotaInfo } from "@claude-desktop/shared";
 import { MessageList } from "./MessageList";
 import { Composer } from "./Composer";
-import { ThemedSelect } from "./Select";
-import { setPermissionMode, useAppStore } from "../state/store";
+import { useAppStore } from "../state/store";
 import { useI18n } from "../i18n/useI18n";
 import {
   contextLevel,
-  contextMeterTitle,
   formatContextPercent,
-  formatContextUsageLine,
   formatTokens,
 } from "../lib/format-usage";
 import { getDesktop, hasDesktopApi } from "../lib/desktop-api";
-
-const PERMISSION_MODES: PermissionMode[] = [
-  "default",
-  "acceptEdits",
-  "plan",
-  "auto",
-];
 
 const EMPTY_ITEMS: ChatItem[] = [];
 
 export type ChatPanelProps = {
   onOpenSettings: () => void;
   /** Open a project-relative file in the in-app editor column. */
-  onOpenFile?: (rel: string) => void;
+  onOpenFile?: (rel: string, line?: number) => void;
 };
 
 export function ChatPanel({ onOpenSettings, onOpenFile }: ChatPanelProps) {
@@ -45,11 +35,6 @@ export function ChatPanel({ onOpenSettings, onOpenFile }: ChatPanelProps) {
     (s) => s.loadingSessionId !== null && s.loadingSessionId === s.activeSessionId,
   );
   const sessions = useAppStore((s) => s.sessions);
-  const running = useAppStore((s) =>
-    s.activeSessionId
-      ? s.sessions.some((x) => x.id === s.activeSessionId && x.status === "running")
-      : false,
-  );
   const settings = useAppStore((s) => s.settings);
 
   const [bannerDismissed, setBannerDismissed] = useState<Record<string, true>>(
@@ -60,7 +45,6 @@ export function ChatPanel({ onOpenSettings, onOpenFile }: ChatPanelProps) {
   const active = sessions.find((s) => s.id === activeSessionId);
   const ctx = active?.contextUsage;
   const level = ctx ? contextLevel(ctx.ratio) : "ok";
-  const fillPct = ctx ? Math.max(0, Math.min(100, ctx.ratio * 100)) : 0;
   const quotaModel = ctx?.modelId ?? settings?.defaultModel ?? "";
   const activeRunning = active?.status === "running";
   const showBanner =
@@ -130,41 +114,10 @@ export function ChatPanel({ onOpenSettings, onOpenFile }: ChatPanelProps) {
   }, []);
 
   return (
-    <div className="chat-panel" ref={panelRef}>
-      <header className="chat-header">
-        <div className="chat-header-left">
-          <span className="chat-title">
-            {active ? active.title : "New chat"}
-          </span>
-          {running ? <span className="badge running">running</span> : null}
-          {ctx ? (
-            <span
-              className={`context-meter context-meter-${level}`}
-              title={contextMeterTitle(ctx)}
-            >
-              <span className="context-meter-bar" aria-hidden>
-                <span className="context-meter-fill" style={{ width: `${fillPct}%` }} />
-              </span>
-              <span className="context-meter-label">{formatContextUsageLine(ctx)}</span>
-            </span>
-          ) : null}
-        </div>
-        <div className="chat-header-right">
-          <label className="chat-header-field">
-            <ThemedSelect
-              className="select-ghost-wrap"
-              value={settings?.permissionMode ?? "default"}
-              disabled={!settings}
-              onChange={(v) => void setPermissionMode(v as PermissionMode)}
-              title="Permission mode"
-              align="right"
-              stretchOnOpen
-              options={PERMISSION_MODES.map((m) => ({ value: m }))}
-            />
-          </label>
-        </div>
-      </header>
-
+    <div
+      className={activeSessionId ? "chat-panel" : "chat-panel hero"}
+      ref={panelRef}
+    >
       <div className="chat-body">
         <div className="chat-inner">
           {showBanner && ctx ? (

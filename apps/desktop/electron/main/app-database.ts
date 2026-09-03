@@ -6,11 +6,14 @@ import type {
   ChatItem,
   FileChange,
   RoomTimelineItem,
+  SessionSearchHit,
 } from "@claude-desktop/shared";
 
 const DATABASE_FILE = "cc-desktop.sqlite3";
 const ROOM_HISTORY_LIMIT = 50;
 const ROOM_ITEM_LIMIT = 400;
+/** Max transcript rows scanned per content search (memory guard). */
+const SESSION_SEARCH_SCAN_LIMIT = 500;
 
 type DatabaseConstructor = new (location: string) => DatabaseSync;
 type RoomLike = {
@@ -51,6 +54,20 @@ function searchableChatText(item: ChatItem): string {
   return [row.text, row.thinking, row.summary, row.name]
     .filter((value): value is string => typeof value === "string")
     .join("\n");
+}
+
+/**
+ * Window of ~60 chars on each side of the first case-insensitive match,
+ * whitespace (incl. newlines) collapsed to single spaces; "…" marks the
+ * truncated sides.
+ */
+function transcriptSnippet(text: string, needle: string): string {
+  const index = text.toLowerCase().indexOf(needle.toLowerCase());
+  const at = index >= 0 ? index : 0;
+  const start = Math.max(0, at - 60);
+  const end = Math.min(text.length, at + needle.length + 60);
+  const body = text.slice(start, end).replace(/\s+/g, " ").trim();
+  return `${start > 0 ? "…" : ""}${body}${end < text.length ? "…" : ""}`;
 }
 
 /**
@@ -320,6 +337,57 @@ export class AppDatabase {
       hasMore: start > 0,
       hasNewer: end < total,
     };
+  }
+
+  /**
+   * Full-text content search over persisted transcripts. The SQL scan is
+   * capped; only the first matching row per session becomes a snippet, and
+   * hits come back ordered by the archive's updated_at DESC.
+   */
+  searchTranscripts(query: string, limit = 20): SessionSearchHit[] {
+    const needle = query.trim();
+    if (!needle) return [];
+    const cap = limit > 0 ? limit : 20;
+    // Escape LIKE wildcards so "%", "_" and "\" match literally.
+    const escaped = needle.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+    const rows = this.db
+      .prepare(
+        `SELECT t.session_id, t.item_text, a.updated_at, a.summary_json
+         FROM session_transcript t
+         JOIN session_archive a ON a.session_id = t.session_id
+         WHERE LOWER(t.item_text) LIKE LOWER(?) ESCAPE '\\'
+         ORDER BY a.updated_at DESC
+         LIMIT ?`,
+      )
+      .all(`%${escaped}%`, SESSION_SEARCH_SCAN_LIMIT) as unknown as Array<{
+      session_id: string;
+      item_text: string;
+      updated_at: number;
+      summary_json: string;
+    }>;
+
+    const hits: SessionSearchHit[] = [];
+    const seen = new Set<string>();
+    for (const row of rows) {
+      if (seen.has(row.session_id)) continue;
+      let summary: { title?: unknown; cwd?: unknown; updatedAt?: unknown };
+      try {
+        summary = JSON.parse(row.summary_json) as typeof summary;
+      } catch {
+        // Skip a corrupt summary row.
+        continue;
+      }
+      seen.add(row.session_id);
+      hits.push({
+        sessionId: row.session_id,
+        title: typeof summary.title === "string" ? summary.title : "",
+        cwd: typeof summary.cwd === "string" ? summary.cwd : "",
+        snippet: transcriptSnippet(row.item_text, needle),
+        updatedAt: Number(summary.updatedAt) || Number(row.updated_at) || 0,
+      });
+      if (hits.length >= cap) break;
+    }
+    return hits;
   }
 
   saveSessionItems(

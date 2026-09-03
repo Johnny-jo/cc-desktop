@@ -14,6 +14,7 @@ import { formatTurnUsageLine } from "../lib/format-usage";
 import {
   loadNewerMessages,
   loadOlderMessages,
+  requestRevealChange,
   rewindToMessage,
   selectSession,
   useAppStore,
@@ -23,6 +24,7 @@ import {
   buildConversationAnchors,
   type ConversationAnchor,
 } from "../lib/conversation-navigation";
+import { toProjectRel } from "../lib/project-path";
 
 /** Long skill / system dumps that slipped through as plain text. */
 function looksLikeSkillDump(text: string): boolean {
@@ -63,6 +65,44 @@ function CollapsedTextCard({ text }: { text: string }) {
         <span className="tool-status status-done">done</span>
       </button>
       {open ? <pre className="skill-dump-body">{text}</pre> : null}
+    </div>
+  );
+}
+
+function ThinkingBlock({
+  text,
+  active,
+}: {
+  text: string;
+  active: boolean;
+}) {
+  const [open, setOpen] = useState(active);
+
+  // Codex-style lifecycle: reveal the reasoning while it is arriving, then
+  // fold it when answer generation begins. Completed reasoning stays available
+  // for an explicit manual re-open.
+  useEffect(() => {
+    setOpen(active);
+  }, [active]);
+
+  return (
+    <div
+      className={`msg-thinking${open ? " open" : ""}${active ? " active" : ""}`}
+    >
+      <button
+        type="button"
+        className="msg-thinking-toggle"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <span className="tool-chevron" aria-hidden>
+          {open ? "▾" : "▸"}
+        </span>
+        <span>{active ? "思考中…" : "思考过程"}</span>
+      </button>
+      {open ? (
+        <div className="msg-thinking-body">{text || "正在组织思路…"}</div>
+      ) : null}
     </div>
   );
 }
@@ -124,12 +164,108 @@ function RewindButton({ sdkMsgId }: { sdkMsgId: string }) {
  * stripped when we render rich chips instead. */
 const ATTACHED_TAIL = /\n\n\[Attached: [^\]]*\]\s*$/;
 
+function TurnChangesCard({
+  files,
+  sessionId,
+  onOpenFile,
+}: {
+  files: Extract<ChatItem, { kind: "changes" }>["files"];
+  sessionId: string | null;
+  onOpenFile?: (rel: string, line?: number) => void;
+}) {
+  const { t } = useI18n();
+  const projectPath = useAppStore((state) => state.projectPath);
+  const [open, setOpen] = useState(true);
+  const title =
+    files.length === 1
+      ? t.changes.editedFilesOne
+      : t.changes.editedFiles.replace("{count}", String(files.length));
+
+  const viewChanges = () => {
+    if (!sessionId || !files[0]) return;
+    requestRevealChange({ sessionId, path: files[0].path });
+  };
+
+  return (
+    <section className="turn-changes-card">
+      <div className="turn-changes-head">
+        <span className="turn-changes-icon" aria-hidden>
+          <svg viewBox="0 0 20 20">
+            <rect x="4.25" y="3" width="11.5" height="14" rx="2" />
+            <path d="M10 7.25v5.5M7.25 10h5.5" />
+          </svg>
+        </span>
+        <span className="turn-changes-title">
+          <strong>{title}</strong>
+          <button
+            type="button"
+            className="turn-changes-view"
+            onClick={viewChanges}
+            disabled={!sessionId}
+          >
+            {t.changes.viewChanges}
+            <svg viewBox="0 0 16 16" aria-hidden>
+              <path d="M6 3.5h6.5V10M12.5 3.5L6 10" />
+            </svg>
+          </button>
+        </span>
+      </div>
+      {open ? (
+        <div className="turn-changes-files">
+          {files.map((file) => {
+            const rel = toProjectRel(projectPath, file.path);
+            const label = rel ?? file.path;
+            return (
+              <button
+                key={file.path}
+                type="button"
+                className="turn-change-file"
+                disabled={!rel || !onOpenFile}
+                title={
+                  rel
+                    ? t.changes.openAtLine.replace("{line}", String(file.line))
+                    : file.path
+                }
+                onClick={() => {
+                  if (rel) onOpenFile?.(rel, file.line);
+                }}
+              >
+                <span className="turn-change-path">{label}</span>
+                <span
+                  className="turn-change-stats"
+                  aria-label={`+${file.additions} -${file.deletions}`}
+                >
+                  <span className="turn-change-add">+{file.additions}</span>
+                  <span className="turn-change-del">-{file.deletions}</span>
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+      <button
+        type="button"
+        className="turn-changes-collapse"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        {open ? t.changes.collapseFiles : t.changes.expandFiles}
+        <svg viewBox="0 0 16 16" aria-hidden>
+          <path d={open ? "M4 10l4-4 4 4" : "M4 6l4 4 4-4"} />
+        </svg>
+      </button>
+    </section>
+  );
+}
+
 const MessageRow = memo(function MessageRow({
   item,
+  sessionId,
   onOpenFile,
 }: {
   item: ChatItem;
-  onOpenFile?: (rel: string) => void;
+  sessionId: string | null;
+  onOpenFile?: (rel: string, line?: number) => void;
 }) {
   if (item.kind === "tool") {
     return (
@@ -145,6 +281,18 @@ const MessageRow = memo(function MessageRow({
         <div className="usage-chip" title="This turn">
           {formatTurnUsageLine(item.usage)}
         </div>
+      </div>
+    );
+  }
+
+  if (item.kind === "changes") {
+    return (
+      <div className="message-row turn-changes-row" data-item-id={item.id}>
+        <TurnChangesCard
+          files={item.files}
+          sessionId={sessionId}
+          onOpenFile={onOpenFile}
+        />
       </div>
     );
   }
@@ -181,17 +329,10 @@ const MessageRow = memo(function MessageRow({
       ) : (
         <div className="bubble bubble-assistant">
           {item.thinkingText || (item.thinking && item.streaming) ? (
-            /* 思考阶段实时展开（open 受控，每次 delta 强制展开）；正文开始或
-               回合结束后自动折叠，保留内容可手动展开回看。 */
-            <details
-              className="msg-thinking"
-              open={Boolean(item.thinking && item.streaming)}
-            >
-              <summary>
-                {item.thinking && item.streaming ? "思考中…" : "思考过程"}
-              </summary>
-              <div className="msg-thinking-body">{item.thinkingText ?? ""}</div>
-            </details>
+            <ThinkingBlock
+              text={item.thinkingText ?? ""}
+              active={Boolean(item.thinking && item.streaming)}
+            />
           ) : null}
           {item.thinking && item.streaming && !item.text ? null : (
             <MarkdownBody text={item.text} streaming={item.streaming} />
@@ -347,7 +488,7 @@ export function MessageList({
   /** Actual provider quota observed or queried through CPA for the selected model. */
   modelQuota?: ModelQuotaInfo | null;
   /** Open a project-relative file in the in-app editor column. */
-  onOpenFile?: (rel: string) => void;
+  onOpenFile?: (rel: string, line?: number) => void;
 }) {
   const { t } = useI18n();
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -527,10 +668,8 @@ export function MessageList({
       <div className="message-list-shell">
         <div className="message-list empty">
           <div className="empty-hero">
-            <div className="empty-hero-title">How can I help you today?</div>
-            <p className="empty-hero-sub">
-              Open a project, then send a message to start a session.
-            </p>
+            <div className="empty-hero-title">{t.chat.emptyHeroTitle}</div>
+            <p className="empty-hero-sub">{t.chat.emptyHeroSub}</p>
           </div>
         </div>
       </div>
@@ -551,7 +690,12 @@ export function MessageList({
           </button>
         ) : null}
         {items.map((item) => (
-          <MessageRow key={item.id} item={item} onOpenFile={onOpenFile} />
+          <MessageRow
+            key={item.id}
+            item={item}
+            sessionId={sessionId}
+            onOpenFile={onOpenFile}
+          />
         ))}
         {hasNewer && sessionId ? (
           <button

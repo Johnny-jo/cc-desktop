@@ -40,12 +40,19 @@ import {
 } from "../lib/slash-commands";
 import { parseTrailingAt } from "../lib/at-mention";
 import { Lightbox, useImageDataUrl } from "./AttachmentChips";
+import { ContextRing } from "./ContextRing";
+import { ThemedSelect } from "./Select";
 
 /** Join a project-relative path onto the project root, tolerating either separator. */
 function joinProjectPath(root: string, rel: string): string {
   const sep = root.includes("\\") ? "\\" : "/";
   const trimmed = root.replace(/[/\\]+$/, "");
   return `${trimmed}${sep}${rel.replace(/[/\\]+/g, sep)}`;
+}
+
+/** 项目路径比较键：去尾斜杠并统一小写（Windows 路径大小写不敏感）。 */
+function cwdKey(cwd: string): string {
+  return cwd.replace(/[\\/]+$/, "").toLowerCase();
 }
 
 export type ComposerProps = {
@@ -227,8 +234,8 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
   } | null>(null);
   // The panel stays mounted briefly after close so the exit animation plays.
   const [modelMenuPanelMounted, setModelMenuPanelMounted] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const modelMenuRef = useRef<HTMLDivElement | null>(null);
   const modelMenuPanelRef = useRef<HTMLDivElement | null>(null);
   const { t } = useI18n();
@@ -243,6 +250,11 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
   const settings = useAppStore((s) => s.settings);
   const slashBySession = useAppStore((s) => s.slashBySession);
   const queuedPrompts = useAppStore((s) => s.queuedPrompts);
+  const activeCtx = useAppStore((s) =>
+    s.activeSessionId
+      ? s.sessions.find((x) => x.id === s.activeSessionId)?.contextUsage
+      : undefined,
+  );
 
   const canSend = Boolean(text.trim()) || attachments.length > 0;
 
@@ -263,6 +275,62 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
     : availableReasoningEfforts.length
       ? "默认"
       : "未同步";
+  const permissionLabels: Record<PermissionMode, string> = {
+    default: t.chat.permissionDefault,
+    acceptEdits: t.chat.permissionAcceptEdits,
+    plan: t.chat.permissionPlan,
+    auto: t.chat.permissionAuto,
+  };
+
+  // 新建会话页的项目选择上拉框：按最近会话时间排序取前 5 个项目，
+  // settings.projects 里还没出现过的按 0 时刻排在后面补齐。
+  const sessions = useAppStore((s) => s.sessions);
+  const recentProjects = useMemo(() => {
+    const byKey = new Map<string, { cwd: string; at: number }>();
+    for (const s of sessions) {
+      if (!s.cwd) continue;
+      const key = cwdKey(s.cwd);
+      const cur = byKey.get(key);
+      if (!cur || s.updatedAt > cur.at) {
+        byKey.set(key, { cwd: s.cwd.replace(/[\\/]+$/, ""), at: s.updatedAt });
+      }
+    }
+    for (const dir of settings?.projects ?? []) {
+      const key = cwdKey(dir);
+      if (!byKey.has(key)) {
+        byKey.set(key, { cwd: dir.replace(/[\\/]+$/, ""), at: 0 });
+      }
+    }
+    return [...byKey.values()]
+      .sort((a, b) => b.at - a.at)
+      .slice(0, 5)
+      .map((x) => x.cwd);
+  }, [sessions, settings?.projects]);
+
+  const [projMenuOpen, setProjMenuOpen] = useState(false);
+  const projMenuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!projMenuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (
+        projMenuRef.current &&
+        e.target instanceof Node &&
+        !projMenuRef.current.contains(e.target)
+      ) {
+        setProjMenuOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setProjMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [projMenuOpen]);
 
   const refreshModelCatalog = useCallback(async () => {
     const desktop = getDesktopOrNull();
@@ -441,28 +509,6 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
     },
     [attachments, validateAndSetAttachments],
   );
-
-  const handleFileSelect = useCallback(async () => {
-    const desktop = getDesktopOrNull();
-    if (!desktop) return;
-    try {
-      const { paths } = await desktop.selectFiles();
-      const added: Attachment[] = [];
-      for (const path of paths) {
-        try {
-          const attachment = await desktop.readAttachment(path);
-          added.push(attachment);
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          setAttachmentError(message);
-        }
-      }
-      validateAndSetAttachments([...attachments, ...added]);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      setAttachmentError(message);
-    }
-  }, [attachments, validateAndSetAttachments]);
 
   const removeAttachment = useCallback(
     (path: string) => {
@@ -919,32 +965,20 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
                 />
               </svg>
             </button>
-            <button
-              type="button"
-              className="composer-project-chip"
-              title={projectPath ?? t.chat.pickProject}
-              onClick={() => void openProject()}
-            >
-              <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden>
-                <path
-                  d="M1.5 4.5A1.5 1.5 0 0 1 3 3h3.2L7.7 5H13a1.5 1.5 0 0 1 1.5 1.5v5A1.5 1.5 0 0 1 13 13H3a1.5 1.5 0 0 1-1.5-1.5v-7Z"
-                  stroke="currentColor"
-                  strokeWidth="1.3"
-                  strokeLinejoin="round"
-                />
-              </svg>
-              <span>
-                {projectPath
-                  ? (projectPath
-                      .replace(/\\/g, "/")
-                      .split("/")
-                      .filter(Boolean)
-                      .pop() ?? projectPath)
-                  : t.chat.pickProject}
-              </span>
-            </button>
+            <ThemedSelect
+              className="select-ghost-wrap"
+              value={settings?.permissionMode ?? "default"}
+              disabled={!settings}
+              onChange={(v) => void setPermissionMode(v as PermissionMode)}
+              title={t.chat.permissionMode}
+              options={PERMISSION_CYCLE.map((m) => ({
+                value: m,
+                label: permissionLabels[m],
+              }))}
+            />
           </div>
           <div className="composer-actions">
+            {activeSessionId ? <ContextRing usage={activeCtx} /> : null}
             <div ref={modelMenuRef} className="composer-model-menu">
               <button
                 type="button"
@@ -1099,6 +1133,136 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
           </div>
         </div>
       </div>
+      {!activeSessionId ? (
+        <div
+          className={`composer-project-wrap${projMenuOpen ? " open" : ""}`}
+          ref={projMenuRef}
+        >
+          <button
+            type="button"
+            className="composer-project-row"
+            title={projectPath ?? t.chat.pickProject}
+            aria-haspopup="menu"
+            aria-expanded={projMenuOpen}
+            onClick={() => setProjMenuOpen((v) => !v)}
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
+              <path
+                d="M1.5 4.5A1.5 1.5 0 0 1 3 3h3.2L7.7 5H13a1.5 1.5 0 0 1 1.5 1.5v5A1.5 1.5 0 0 1 13 13H3a1.5 1.5 0 0 1-1.5-1.5v-7Z"
+                stroke="currentColor"
+                strokeWidth="1.3"
+                strokeLinejoin="round"
+              />
+            </svg>
+            <span>
+              {projectPath
+                ? (projectPath
+                    .replace(/\\/g, "/")
+                    .split("/")
+                    .filter(Boolean)
+                    .pop() ?? projectPath)
+                : t.chat.pickProject}
+            </span>
+            <svg
+              className="composer-project-chev"
+              width="12"
+              height="12"
+              viewBox="0 0 16 16"
+              fill="none"
+              aria-hidden
+            >
+              <path
+                d="M4 6l4 4 4-4"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </button>
+          {projMenuOpen ? (
+            <div className="composer-project-menu" role="menu">
+              <div className="composer-project-menu-title">
+                {t.chat.recentFolders}
+              </div>
+              {recentProjects.map((dir) => {
+                const name =
+                  dir.replace(/\\/g, "/").split("/").filter(Boolean).pop() ??
+                  dir;
+                const isCurrent = projectPath
+                  ? cwdKey(projectPath) === cwdKey(dir)
+                  : false;
+                return (
+                  <button
+                    key={dir}
+                    type="button"
+                    role="menuitem"
+                    className={`composer-project-item${isCurrent ? " current" : ""}`}
+                    onClick={() => {
+                      setProjMenuOpen(false);
+                      void openProject(dir);
+                    }}
+                  >
+                    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden>
+                      <path
+                        d="M1.5 4.5A1.5 1.5 0 0 1 3 3h3.2L7.7 5H13a1.5 1.5 0 0 1 1.5 1.5v5A1.5 1.5 0 0 1 13 13H3a1.5 1.5 0 0 1-1.5-1.5v-7Z"
+                        stroke="currentColor"
+                        strokeWidth="1.3"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                    <span className="composer-project-item-text">
+                      <span className="composer-project-item-name">{name}</span>
+                      <span className="composer-project-item-path">{dir}</span>
+                    </span>
+                    {isCurrent ? (
+                      <svg
+                        className="composer-project-item-check"
+                        width="14"
+                        height="14"
+                        viewBox="0 0 16 16"
+                        fill="none"
+                        aria-hidden
+                      >
+                        <path
+                          d="M3.5 8.5l3 3 6-6.5"
+                          stroke="currentColor"
+                          strokeWidth="1.6"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                    ) : null}
+                  </button>
+                );
+              })}
+              <div className="composer-project-menu-divider" />
+              <button
+                type="button"
+                role="menuitem"
+                className="composer-project-item"
+                onClick={() => {
+                  setProjMenuOpen(false);
+                  void openProject();
+                }}
+              >
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden>
+                  <path
+                    d="M9.5 2.5h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-3M6.5 11l3-3-3-3M9 8H2"
+                    stroke="currentColor"
+                    strokeWidth="1.3"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+                <span className="composer-project-item-name">
+                  {t.chat.pickProject}…
+                </span>
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }

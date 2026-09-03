@@ -100,6 +100,8 @@ const DEFAULTS: AppSettings = {
   permissionDeny: [],
   agents: [],
   pluginPaths: [],
+  projects: [],
+  hiddenProjects: [],
   uiFontSize: 13,
   editorFontSize: 12.5,
   updateFeedUrl: "",
@@ -146,6 +148,8 @@ export class SettingsStore {
         ...(a.tools ? { tools: [...a.tools] } : {}),
       })),
       pluginPaths: [...(this.settings.pluginPaths ?? [])],
+      projects: [...(this.settings.projects ?? [])],
+      hiddenProjects: [...(this.settings.hiddenProjects ?? [])],
     };
   }
 
@@ -186,6 +190,12 @@ export class SettingsStore {
     }
     if (publicPatch.pluginPaths !== undefined) {
       publicPatch.pluginPaths = sanitizePluginPaths(publicPatch.pluginPaths);
+    }
+    if (publicPatch.projects !== undefined) {
+      publicPatch.projects = sanitizePluginPaths(publicPatch.projects);
+    }
+    if (publicPatch.hiddenProjects !== undefined) {
+      publicPatch.hiddenProjects = sanitizePluginPaths(publicPatch.hiddenProjects);
     }
     const clearEffort = publicPatch.effort === null;
     if (
@@ -298,6 +308,8 @@ export class SettingsStore {
         permissionDeny: sanitizePermissionRules(rest.permissionDeny) ?? [],
         agents: sanitizeAgents(rest.agents) ?? [],
         pluginPaths: sanitizePluginPaths(rest.pluginPaths) ?? [],
+        projects: sanitizePluginPaths(rest.projects) ?? [],
+        hiddenProjects: sanitizePluginPaths(rest.hiddenProjects) ?? [],
         uiFontSize: clampFont(rest.uiFontSize, 11, 20, DEFAULTS.uiFontSize ?? 13),
         editorFontSize: clampFont(
           rest.editorFontSize,

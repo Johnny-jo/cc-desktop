@@ -122,6 +122,44 @@ describe("applySdkEvent", () => {
     });
   });
 
+  it("deduplicates a completed thinking block after partial deltas", () => {
+    let s = apply(emptyTranscript(), {
+      type: "thinking_delta",
+      sessionId: "s",
+      text: "先检查",
+    });
+    s = apply(s, {
+      type: "thinking_delta",
+      sessionId: "s",
+      text: "先检查调用链",
+    });
+    expect(s.items[0]).toMatchObject({ thinkingText: "先检查调用链" });
+  });
+
+  it("settles and folds thinking as soon as a tool starts", () => {
+    let s = apply(emptyTranscript(), {
+      type: "thinking_delta",
+      sessionId: "s",
+      text: "需要先读文件",
+    });
+    s = apply(s, {
+      type: "tool_start",
+      sessionId: "s",
+      tool: {
+        id: "read-1",
+        name: "Read",
+        summary: "a.ts",
+        status: "running",
+      },
+    });
+    expect(s.items[0]).toMatchObject({
+      role: "assistant",
+      thinkingText: "需要先读文件",
+      streaming: false,
+    });
+    expect(s.items[0]).not.toHaveProperty("thinking", true);
+  });
+
   it("streams text_delta then settles on text_done", () => {
     let s = apply(emptyTranscript(), {
       type: "text_delta",
@@ -160,7 +198,7 @@ describe("applySdkEvent", () => {
     expect(s.items[0]).not.toHaveProperty("thinking", true);
   });
 
-  it("result drops an empty thinking placeholder that is no longer last", () => {
+  it("tool start drops an empty thinking placeholder", () => {
     let s = apply(emptyTranscript(), {
       type: "thinking_delta",
       sessionId: "s",
@@ -176,7 +214,9 @@ describe("applySdkEvent", () => {
         status: "running",
       },
     });
-    expect(s.items[0]).toMatchObject({ thinking: true, streaming: true, text: "" });
+    expect(s.items.some((i) => i.kind === "text" && i.role === "assistant")).toBe(
+      false,
+    );
     s = apply(s, { type: "result", sessionId: "s", ok: true });
     expect(s.items.some((i) => i.kind === "text" && i.role === "assistant")).toBe(
       false,
@@ -269,6 +309,22 @@ describe("applySdkEvent", () => {
       { type: "items_replaced", sessionId: "s", items: replacement },
     );
     expect(next.items).toEqual(replacement);
+  });
+
+  it("appends one persisted per-turn file changes item", () => {
+    const item: ChatItem = {
+      kind: "changes",
+      id: "changes-1",
+      files: [
+        { path: "src/a.ts", additions: 3, deletions: 1, line: 12 },
+      ],
+    };
+    if (item.kind !== "changes") throw new Error("invalid fixture");
+    const event = { type: "turn_changes" as const, sessionId: "s", item };
+    const once = apply(emptyTranscript(), event);
+    const twice = apply(once, event);
+    expect(once.items).toEqual([item]);
+    expect(twice.items).toEqual([item]);
   });
 
   it("user_msg_ids does not change items", () => {

@@ -46,6 +46,22 @@ export type FileChange = {
   canRestore?: boolean;
 };
 
+/** One file changed during a single completed AI turn. */
+export type TurnFileChange = {
+  /** Absolute or project-relative path as recorded by the main process. */
+  path: string;
+  additions: number;
+  deletions: number;
+  /** First affected line in the resulting file, used by editor reveal. */
+  line: number;
+};
+
+export type TurnChangesItem = {
+  kind: "changes";
+  id: string;
+  files: TurnFileChange[];
+};
+
 export type ChatRole = "user" | "assistant" | "system";
 
 export type TodoItem = {
@@ -201,6 +217,7 @@ export type ChatItem =
       attachments?: Attachment[];
     }
   | { kind: "tool"; id: string; tool: ToolCardState }
+  | TurnChangesItem
   | { kind: "usage"; id: string; usage: TurnUsage };
 
 /** App-local slash command (composer `/` menu) */
@@ -249,6 +266,15 @@ export type SessionSummary = {
   pinned?: boolean;
 };
 
+/** One content-search hit: the session plus a snippet around the first match. */
+export type SessionSearchHit = {
+  sessionId: string;
+  title: string;
+  cwd: string;
+  snippet: string;
+  updatedAt: number;
+};
+
 export type PermissionRequest = {
   requestId: string;
   sessionId: string;
@@ -278,7 +304,7 @@ export type AppSettings = {
   models: string[];
   permissionMode: PermissionMode;
   shutdownCpaOnQuit: boolean;
-  lastProjectPath?: string;
+  lastProjectPath?: string | null;
   /** Fallback window when model unknown (tokens) */
   defaultContextLimit: number;
   /** Per-model id overrides for context window */
@@ -344,6 +370,13 @@ export type AppSettings = {
    * with skipMcpDiscovery — app-configured MCP stays the single MCP surface).
    */
   pluginPaths?: string[];
+  /**
+   * Sidebar project folders (the chat list groups sessions by project cwd).
+   * Persisted so a project stays visible even before it has any session.
+   */
+  projects?: string[];
+  /** Workspaces explicitly removed from the sidebar; files and sessions remain intact. */
+  hiddenProjects?: string[];
 };
 
 export type PublicSettings = Omit<AppSettings, never> & {
@@ -372,6 +405,7 @@ export type SdkNormalizedEvent =
       error?: string;
       usage?: TurnUsage;
     }
+  | { type: "turn_changes"; sessionId: string; item: TurnChangesItem }
   | { type: "items_replaced"; sessionId: string; items: ChatItem[] }
   /**
    * SDK-persisted user message uuids in turn order (real user turns only,

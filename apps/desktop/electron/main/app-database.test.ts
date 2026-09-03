@@ -239,3 +239,114 @@ describe("AppDatabase SessionArchive", () => {
   });
 
 });
+
+describe("AppDatabase transcript search", () => {
+  function openDatabase(dir: string): AppDatabase {
+    const database = AppDatabase.open(dir);
+    expect(database).not.toBeNull();
+    if (!database) throw new Error("node:sqlite unavailable in test runtime");
+    return database;
+  }
+
+  function seedSession(
+    archive: SessionArchive,
+    id: string,
+    title: string,
+    cwd: string,
+    updatedAt: number,
+    texts: string[],
+  ): void {
+    archive.upsertSummary({ id, title, cwd, updatedAt, status: "idle" });
+    archive.saveItems(
+      id,
+      texts.map(
+        (text, index): ChatItem => ({
+          kind: "text",
+          id: `${id}-item-${index}`,
+          role: "user",
+          text,
+        }),
+      ),
+    );
+  }
+
+  it("matches transcript content and joins title/cwd from the archive", () => {
+    const dir = tmp();
+    const database = openDatabase(dir);
+    try {
+      const archive = new SessionArchive(dir, database);
+      seedSession(archive, "session-alpha", "Alpha work", "D:/alpha", 100, [
+        "the quick brown fox jumps over the lazy dog",
+      ]);
+      seedSession(archive, "session-beta", "Beta notes", "D:/beta", 200, [
+        "nothing relevant in this transcript",
+      ]);
+
+      const hits = database.searchTranscripts("BROWN FOX");
+      expect(hits).toHaveLength(1);
+      expect(hits[0]).toMatchObject({
+        sessionId: "session-alpha",
+        title: "Alpha work",
+        cwd: "D:/alpha",
+        updatedAt: 100,
+      });
+      expect(hits[0]?.snippet).toContain("brown fox");
+    } finally {
+      database.close();
+    }
+  });
+
+  it("escapes LIKE wildcards so \"100%\" does not match \"1000\"", () => {
+    const dir = tmp();
+    const database = openDatabase(dir);
+    try {
+      const archive = new SessionArchive(dir, database);
+      seedSession(archive, "session-pct", "Percent", "D:/pct", 100, [
+        "progress reached 100% today",
+      ]);
+      seedSession(archive, "session-num", "Numbers", "D:/num", 200, [
+        "processed 1000 rows",
+      ]);
+
+      const hits = database.searchTranscripts("100%");
+      expect(hits.map((hit) => hit.sessionId)).toEqual(["session-pct"]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("stops at the limit and orders hits by updated_at desc", () => {
+    const dir = tmp();
+    const database = openDatabase(dir);
+    try {
+      const archive = new SessionArchive(dir, database);
+      seedSession(archive, "session-old", "Old", "D:/old", 100, ["keyword one"]);
+      seedSession(archive, "session-mid", "Mid", "D:/mid", 200, ["keyword two"]);
+      seedSession(archive, "session-new", "New", "D:/new", 300, [
+        "keyword three",
+      ]);
+
+      const hits = database.searchTranscripts("keyword", 2);
+      expect(hits.map((hit) => hit.sessionId)).toEqual([
+        "session-new",
+        "session-mid",
+      ]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("returns [] for a blank query", () => {
+    const dir = tmp();
+    const database = openDatabase(dir);
+    try {
+      const archive = new SessionArchive(dir, database);
+      seedSession(archive, "session-alpha", "Alpha", "D:/alpha", 100, [
+        "some text",
+      ]);
+      expect(database.searchTranscripts("   ")).toEqual([]);
+    } finally {
+      database.close();
+    }
+  });
+});

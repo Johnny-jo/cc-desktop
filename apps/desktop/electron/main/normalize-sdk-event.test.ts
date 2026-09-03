@@ -44,6 +44,26 @@ describe("normalizeSdkEvent", () => {
     ).toEqual([{ type: "thinking_delta", sessionId, text: "plan" }]);
   });
 
+  it("keeps completed assistant thinking when a provider omits stream deltas", () => {
+    const events = normalizeSdkEvent(
+      {
+        type: "assistant",
+        message: {
+          content: [
+            { type: "thinking", thinking: "先检查调用链" },
+            { type: "text", text: "结论" },
+          ],
+        },
+      },
+      sessionId,
+    );
+
+    expect(events).toEqual([
+      { type: "thinking_delta", sessionId, text: "先检查调用链" },
+      { type: "text_done", sessionId, text: "结论" },
+    ]);
+  });
+
   it("maps tool_progress to tool_progress event", () => {
     const msg = {
       type: "tool_progress",

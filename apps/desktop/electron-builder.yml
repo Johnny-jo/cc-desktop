@@ -48,9 +48,14 @@ extraResources:
     to: mods
     filter:
       - "**/*"
+  # BrowserWindow + notification-area tray icon. build/ is not packed into
+  # app.asar because `files` intentionally contains only out/ + package.json.
+  - from: build/icon.ico
+    to: icon.ico
 
 # Windows: portable dir + NSIS installer.
-# Disable signing/rcedit so packaging works offline without winCodeSign binaries.
+# Keep rcedit disabled so unsigned/offline packaging does not require Windows
+# symlink privileges. The installer recreates shortcuts with resources/icon.ico.
 win:
   target:
     - target: dir
@@ -59,7 +64,7 @@ win:
     - target: nsis
       arch:
         - x64
-  icon: build/icon.png
+  icon: build/icon.ico
   signAndEditExecutable: false
   verifyUpdateCodeSignature: false
 

@@ -268,8 +268,14 @@ function loadRenderer(
   }
 }
 
-/** Loose PNG for the window / taskbar icon in dev; packaged builds bake it into the exe. */
-const WINDOW_ICON = path.join(__dirname, "../../build/icon.png");
+/**
+ * Loose PNG used by BrowserWindow and the Windows notification-area tray.
+ * `build/` is not inside app.asar, so packaged builds read the copy emitted
+ * to `resources/icon.ico` by electron-builder.
+ */
+const WINDOW_ICON = app.isPackaged
+  ? path.join(process.resourcesPath, "icon.ico")
+  : path.join(__dirname, "../../build/icon.png");
 
 function buildWindow(
   width: number,
@@ -443,6 +449,12 @@ function bootstrap() {
 
   // Per-operation content snapshots for change rollback (persisted on disk).
   const snapshots = new SnapshotStore(userDataDir);
+  const snapshotCleanup = snapshots.cleanup(
+    new Set(archive.loadIndex().map((session) => session.id)),
+  );
+  if (snapshotCleanup.removedSessions || snapshotCleanup.removedEvents) {
+    console.info("Snapshot cleanup", snapshotCleanup);
+  }
   diffs.onBeforeWrite = (sessionId, filePath, eventId) => {
     snapshots.capture(sessionId, eventId, filePath);
   };

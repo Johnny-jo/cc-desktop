@@ -156,11 +156,14 @@ export function FileEditor({
   rel,
   onClose,
   hidden,
+  reveal,
 }: {
   rel: string;
   onClose: () => void;
   /** Keep the CodeMirror instance mounted but off-screen when another tab is active. */
   hidden?: boolean;
+  /** Select and vertically center a line requested by a change-summary card. */
+  reveal?: { line: number; nonce: number };
 }) {
   const projectPath = useAppStore((s) => s.projectPath);
   const settings = useAppStore((s) => s.settings);
@@ -486,6 +489,38 @@ export function FileEditor({
       effects: setDiffMarks.of(changeHunks ? lineMarksFromHunks(changeHunks) : null),
     });
   }, [changeHunks, hidden, loading, error, missing]);
+
+  useEffect(() => {
+    if (hidden || !reveal || loading || error || missing) return;
+    const view = viewRef.current;
+    if (!view) return;
+    let cancelled = false;
+    const revealLine = () => {
+      if (cancelled || viewRef.current !== view) return;
+      const lineNo = Math.min(Math.max(1, reveal.line), view.state.doc.lines);
+      const position = view.state.doc.line(lineNo).from;
+      view.dispatch({
+        selection: { anchor: position },
+        effects: EditorView.scrollIntoView(position, { y: "center" }),
+      });
+      view.focus();
+    };
+    revealLine();
+    // The editor may have just left `display:none`; wait for layout so
+    // scrollIntoView can actually center the line.
+    let frames = 0;
+    let frame = 0;
+    const tick = () => {
+      revealLine();
+      frames += 1;
+      if (frames < 2) frame = window.requestAnimationFrame(tick);
+    };
+    frame = window.requestAnimationFrame(tick);
+    return () => {
+      cancelled = true;
+      window.cancelAnimationFrame(frame);
+    };
+  }, [error, hidden, loading, missing, reveal]);
 
   const changeEncoding = async (next: string) => {
     if (next === encoding) {

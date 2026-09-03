@@ -1,4 +1,4 @@
-import React, { memo, useState } from "react";
+import React, { memo, useEffect, useState } from "react";
 import type { ToolCardState, TodoItem } from "@claude-desktop/shared";
 import { requestRevealChange, useAppStore } from "../state/store";
 
@@ -28,8 +28,13 @@ export const ToolCard = memo(function ToolCard({
 }: {
   tool: ToolCardState;
 }) {
-  // Collapsed by default — user expands to inspect details.
-  const [open, setOpen] = useState(false);
+  // Keep live work visible, then fold the noisy details as soon as it settles.
+  // The effect only reacts to status changes, so a completed card can still be
+  // opened manually without a parent re-render immediately closing it again.
+  const [open, setOpen] = useState(tool.status === "running");
+  useEffect(() => {
+    setOpen(tool.status === "running");
+  }, [tool.status]);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
   const isTodo =
     (tool.name === "TodoWrite" ||

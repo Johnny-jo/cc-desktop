@@ -422,6 +422,18 @@ describe("room remote exec", () => {
       .get(roomId)!
       .items.find((i) => i.text === "这条要撤回")!.id;
 
+    // 房主入队成功不代表包含该消息的下一份快照已经抵达客人端。
+    // recall() 会先做本地作者校验，因此必须等客人看到同一个 itemId，
+    // 否则全量并发跑测试时会偶发得到“消息不存在”。
+    await vi.waitFor(() => {
+      expect(
+        guest.get(roomId)!.items.find((i) => i.id === itemId),
+      ).toMatchObject({
+        text: "这条要撤回",
+        authorUserId: guestUserId,
+      });
+    });
+
     // 客人撤回自己的消息 → chat.recall 帧 → 房主标记 → 快照回流
     expect(guest.recall(roomId, itemId).ok).toBe(true);
     await vi.waitFor(() => {

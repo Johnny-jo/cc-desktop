@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -269,6 +270,61 @@ describe("DiffTracker", () => {
       expect(
         changes.some((c) => c.path === existing || c.path.endsWith("keep.py")),
       ).toBe(false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not dump a dirty git worktree into the session when this turn never used Bash", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "diff-noscan-"));
+    try {
+      execFileSync("git", ["init"], { cwd: root, stdio: "ignore" });
+      const leftover = path.join(root, "legacy.ts");
+      fs.writeFileSync(leftover, "old work\n", "utf8");
+      const wrote = path.join(root, "fresh.ts");
+      const tracker = new DiffTracker({
+        readFile: (p) => fs.readFileSync(p, "utf8"),
+      });
+      tracker.onToolUse(
+        "s1",
+        "Write",
+        { file_path: wrote, content: "new\n" },
+        { cwd: root },
+      );
+      await tracker.refreshBashWritesFromDisk("s1", root);
+      const paths = tracker.list("s1").map((c) => c.path);
+      expect(paths.some((p) => p === leftover || p.endsWith("legacy.ts"))).toBe(
+        false,
+      );
+      expect(paths.some((p) => p === wrote || p.endsWith("fresh.ts"))).toBe(true);
+      expect(tracker.list("s1").find((c) => c.path === wrote)?.events).toHaveLength(
+        1,
+      );
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refreshes this-turn Bash content in place instead of appending a new event", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "diff-inplace-"));
+    try {
+      const filePath = path.join(root, "via-bash.ts");
+      const tracker = new DiffTracker({
+        readFile: (p) => fs.readFileSync(p, "utf8"),
+      });
+      tracker.onToolUse(
+        "s1",
+        "Bash",
+        { command: "cat > via-bash.ts <<'EOF'\nbefore\nEOF" },
+        { cwd: root },
+      );
+      expect(tracker.list("s1")[0]!.events).toHaveLength(1);
+      fs.writeFileSync(filePath, "after disk write\n", "utf8");
+      await tracker.captureBashBaseline("s1", root);
+      await tracker.refreshBashWritesFromDisk("s1", root);
+      const change = tracker.list("s1")[0]!;
+      expect(change.events).toHaveLength(1);
+      expect(change.hunks).toContain("after disk write");
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }

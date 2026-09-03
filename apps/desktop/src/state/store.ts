@@ -664,7 +664,20 @@ export async function openProject(path?: string): Promise<void> {
   try {
     const res = (await desktop.openProject(path)) as { path: string };
     setState({ projectPath: res.path, lastError: null });
-    const settings = (await desktop.getSettings()) as PublicSettings;
+    let settings = (await desktop.getSettings()) as PublicSettings;
+    const hiddenProjects = settings.hiddenProjects ?? [];
+    const openedKey = res.path.replace(/[\\/]+$/, "").toLowerCase();
+    if (
+      hiddenProjects.some(
+        (item) => item.replace(/[\\/]+$/, "").toLowerCase() === openedKey,
+      )
+    ) {
+      settings = (await desktop.setSettings({
+        hiddenProjects: hiddenProjects.filter(
+          (item) => item.replace(/[\\/]+$/, "").toLowerCase() !== openedKey,
+        ),
+      })) as PublicSettings;
+    }
     setState({ settings });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -745,6 +758,11 @@ export function clearChangesSessionOverride(): void {
 
 export function newChat(): void {
   setState({ activeSessionId: null });
+}
+
+/** Clear the renderer's current workspace after it was removed from the sidebar. */
+export function clearProjectPath(): void {
+  setState({ projectPath: null, activeSessionId: null });
 }
 
 /** Pin / unpin a session at the top of the sidebar list (persisted in main). */

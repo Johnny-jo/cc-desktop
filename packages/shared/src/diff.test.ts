@@ -11,6 +11,7 @@ import {
   groupDiffDisplayRows,
   mergeFullTextWithHunks,
   parseHunkForDisplay,
+  summarizeTurnFiles,
   truncateFileChange,
   upsertFileChange,
 } from "./diff";
@@ -412,5 +413,115 @@ describe("groupDiffDisplayRows", () => {
     expect(change).toHaveLength(1);
     expect(change[0]!.dels[0]!.text).toBe("-b1");
     expect(change[0]!.adds[0]!.text).toBe("+b2");
+  });
+});
+
+describe("summarizeTurnFiles", () => {
+  const hunkA = [
+    "--- a/src/a.ts",
+    "+++ b/src/a.ts",
+    "@@ -12,1 +12,2 @@",
+    "-old",
+    "+new",
+    "+extra",
+  ].join("\n");
+  const hunkB = [
+    "--- a/src/b.ts",
+    "+++ b/src/b.ts",
+    "@@ -4,1 +4,1 @@",
+    "-x",
+    "+y",
+  ].join("\n");
+
+  it("counts only events added after the baseline", () => {
+    const changes: FileChange[] = [
+      {
+        path: "src/a.ts",
+        status: "M",
+        hunks: hunkA,
+        updatedAt: 2,
+        events: [
+          { id: "ev-1", tool: "Edit", at: 1, hunk: hunkB },
+          { id: "ev-2", tool: "Edit", at: 2, hunk: hunkA },
+        ],
+      },
+      {
+        path: "src/b.ts",
+        status: "M",
+        hunks: hunkB,
+        updatedAt: 1,
+        events: [{ id: "ev-0", tool: "Write", at: 1, hunk: hunkB }],
+      },
+    ];
+    const files = summarizeTurnFiles(changes, new Set(["ev-1", "ev-0"]));
+    expect(files).toEqual([
+      { path: "src/a.ts", additions: 2, deletions: 1, line: 12 },
+    ]);
+  });
+
+  it("returns nothing when this turn added no file events", () => {
+    const changes: FileChange[] = [
+      {
+        path: "src/a.ts",
+        status: "M",
+        hunks: hunkA,
+        updatedAt: 1,
+        events: [{ id: "ev-1", tool: "Edit", at: 1, hunk: hunkA }],
+      },
+    ];
+    expect(summarizeTurnFiles(changes, new Set(["ev-1"]))).toEqual([]);
+  });
+
+  it("uses the first added line for editor reveal", () => {
+    const hunk = [
+      "--- a/src/a.ts",
+      "+++ b/src/a.ts",
+      "@@ -40,2 +40,3 @@",
+      " keep",
+      "-old",
+      "+new",
+      "+more",
+    ].join("\n");
+    const files = summarizeTurnFiles(
+      [
+        {
+          path: "src/a.ts",
+          status: "M",
+          hunks: hunk,
+          updatedAt: 1,
+          events: [{ id: "ev-9", tool: "Edit", at: 1, hunk }],
+        },
+      ],
+      new Set(),
+    );
+    expect(files[0]).toMatchObject({ additions: 2, deletions: 1, line: 41 });
+  });
+
+  it("ignores workspace-scan events on files that already existed before the turn", () => {
+    const scanHunk = [
+      "--- a/src/a.ts",
+      "+++ b/src/a.ts",
+      "@@ -1,1 +1,1 @@",
+      "-old",
+      "+new",
+      "# via Bash (workspace scan)",
+    ].join("\n");
+    const files = summarizeTurnFiles(
+      [
+        {
+          path: "src/a.ts",
+          status: "M",
+          hunks: scanHunk,
+          updatedAt: 2,
+          events: [
+            { id: "ev-1", tool: "Edit", at: 1, hunk: hunkA },
+            { id: "ev-scan", tool: "Bash", at: 2, hunk: scanHunk },
+          ],
+        },
+      ],
+      new Set(["ev-1"]),
+      { baselinePaths: new Set(["src/a.ts"]) },
+    );
+    expect(files).toEqual([]);
   });
 });

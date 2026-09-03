@@ -251,6 +251,15 @@ function normalizeAssistant(
   for (const block of content) {
     if (!isRecord(block) || typeof block.type !== "string") continue;
 
+    // Some compatible providers omit partial stream events but include the
+    // completed reasoning block in the final assistant message. Normalize it
+    // too; the transcript reducer ignores a late duplicate once answer text
+    // has already started, so streamed providers are not rendered twice.
+    if (block.type === "thinking" && typeof block.thinking === "string") {
+      out.push({ type: "thinking_delta", sessionId, text: block.thinking });
+      continue;
+    }
+
     if (block.type === "text" && typeof block.text === "string") {
       // Skill dumps often arrive as assistant text — fold into a collapsible tool card.
       if (isCollapsibleSkillText(block.text)) {

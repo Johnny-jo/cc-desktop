@@ -1,4 +1,9 @@
-import type { FileChange, FileChangeEvent, FileChangeStatus } from "./models";
+import type {
+  FileChange,
+  FileChangeEvent,
+  FileChangeStatus,
+  TurnFileChange,
+} from "./models";
 
 let eventSeq = 0;
 /** Unique id for one tracked write operation. */
@@ -682,4 +687,68 @@ export function mergeFullTextWithHunks(
     });
   }
   return rows;
+}
+
+const BASH_SCAN_NOISE_RE = /# via Bash \((?:workspace scan|disk)\)/;
+
+function isBashScanNoise(hunk: string): boolean {
+  return BASH_SCAN_NOISE_RE.test(hunk);
+}
+
+export type SummarizeTurnFilesOptions = {
+  /** Paths that already had a change record before this turn started. */
+  baselinePaths?: ReadonlySet<string>;
+};
+
+/**
+ * Compact per-turn file summary: only events whose ids are not in `baseline`
+ * (ids that already existed before this turn's first write).
+ */
+export function summarizeTurnFiles(
+  changes: FileChange[],
+  baseline: ReadonlySet<string>,
+  opts?: SummarizeTurnFilesOptions,
+): TurnFileChange[] {
+  const files: TurnFileChange[] = [];
+  const baselinePaths = opts?.baselinePaths;
+  for (const change of changes) {
+    const events = change.events.filter((event) => !baseline.has(event.id));
+    if (!events.length) continue;
+    const wroteThisTurn = events.filter((event) => !isBashScanNoise(event.hunk));
+    if (
+      !wroteThisTurn.length &&
+      baselinePaths?.has(change.path)
+    ) {
+      continue;
+    }
+    const counted = wroteThisTurn.length ? wroteThisTurn : events;
+    let additions = 0;
+    let deletions = 0;
+    let firstLine = Number.POSITIVE_INFINITY;
+    for (const event of counted) {
+      const rows = parseHunkForDisplay(event.hunk, Number.MAX_SAFE_INTEGER);
+      for (const row of rows) {
+        if (row.kind === "add") {
+          additions += 1;
+          if (row.newNo != null) firstLine = Math.min(firstLine, row.newNo);
+        } else if (row.kind === "del") {
+          deletions += 1;
+          if (!Number.isFinite(firstLine) && row.oldNo != null) {
+            firstLine = row.oldNo;
+          }
+        }
+      }
+      if (!Number.isFinite(firstLine)) {
+        const header = event.hunk.match(/@@\s*-\d+(?:,\d+)?\s+\+(\d+)/);
+        if (header?.[1]) firstLine = Math.max(1, Number(header[1]));
+      }
+    }
+    files.push({
+      path: change.path,
+      additions,
+      deletions,
+      line: Number.isFinite(firstLine) ? firstLine : 1,
+    });
+  }
+  return files;
 }

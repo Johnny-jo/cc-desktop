@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -27,6 +28,22 @@ const baseSettings: AppSettings = {
   defaultContextLimit: 200_000,
   modelContextLimits: {},
 };
+
+function userTextFromPrompt(msg: unknown): string {
+  if (typeof msg !== "object" || msg === null) return "";
+  const rec = msg as { type?: string; message?: { content?: unknown } };
+  if (rec.type !== "user") return "";
+  const content = rec.message?.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((block) =>
+      typeof block === "object" && block !== null && "text" in block
+        ? String((block as { text?: unknown }).text ?? "")
+        : "",
+    )
+    .join("");
+}
 
 /** Drain one user message from streaming prompt (MessageStream). */
 async function takeFirstUserText(
@@ -81,6 +98,7 @@ function makeDeps(overrides: {
   canUseTool?: ReturnType<typeof vi.fn>;
   onToolUse?: ReturnType<typeof vi.fn>;
   listDiffs?: ReturnType<typeof vi.fn>;
+  diffTracker?: DiffTracker;
 } = {}) {
   const emitted: SdkNormalizedEvent[] = [];
   const sessions: SessionSummary[] = [];
@@ -96,19 +114,21 @@ function makeDeps(overrides: {
 
   const onToolUse = overrides.onToolUse ?? vi.fn();
   const listDiffs = overrides.listDiffs ?? vi.fn().mockReturnValue([]);
-  const diffTracker = {
-    onToolUse,
-    list: listDiffs,
-    remove: vi.fn(),
-    has: vi.fn().mockReturnValue(false),
-    findByEvent: vi.fn().mockReturnValue(null),
-    truncateAt: vi.fn(),
-    markDeleted: vi.fn().mockReturnValue(false),
-    refreshBashWritesFromDisk: vi.fn().mockResolvedValue(undefined),
-    captureBashBaseline: vi.fn().mockResolvedValue(undefined),
-    hydrate: vi.fn(),
-    clearSession: vi.fn(),
-  } as unknown as DiffTracker;
+  const diffTracker =
+    overrides.diffTracker ??
+    ({
+      onToolUse,
+      list: listDiffs,
+      remove: vi.fn(),
+      has: vi.fn().mockReturnValue(false),
+      findByEvent: vi.fn().mockReturnValue(null),
+      truncateAt: vi.fn(),
+      markDeleted: vi.fn().mockReturnValue(false),
+      refreshBashWritesFromDisk: vi.fn().mockResolvedValue(undefined),
+      captureBashBaseline: vi.fn().mockResolvedValue(undefined),
+      hydrate: vi.fn(),
+      clearSession: vi.fn(),
+    } as unknown as DiffTracker);
 
   const ensureReady =
     overrides.ensureReady ??
@@ -379,6 +399,14 @@ describe("SessionManager", () => {
     ];
     const onToolUse = vi.fn();
     const listDiffs = vi.fn().mockReturnValue(changes);
+    let releaseResult!: () => void;
+    const resultGate = new Promise<void>((resolve) => {
+      releaseResult = resolve;
+    });
+    let markToolResultConsumed!: () => void;
+    const toolResultConsumed = new Promise<void>((resolve) => {
+      markToolResultConsumed = resolve;
+    });
 
     const queryFn: QueryFn = async function* (args) {
       await takeFirstUserText(args.prompt);
@@ -399,11 +427,32 @@ describe("SessionManager", () => {
           ],
         },
       };
+      yield {
+        type: "user",
+        message: {
+          content: [
+            { type: "tool_result", tool_use_id: "e1", name: "Edit", content: "ok" },
+          ],
+        },
+      };
+      // Keep the turn open after the tool result so the test can prove there
+      // is no intermediate Git scan or renderer diff update.
+      markToolResultConsumed();
+      await resultGate;
       yield { type: "result", subtype: "success", total_cost_usd: 0 };
     };
 
     const ctx = makeDeps({ queryFn, onToolUse, listDiffs });
-    const sessionId = await ctx.manager.start({ text: "edit please", attachments: [] }, "D:/p");
+    const started = ctx.manager.start(
+      { text: "edit please", attachments: [] },
+      "D:/p",
+    );
+    await toolResultConsumed;
+    expect(ctx.diffTracker.refreshBashWritesFromDisk).not.toHaveBeenCalled();
+    expect(ctx.emitDiff).not.toHaveBeenCalled();
+
+    releaseResult();
+    const sessionId = await started;
 
     expect(onToolUse).toHaveBeenCalledWith(
       sessionId,
@@ -411,7 +460,245 @@ describe("SessionManager", () => {
       expect.objectContaining({ file_path: "src/a.ts" }),
       expect.objectContaining({ cwd: "D:/p" }),
     );
+    expect(ctx.diffTracker.refreshBashWritesFromDisk).toHaveBeenCalledTimes(1);
     expect(ctx.emitDiff).toHaveBeenCalledWith(sessionId, changes);
+    expect(ctx.emitDiff).toHaveBeenCalledTimes(1);
+  });
+
+  it("emits a per-turn file-changes card and does not repeat earlier files", async () => {
+    const byPath = new Map<string, FileChange>();
+    let seq = 0;
+    const onToolUse = vi.fn(
+      (_sessionId: string, name: string, input: Record<string, unknown>) => {
+        const filePath = String(input.file_path ?? "");
+        seq += 1;
+        const hunk = [
+          `--- a/${filePath}`,
+          `+++ b/${filePath}`,
+          "@@ -12,1 +12,2 @@",
+          "-old",
+          "+new",
+          "+extra",
+        ].join("\n");
+        const event = {
+          id: `ev-${seq}`,
+          tool: name === "Write" ? ("Write" as const) : ("Edit" as const),
+          at: seq,
+          hunk,
+        };
+        const existing = byPath.get(filePath);
+        if (existing) {
+          existing.events = [...existing.events, event];
+          existing.hunks = hunk;
+          existing.updatedAt = seq;
+        } else {
+          byPath.set(filePath, {
+            path: filePath,
+            status: "M",
+            hunks: hunk,
+            updatedAt: seq,
+            events: [event],
+          });
+        }
+      },
+    );
+    const listDiffs = vi.fn(() => [...byPath.values()]);
+    const queryFn: QueryFn = async function* (args) {
+      for await (const msg of args.prompt as AsyncIterable<unknown>) {
+        const text = userTextFromPrompt(msg);
+        if (!text) continue;
+        const filePath = text.includes("second") ? "src/b.ts" : "src/a.ts";
+        yield {
+          type: "assistant",
+          message: {
+            content: [
+              {
+                type: "tool_use",
+                id: filePath,
+                name: "Edit",
+                input: {
+                  file_path: filePath,
+                  old_string: "old",
+                  new_string: "new\nextra",
+                },
+              },
+            ],
+          },
+        };
+        yield { type: "result", subtype: "success", total_cost_usd: 0 };
+      }
+    };
+
+    const ctx = makeDeps({ queryFn, onToolUse, listDiffs });
+    const sessionId = await ctx.manager.start(
+      { text: "first", attachments: [] },
+      "D:/p",
+    );
+    const first = ctx.emitted.filter((event) => event.type === "turn_changes");
+    expect(first).toHaveLength(1);
+    expect(first[0]).toMatchObject({
+      type: "turn_changes",
+      item: {
+        kind: "changes",
+        files: [{ path: "src/a.ts", additions: 2, deletions: 1, line: 12 }],
+      },
+    });
+
+    await ctx.manager.continue(sessionId, {
+      text: "second",
+      attachments: [],
+    });
+    const all = ctx.emitted.filter((event) => event.type === "turn_changes");
+    expect(all).toHaveLength(2);
+    expect(all[1]).toMatchObject({
+      type: "turn_changes",
+      item: {
+        kind: "changes",
+        files: [{ path: "src/b.ts", additions: 2, deletions: 1, line: 12 }],
+      },
+    });
+  });
+
+  it("summarizes only this turn's events when the same file is edited again", async () => {
+    const byPath = new Map<string, FileChange>();
+    let seq = 0;
+    const onToolUse = vi.fn(
+      (_sessionId: string, _name: string, input: Record<string, unknown>) => {
+        const filePath = String(input.file_path ?? "");
+        seq += 1;
+        const hunk =
+          seq === 1
+            ? [
+                "--- a/src/a.ts",
+                "+++ b/src/a.ts",
+                "@@ -12,1 +12,2 @@",
+                "-old",
+                "+new",
+                "+extra",
+              ].join("\n")
+            : [
+                "--- a/src/a.ts",
+                "+++ b/src/a.ts",
+                "@@ -80,0 +80,1 @@",
+                "+only",
+              ].join("\n");
+        const event = {
+          id: `ev-${seq}`,
+          tool: "Edit" as const,
+          at: seq,
+          hunk,
+        };
+        const existing = byPath.get(filePath);
+        if (existing) {
+          existing.events = [...existing.events, event];
+          existing.hunks = hunk;
+          existing.updatedAt = seq;
+        } else {
+          byPath.set(filePath, {
+            path: filePath,
+            status: "M",
+            hunks: hunk,
+            updatedAt: seq,
+            events: [event],
+          });
+        }
+      },
+    );
+    const listDiffs = vi.fn(() => [...byPath.values()]);
+    const queryFn: QueryFn = async function* (args) {
+      for await (const msg of args.prompt as AsyncIterable<unknown>) {
+        if (!userTextFromPrompt(msg)) continue;
+        yield {
+          type: "assistant",
+          message: {
+            content: [
+              {
+                type: "tool_use",
+                id: `e-${seq + 1}`,
+                name: "Edit",
+                input: {
+                  file_path: "src/a.ts",
+                  old_string: "a",
+                  new_string: "b",
+                },
+              },
+            ],
+          },
+        };
+        yield { type: "result", subtype: "success", total_cost_usd: 0 };
+      }
+    };
+
+    const ctx = makeDeps({ queryFn, onToolUse, listDiffs });
+    const sessionId = await ctx.manager.start(
+      { text: "first", attachments: [] },
+      "D:/p",
+    );
+    await ctx.manager.continue(sessionId, {
+      text: "again",
+      attachments: [],
+    });
+    const cards = ctx.emitted.filter((event) => event.type === "turn_changes");
+    expect(cards).toHaveLength(2);
+    expect(cards[0]).toMatchObject({
+      item: { files: [{ path: "src/a.ts", additions: 2, deletions: 1, line: 12 }] },
+    });
+    expect(cards[1]).toMatchObject({
+      item: { files: [{ path: "src/a.ts", additions: 1, deletions: 0, line: 80 }] },
+    });
+  });
+
+  it("real tracker omits earlier dirty files from a later turn card", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "turn-card-"));
+    try {
+      execFileSync("git", ["init"], { cwd: root, stdio: "ignore" });
+      fs.writeFileSync(path.join(root, "legacy.ts"), "old work\n", "utf8");
+      const tracker = new DiffTracker({
+        readFile: (p) => fs.readFileSync(p, "utf8"),
+      });
+      const queryFn: QueryFn = async function* (args) {
+        for await (const msg of args.prompt as AsyncIterable<unknown>) {
+          const text = userTextFromPrompt(msg);
+          if (!text) continue;
+          const fileName = text.includes("second") ? "other.ts" : "fresh.ts";
+          const abs = path.join(root, fileName);
+          fs.writeFileSync(abs, `${fileName}\n`, "utf8");
+          yield {
+            type: "assistant",
+            message: {
+              content: [
+                {
+                  type: "tool_use",
+                  id: fileName,
+                  name: "Write",
+                  input: { file_path: abs, content: `${fileName}\n` },
+                },
+              ],
+            },
+          };
+          yield { type: "result", subtype: "success", total_cost_usd: 0 };
+        }
+      };
+      const ctx = makeDeps({ queryFn, diffTracker: tracker });
+      const sessionId = await ctx.manager.start(
+        { text: "first", attachments: [] },
+        root,
+      );
+      await ctx.manager.continue(sessionId, {
+        text: "second",
+        attachments: [],
+      });
+      const cards = ctx.emitted.filter((event) => event.type === "turn_changes");
+      expect(cards).toHaveLength(2);
+      const names = (event: SdkNormalizedEvent) =>
+        event.type === "turn_changes"
+          ? event.item.files.map((file) => path.basename(file.path))
+          : [];
+      expect(names(cards[0]!)).toEqual(["fresh.ts"]);
+      expect(names(cards[1]!)).toEqual(["other.ts"]);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("continue reuses streaming session (single queryFn open)", async () => {
@@ -1022,6 +1309,14 @@ describe("SessionManager", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sess-pin-"));
     const archive = new SessionArchive(dir);
     const ctx = makeDeps();
+    const snapshots = {
+      has: vi.fn().mockReturnValue(false),
+      pathOf: vi.fn().mockReturnValue(null),
+      restore: vi.fn().mockReturnValue(false),
+      list: vi.fn().mockReturnValue([]),
+      drop: vi.fn(),
+      dropAll: vi.fn(),
+    };
     const manager = new SessionManager({
       queryFn: ctx.queryFn,
       permissionBroker: ctx.permissionBroker,
@@ -1032,6 +1327,7 @@ describe("SessionManager", () => {
       emit: ctx.emit,
       emitSession: ctx.emitSession,
       emitDiff: ctx.emitDiff,
+      snapshots,
     });
     const a = await manager.start({ text: "first", attachments: [] }, "D:/proj");
     const b = await manager.start({ text: "second", attachments: [] }, "D:/proj");
@@ -1061,6 +1357,7 @@ describe("SessionManager", () => {
     expect(manager.getSummary(b)).toBeUndefined();
     expect(archive.loadIndex().map((s) => s.id)).toEqual([a]);
     expect(fs.existsSync(path.join(dir, "sessions", `${b}.json`))).toBe(false);
+    expect(snapshots.dropAll).toHaveBeenCalledWith(b);
     expect(manager.delete("missing")).toBe(false);
 
     fs.rmSync(dir, { recursive: true, force: true });

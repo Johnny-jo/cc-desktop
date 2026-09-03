@@ -10,6 +10,7 @@ import type {
   PermissionRequest,
   PublicSettings,
   SdkNormalizedEvent,
+  SessionSearchHit,
   SessionSummary,
   SlashCommandItem,
   UserPromptDecision,
@@ -31,6 +32,8 @@ export const IPC = {
   sessionContinue: "session:continue",
   sessionAbort: "session:abort",
   sessionList: "session:list",
+  /** Full-text content search over persisted session transcripts */
+  sessionSearch: "session:search",
   sessionSelect: "session:select",
   sessionLoadOlder: "session:load-older",
   sessionLoadNewer: "session:load-newer",
@@ -293,6 +296,10 @@ export type IpcInvokeMap = {
   };
   [IPC.sessionAbort]: { args: [{ sessionId: string }]; result: { ok: boolean } };
   [IPC.sessionList]: { args: []; result: SessionSummary[] };
+  [IPC.sessionSearch]: {
+    args: [{ query: string; limit?: number }];
+    result: { results: SessionSearchHit[] };
+  };
   [IPC.sessionSelect]: {
     args: [{ sessionId: string; limit?: number }];
     result: {
