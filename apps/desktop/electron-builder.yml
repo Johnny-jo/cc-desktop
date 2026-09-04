@@ -69,6 +69,8 @@ win:
   verifyUpdateCodeSignature: false
 
 nsis:
+  # Generate blockmap metadata used by electron-updater for differential updates.
+  differentialPackage: true
   # Multi-step wizard (not one-click).
   # Flow: Welcome → License → Install mode → Directory → Install.
   oneClick: false

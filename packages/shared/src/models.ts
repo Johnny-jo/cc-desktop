@@ -54,6 +54,13 @@ export type TurnFileChange = {
   deletions: number;
   /** First affected line in the resulting file, used by editor reveal. */
   line: number;
+  /** Exact diff events created by this task, oldest to newest. */
+  eventIds?: string[];
+};
+
+export type TurnChangeRestoreTarget = {
+  path: string;
+  eventIds: string[];
 };
 
 export type TurnChangesItem = {

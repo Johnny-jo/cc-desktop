@@ -465,6 +465,91 @@ describe("SessionManager", () => {
     expect(ctx.emitDiff).toHaveBeenCalledTimes(1);
   });
 
+  it("emits a persisted file summary only for changes added in this turn", async () => {
+    const previous: FileChange = {
+      path: "D:/p/src/old.ts",
+      status: "M",
+      hunks: "@@ -1,1 +1,1 @@\n-old\n+older",
+      updatedAt: 1,
+      events: [
+        {
+          id: "ev-old",
+          tool: "Edit",
+          at: 1,
+          hunk: "@@ -1,1 +1,1 @@\n-old\n+older",
+        },
+      ],
+    };
+    const current: FileChange[] = [
+      previous,
+      {
+        path: "D:/p/src/a.ts",
+        status: "M",
+        hunks: "@@ -11,2 +11,3 @@\n-old\n+new\n+extra\n keep",
+        updatedAt: 2,
+        events: [
+          {
+            id: "ev-new",
+            tool: "Edit",
+            at: 2,
+            hunk: "@@ -11,2 +11,3 @@\n-old\n+new\n+extra\n keep",
+          },
+        ],
+      },
+    ];
+    const listDiffs = vi
+      .fn()
+      .mockReturnValueOnce([previous])
+      .mockReturnValue(current);
+    const queryFn: QueryFn = async function* (args) {
+      await takeFirstUserText(args.prompt);
+      yield {
+        type: "assistant",
+        message: {
+          content: [
+            {
+              type: "tool_use",
+              id: "tool-edit",
+              name: "Edit",
+              input: {
+                file_path: "D:/p/src/a.ts",
+                old_string: "old",
+                new_string: "new\nextra",
+              },
+            },
+          ],
+        },
+      };
+      yield { type: "result", subtype: "success", total_cost_usd: 0 };
+    };
+
+    const ctx = makeDeps({ queryFn, listDiffs });
+    const sessionId = await ctx.manager.start(
+      { text: "edit", attachments: [] },
+      "D:/p",
+    );
+
+    expect(
+      ctx.emitted.find((event) => event.type === "turn_changes"),
+    ).toEqual({
+      type: "turn_changes",
+      sessionId,
+      item: {
+        kind: "changes",
+        id: expect.stringContaining("changes-"),
+        files: [
+          {
+            path: "D:/p/src/a.ts",
+            additions: 2,
+            deletions: 1,
+            line: 11,
+            eventIds: ["ev-new"],
+          },
+        ],
+      },
+    });
+  });
+
   it("emits a per-turn file-changes card and does not repeat earlier files", async () => {
     const byPath = new Map<string, FileChange>();
     let seq = 0;
@@ -1016,6 +1101,86 @@ describe("SessionManager", () => {
     const res = ctx.manager.restoreChangeEvent(sessionId, "ev-x");
     expect(res.ok).toBe(false);
     expect(snapshots.restore).not.toHaveBeenCalled();
+  });
+
+  it("restoreTurnChanges restores only the latest task suffix", async () => {
+    const change: FileChange = {
+      path: "demo.txt",
+      status: "M",
+      hunks: "task-2",
+      updatedAt: 3,
+      events: [
+        { id: "ev-old", tool: "Edit", at: 1, hunk: "old" },
+        { id: "ev-task-1", tool: "Edit", at: 2, hunk: "task-1" },
+        { id: "ev-task-2", tool: "Edit", at: 3, hunk: "task-2" },
+      ],
+    };
+    const ctx = makeDeps({ listDiffs: vi.fn().mockReturnValue([change]) });
+    const snapshots = {
+      has: vi.fn().mockReturnValue(true),
+      pathOf: vi.fn(),
+      restore: vi.fn().mockReturnValue(true),
+      list: vi.fn(),
+      drop: vi.fn(),
+      dropAll: vi.fn(),
+    };
+    (ctx.manager as unknown as { snapshots: unknown }).snapshots = snapshots;
+    const sessionId = await ctx.manager.start(
+      { text: "hi", attachments: [] },
+      "D:/p",
+    );
+
+    const result = ctx.manager.restoreTurnChanges(sessionId, [
+      { path: "demo.txt", eventIds: ["ev-task-1", "ev-task-2"] },
+    ]);
+
+    expect(result).toEqual({ restored: ["demo.txt"], failed: [] });
+    expect(snapshots.restore).toHaveBeenCalledWith(sessionId, "ev-task-1");
+    expect(snapshots.drop).toHaveBeenCalledWith(sessionId, "ev-task-1");
+    expect(snapshots.drop).toHaveBeenCalledWith(sessionId, "ev-task-2");
+    expect(snapshots.drop).not.toHaveBeenCalledWith(sessionId, "ev-old");
+    expect(ctx.diffTracker.truncateAt).toHaveBeenCalledWith(
+      sessionId,
+      "demo.txt",
+      "ev-task-1",
+    );
+  });
+
+  it("restoreTurnChanges rejects an older task when later edits exist", async () => {
+    const change: FileChange = {
+      path: "demo.txt",
+      status: "M",
+      hunks: "newer",
+      updatedAt: 3,
+      events: [
+        { id: "ev-old-task", tool: "Edit", at: 1, hunk: "old task" },
+        { id: "ev-new-task", tool: "Edit", at: 2, hunk: "new task" },
+      ],
+    };
+    const ctx = makeDeps({ listDiffs: vi.fn().mockReturnValue([change]) });
+    const snapshots = {
+      has: vi.fn().mockReturnValue(true),
+      pathOf: vi.fn(),
+      restore: vi.fn().mockReturnValue(true),
+      list: vi.fn(),
+      drop: vi.fn(),
+      dropAll: vi.fn(),
+    };
+    (ctx.manager as unknown as { snapshots: unknown }).snapshots = snapshots;
+    const sessionId = await ctx.manager.start(
+      { text: "hi", attachments: [] },
+      "D:/p",
+    );
+
+    const result = ctx.manager.restoreTurnChanges(sessionId, [
+      { path: "demo.txt", eventIds: ["ev-old-task"] },
+    ]);
+
+    expect(result.restored).toEqual([]);
+    expect(result.failed).toEqual(["demo.txt"]);
+    expect(result.error).toMatch(/no files were changed/i);
+    expect(snapshots.restore).not.toHaveBeenCalled();
+    expect(ctx.diffTracker.truncateAt).not.toHaveBeenCalled();
   });
 
   it("tracks SDK user message uuids and emits user_msg_ids", async () => {

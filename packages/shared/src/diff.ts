@@ -748,6 +748,7 @@ export function summarizeTurnFiles(
       additions,
       deletions,
       line: Number.isFinite(firstLine) ? firstLine : 1,
+      eventIds: events.map((event) => event.id),
     });
   }
   return files;

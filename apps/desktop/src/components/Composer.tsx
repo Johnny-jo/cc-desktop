@@ -42,6 +42,8 @@ import { parseTrailingAt } from "../lib/at-mention";
 import { Lightbox, useImageDataUrl } from "./AttachmentChips";
 import { ContextRing } from "./ContextRing";
 import { ThemedSelect } from "./Select";
+import { PermissionModal } from "./PermissionModal";
+import { UserPromptModal } from "./UserPromptModal";
 
 /** Join a project-relative path onto the project root, tolerating either separator. */
 function joinProjectPath(root: string, rel: string): string {
@@ -250,6 +252,8 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
   const settings = useAppStore((s) => s.settings);
   const slashBySession = useAppStore((s) => s.slashBySession);
   const queuedPrompts = useAppStore((s) => s.queuedPrompts);
+  const permissionRequest = useAppStore((s) => s.permissionRequest);
+  const userPromptRequest = useAppStore((s) => s.userPromptRequest);
   const activeCtx = useAppStore((s) =>
     s.activeSessionId
       ? s.sessions.find((x) => x.id === s.activeSessionId)?.contextUsage
@@ -796,6 +800,14 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
       onSend();
     }
   };
+
+  if (permissionRequest || userPromptRequest) {
+    return (
+      <div className="composer-shell composer-shell-prompt">
+        {permissionRequest ? <PermissionModal /> : <UserPromptModal />}
+      </div>
+    );
+  }
 
   return (
     <div className="composer-shell">

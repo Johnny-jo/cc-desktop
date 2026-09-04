@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import type { UserPromptDecision } from "@claude-desktop/shared";
 import { clearUserPromptRequest, useAppStore } from "../state/store";
+import { useI18n } from "../i18n/useI18n";
 
 /**
  * Modal for agent "ask user for more info" flows:
@@ -8,6 +9,7 @@ import { clearUserPromptRequest, useAppStore } from "../state/store";
  * - SDK user dialog (request_user_dialog)
  */
 export function UserPromptModal() {
+  const { t } = useI18n();
   const request = useAppStore((s) => s.userPromptRequest);
   const [answer, setAnswer] = useState("");
 
@@ -38,31 +40,29 @@ export function UserPromptModal() {
   };
 
   return (
-    <div className="modal-overlay">
-      <div className="modal permission-modal">
-        <div className="modal-header">
-          <span className="modal-title">
-            {request.kind === "elicitation"
-              ? "Agent needs input"
-              : "Confirm"}
+    <div className="agent-prompt-card permission-modal">
+        <div className="agent-prompt-kicker">
+          <span className="agent-prompt-icon" aria-hidden>
+            <svg viewBox="0 0 16 16">
+              <path d="M3 3.2h10v7.3H7l-3.4 2.3.8-2.3H3V3.2Z" />
+            </svg>
           </span>
-          <span className="tool-name">{request.title}</span>
+          <span>{request.title || t.prompts.agentQuestion}</span>
         </div>
 
-        <div className="modal-body">
-          <p className="permission-summary">{request.message}</p>
+        <div className="agent-prompt-content">
+          <p className="agent-prompt-title">{request.message}</p>
           {request.url ? (
-            <p className="muted">
-              Open URL:{" "}
+            <p className="agent-prompt-link">
               <a href={request.url} target="_blank" rel="noreferrer">
                 {request.url}
               </a>
             </p>
           ) : (
             <textarea
-              className="composer-input user-prompt-input"
+              className="user-prompt-input"
               rows={3}
-              placeholder="Type your response…"
+              placeholder={t.prompts.typeResponse}
               value={answer}
               onChange={(e) => setAnswer(e.target.value)}
               autoFocus
@@ -70,34 +70,24 @@ export function UserPromptModal() {
           )}
         </div>
 
-        <div className="modal-actions">
+        <div className="agent-prompt-actions">
           <button
             type="button"
-            className="btn btn-primary"
-            onClick={onAccept}
-          >
-            {request.url ? "I've completed this" : "Submit"}
-          </button>
-          <button
-            type="button"
-            className="btn"
+            className="btn agent-prompt-secondary"
             onClick={() =>
               respond({ behavior: "decline", message: "User declined" })
             }
           >
-            Decline
+            {t.prompts.decline}
           </button>
           <button
             type="button"
-            className="btn btn-danger"
-            onClick={() =>
-              respond({ behavior: "cancel", message: "User cancelled" })
-            }
+            className="btn agent-prompt-primary"
+            onClick={onAccept}
           >
-            Cancel
+            {request.url ? t.prompts.completed : t.prompts.submitAnswer}
           </button>
         </div>
-      </div>
     </div>
   );
 }

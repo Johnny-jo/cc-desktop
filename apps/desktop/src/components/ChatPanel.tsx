@@ -148,6 +148,7 @@ export function ChatPanel({ onOpenSettings, onOpenFile }: ChatPanelProps) {
           <MessageList
             items={items}
             sessionId={activeSessionId}
+            running={activeRunning}
             hasMore={hasMore}
             hasNewer={hasNewer}
             loading={transcriptLoading}

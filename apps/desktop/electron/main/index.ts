@@ -459,6 +459,40 @@ function bootstrap() {
     snapshots.capture(sessionId, eventId, filePath);
   };
 
+  const showDesktopNotification = (args: {
+    title: string;
+    body: string;
+    showWhenFocused?: boolean;
+  }) => {
+    const win = getMainWindow();
+    if (
+      !args.showWhenFocused &&
+      win &&
+      !win.isDestroyed() &&
+      win.isFocused()
+    ) {
+      return;
+    }
+    if (!Notification.isSupported()) return;
+    const body =
+      args.body.length > 200 ? `${args.body.slice(0, 200)}…` : args.body;
+    const notification = new Notification({ title: args.title, body });
+    notification.on("click", () => {
+      const target = getMainWindow();
+      if (target && !target.isDestroyed()) {
+        target.show();
+        target.focus();
+      }
+    });
+    notification.show();
+  };
+
+  const prefersChinese = () => {
+    const locale = settings.get().locale;
+    return locale === "zh" ||
+      (locale === "system" && app.getLocale().toLowerCase().startsWith("zh"));
+  };
+
   const permissions = new PermissionBroker({
     getMode: () => settings.get().permissionMode,
     getAllowRules: () => settings.get().permissionAllow ?? [],
@@ -476,6 +510,18 @@ function bootstrap() {
         req,
         rooms?.roomIdForSession(req.sessionId),
       );
+      const question = req.toolName === "AskUserQuestion";
+      showDesktopNotification({
+        title: prefersChinese()
+          ? question
+            ? "AI 正在等待你的回答"
+            : "AI 正在等待你的确认"
+          : question
+            ? "AI is waiting for your answer"
+            : "AI is waiting for confirmation",
+        body: req.summary || req.toolName,
+        showWhenFocused: true,
+      });
     },
   });
 
@@ -487,6 +533,13 @@ function bootstrap() {
         req,
         rooms?.roomIdForSession(req.sessionId),
       );
+      showDesktopNotification({
+        title: prefersChinese()
+          ? "AI 正在等待你的回答"
+          : "AI is waiting for your answer",
+        body: req.message || req.title,
+        showWhenFocused: true,
+      });
     },
   });
 
@@ -570,22 +623,10 @@ function bootstrap() {
       });
     },
     onNotification: (n) => {
-      // Desktop notification only when the window isn't focused — when the
-      // user is looking at the app, the in-app UI already shows everything.
-      const win = getMainWindow();
-      if (win && !win.isDestroyed() && win.isFocused()) return;
-      if (!Notification.isSupported()) return;
-      const title = n.title || "CC Desktop";
-      const body = n.message.length > 200 ? `${n.message.slice(0, 200)}…` : n.message;
-      const notification = new Notification({ title, body });
-      notification.on("click", () => {
-        const w = getMainWindow();
-        if (w && !w.isDestroyed()) {
-          w.show();
-          w.focus();
-        }
+      showDesktopNotification({
+        title: n.title || "CC Desktop",
+        body: n.message,
       });
-      notification.show();
     },
   });
 

@@ -1144,6 +1144,87 @@ export class SessionManager {
     return { restored, failed };
   }
 
+  /**
+   * Roll back exactly one task card. Every target must still be the latest
+   * contiguous suffix for its file; otherwise nothing is changed. This guard
+   * prevents an older card from silently erasing edits made by later tasks.
+   */
+  restoreTurnChanges(
+    sessionId: string,
+    files: import("@claude-desktop/shared").TurnChangeRestoreTarget[],
+  ): { restored: string[]; failed: string[]; error?: string } {
+    this.hydrateChanges(sessionId);
+    if (!this.snapshots || files.length === 0) {
+      return {
+        restored: [],
+        failed: files.map((file) => file.path),
+        error: "Task snapshots are unavailable",
+      };
+    }
+
+    const changes = this.diffTracker.list(sessionId);
+    const plans: Array<{
+      path: string;
+      firstEventId: string;
+      suffixEventIds: string[];
+    }> = [];
+
+    for (const file of files) {
+      const targetIds = [...new Set(file.eventIds)].filter(Boolean);
+      const change = changes.find((item) => item.path === file.path);
+      const firstIndex = change
+        ? change.events.findIndex((event) => event.id === targetIds[0])
+        : -1;
+      const suffix =
+        change && firstIndex >= 0 ? change.events.slice(firstIndex) : [];
+      const isExactLatestSuffix =
+        targetIds.length > 0 &&
+        suffix.length === targetIds.length &&
+        suffix.every((event, index) => event.id === targetIds[index]);
+      const firstEventId = targetIds[0];
+
+      if (
+        !change ||
+        !firstEventId ||
+        !isExactLatestSuffix ||
+        !this.snapshots.has(sessionId, firstEventId)
+      ) {
+        return {
+          restored: [],
+          failed: files.map((item) => item.path),
+          error:
+            "This task is no longer the latest edit; no files were changed",
+        };
+      }
+
+      plans.push({
+        path: change.path,
+        firstEventId,
+        suffixEventIds: suffix.map((event) => event.id),
+      });
+    }
+
+    const restored: string[] = [];
+    const failed: string[] = [];
+    for (const plan of plans) {
+      if (!this.snapshots.restore(sessionId, plan.firstEventId)) {
+        failed.push(plan.path);
+        continue;
+      }
+      for (const eventId of plan.suffixEventIds) {
+        this.snapshots.drop(sessionId, eventId);
+      }
+      this.diffTracker.truncateAt(
+        sessionId,
+        plan.path,
+        plan.firstEventId,
+      );
+      restored.push(plan.path);
+    }
+    this.emitDiffAndPersist(sessionId);
+    return { restored, failed };
+  }
+
   private emitDiffAndPersist(sessionId: string): void {
     this.hydrateChanges(sessionId);
     // Sync deleted/reappeared files before pushing to the renderer.
@@ -1879,7 +1960,6 @@ export class SessionManager {
       !reopenForExtras
     ) {
       try {
-        this.snapshotTurnChangeBaseline(sessionId);
         entry.input.push(content, entry.sdkSessionId);
       } catch {
         // Stream closed between the check and push (e.g. concurrent abort) —
@@ -2187,7 +2267,6 @@ export class SessionManager {
       // Kick off consumer before first push so we don't miss early messages.
       entry.consumer = this.consumeQuery(sessionId, q, settings.defaultModel);
 
-      this.snapshotTurnChangeBaseline(sessionId);
       input.push(content, entry.sdkSessionId);
 
       // Control request on the same CLI competes with the first model call

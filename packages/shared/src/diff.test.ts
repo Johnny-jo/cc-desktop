@@ -455,7 +455,13 @@ describe("summarizeTurnFiles", () => {
     ];
     const files = summarizeTurnFiles(changes, new Set(["ev-1", "ev-0"]));
     expect(files).toEqual([
-      { path: "src/a.ts", additions: 2, deletions: 1, line: 12 },
+      {
+        path: "src/a.ts",
+        additions: 2,
+        deletions: 1,
+        line: 12,
+        eventIds: ["ev-2"],
+      },
     ]);
   });
 

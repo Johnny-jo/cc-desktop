@@ -74,6 +74,8 @@ export const IPC = {
   diffRestoreFile: "diff:restore-file",
   /** Restore all changed files of a session */
   diffRestoreAll: "diff:restore-all",
+  /** Restore only the exact file events recorded by one task card */
+  diffRestoreTurn: "diff:restore-turn",
   /** Rewind files + conversation to a user message (SDK checkpointing) */
   sessionRewind: "session:rewind",
   /** Open a file in the OS default editor */
@@ -451,6 +453,15 @@ export type IpcInvokeMap = {
   [IPC.diffRestoreAll]: {
     args: [{ sessionId: string }];
     result: { restored: string[]; failed: string[] };
+  };
+  [IPC.diffRestoreTurn]: {
+    args: [
+      {
+        sessionId: string;
+        files: import("./models").TurnChangeRestoreTarget[];
+      },
+    ];
+    result: { restored: string[]; failed: string[]; error?: string };
   };
   [IPC.sessionRewind]: {
     /**

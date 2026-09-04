@@ -2,7 +2,7 @@ import type { ChatItem } from "@claude-desktop/shared";
 
 export type ConversationAnchor = {
   id: string;
-  role: "user" | "assistant";
+  /** Final assistant conclusion for this user task; empty while still running. */
   preview: string;
 };
 
@@ -14,22 +14,27 @@ function compactPreview(text: string): string {
   return `${compact.slice(0, PREVIEW_LIMIT - 1).trimEnd()}…`;
 }
 
-/** User/assistant message ids that can act as stable transcript jump targets. */
+/** One stable jump target per user task, previewing its final AI conclusion. */
 export function buildConversationAnchors(
   items: ChatItem[],
 ): ConversationAnchor[] {
   const anchors: ConversationAnchor[] = [];
+  let current: ConversationAnchor | null = null;
+
   for (const item of items) {
-    if (
-      item.kind !== "text" ||
-      (item.role !== "user" && item.role !== "assistant")
-    ) {
+    if (item.kind !== "text") continue;
+
+    if (item.role === "user") {
+      current = { id: item.id, preview: "" };
+      anchors.push(current);
       continue;
     }
-    const preview = compactPreview(item.text);
-    if (!preview) continue;
-    anchors.push({ id: item.id, role: item.role, preview });
+
+    if (item.role === "assistant" && current) {
+      const conclusion = compactPreview(item.text);
+      if (conclusion) current.preview = conclusion;
+    }
   }
+
   return anchors;
 }
-

@@ -16,12 +16,9 @@ import {
   ResizeHandle,
 } from "./components/LayoutChrome";
 import { SideRail, type RailMode } from "./components/SideRail";
-import { PermissionModal } from "./components/PermissionModal";
 import { RoomPermAskModal } from "./components/RoomPermAskModal";
-import { UserPromptModal } from "./components/UserPromptModal";
 import { OnboardingModal } from "./components/OnboardingModal";
 import { ErrorBanner } from "./components/ErrorBanner";
-import { UpdateBanner } from "./components/UpdateBanner";
 import { getDesktop } from "./lib/desktop-api";
 import { dropEditorBuffer } from "./lib/editor-buffer-cache";
 import {
@@ -487,9 +484,7 @@ export function App() {
           </div>
         </div>
 
-        <PermissionModal />
         <RoomPermAskModal />
-        <UserPromptModal />
         <OnboardingModal open={needsOnboarding} />
         {settingsOpen ? (
           <Suspense fallback={null}>
@@ -527,9 +522,7 @@ export function App() {
           </div>
         </div>
 
-        <PermissionModal />
         <RoomPermAskModal />
-        <UserPromptModal />
         <OnboardingModal open={needsOnboarding} />
         {settingsOpen ? (
           <Suspense fallback={null}>
@@ -561,7 +554,6 @@ export function App() {
         <div className="titlebar-caption-space" aria-hidden />
       </div>
       <ErrorBanner />
-      <UpdateBanner />
 
       <div
         className={
@@ -1036,9 +1028,7 @@ export function App() {
         ) : null}
       </div>
 
-      <PermissionModal />
       <RoomPermAskModal />
-      <UserPromptModal />
       {tabMenu
         ? createPortal(
             <div

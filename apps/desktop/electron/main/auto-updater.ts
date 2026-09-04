@@ -5,6 +5,7 @@ import { autoUpdater, type UpdateInfo } from "electron-updater";
 import { IPC } from "@claude-desktop/shared";
 import {
   NO_UPDATE_FEED_MESSAGE,
+  renderAppUpdateYml,
   resolveUpdateSource,
 } from "./auto-updater-source";
 
@@ -36,6 +37,7 @@ export class AppAutoUpdater {
   private readonly host: AutoUpdaterHost;
   private status: UpdateStatus = { state: "idle" };
   private wired = false;
+  private activeUpdateConfig: string | null = null;
 
   constructor(host: AutoUpdaterHost) {
     this.host = host;
@@ -65,7 +67,7 @@ export class AppAutoUpdater {
     try {
       // electron-updater exposes this on Windows for unsigned apps
       (autoUpdater as unknown as { disableDifferentialDownload?: boolean })
-        .disableDifferentialDownload = true;
+        .disableDifferentialDownload = false;
     } catch {
       // ignore
     }
@@ -126,21 +128,68 @@ export class AppAutoUpdater {
   }
 
   /**
+   * electron-updater still reads updateConfigPath during download to resolve
+   * updaterCacheDirName. A runtime feed therefore needs a real config file,
+   * even when setFeedURL() was sufficient for the preceding update check.
+   */
+  private applyRuntimeFeedConfig(url: string): void {
+    const configPath = path.join(
+      app.getPath("userData"),
+      "app-update-runtime.yml",
+    );
+    const contents = renderAppUpdateYml(url);
+    let current = "";
+    try {
+      current = fs.readFileSync(configPath, "utf8");
+    } catch {
+      // Missing/stale runtime config is recreated below.
+    }
+    if (current !== contents) {
+      fs.writeFileSync(configPath, contents, "utf8");
+    }
+    const key = `feed:${url}`;
+    if (this.activeUpdateConfig !== key) {
+      autoUpdater.updateConfigPath = configPath;
+      this.activeUpdateConfig = key;
+    }
+  }
+
+  private applyPackagedFeedConfig(): void {
+    const configPath = this.packagedYmlPath();
+    const key = `packaged:${configPath}`;
+    if (this.activeUpdateConfig !== key) {
+      autoUpdater.updateConfigPath = configPath;
+      this.activeUpdateConfig = key;
+    }
+  }
+
+  /**
    * Configure electron-updater, or report that updates are disabled.
    * Must not call checkForUpdates() when this returns "disabled" — that
    * is what produced ENOENT on resources/app-update.yml.
    */
-  private applyFeedUrl(): "feed" | "packaged-yml" | "disabled" {
+  private applyFeedUrl(): "feed" | "packaged-yml" | "disabled" | "error" {
     const source = resolveUpdateSource({
       envUrl: process.env.CLAUDE_DESKTOP_UPDATE_URL,
       settingsUrl: this.host.getFeedUrl?.(),
       packagedYmlExists: fs.existsSync(this.packagedYmlPath()),
     });
     if (source.kind === "feed") {
-      autoUpdater.setFeedURL({ provider: "generic", url: source.url });
+      try {
+        this.applyRuntimeFeedConfig(source.url);
+      } catch (err) {
+        this.setStatus({
+          state: "error",
+          message: `无法创建更新配置：${err instanceof Error ? err.message : String(err)}`,
+        });
+        return "error";
+      }
       return "feed";
     }
-    if (source.kind === "packaged-yml") return "packaged-yml";
+    if (source.kind === "packaged-yml") {
+      this.applyPackagedFeedConfig();
+      return "packaged-yml";
+    }
     return "disabled";
   }
 
@@ -152,10 +201,12 @@ export class AppAutoUpdater {
       });
       return this.status;
     }
-    if (this.applyFeedUrl() === "disabled") {
+    const source = this.applyFeedUrl();
+    if (source === "disabled") {
       this.setStatus({ state: "disabled", message: NO_UPDATE_FEED_MESSAGE });
       return this.status;
     }
+    if (source === "error") return this.status;
     try {
       await autoUpdater.checkForUpdates();
     } catch (err) {
@@ -173,10 +224,12 @@ export class AppAutoUpdater {
     if (!app.isPackaged) {
       return this.getStatus();
     }
-    if (this.applyFeedUrl() === "disabled") {
+    const source = this.applyFeedUrl();
+    if (source === "disabled") {
       this.setStatus({ state: "disabled", message: NO_UPDATE_FEED_MESSAGE });
       return this.status;
     }
+    if (source === "error") return this.status;
     try {
       await autoUpdater.downloadUpdate();
     } catch (err) {

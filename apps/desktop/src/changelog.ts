@@ -8,6 +8,30 @@ export type ChangelogEntry = {
 /** Newest first. Shown in the title-bar changelog panel. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.3.11",
+    date: "2026-09-04",
+    title: "更新机制变动 @Johnny",
+    items: [
+      "增加对话内容的复制按钮",
+      "增加差分更新功能",
+    ],
+  },
+  {
+    version: "0.3.7",
+    date: "2026-09-04",
+    title: "UI设计 · 布局改版 @Johnny",
+    items: [
+      "基础依赖版本升级",
+      "会话索引、会话消息及思考内容、文件变化记录、文件变化记录、群聊元数据、聊天时间线、MOD KV数据全部转为SQLite存储",
+      "优化会话聊天UI设计、优化界面布局",
+      "升级CPA 服务，现在支持会话窗口内同步订阅额度（仅限CPA内配置的订阅服务）",
+      "折叠执行过程、思考内容、工具调用",
+      "增加了会话内的快速查找功能",
+      "采用更先进的上下文自动压缩技术",
+      "新增 「修改文件列表」，可快速比对文件差异 ",
+    ],
+  },
+  {
     version: "0.3.5",
     date: "2026-09-01",
     title: "群聊借 AI · 安全围栏 · 内存治理 @Johnny",

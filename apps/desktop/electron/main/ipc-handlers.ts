@@ -602,6 +602,25 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
   );
 
   ipcMain.handle(
+    IPC.diffRestoreTurn,
+    async (
+      _e,
+      {
+        sessionId,
+        files,
+      }: {
+        sessionId: string;
+        files: import("@claude-desktop/shared").TurnChangeRestoreTarget[];
+      },
+    ) => {
+      if (!ctx.sessions.getSummary(sessionId)) {
+        return { restored: [], failed: [], error: "Unknown session" };
+      }
+      return ctx.sessions.restoreTurnChanges(sessionId, files);
+    },
+  );
+
+  ipcMain.handle(
     IPC.sessionRewind,
     async (
       _e,

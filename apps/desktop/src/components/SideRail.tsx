@@ -8,6 +8,7 @@ import {
 } from "../state/store";
 import { selectRoom, useRoomStore } from "../state/room-store";
 import { effectiveTheme, nextTheme } from "../lib/theme";
+import { UpdateRailButton } from "./UpdateRailButton";
 
 /** 左侧 icon 工具栏的模式：AI 对话 / 群聊（好友为占位）。 */
 export type RailMode = "chat" | "rooms" | "friends";
@@ -231,6 +232,7 @@ export function SideRail({
         </button>
       </div>
       <div className="side-rail-bottom">
+        <UpdateRailButton />
         <button
           type="button"
           className="side-rail-btn"

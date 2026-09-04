@@ -180,6 +180,17 @@ const desktop = {
       failed: string[];
     }>,
 
+  /** Restore only the changes belonging to one task card. */
+  restoreTurnChanges: (
+    sessionId: string,
+    files: import("@claude-desktop/shared").TurnChangeRestoreTarget[],
+  ) =>
+    ipcRenderer.invoke(IPC.diffRestoreTurn, { sessionId, files }) as Promise<{
+      restored: string[];
+      failed: string[];
+      error?: string;
+    }>,
+
   /**
    * Rewind files + conversation to a user message (SDK checkpointing).
    * dryRun previews the file changes without touching disk.
