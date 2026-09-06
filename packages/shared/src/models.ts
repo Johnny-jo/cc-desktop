@@ -77,6 +77,43 @@ export type TodoItem = {
   activeForm?: string;
 };
 
+export type ProgressTask = {
+  id: string;
+  title: string;
+  status: "pending" | "in_progress" | "completed";
+  description?: string;
+  activeForm?: string;
+  owner?: string;
+  /** Task identity is (scope, id); absent scope denotes the main agent. */
+  scope?: string;
+};
+
+export type ProgressAgent = {
+  id: string;
+  toolUseId?: string;
+  parentToolUseId?: string;
+  title: string;
+  status: "running" | "completed" | "failed" | "stopped" | "paused" | "unknown";
+  summary?: string;
+  elapsedSeconds?: number;
+  background?: boolean;
+};
+
+export type SessionProgress = { tasks: ProgressTask[]; agents: ProgressAgent[] };
+
+export type ToolTaskUpdate = {
+  operation: "create" | "update" | "list" | "replace";
+  /** Local application sequence, assigned by the transcript reducer at tool_end. */
+  appliedOrder?: number;
+  taskId?: string;
+  tasks?: ProgressTask[];
+  /** scope also identifies an empty list/replace operation's target. */
+  patch?: Partial<ProgressTask> & { deleted?: boolean };
+  success?: boolean;
+};
+
+export type AgentProgressUpdate = Pick<ProgressAgent, "id"> & Partial<Omit<ProgressAgent, "id">>;
+
 export type ToolCardState = {
   id: string;
   name: string;
@@ -89,6 +126,10 @@ export type ToolCardState = {
   isSubagent?: boolean;
   /** Structured todo list — populated only for TodoWrite tool calls */
   todos?: TodoItem[];
+  task?: ToolTaskUpdate;
+  /** Invocation completion and background agent completion are independent. */
+  agent?: ProgressAgent;
+  parentToolUseId?: string;
 };
 
 /** Per-turn token / cost / timing from SDK result message */
@@ -267,6 +308,8 @@ export type SessionSummary = {
   usage?: SessionUsage;
   /** Latest context-window occupancy (not billing totals) */
   contextUsage?: ContextUsage;
+  /** Structured progress for the complete retained session, independent of paging. */
+  progress?: SessionProgress;
   /** Room-mod / seat sessions — omitted from the main session list */
   hiddenFromList?: boolean;
   /** Pinned to the top of the sidebar list */
@@ -396,6 +439,7 @@ export type SdkNormalizedEvent =
   | { type: "text_done"; sessionId: string; text: string }
   | { type: "tool_start"; sessionId: string; tool: ToolCardState }
   | { type: "tool_end"; sessionId: string; tool: ToolCardState }
+  | { type: "agent_progress"; sessionId: string; agent: AgentProgressUpdate }
   | {
       type: "tool_progress";
       sessionId: string;

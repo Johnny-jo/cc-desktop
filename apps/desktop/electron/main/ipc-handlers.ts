@@ -18,6 +18,7 @@ import type {
 } from "@claude-desktop/shared";
 import { attachmentFromFile, guessMimeType } from "@claude-desktop/shared";
 import { MAX_IMAGE_ATTACHMENT_SIZE } from "./attachment-reader";
+import { performRoomAttachmentAction } from "./room-attachment-actions";
 import type { SessionManager } from "./session-manager";
 import type { PermissionBroker } from "./permission-broker";
 import type { UserPromptBroker } from "./user-prompt-broker";
@@ -1094,9 +1095,22 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
     if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.returnSeat(roomId, seatId);
   });
-  ipcMain.handle(IPC.roomSend, async (_e, { roomId, seatId, text, quote, attachments }) => {
+  ipcMain.handle(IPC.roomSend, async (_e, { roomId, seatId, text, quote, attachments, mentions, clientMessageId }) => {
     if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
-    return ctx.rooms.send(roomId, seatId, text, quote, attachments);
+    return ctx.rooms.send(roomId, seatId, text, quote, attachments, mentions, clientMessageId);
+  });
+  ipcMain.handle(IPC.roomAttachment, async (_e, args) => {
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
+    return performRoomAttachmentAction(ctx.rooms, args, async (name) => {
+      const options = { title: "保存群聊附件", defaultPath: name, properties: ["createDirectory", "showOverwriteConfirmation"] as ("createDirectory" | "showOverwriteConfirmation")[] };
+      const win = ctx.window();
+      const selected = win ? await dialog.showSaveDialog(win, options) : await dialog.showSaveDialog(options);
+      return selected.canceled ? undefined : selected.filePath;
+    });
+  });
+  ipcMain.handle(IPC.roomTaskControl, async (_e, args) => {
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
+    return ctx.rooms.controlTask(args);
   });
   ipcMain.handle(IPC.roomRejoin, async (_e, { roomId }) => {
     if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
@@ -1201,6 +1215,13 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
   ipcMain.handle(IPC.roomModIntent, async (_e, { roomId, seatId, name, payload }) => {
     if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
     return ctx.rooms.modIntent(roomId, seatId, name, payload);
+  });
+  ipcMain.handle(IPC.roomModParticipation, async (_e, { roomId, enabled }) => {
+    if (!ctx.rooms) return { ok: false, error: "群聊服务未启用" };
+    if (typeof roomId !== "string" || typeof enabled !== "boolean") {
+      return { ok: false, error: "活动参与参数无效" };
+    }
+    return ctx.rooms.setModParticipation(roomId, enabled);
   });
   ipcMain.handle(IPC.roomListMods, async () => {
     return { mods: ctx.rooms?.listMods().mods ?? [] };

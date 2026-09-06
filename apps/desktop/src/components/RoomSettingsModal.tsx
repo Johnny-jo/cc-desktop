@@ -34,6 +34,7 @@ import {
 import { RoomLeaveConfirm } from "./RoomLeaveConfirm";
 import { isRoomMuted, setRoomMuted } from "../lib/room-notify";
 import { ToggleSwitch } from "./ToggleSwitch";
+import "./RoomSettingsDetails.css";
 
 type Props = {
   room: RoomSnapshot;
@@ -41,6 +42,9 @@ type Props = {
   canAdmin?: boolean;
   offline?: boolean;
   onClose: () => void;
+  onInvite?: () => Promise<{ ok: boolean; error?: string }>;
+  /** Keep draft state mounted, but let the invitation dialog own focus / Escape. */
+  suspended?: boolean;
 };
 
 type RoomSettingsTab = "mods" | "improve" | "memory" | "overview";
@@ -85,6 +89,8 @@ export function RoomSettingsModal({
   canAdmin,
   offline,
   onClose,
+  onInvite,
+  suspended = false,
 }: Props) {
   const { t } = useI18n();
   const [packs, setPacks] = useState<RoomModPack[]>([]);
@@ -95,6 +101,7 @@ export function RoomSettingsModal({
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [inviteError, setInviteError] = useState<string | null>(null);
   // 概览页：改名草稿 + 退出/解散确认
   const [nameDraft, setNameDraft] = useState(room.name);
   const [savedName, setSavedName] = useState(room.name);
@@ -164,12 +171,13 @@ export function RoomSettingsModal({
   }, [room.roomId, room.kernel, canHost, memoryOn]);
 
   useEffect(() => {
+    if (suspended) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") requestClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [requestClose]);
+  }, [requestClose, suspended]);
 
   // 改名成功后快照回流 → 草稿跟随最新名字
   useEffect(() => {
@@ -352,6 +360,8 @@ export function RoomSettingsModal({
   const pending = (improve?.proposals ?? []).filter((p) => p.status === "pending");
   const canRollback = new Set(improve?.canRollback ?? []);
 
+  if (suspended) return null;
+
   return createPortal(
     <div className="room-modal-overlay" role="presentation" onClick={requestClose}>
       <div
@@ -449,6 +459,34 @@ export function RoomSettingsModal({
                     <span>{t.room.settingsPort.replace("{port}", String(room.port))}</span>
                   </div>
                 </div>
+              </div>
+
+              <div className="room-overview-card room-connection-details">
+                <div className="room-connection-details-head">
+                  <div className="room-overview-card-title">连接信息</div>
+                  {canHost && !offline && room.status === "open" && onInvite ? (
+                    <button type="button" className="btn btn-ghost btn-sm" aria-label="邀请成员"
+                      disabled={busyId === "invite"}
+                      onClick={async () => {
+                        setBusyId("invite");
+                        setErr(null);
+                        setInviteError(null);
+                        try {
+                          const result = await onInvite();
+                          if (!result.ok) setInviteError(result.error ?? "生成邀请码失败，请重试");
+                        } catch (error) {
+                          setInviteError(error instanceof Error ? error.message : "生成邀请码失败，请重试");
+                        } finally { setBusyId(current => current === "invite" ? null : current); }
+                      }}>{busyId === "invite" ? "正在生成…" : "邀请成员"}</button>
+                  ) : null}
+                </div>
+                {inviteError ? <p className="settings-error room-invite-error" role="alert">{inviteError}</p> : null}
+                <dl>
+                  <div><dt>连接</dt><dd>{offline ? "连接已断开" : room.status !== "open" ? "已结束" : canHost ? "本地主持" : "成员连接"}</dd></div>
+                  <div><dt>传输</dt><dd>{room.encrypt ? "已启用加密" : "未启用加密"}</dd></div>
+                  <div><dt>扩展</dt><dd>{room.kernel?.mods.filter(m => m.state === "active").map(m => m.name).join("、") || "未启用扩展"}</dd></div>
+                  <div><dt>群活动</dt><dd>{room.modChecksum ? "已启用群活动" : "暂无群活动"}</dd></div>
+                </dl>
               </div>
 
               <div className="room-overview-grid">

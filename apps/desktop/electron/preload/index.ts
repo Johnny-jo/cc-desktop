@@ -545,11 +545,15 @@ const desktop = {
     text: string,
     quote?: import("@claude-desktop/shared").RoomQuoteRef,
     attachments?: import("@claude-desktop/shared").Attachment[],
+    mentions?: import("@claude-desktop/shared").RoomMention[],
+    clientMessageId?: string,
   ) =>
-    ipcRenderer.invoke(IPC.roomSend, { roomId, seatId, text, quote, attachments }) as Promise<{
+    ipcRenderer.invoke(IPC.roomSend, { roomId, seatId, text, quote, attachments, mentions, clientMessageId }) as Promise<{
       ok: boolean;
       error?: string;
     }>,
+  roomAttachment: (roomId: string, itemId: string, attachmentId: string, action: "preview" | "save") =>
+    ipcRenderer.invoke(IPC.roomAttachment, { roomId, itemId, attachmentId, action }) as Promise<import("@claude-desktop/shared").IpcInvokeMap[typeof IPC.roomAttachment]["result"]>,
   rejoinRoom: (roomId: string) =>
     ipcRenderer.invoke(IPC.roomRejoin, { roomId }) as Promise<{
       ok: boolean;
@@ -730,6 +734,13 @@ const desktop = {
       ok: boolean;
       error?: string;
     }>,
+  setRoomModParticipation: (roomId: string, enabled: boolean) =>
+    ipcRenderer.invoke(IPC.roomModParticipation, { roomId, enabled }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+  controlRoomTask: (args: import("@claude-desktop/shared").IpcInvokeMap[typeof IPC.roomTaskControl]["args"][0]) =>
+    ipcRenderer.invoke(IPC.roomTaskControl, args) as Promise<{ ok: boolean; error?: string }>,
   listRoomMods: () =>
     ipcRenderer.invoke(IPC.roomListMods) as Promise<{
       mods: Array<{

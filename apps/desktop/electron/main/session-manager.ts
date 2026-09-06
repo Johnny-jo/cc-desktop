@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import type {
   ChatItem,
   FileChange,
@@ -8,10 +9,12 @@ import type {
   SdkNormalizedEvent,
   SessionMcpServerStatus,
   SessionSearchHit,
+  SessionProgress,
   SessionSummary,
   SessionUsage,
   SlashCommandItem,
   TurnUsage,
+  ToolCardState,
 } from "@claude-desktop/shared";
 import type { PermissionBroker } from "./permission-broker";
 import type { DiffTracker } from "./diff-tracker";
@@ -32,6 +35,9 @@ import {
   computeContextUsage,
   createIdFactory,
   shouldPersistTranscript,
+  rebuildSessionProgress,
+  restoreSessionProgress,
+  updateSessionProgress,
   summarizeTurnFiles,
   type TranscriptState,
   type UserPrompt,
@@ -72,6 +78,15 @@ export type SessionRunOpts = {
    * 重定向 / cd 都不能越出这个目录，越界直接拒绝，不进权限弹窗。
    */
   pathJail?: string;
+  /** Room turns only: enforce read-only tools in PreToolUse, regardless of SDK mode. */
+  roomReadOnly?: boolean;
+  /** Room task lifetime only; cancellation also fences asynchronous preparation. */
+  roomAbortSignal?: AbortSignal;
+  /** Approve leaving read-only for this turn; normal permissions/pathJail still apply. */
+  requestRoomWriteAccess?: (
+    name: string,
+    input: Record<string, unknown>,
+  ) => Promise<boolean>;
   /** Merge over CPA env (borrowed AI proxy sets ANTHROPIC_BASE_URL here). */
   extraEnv?: Record<string, string>;
   /** Skip local CPA ready check (borrowed AI talks to a loopback proxy). */
@@ -195,8 +210,21 @@ type QueryControl = {
   }>;
 };
 
+type RoomAbortTurn = {
+  signal: AbortSignal;
+  cancelled: boolean;
+  detach?: () => void;
+};
+
+type QueryExtras = {
+  servers: Record<string, unknown>;
+  allowedTools: string[];
+};
+
 type SessionEntry = {
   summary: SessionSummary;
+  /** Progress before the retained transcript; never exposed in SessionSummary. */
+  progressBaseline?: SessionProgress;
   abortController: AbortController | null;
   sdkSessionId?: string;
   /** Streaming input queue (kept open across turns) */
@@ -244,10 +272,19 @@ type SessionEntry = {
   nextId: (prefix: string) => string;
   extraMcpServers?: Record<string, unknown>;
   extraAllowedTools?: string[];
+  /** Snapshot actually attached to the live query, not staged next-turn extras. */
+  queryExtras?: QueryExtras;
   model?: string;
   permissionMode?: PermissionMode;
   /** Room turns only: confine file tools to this root (see SessionRunOpts). */
   pathJail?: string;
+  /** Replaced on every start/continue, even when the SDK query stays open. */
+  roomReadOnlyTurn?: {
+    requestWriteAccess: SessionRunOpts["requestRoomWriteAccess"];
+    writeApproved: boolean;
+  };
+  /** Replaced before each room turn's preparation; old continuations lose ownership. */
+  roomAbortTurn?: RoomAbortTurn;
   extraEnv?: Record<string, string>;
   skipCpa?: boolean;
 };
@@ -390,6 +427,32 @@ export function pathJailViolation(
   return null;
 }
 
+function isSdkMcpServer(
+  server: unknown,
+): server is Record<string, unknown> & { type: "sdk" } {
+  return (
+    server != null && typeof server === "object" &&
+    "type" in server && server.type === "sdk"
+  );
+}
+
+function snapshotQueryExtras(entry: SessionEntry): QueryExtras {
+  return {
+    servers: Object.fromEntries(
+      Object.entries(entry.extraMcpServers ?? {}).map(([name, server]) => {
+        // Transport configs are data, but SDK instances contain live task closures.
+        // Copy their wrapper without cloning the instance or losing its identity.
+        if (isSdkMcpServer(server)) {
+          const { instance, ...config } = server;
+          return [name, { ...structuredClone(config), instance }];
+        }
+        return [name, structuredClone(server)];
+      }),
+    ),
+    allowedTools: [...(entry.extraAllowedTools ?? [])],
+  };
+}
+
 function extrasChanged(
   prevServers: Record<string, unknown> | undefined,
   prevTools: string[] | undefined,
@@ -398,7 +461,17 @@ function extrasChanged(
 ): boolean {
   return (
     !sameKeySet(Object.keys(prevServers ?? {}), Object.keys(nextServers)) ||
-    !sameKeySet(prevTools ?? [], nextTools)
+    !sameKeySet(prevTools ?? [], nextTools) ||
+    Object.entries(nextServers).some(([name, next]) => {
+      const prev = prevServers?.[name];
+      if (isSdkMcpServer(prev) || isSdkMcpServer(next)) {
+        if (
+          !isSdkMcpServer(prev) || !isSdkMcpServer(next) ||
+          prev.instance !== next.instance
+        ) return true;
+      }
+      return !isDeepStrictEqual(prev, next);
+    })
   );
 }
 
@@ -564,9 +637,11 @@ export class SessionManager {
               : {}),
             ...(stored.hiddenFromList ? { hiddenFromList: true } : {}),
             ...(stored.pinned ? { pinned: true } : {}),
+            ...(stored.progress ? { progress: stored.progress } : {}),
           },
           abortController: null,
           sdkSessionId: stored.sdkSessionId,
+          progressBaseline: stored.progressBaseline,
           slashCommands: [],
           turnActive: false,
           lastQueryUsedAt: 0,
@@ -636,6 +711,8 @@ export class SessionManager {
    */
   private parkSession(entry: SessionEntry, force = false): void {
     if (!force && entry.turnActive) return;
+    this.settleLiveAgents(entry, "unknown");
+    entry.roomAbortTurn?.detach?.();
     this.clearIdleCloseTimer(entry);
     entry.streamGen += 1;
     try {
@@ -651,6 +728,7 @@ export class SessionManager {
     entry.abortController = null;
     entry.input = undefined;
     entry.query = undefined;
+    entry.queryExtras = undefined;
     entry.consumer = undefined;
   }
 
@@ -771,14 +849,14 @@ export class SessionManager {
       }
       // Renderer history restore should not pin the full conversation in the
       // main process. The archive reads only chunks intersecting this page.
-      return (
-        this.archive?.loadItemsPage(sessionId, opts) ?? {
+      this.restoreProgress(entry);
+      const page = this.archive?.loadItemsPage(sessionId, opts) ?? {
           items: [],
           total: 0,
           hasMore: false,
           hasNewer: false,
-        }
-      );
+        };
+      return { ...page, items: this.restoreTranscriptAgents(entry, page.items) };
     }
     return (
       this.archive?.loadItemsPage(sessionId, opts) ?? {
@@ -805,6 +883,8 @@ export class SessionManager {
       if (opts?.replace) {
         entry.items = items.slice();
         entry.itemsHydrated = true;
+        entry.progressBaseline = undefined;
+        this.setProgress(entry, rebuildSessionProgress(entry.items) ?? { tasks: [], agents: [] });
       } else {
         this.hydrateItems(entry);
         entry.items = mergeTranscriptItems(entry.items, items);
@@ -823,7 +903,9 @@ export class SessionManager {
 
   private hydrateItems(entry: SessionEntry): void {
     if (!entry.itemsHydrated) {
-      entry.items = this.archive?.loadItems(entry.summary.id) ?? [];
+      const items = this.archive?.loadItems(entry.summary.id) ?? [];
+      this.restoreProgress(entry, items);
+      entry.items = this.restoreTranscriptAgents(entry, items);
       entry.itemsHydrated = true;
     }
     this.touchTranscript(entry);
@@ -951,6 +1033,11 @@ export class SessionManager {
     event: SdkNormalizedEvent,
   ): void {
     this.hydrateItems(entry);
+    const toolId = event.type === "tool_start" || event.type === "tool_end"
+      ? event.tool.id
+      : event.type === "tool_progress" ? event.toolUseId : undefined;
+    const previousTool = toolId ? this.resolveTool(entry, toolId) : undefined;
+    this.setProgress(entry, updateSessionProgress(entry.summary.progress, event, previousTool));
     const next = applySdkEvent(this.transcriptOf(entry), event, {
       nextId: entry.nextId,
     });
@@ -971,9 +1058,58 @@ export class SessionManager {
     if (!this.archive) return;
     const stored: StoredSession = {
       ...entry.summary,
+      progressBaseline: entry.progressBaseline,
       ...(entry.sdkSessionId ? { sdkSessionId: entry.sdkSessionId } : {}),
     };
     this.archive.upsertSummary(stored);
+  }
+
+  /** Cache even an empty backfill; subsequent pages must not rescan history. */
+  private restoreProgress(entry: SessionEntry, items?: ChatItem[]): void {
+    if (entry.summary.hiddenFromList || entry.summary.progress) return;
+    const progress = items
+      ? restoreSessionProgress(rebuildSessionProgress(items, entry.progressBaseline))
+      : this.archive?.loadProgress(entry.summary.id, entry.progressBaseline);
+    this.setProgress(entry, progress ?? { tasks: [], agents: [] });
+  }
+
+  /** Progress is session-wide, independent of the renderer's transcript page. */
+  private setProgress(entry: SessionEntry, progress: SessionProgress | undefined): void {
+    if (entry.summary.hiddenFromList || progress === entry.summary.progress) return;
+    entry.summary = { ...entry.summary, progress };
+    this.persistSummary(entry);
+    this.emitSession({ ...entry.summary });
+  }
+
+  private resolveTool(entry: SessionEntry, id: string): ToolCardState | undefined {
+    for (let index = entry.items.length - 1; index >= 0; index -= 1) {
+      const item = entry.items[index];
+      if (item.kind === "tool" && (item.tool.id === id || item.tool.agent?.id === id)) return item.tool;
+    }
+    return undefined;
+  }
+
+  private restoreTranscriptAgents(entry: SessionEntry, items: ChatItem[]): ChatItem[] {
+    if (entry.summary.hiddenFromList) return items;
+    return items.map(item => {
+      if (item.kind !== "tool" || !item.tool.agent) return item;
+      const agent = item.tool.agent;
+      const snapshot = entry.summary.progress?.agents.find(value => value.id === agent.id || value.toolUseId === item.tool.id);
+      const restored = snapshot ?? (!entry.query && (agent.status === "running" || agent.status === "paused")
+        ? { ...agent, status: "unknown" as const } : agent);
+      return restored === agent ? item : { ...item, tool: { ...item.tool, agent: restored } };
+    });
+  }
+
+  /** Losing the SDK stream is not proof of completion. Only explicit abort is a stop. */
+  private settleLiveAgents(entry: SessionEntry, status: "unknown" | "stopped"): void {
+    if (entry.summary.hiddenFromList) return;
+    for (const agent of entry.summary.progress?.agents ?? []) {
+      if (agent.status !== "running" && agent.status !== "paused") continue;
+      const event: SdkNormalizedEvent = { type: "agent_progress", sessionId: entry.summary.id, agent: { id: agent.id, toolUseId: agent.toolUseId, status } };
+      this.applyAndMaybePersist(entry, event);
+      this.emit(event);
+    }
   }
 
   private scheduleChangesPersist(sessionId: string): void {
@@ -1537,6 +1673,7 @@ export class SessionManager {
         }
         entry.input = undefined;
         entry.query = undefined;
+        entry.queryExtras = undefined;
         entry.consumer = undefined;
       }
       entry.resumeAtAnchor = userMessageId;
@@ -1558,6 +1695,7 @@ export class SessionManager {
           persist: true,
           replace: true,
         });
+        this.setProgress(entry, rebuildSessionProgress(entry.items, entry.progressBaseline));
       }
       return {
         ok: true,
@@ -1577,8 +1715,8 @@ export class SessionManager {
     const nextServers = extras.extraMcpServers ?? {};
     const nextTools = extras.extraAllowedTools ?? [];
     const changed = extrasChanged(
-      entry.extraMcpServers,
-      entry.extraAllowedTools,
+      entry.queryExtras?.servers ?? entry.extraMcpServers,
+      entry.queryExtras?.allowedTools ?? entry.extraAllowedTools,
       nextServers,
       nextTools,
     );
@@ -1587,9 +1725,45 @@ export class SessionManager {
     if (changed) this.abort(sessionId);
   }
 
+  private roomTurnCancelled(entry: SessionEntry, turn = entry.roomAbortTurn): boolean {
+    return Boolean(turn && (
+      entry.roomAbortTurn !== turn || turn.cancelled || turn.signal.aborted
+    ));
+  }
+
+  private throwIfRoomTurnCancelled(entry: SessionEntry, turn = entry.roomAbortTurn): void {
+    if (this.roomTurnCancelled(entry, turn)) {
+      throw new DOMException("Room turn cancelled or superseded", "AbortError");
+    }
+  }
+
+  private listenForRoomAbort(entry: SessionEntry): void {
+    const turn = entry.roomAbortTurn;
+    if (!turn) return;
+    turn.detach?.();
+    const onAbort = () => {
+      if (entry.roomAbortTurn === turn) this.abort(entry.summary.id);
+    };
+    turn.signal.addEventListener("abort", onAbort, { once: true });
+    turn.detach = () => turn.signal.removeEventListener("abort", onAbort);
+    if (turn.signal.aborted) onAbort();
+  }
+
+  private setRoomAbortSignal(entry: SessionEntry, signal?: AbortSignal): RoomAbortTurn | undefined {
+    entry.roomAbortTurn?.detach?.();
+    entry.roomAbortTurn = signal ? { signal, cancelled: false } : undefined;
+    this.listenForRoomAbort(entry);
+    return entry.roomAbortTurn;
+  }
+
   abort(sessionId: string): void {
     const entry = this.sessions.get(sessionId);
     if (!entry) return;
+    this.settleLiveAgents(entry, "stopped");
+    if (entry.roomAbortTurn) {
+      entry.roomAbortTurn.cancelled = true;
+      entry.roomAbortTurn.detach?.();
+    }
     this.clearIdleCloseTimer(entry);
 
     // Mark the turn done immediately so waitForTurnIdle / UI unlock.
@@ -1644,6 +1818,7 @@ export class SessionManager {
     }
     entry.input = undefined;
     entry.query = undefined;
+    entry.queryExtras = undefined;
     entry.consumer = undefined;
     this.enforceTranscriptCacheCap();
   }
@@ -1657,8 +1832,8 @@ export class SessionManager {
 
   /** Release every SDK child and flush delayed writes, including hidden room sessions. */
   disposeAll(): void {
-    this.flushPendingPersistence();
     for (const entry of this.sessions.values()) this.parkSession(entry, true);
+    this.flushPendingPersistence();
   }
 
   /**
@@ -1677,6 +1852,10 @@ export class SessionManager {
   ): Promise<{ ok: boolean; message?: string }> {
     const entry = this.sessions.get(sessionId);
     if (!entry) return { ok: false, message: "Session not found" };
+    const roomTurn = entry.roomAbortTurn;
+    if (this.roomTurnCancelled(entry, roomTurn)) {
+      return { ok: false, message: "Room turn cancelled" };
+    }
     if (!this.compressor || !this.archive) {
       return { ok: false, message: "Compression not available" };
     }
@@ -1709,8 +1888,18 @@ export class SessionManager {
 
     try {
       const result = await this.compressor.compress(current);
+      // Cancellation or a newer room turn must also fence transcript replacement.
+      this.throwIfRoomTurnCancelled(entry, roomTurn);
       if (result.compressedCount === 0) {
         return { ok: false, message: "Nothing to compress" };
+      }
+      if (!entry.summary.hiddenFromList) {
+        // Keep the removed prefix's state, so rewinds within the retained tail
+        // do not inherit task changes that happened after their checkpoint.
+        entry.progressBaseline = restoreSessionProgress(rebuildSessionProgress(
+          current.slice(0, result.compressedCount), entry.progressBaseline,
+        )) ?? { tasks: [], agents: [] };
+        this.persistSummary(entry);
       }
       this.replaceTranscript(entry, result.items, {
         persist: true,
@@ -1772,6 +1961,7 @@ export class SessionManager {
           [{ type: "text", text: continueText }],
           { resume: false },
         ).catch((err) => {
+          if (this.roomTurnCancelled(entry, roomTurn)) return;
           const message = err instanceof Error ? err.message : String(err);
           this.emit({
             type: "result",
@@ -1804,7 +1994,9 @@ export class SessionManager {
     cwd: string,
     opts?: SessionRunOpts,
   ): Promise<string> {
+    opts?.roomAbortSignal?.throwIfAborted();
     if (!opts?.skipCpa) await this.ensureCpaOrThrow();
+    opts?.roomAbortSignal?.throwIfAborted();
 
     const { content, errors } = buildUserContent(prompt);
     if (errors.length) {
@@ -1845,11 +2037,16 @@ export class SessionManager {
       ...(opts?.model ? { model: opts.model } : {}),
       ...(opts?.permissionMode ? { permissionMode: opts.permissionMode } : {}),
       ...(opts?.pathJail ? { pathJail: opts.pathJail } : {}),
+      roomReadOnlyTurn: opts?.roomReadOnly
+        ? { requestWriteAccess: opts.requestRoomWriteAccess, writeApproved: false }
+        : undefined,
       ...(opts?.extraEnv ? { extraEnv: opts.extraEnv } : {}),
       ...(opts?.skipCpa ? { skipCpa: true } : {}),
     };
     this.sessions.set(sessionId, entry);
+    this.setRoomAbortSignal(entry, opts?.roomAbortSignal);
     opts?.onSessionId?.(sessionId);
+    this.throwIfRoomTurnCancelled(entry);
     if (!summary.hiddenFromList) this.emitSession({ ...summary });
     this.persistSummary(entry);
     this.replaceTranscript(
@@ -1875,6 +2072,8 @@ export class SessionManager {
     if (!entry) {
       throw new Error(`Unknown session: ${sessionId}`);
     }
+    opts?.roomAbortSignal?.throwIfAborted();
+    const roomTurn = this.setRoomAbortSignal(entry, opts?.roomAbortSignal);
     this.clearIdleCloseTimer(entry);
     entry.lastQueryUsedAt = Date.now();
     let reopenForExtras = false;
@@ -1883,20 +2082,10 @@ export class SessionManager {
       reopenForExtras = true;
     }
     if (opts?.replaceExtras) {
-      const nextServers = opts.extraMcpServers ?? {};
-      const nextTools = opts.extraAllowedTools ?? [];
-      reopenForExtras = extrasChanged(
-        entry.extraMcpServers,
-        entry.extraAllowedTools,
-        nextServers,
-        nextTools,
-      );
-      entry.extraMcpServers = nextServers;
-      entry.extraAllowedTools = nextTools;
+      entry.extraMcpServers = opts.extraMcpServers ?? {};
+      entry.extraAllowedTools = opts.extraAllowedTools ?? [];
     } else {
       if (opts?.extraMcpServers) {
-        const incoming = Object.keys(opts.extraMcpServers);
-        reopenForExtras = incoming.some((k) => !entry.extraMcpServers?.[k]);
         entry.extraMcpServers = {
           ...(entry.extraMcpServers ?? {}),
           ...opts.extraMcpServers,
@@ -1905,7 +2094,6 @@ export class SessionManager {
       if (opts?.extraAllowedTools?.length) {
         const have = new Set(entry.extraAllowedTools ?? []);
         for (const t of opts.extraAllowedTools) {
-          if (!have.has(t)) reopenForExtras = true;
           have.add(t);
         }
         entry.extraAllowedTools = [...have];
@@ -1918,7 +2106,28 @@ export class SessionManager {
     if (opts?.extraEnv) entry.extraEnv = opts.extraEnv;
     if (opts?.skipCpa) entry.skipCpa = true;
 
-    if (!entry.skipCpa && !opts?.skipCpa) await this.ensureCpaOrThrow(sessionId);
+    try {
+      if (!entry.skipCpa && !opts?.skipCpa) await this.ensureCpaOrThrow(sessionId);
+    } catch (err) {
+      roomTurn?.detach?.();
+      throw err;
+    }
+    this.throwIfRoomTurnCancelled(entry, roomTurn);
+
+    // Compare with the query's binding, not a previous attempt's staged extras:
+    // CPA preparation can fail after entry was updated, leaving the old query live.
+    reopenForExtras ||= extrasChanged(
+      entry.queryExtras?.servers,
+      entry.queryExtras?.allowedTools,
+      entry.extraMcpServers ?? {},
+      entry.extraAllowedTools ?? [],
+    );
+
+    // Never retain a prior room approval/callback in a reused query. Omitting
+    // roomReadOnly returns this turn to ordinary session behavior.
+    entry.roomReadOnlyTurn = opts?.roomReadOnly
+      ? { requestWriteAccess: opts.requestRoomWriteAccess, writeApproved: false }
+      : undefined;
 
     const { content, errors } = buildUserContent(prompt);
     if (errors.length) {
@@ -1959,6 +2168,7 @@ export class SessionManager {
       !entry.resumeAtAnchor &&
       !reopenForExtras
     ) {
+      this.throwIfRoomTurnCancelled(entry, roomTurn);
       try {
         entry.input.push(content, entry.sdkSessionId);
       } catch {
@@ -1966,6 +2176,7 @@ export class SessionManager {
         // fall through to open a fresh resumed query.
         entry.input = undefined;
         entry.query = undefined;
+        entry.queryExtras = undefined;
         entry.consumer = undefined;
         await this.openStreamingSession(sessionId, content, { resume: true });
         return;
@@ -2023,7 +2234,9 @@ export class SessionManager {
     sessionId: string,
     entry: SessionEntry,
     abortController: AbortController,
+    queryExtras: QueryExtras,
   ): Record<string, unknown> {
+    const queryGen = entry.streamGen;
     const settings = this.settings.get();
     const env = {
       ...this.cpa.buildProcessEnv(entry.model || settings.defaultModel),
@@ -2067,7 +2280,7 @@ export class SessionManager {
         "TaskUpdate",
         "TaskList",
         "TaskGet",
-        ...(entry.extraAllowedTools ?? []),
+        ...queryExtras.allowedTools,
       ],
       // Load CLAUDE.md hierarchy (user → project → local) into the system
       // prompt, matching Claude Code. Must include 'project' for project CLAUDE.md.
@@ -2077,11 +2290,11 @@ export class SessionManager {
       // never leaked into MCP server subprocesses.
       // Per-session extras (in-process room_mod_act) merge on top.
       ...(Object.keys(settings.mcpServers ?? {}).length ||
-      Object.keys(entry.extraMcpServers ?? {}).length
+      Object.keys(queryExtras.servers).length
         ? {
             mcpServers: {
               ...(settings.mcpServers ?? {}),
-              ...(entry.extraMcpServers ?? {}),
+              ...queryExtras.servers,
             },
           }
         : {}),
@@ -2130,24 +2343,86 @@ export class SessionManager {
         PreToolUse: [
           {
             hooks: [
-              async (input: {
-                tool_name?: string;
-                tool_input?: unknown;
-              }) => {
-                if (!entry.pathJail) return {};
-                const violation = pathJailViolation(
-                  entry.pathJail,
-                  String(input.tool_name ?? ""),
-                  (input.tool_input ?? {}) as Record<string, unknown>,
-                );
-                if (!violation) return {};
-                return {
+              async (
+                input: { tool_name?: string; tool_input?: unknown },
+                _toolUseId?: string,
+                hookOptions?: { signal?: AbortSignal },
+              ) => {
+                const name = String(input.tool_name ?? "");
+                const toolInput = (input.tool_input ?? {}) as Record<string, unknown>;
+                const deny = (reason: string) => ({
                   hookSpecificOutput: {
                     hookEventName: "PreToolUse" as const,
                     permissionDecision: "deny" as const,
-                    permissionDecisionReason: violation,
+                    permissionDecisionReason: reason,
                   },
-                };
+                });
+                const abortTurn = entry.roomAbortTurn;
+                if (abortTurn && (
+                  this.roomTurnCancelled(entry, abortTurn) || !entry.turnActive ||
+                  entry.streamGen !== queryGen || abortController.signal.aborted ||
+                  hookOptions?.signal?.aborted
+                )) {
+                  return deny("已拒绝：群聊轮次已取消或结束");
+                }
+                // Preserve the jail's immediate-deny behavior: an out-of-root
+                // write cannot even request a room permission upgrade.
+                if (entry.pathJail) {
+                  const violation = pathJailViolation(entry.pathJail, name, toolInput);
+                  if (violation) return deny(violation);
+                }
+                // Read the current turn at invocation time, not when building
+                // options: one query can serve both room and ordinary turns.
+                const roomTurn = entry.roomReadOnlyTurn;
+                if (roomTurn) {
+                  const isCurrentTurn = () =>
+                    !this.roomTurnCancelled(entry, abortTurn) &&
+                    entry.roomReadOnlyTurn === roomTurn &&
+                    entry.turnActive &&
+                    entry.streamGen === queryGen &&
+                    !abortController.signal.aborted &&
+                    !hookOptions?.signal?.aborted;
+                  const cancelled = "已拒绝：群聊轮次已取消或结束";
+                  if (!isCurrentTurn()) return deny(cancelled);
+
+                  const roomChat = queryExtras.servers["room-chat"];
+                  // Only our task-bound in-process room-chat tools are exempt.
+                  // Use this query's binding even while continue stages new extras.
+                  // RoomService controls their messaging/member permissions.
+                  const isRoomChatTool =
+                    (name === "mcp__room-chat__room_members" ||
+                      name === "mcp__room-chat__room_message") &&
+                    isSdkMcpServer(roomChat) &&
+                    queryExtras.allowedTools.includes(name);
+                  const isReadOnlyTool =
+                    name === "Read" || name === "Glob" || name === "Grep";
+                  if (!roomTurn.writeApproved && !isReadOnlyTool && !isRoomChatTool) {
+                    const readOnlyReason = `已拒绝：群聊只读轮次尚未获准执行 ${name || "未知工具"}`;
+                    if (!roomTurn.requestWriteAccess) return deny(readOnlyReason);
+                    let approved = false;
+                    try {
+                      approved = (await roomTurn.requestWriteAccess(name, toolInput)) === true;
+                    } catch {
+                      // Missing, rejected, or failed approval must all fail closed.
+                    }
+                    // The callback may settle after abort, a new turn, or query
+                    // replacement. It must never unlock that newer turn.
+                    if (!isCurrentTurn()) return deny(cancelled);
+                    if (!approved) return deny(readOnlyReason);
+                    roomTurn.writeApproved = true;
+                  }
+                }
+
+                // Recheck after awaiting approval in case the jail/input changed.
+                if (!entry.pathJail) return {};
+                const violation = pathJailViolation(
+                  entry.pathJail,
+                  name,
+                  toolInput,
+                );
+                // Returning {} preserves the SDK/PermissionBroker decision;
+                // a room write grant is never an unconditional tool allow.
+                return violation ? deny(violation) : {};
               },
             ],
           },
@@ -2180,6 +2455,15 @@ export class SessionManager {
         input: Record<string, unknown>,
         _sdkOpts: { signal: AbortSignal },
       ) => {
+        const roomTurn = entry.roomAbortTurn;
+        const roomCancelled = () => roomTurn && (
+          this.roomTurnCancelled(entry, roomTurn) || !entry.turnActive ||
+          entry.streamGen !== queryGen || abortController.signal.aborted ||
+          _sdkOpts.signal.aborted
+        );
+        if (roomCancelled()) {
+          return { behavior: "deny" as const, message: "Room turn cancelled" };
+        }
         // 路径围栏（群聊席位/远程执行）：越界文件操作直接拒，不进弹窗。
         if (entry.pathJail) {
           const violation = pathJailViolation(entry.pathJail, name, input);
@@ -2192,6 +2476,9 @@ export class SessionManager {
           input,
           sessionId,
         );
+        if (roomCancelled()) {
+          return { behavior: "deny" as const, message: "Room turn cancelled" };
+        }
         if (result.behavior === "allow") {
           return {
             behavior: "allow" as const,
@@ -2223,6 +2510,9 @@ export class SessionManager {
   ): Promise<void> {
     const entry = this.sessions.get(sessionId);
     if (!entry) return;
+    const roomTurn = entry.roomAbortTurn;
+    this.throwIfRoomTurnCancelled(entry, roomTurn);
+    this.listenForRoomAbort(entry);
     this.clearIdleCloseTimer(entry);
     entry.lastQueryUsedAt = Date.now();
 
@@ -2243,7 +2533,8 @@ export class SessionManager {
     const input = new MessageStream();
     entry.input = input;
 
-    const options = this.buildOptions(sessionId, entry, abortController);
+    const queryExtras = snapshotQueryExtras(entry);
+    const options = this.buildOptions(sessionId, entry, abortController, queryExtras);
     if (opts.resume) {
       options.resume = entry.sdkSessionId ?? sessionId;
       // After a rewind: resume the SDK session truncated at the anchor
@@ -2257,11 +2548,13 @@ export class SessionManager {
     const settings = this.settings.get();
 
     try {
+      this.throwIfRoomTurnCancelled(entry, roomTurn);
       const q = this.queryFn({
         prompt: input as AsyncIterable<unknown>,
         options,
       });
       entry.query = q as QueryHandle & QueryControl;
+      entry.queryExtras = queryExtras;
       this.enforceLiveQueryCap(sessionId);
 
       // Kick off consumer before first push so we don't miss early messages.
@@ -2279,6 +2572,10 @@ export class SessionManager {
       }, 2500);
       await this.waitForTurnIdle(sessionId);
     } catch (err) {
+      if (this.roomTurnCancelled(entry, roomTurn)) {
+        input.end();
+        throw err;
+      }
       const raw = err instanceof Error ? err.message : String(err);
       const message = humanizeAgentError(raw, settings.defaultModel);
       this.emit({
@@ -2334,6 +2631,7 @@ export class SessionManager {
       ...(contextUsage ? { contextUsage } : {}),
     };
     entry.turnActive = false;
+    entry.roomAbortTurn?.detach?.();
     this.emitSession({ ...entry.summary });
     this.persistSummary(entry);
     this.scheduleIdleClose(entry);
@@ -2435,7 +2733,7 @@ export class SessionManager {
 
         this.handleToolUseForDiff(sessionId, msg);
 
-        const events = normalizeSdkEvent(msg, sessionId);
+        const events = normalizeSdkEvent(msg, sessionId, (id) => this.resolveTool(entry, id));
         for (const event of events) {
           // File mutation snapshots are captured at tool_use time for rewind,
           // but workspace/Git scanning and renderer updates happen once here,
@@ -2449,6 +2747,7 @@ export class SessionManager {
         // Also mark idle on bare result messages if normalize missed fields
         if (isResultMessage(msg) && entry.turnActive) {
           entry.turnActive = false;
+          entry.roomAbortTurn?.detach?.();
           if (entry.summary.status === "running") {
             entry.summary = {
               ...entry.summary,
@@ -2521,6 +2820,10 @@ export class SessionManager {
       // Only clear abortController if this consumer still owns the stream.
       if (entry.streamGen === myGen && entry.abortController) {
         entry.abortController = null;
+      }
+      if (entry.streamGen === myGen) {
+        this.settleLiveAgents(entry, "unknown");
+        entry.roomAbortTurn?.detach?.();
       }
     }
   }

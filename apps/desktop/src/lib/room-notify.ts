@@ -3,6 +3,8 @@
  * 通知的实际弹出在 room-store（需要 selectRoom / window.focus 接线）。
  */
 
+import { validateRoomMentions, type RoomMention } from "@claude-desktop/shared";
+
 const MUTED_KEY = "room-muted.v1";
 
 export function loadRoomMuted(): Set<string> {
@@ -41,8 +43,9 @@ export function roomNotifyDecision(opts: {
   recalled?: boolean;
   /** 本机用户 userId */
   myUserId: string | null | undefined;
-  /** 本机用户在群里的人席名（@ 判定用） */
-  mySeatName: string | null;
+  mySeatId: string | null;
+  seats: readonly { id: string; name: string }[];
+  mentions?: readonly RoomMention[];
   /** 该房间是否开了消息免打扰 */
   muted: boolean;
   /** 正在看这个房间且窗口聚焦时，不再弹通知 */
@@ -51,11 +54,13 @@ export function roomNotifyDecision(opts: {
   const none = { notify: false, mention: false };
   if (opts.recalled) return none;
   if (opts.kind !== "user" && opts.kind !== "assistant") return none;
-  if (!opts.authorUserId) return none;
+  if (opts.kind === "user" && !opts.authorUserId) return none;
   if (opts.myUserId && opts.authorUserId === opts.myUserId) return none;
   const mention = Boolean(
-    opts.mySeatName && opts.text.includes(`@${opts.mySeatName}`),
+    opts.mySeatId && validateRoomMentions(opts.text, opts.mentions, opts.seats)
+      .some(m => m.seatId === opts.mySeatId),
   );
+  if (opts.kind === "assistant" && !mention) return none;
   // @ 我的消息即使正在看也弹（群里 @ 需要明显提醒）——但自己正盯着这个
   // 房间时就免了，气泡就在眼前。
   if (opts.isActiveAndFocused) return none;

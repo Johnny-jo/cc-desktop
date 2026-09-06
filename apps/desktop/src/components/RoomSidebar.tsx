@@ -32,7 +32,6 @@ import {
   createRoom,
   enableRoomKernelMod,
   enableRoomMod,
-  fetchRoomMod,
   hasRoomMod,
   joinRoom,
   listRoomMods,
@@ -44,6 +43,7 @@ import {
   useRoomStore,
 } from "../state/room-store";
 import { ToggleSwitch } from "./ToggleSwitch";
+import "./RoomSidebar.css";
 
 /** 单个群聊行：单击进入，双击 / 拖出侧栏在独立窗口打开（参考会话行的拖出）。 */
 function RoomRow({ r, active }: { r: RoomListItem; active: boolean }) {
@@ -146,6 +146,12 @@ function RoomRow({ r, active }: { r: RoomListItem; active: boolean }) {
   // Unmount mid-drag: drop listeners so they never leak.
   useEffect(() => endDrag, [endDrag]);
 
+  const initial = Array.from(r.name.trim())[0] || "群";
+  const lastMessage = r.lastMessage;
+  const messageDate = lastMessage ? new Date(lastMessage.at) : null;
+  const validDate = messageDate && Number.isFinite(messageDate.getTime()) ? messageDate : null;
+  const preview = lastMessage ? `${lastMessage.authorLabel}: ${lastMessage.text}` : "暂无消息";
+
   return (
     <div ref={rootRef} className="room-list-row">
       <button
@@ -162,18 +168,17 @@ function RoomRow({ r, active }: { r: RoomListItem; active: boolean }) {
         onDoubleClick={openDetached}
         title={`${r.name}\n双击或拖出侧栏在新窗口打开`}
       >
-        <span className="session-title">{r.name}</span>
-        <span className="session-meta">
-          <span>
-            {r.offline
-              ? t.room.offline
-              : r.status === "open"
-                ? fillTemplate(t.room.peopleOnline, {
-                    n: String(r.onlineCount ?? r.memberCount),
-                  })
-                : "已结束"}
-            {r.role === "host" ? " · 群主" : ""}
+        <span className="room-list-avatar" aria-hidden="true">{initial}</span>
+        <span className="room-list-content">
+          <span className="room-list-heading">
+            <span className="room-list-name">{r.name}</span>
+            {validDate ? (
+              <time className="room-list-time" dateTime={validDate.toISOString()} title={validDate.toLocaleString()}>
+                {`${String(validDate.getHours()).padStart(2, "0")}:${String(validDate.getMinutes()).padStart(2, "0")}`}
+              </time>
+            ) : null}
           </span>
+          <span className="room-list-preview" title={preview}>{preview}</span>
         </span>
       </button>
       {r.offline ? (
@@ -504,46 +509,15 @@ export function RoomSidebar() {
       return;
     }
 
-    const primary = joinPrimaryAction({
-      inviteChecksum: target.checksum,
-      offer,
-      cacheHit,
-    });
-    const needSync = primary === "sync-join";
-    const checksum = target.checksum;
-
     const wss = target.wss.length ? target.wss : undefined;
-    if (needSync) {
-      if (!checksum) {
-        setBusy(false);
-        setErr("缺少模组校验码");
-        return;
-      }
-      setProgress(t.room.syncing);
-      const fetched = await fetchRoomMod({
-        host: target.host,
-        port: target.port,
-        checksum,
-        password: target.password,
-        hostFingerprint: target.fingerprint,
-        hosts: target.candidates,
-        wss,
-      });
-      if (gen !== joinGen.current) return;
-      if (!fetched.ok) {
-        setBusy(false);
-        setProgress(null);
-        setErr(fetched.error ?? "同步失败");
-        return;
-      }
-    }
     if (gen !== joinGen.current) return;
-    setProgress(needSync ? t.room.joining : null);
+    setProgress(t.room.joining);
     const res = await joinRoom({
       host: target.host,
       port: target.port,
       password: target.password,
-      modChecksum: checksum,
+      // Room admission never implies consent to load/participate in a Mod.
+      modChecksum: "",
       hosts: target.candidates,
       wss,
       hostFingerprint: target.fingerprint,
@@ -929,8 +903,7 @@ export function RoomSidebar() {
                   busy ||
                   (dialog === "join" && !secret.trim() && !host.trim()) ||
                   (dialog === "join" &&
-                    Boolean(joinErrorForInvite(secret.trim()))) ||
-                  (dialog === "join" && peeking && Boolean(inviteChecksum))
+                    Boolean(joinErrorForInvite(secret.trim())))
                 }
                 onClick={() =>
                   void (dialog === "create" ? onCreate() : onJoin())

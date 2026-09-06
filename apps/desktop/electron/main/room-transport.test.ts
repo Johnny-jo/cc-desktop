@@ -880,14 +880,14 @@ describe("room transport: abuse limits (task 14)", () => {
 
     // Unknown types: ignored, no room-state change, still bucket-charged.
     sendEnv(2n, {
-      v: 1,
+      v: ROOM_PROTOCOL_VERSION,
       roomId: room.roomId,
       seq: 2,
       type: "bogus.frame",
       payload: {},
     });
     sendEnv(3n, {
-      v: 1,
+      v: ROOM_PROTOCOL_VERSION,
       roomId: room.roomId,
       seq: 3,
       type: "state.snapsh0t",

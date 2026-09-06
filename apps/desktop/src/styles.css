@@ -14,9 +14,10 @@
 
   --bg-app: #1E1E1E;
   /* Night mode: rail + session sidebar share one surface, lifted a touch brighter. */
-  --bg-sidebar: #242428;
+  --bg-sidebar: #181818;
   --bg-elevated: #1a1a1a;
-  --bg-panel: #161616;
+  --bg-title-top: #0a0a0a;
+  --bg-panel: #181818;
   --bg-hover: #29292e;
   --bg-active: #323238;
   --bg-input: #242424;
@@ -28,12 +29,12 @@
   --code-text: #e8e8e8;
   --border-composer: #7c7c85;
   --border: #262626;
-  --border-soft: #1f1f1f;
+  --border-soft: #2a2a2a;
   --border-strong: #333333;
   --text: #e8e8e8;
-  --text-muted: #8a8a8a;
+  --text-muted: #ababab;
   --text-model-select:#9e9e9e;
-  --text-faint: #666666;
+  --text-faint: #adadad;
   --accent: #3b82f6;
   --accent-strong: #4b8ff7;
   --accent-soft: rgba(59, 130, 246, 0.14);
@@ -88,6 +89,7 @@
 
   --bg-app: #fffffe;
   --bg-sidebar: #f9f9f9;
+  --bg-title-top: #f9f9f9;
   --bg-elevated: #ffffff;
   --bg-panel: #f9f9f9;
   --bg-hover: #ededf0;
@@ -252,7 +254,7 @@ textarea {
   left: 0;
   right: 0;
   height: var(--titlebar-h);
-  background: color-mix(in srgb, var(--bg-app) 55%, transparent);
+  background: color-mix(in srgb, var(--bg-title-top) 55%, transparent);
   backdrop-filter: blur(24px) saturate(1.5);
   z-index: 200;
   display: flex;
@@ -494,7 +496,7 @@ textarea {
 
 /* Night mode keeps the narrow tool rail at the app charcoal level. */
 [data-theme="dark"] .side-rail {
-  background: #141414;
+  background: #181818;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -3534,16 +3536,16 @@ body.session-detaching {
 /* Codex-style task overview. One tick represents one user task. */
 .conversation-navigator {
   position: absolute;
-  z-index: 4;
+  z-index: 6;
   left: 9px;
   top: 50%;
   transform: translateY(-50%);
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  width: 34px;
+  width: 36px;
   max-height: min(70%, 340px);
-  padding: 4px 0;
+  padding: 2px 0;
 }
 
 .conversation-nav-item {
@@ -3564,7 +3566,7 @@ body.session-detaching {
 
 .conversation-nav-tick {
   display: block;
-  width: 9px;
+  width: 16px;
   height: 1px;
   border-radius: 99px;
   background: color-mix(in srgb, var(--text-faint) 58%, transparent);
@@ -3576,7 +3578,7 @@ body.session-detaching {
 
 .conversation-nav-item:hover .conversation-nav-tick,
 .conversation-nav-item:focus-visible .conversation-nav-tick {
-  width: 24px;
+  width: 26px;
   height: 2px;
   background: var(--text-muted);
 }

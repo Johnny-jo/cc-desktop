@@ -7,6 +7,7 @@ import { respondRoomPermAsk, useAppStore } from "../state/store";
  */
 export function RoomPermAskModal() {
   const ask = useAppStore((s) => s.roomPermAsk);
+  const pendingCount = useAppStore((s) => s.roomPermAskQueue.length);
 
   if (!ask) return null;
 
@@ -23,6 +24,7 @@ export function RoomPermAskModal() {
         </div>
 
         <div className="modal-body">
+          <p className="permission-summary" role="status">待审批：{pendingCount}</p>
           <p className="permission-summary">
             {ask.requesterName} 想在房间「{ask.roomName}」的席位「
             {ask.seatName}」上，对你的项目 {ask.projectPath} 执行任务。

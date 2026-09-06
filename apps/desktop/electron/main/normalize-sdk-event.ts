@@ -1,6 +1,10 @@
-import type { SdkNormalizedEvent, TodoItem, ToolCardState } from "@claude-desktop/shared";
+import type {
+  AgentProgressUpdate, ProgressAgent, ProgressTask, SdkNormalizedEvent,
+  TodoItem, ToolCardState, ToolTaskUpdate,
+} from "@claude-desktop/shared";
 
 type UnknownRecord = Record<string, unknown>;
+type ResolveTool = (id: string) => ToolCardState | undefined;
 
 function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -8,6 +12,126 @@ function isRecord(value: unknown): value is UnknownRecord {
 
 function asArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
+}
+
+function nonemptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function isAgentTool(name: string): boolean {
+  return name === "Task" || name === "Agent";
+}
+
+function progressTaskStatus(value: unknown): ProgressTask["status"] | undefined {
+  return value === "pending" || value === "in_progress" || value === "completed" ? value : undefined;
+}
+
+function taskFields(input: UnknownRecord, scope?: string): NonNullable<ToolTaskUpdate["patch"]> {
+  const patch: NonNullable<ToolTaskUpdate["patch"]> = {};
+  const title = nonemptyString(input.subject) ?? nonemptyString(input.title);
+  if (title) patch.title = title;
+  for (const key of ["description", "activeForm", "owner"] as const) {
+    if (typeof input[key] === "string") patch[key] = input[key];
+  }
+  const status = progressTaskStatus(input.status);
+  if (status) patch.status = status;
+  if (input.status === "deleted") patch.deleted = true;
+  const taskScope = nonemptyString(input.scope) ?? scope;
+  if (taskScope != null) patch.scope = taskScope;
+  return patch;
+}
+
+function taskInput(name: string, input: UnknownRecord, parent?: string): ToolTaskUpdate | undefined {
+  const patch = taskFields(input, parent);
+  switch (name) {
+    case "TaskCreate":
+      return { operation: "create", patch: { ...patch, status: "pending" } };
+    case "TaskUpdate":
+      return { operation: "update", taskId: nonemptyString(input.taskId), patch };
+    case "TaskList":
+      return { operation: "list", patch };
+    case "TodoWrite": {
+      const scope = parent ? "todos:" + parent : "todos";
+      const valid = Array.isArray(input.todos) && input.todos.every((row) => isRecord(row) &&
+        !!nonemptyString(row.content) && progressTaskStatus(row.status) != null);
+      return {
+        operation: "replace", patch: { scope },
+        ...(valid ? { tasks: extractTodos(input).map((todo, index) => ({
+          id: "todo-" + (index + 1), title: todo.content, status: todo.status, scope,
+          ...(todo.activeForm != null ? { activeForm: todo.activeForm } : {}),
+        })) } : {}),
+      };
+    }
+    default:
+      return undefined;
+  }
+}
+
+/** Decode complete JSON/SDK output before applying any UI preview limit. */
+function structuredResult(value: unknown): unknown {
+  if (typeof value === "string") {
+    try { return JSON.parse(value); } catch { return undefined; }
+  }
+  if (Array.isArray(value) && value.some((entry) => isRecord(entry) && entry.type === "text")) {
+    for (const entry of value) {
+      if (!isRecord(entry) || typeof entry.text !== "string") continue;
+      const parsed = structuredResult(entry.text);
+      if (parsed != null) return parsed;
+    }
+    return undefined;
+  }
+  return value;
+}
+
+function taskResult(
+  name: string,
+  requested: ToolTaskUpdate | undefined,
+  parsed: unknown,
+  content: unknown,
+  isError: boolean,
+  parent?: string,
+): ToolTaskUpdate | undefined {
+  const base = requested ?? taskInput(name, {}, parent);
+  if (!base) return;
+  const result = isRecord(parsed) ? parsed : {};
+  if (isError || result.success === false) return { ...base, success: false };
+  if (base.operation === "create") {
+    const task = isRecord(result.task) ? result.task : result;
+    const text = toolPreview(content, Infinity) ?? "";
+    const created = text.match(/^Task #([^\s:]+) created successfully:\s*(.+)$/s);
+    const taskId = nonemptyString(task.id) ?? nonemptyString(result.taskId) ?? created?.[1];
+    const patch = {
+      ...base.patch, ...taskFields(task, base.patch?.scope ?? parent),
+      ...(created?.[2] && !base.patch?.title && !nonemptyString(task.subject) ? { title: created[2] } : {}),
+    };
+    return { ...base, ...(taskId ? { taskId } : {}), patch, success: !!taskId && !!patch.title };
+  }
+  if (base.operation === "update") {
+    const taskId = nonemptyString(result.taskId) ?? base.taskId;
+    const status = isRecord(result.statusChange) ? progressTaskStatus(result.statusChange.to) : undefined;
+    const marker = (toolPreview(content, Infinity) ?? "").trim().match(
+      /^Updated task #([^\s]+) (?:subject|description|activeForm|status|owner|metadata|blocks|blockedBy)(?:, (?:subject|description|activeForm|status|owner|metadata|blocks|blockedBy))*$/,
+    );
+    const success = !!taskId && (result.success === true || marker?.[1] === taskId);
+    return { ...base, taskId, ...(status ? { patch: { ...base.patch, status } } : {}), success };
+  }
+  if (base.operation === "list") {
+    const raw = Array.isArray(parsed) ? parsed : result.tasks;
+    if (!Array.isArray(raw)) return { ...base, success: false };
+    const tasks: ProgressTask[] = [];
+    for (const value of raw) {
+      if (!isRecord(value)) return { ...base, success: false };
+      const id = nonemptyString(value.id);
+      const fields = taskFields(value, base.patch?.scope ?? parent);
+      if (!id || !fields.title || !fields.status) return { ...base, success: false };
+      tasks.push({ ...fields, id, title: fields.title, status: fields.status });
+    }
+    return { ...base, tasks, success: true };
+  }
+  const accepted = result.newTodos != null
+    ? taskInput("TodoWrite", { todos: result.newTodos }, parent) ?? base
+    : base;
+  return { ...accepted, success: Array.isArray(accepted.tasks) };
 }
 
 function summarizeTool(name: string, input: UnknownRecord): string {
@@ -85,45 +209,6 @@ function taskCreateTodo(input: UnknownRecord): TodoItem[] {
   ];
 }
 
-/** TaskList tool_result content → todos (id, subject, status). */
-function taskListTodos(content: unknown): TodoItem[] {
-  // content may be a JSON string or a parsed object/array depending on SDK framing.
-  let parsed: unknown = content;
-  if (typeof content === "string") {
-    try {
-      parsed = JSON.parse(content);
-    } catch {
-      return [];
-    }
-  }
-  if (Array.isArray(content)) {
-    // content blocks: find a text block holding JSON
-    for (const c of content) {
-      if (isRecord(c) && typeof c.text === "string") {
-        try {
-          parsed = JSON.parse(c.text);
-          break;
-        } catch {
-          // keep looking
-        }
-      }
-    }
-  }
-  const tasks = isRecord(parsed) ? asArray(parsed.tasks) : asArray(parsed);
-  const out: TodoItem[] = [];
-  for (const t of tasks) {
-    if (!isRecord(t)) continue;
-    const content = String(t.subject ?? t.content ?? "");
-    if (!content) continue;
-    const status =
-      t.status === "completed" || t.status === "in_progress"
-        ? t.status
-        : "pending";
-    out.push({ content, status });
-  }
-  return out;
-}
-
 /** Skill / long system-injected bodies should not dump open in the chat. */
 export function isCollapsibleSkillText(text: string): boolean {
   if (text.length < 200) return false;
@@ -165,6 +250,7 @@ function toolPreview(content: unknown, maxLen = 200): string | undefined {
 export function normalizeSdkEvent(
   msg: unknown,
   sessionId: string,
+  resolveTool?: ResolveTool,
 ): SdkNormalizedEvent[] {
   if (!isRecord(msg) || typeof msg.type !== "string") {
     return [];
@@ -176,7 +262,9 @@ export function normalizeSdkEvent(
     case "assistant":
       return normalizeAssistant(msg, sessionId);
     case "user":
-      return normalizeUser(msg, sessionId);
+      return normalizeUser(msg, sessionId, resolveTool);
+    case "system":
+      return normalizeAgentLifecycle(msg, sessionId, resolveTool);
     case "result":
       return normalizeResult(msg, sessionId);
     case "tool_progress":
@@ -210,6 +298,76 @@ function normalizeToolProgress(
       elapsedSeconds: elapsed,
     },
   ];
+}
+
+function normalizeAgentLifecycle(
+  msg: UnknownRecord,
+  sessionId: string,
+  resolveTool?: ResolveTool,
+): SdkNormalizedEvent[] {
+  if (!["task_started", "task_progress", "task_notification", "task_updated"].includes(String(msg.subtype))) return [];
+  const id = nonemptyString(msg.task_id);
+  if (!id) return [];
+  const toolUseId = nonemptyString(msg.tool_use_id);
+  const tool = (toolUseId ? resolveTool?.(toolUseId) : undefined) ?? resolveTool?.(id);
+  const agentTypes = ["local_agent", "remote_agent", "agent"];
+  // System tasks also describe Bash commands and workflows. Never infer an
+  // agent merely from a task_id or from prose mentioning an agent.
+  if (typeof msg.task_type === "string" && !agentTypes.includes(msg.task_type)) return [];
+  const explicitAgent = agentTypes.includes(String(msg.task_type)) || !!nonemptyString(msg.subagent_type);
+  const associatedAgent = tool != null && (isAgentTool(tool.name) || tool.agent != null);
+  if ((tool && !associatedAgent) || (!explicitAgent && !associatedAgent)) return [];
+
+  const patch = isRecord(msg.patch) ? msg.patch : {};
+  const agent: AgentProgressUpdate = { id };
+  const linkedTool = toolUseId ?? tool?.agent?.toolUseId ?? tool?.id;
+  if (linkedTool) agent.toolUseId = linkedTool;
+  const parent = nonemptyString(msg.parent_tool_use_id) ?? tool?.parentToolUseId ?? tool?.agent?.parentToolUseId;
+  if (parent) agent.parentToolUseId = parent;
+  const title = nonemptyString(msg.description) ?? nonemptyString(patch.description) ?? tool?.agent?.title ?? tool?.summary;
+  if (title) agent.title = title;
+  if (msg.subtype === "task_started" || msg.subtype === "task_progress") {
+    agent.status = "running";
+  } else {
+    const status = msg.subtype === "task_updated" ? patch.status : msg.status;
+    if (status === "completed" || status === "failed" || status === "stopped" || status === "paused" || status === "running") agent.status = status;
+    else if (status === "killed") agent.status = "stopped";
+    else if (status === "pending") agent.status = "unknown";
+    else if (msg.subtype === "task_notification" || status != null) return [];
+  }
+  const summary = typeof msg.summary === "string" ? msg.summary : typeof patch.error === "string" ? patch.error : undefined;
+  if (summary != null) agent.summary = summary.slice(0, 2000);
+  const duration = isRecord(msg.usage) ? num(msg.usage.duration_ms) : undefined;
+  if (duration != null && duration >= 0) agent.elapsedSeconds = duration / 1000;
+  if (typeof patch.is_backgrounded === "boolean") agent.background = patch.is_backgrounded;
+  return [{ type: "agent_progress", sessionId, agent }];
+}
+
+function resultAgent(
+  tool: ToolCardState,
+  parsed: unknown,
+  preview: string | undefined,
+  isError: boolean,
+): ProgressAgent {
+  const result = isRecord(parsed) ? parsed : {};
+  const launched = result.status === "async_launched" || result.status === "remote_launched" || result.isAsync === true;
+  const background = launched ? true : tool.agent?.background;
+  const status: ProgressAgent["status"] = isError ? "failed"
+    : result.status === "completed" ? "completed"
+      : launched || background === true ? "running"
+        : background === false ? "completed" : "unknown";
+  const duration = num(result.totalDurationMs);
+  return {
+    ...tool.agent,
+    id: nonemptyString(result.agentId) ?? nonemptyString(result.taskId) ?? tool.agent?.id ?? tool.id,
+    toolUseId: tool.id,
+    title: tool.agent?.title ?? (tool.summary || nonemptyString(result.description) || tool.name),
+    status,
+    ...(tool.parentToolUseId ? { parentToolUseId: tool.parentToolUseId } : {}),
+    ...(background != null ? { background } : {}),
+    ...(preview != null ? { summary: preview } : {}),
+    ...(duration != null && duration >= 0 ? { elapsedSeconds: duration / 1000 } : {}),
+  };
 }
 
 function normalizeStreamEvent(
@@ -284,14 +442,24 @@ function normalizeAssistant(
       const name = String(block.name ?? "tool");
       const input = isRecord(block.input) ? block.input : {};
       const isSub = isSubagentMessage(msg);
+      const parentToolUseId = nonemptyString(msg.parent_tool_use_id);
+      const task = taskInput(name, input, parentToolUseId);
       const tool: ToolCardState = {
         id,
         name,
         summary: summarizeTool(name, input),
         status: "running",
         ...(isSub ? { isSubagent: true } : {}),
+        ...(parentToolUseId ? { parentToolUseId } : {}),
         ...(name === "TodoWrite" ? { todos: extractTodos(input) } : {}),
         ...(name === "TaskCreate" ? { todos: taskCreateTodo(input) } : {}),
+        ...(task ? { task } : {}),
+        ...(isAgentTool(name) ? { agent: {
+          id: nonemptyString(input.resume) ?? id, toolUseId: id,
+          title: summarizeTool(name, input), status: "running" as const,
+          ...(parentToolUseId ? { parentToolUseId } : {}),
+          ...(typeof input.run_in_background === "boolean" ? { background: input.run_in_background } : {}),
+        } } : {}),
       };
       out.push({ type: "tool_start", sessionId, tool });
     }
@@ -313,10 +481,12 @@ function skillSummaryFromText(text: string): string {
 function normalizeUser(
   msg: UnknownRecord,
   sessionId: string,
+  resolveTool?: ResolveTool,
 ): SdkNormalizedEvent[] {
   const message = isRecord(msg.message) ? msg.message : null;
   const content = message ? asArray(message.content) : [];
   const out: SdkNormalizedEvent[] = [];
+  const resultCount = content.filter((block) => isRecord(block) && block.type === "tool_result").length;
 
   // Synthetic / meta user frames (tool echoes, etc.) — never show as chat bubbles.
   if (msg.isSynthetic === true || msg.is_synthetic === true) {
@@ -344,11 +514,20 @@ function normalizeUser(
     if (block.type === "tool_result") {
       const id = String(block.tool_use_id ?? block.toolUseId ?? "");
       const isError = Boolean(block.is_error ?? block.isError);
-      const name = String(block.name ?? "tool");
-      const isSub = isSubagentMessage(msg);
+      const before = resolveTool?.(id);
+      const named = nonemptyString(block.name);
+      const name = named && named !== "tool" ? named : before?.name ?? "tool";
+      const parentToolUseId = nonemptyString(msg.parent_tool_use_id) ?? before?.parentToolUseId;
+      const isSub = isSubagentMessage(msg) || before?.isSubagent === true;
+      const parsed = structuredResult(block.tool_use_result) ??
+        (resultCount === 1 ? structuredResult(msg.tool_use_result) : undefined) ?? structuredResult(block.content);
+      const input = isRecord(block.input) ? block.input : {};
+      const task = taskResult(name, before?.task ?? taskInput(name, input, parentToolUseId), parsed, block.content, isError, parentToolUseId);
       // Keep skill bodies in the collapsed card; don't also emit as chat text.
       // Task/Agent results are the subagent's final report — high value, so widen
       // the preview cap. TodoWrite relies on structured todos, not resultPreview.
+      const previewContent = isAgentTool(name) && isRecord(parsed) && parsed.status === "completed" && parsed.content != null
+        ? parsed.content : block.content;
       const preview =
         name === "Skill" || name === "skill"
           ? toolPreview(block.content, 4000) ??
@@ -356,9 +535,10 @@ function normalizeUser(
               ? block.content.slice(0, 4000)
               : undefined)
           : name === "Task" || name === "Agent"
-            ? toolPreview(block.content, 2000)
+            ? toolPreview(previewContent, 2000)
             : toolPreview(block.content);
       const tool: ToolCardState = {
+        ...before,
         id,
         name,
         summary:
@@ -368,12 +548,19 @@ function normalizeUser(
                   ? block.content
                   : preview ?? "",
               )
-            : "",
+            : before?.summary ?? "",
         status: isError ? "error" : "done",
         resultPreview: preview,
         ...(isSub ? { isSubagent: true } : {}),
-        ...(name === "TaskList" ? { todos: taskListTodos(block.content) } : {}),
+        ...(parentToolUseId ? { parentToolUseId } : {}),
+        ...(task ? { task } : {}),
+        ...(name === "TaskList" && task?.success ? { todos: task.tasks?.map((entry) => ({ content: entry.title, status: entry.status })) } : {}),
+        ...(name === "TodoWrite" && task?.success ? { todos: task.tasks?.map((entry) => ({
+          content: entry.title, status: entry.status,
+          ...(entry.activeForm != null ? { activeForm: entry.activeForm } : {}),
+        })) } : {}),
       };
+      if (isAgentTool(name)) tool.agent = resultAgent(tool, parsed, preview, isError);
       out.push({ type: "tool_end", sessionId, tool });
     }
   }

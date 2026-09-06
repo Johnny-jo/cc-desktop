@@ -1,0 +1,385 @@
+.chat-activity.activity-group {
+  width: 100%;
+  color: var(--text-muted);
+  font-size: 1.115rem;
+}
+
+.chat-activity .activity-group-toggle,
+.chat-activity .activity-group-heading {
+  display: flex;
+  width: 100%;
+  min-height: 30px;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-activity .activity-group-toggle:hover {
+  color: var(--text);
+}
+
+.chat-activity .activity-group-toggle:focus-visible {
+  outline: none;
+  border-radius: 4px;
+  box-shadow: var(--focus-ring);
+}
+
+.chat-activity .activity-chevron {
+  display: grid;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  place-items: center;
+  color: var(--text-faint);
+  transform-origin: center;
+  transition: transform 140ms ease;
+}
+
+.chat-activity .activity-chevron svg,
+.chat-activity .activity-thinking-chevron svg {
+  width: 100%;
+  height: 100%;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.45;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.chat-activity.activity-group.open .activity-chevron {
+  transform: rotate(90deg);
+}
+
+.chat-activity .activity-group-title {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.chat-activity .activity-group-summary {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  color: var(--text-faint);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-activity .activity-group-status {
+  margin-left: auto;
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  font-size: 0.885rem;
+}
+
+.chat-activity .activity-group-status.status-running {
+  color: var(--warn);
+}
+
+.chat-activity .activity-group-status.status-error {
+  color: var(--danger);
+}
+
+.chat-activity .activity-group-body {
+  position: relative;
+  margin: 7px 0 2px 5px;
+  padding: 2px 0 2px 21px;
+  font-size: 0.962rem;
+}
+
+.chat-activity .activity-group-body::before {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: 0;
+  width: 1px;
+  background: var(--border);
+  content: "";
+}
+
+.chat-activity .activity-step {
+  position: relative;
+  min-width: 0;
+  padding-left: 20px;
+  color: var(--text);
+}
+
+.chat-activity .activity-step + .activity-step {
+  margin-top: 5px;
+}
+
+.chat-activity .activity-step-done,
+.chat-activity .activity-step-done .activity-step-main,
+.chat-activity .activity-step-done .activity-thinking-text,
+.chat-activity .activity-step-done .activity-step-name,
+.chat-activity .activity-step-done .activity-step-summary,
+.chat-activity .activity-step-done .activity-step-meta {
+  color: var(--text-faint);
+}
+
+.chat-activity .activity-step-error,
+.chat-activity .activity-step-error .activity-step-main,
+.chat-activity .activity-step-error .activity-step-name,
+.chat-activity .activity-step-error .activity-step-summary {
+  color: var(--danger);
+}
+
+.chat-activity .activity-step-main {
+  display: flex;
+  width: 100%;
+  min-height: 27px;
+  min-width: 0;
+  align-items: baseline;
+  gap: 7px;
+  border: 0;
+  padding: 3px 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+.chat-activity button.activity-step-main:not(:disabled) {
+  cursor: pointer;
+}
+
+.chat-activity button.activity-step-main:not(:disabled):hover .activity-step-name {
+  color: var(--text);
+}
+
+.chat-activity .activity-step-main:focus-visible {
+  outline: none;
+  border-radius: 4px;
+  box-shadow: var(--focus-ring);
+}
+
+.chat-activity .activity-step-name {
+  flex: 0 0 auto;
+  color: inherit;
+  font-weight: 600;
+}
+
+.chat-activity .activity-step-icon {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  align-self: center;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.35;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.chat-activity .activity-compaction-event {
+  display: flex;
+  min-height: 27px;
+  align-items: center;
+  gap: 7px;
+  padding-top: 3px;
+  padding-bottom: 3px;
+  color: var(--text-faint);
+}
+
+.chat-activity .activity-compaction-icon {
+  display: grid;
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  place-items: center;
+}
+
+.chat-activity .activity-compaction-icon svg {
+  width: 100%;
+  height: 100%;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.chat-activity .activity-step-summary {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  color: inherit;
+  opacity: 0.72;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-activity .activity-step-meta {
+  margin-left: auto;
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  font-size: 0.846rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-activity .activity-spinner {
+  position: absolute;
+  top: 8px;
+  left: 0;
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid color-mix(in srgb, var(--text) 24%, transparent);
+  border-top-color: var(--text);
+  border-radius: 50%;
+  animation: chat-activity-spin 720ms linear infinite;
+}
+
+.chat-activity .activity-thinking-toggle {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 27px;
+  align-items: baseline;
+  gap: 5px;
+  border: 0;
+  padding: 3px 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-activity .activity-thinking-toggle:focus-visible {
+  outline: none;
+  border-radius: 4px;
+  box-shadow: var(--focus-ring);
+}
+
+.chat-activity .activity-thinking-toggle.is-static {
+  cursor: default;
+}
+
+.chat-activity .activity-thinking-text {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: 0.962rem;
+  font-style: italic;
+  line-height: 1.55;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-activity .activity-thinking-chevron {
+  display: grid;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  place-items: center;
+  color: var(--text-faint);
+  transform-origin: center;
+  transition: transform 140ms ease;
+}
+
+.chat-activity .activity-thinking-event.expanded .activity-thinking-text {
+  max-height: 220px;
+  overflow: auto;
+  text-overflow: clip;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.chat-activity .activity-thinking-event.expanded .activity-thinking-chevron {
+  transform: rotate(90deg);
+}
+
+.chat-activity .activity-step-details {
+  padding: 1px 0 7px;
+}
+
+.chat-activity .activity-tool-preview {
+  max-height: 160px;
+  margin: 2px 0 0;
+  overflow: auto;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-code);
+  color: var(--text-muted);
+  font-size: 0.846rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.chat-activity .activity-view-change {
+  margin-top: 6px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.846rem;
+  cursor: pointer;
+}
+
+.chat-activity .activity-view-change:hover {
+  color: var(--text);
+}
+
+.chat-activity .activity-todo-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 2px 0 6px;
+  padding: 0;
+  list-style: none;
+}
+
+.chat-activity .activity-todo {
+  position: relative;
+  min-height: 22px;
+  padding-left: 20px;
+  color: var(--text);
+  line-height: 1.45;
+}
+
+.chat-activity .activity-todo-completed {
+  color: var(--text-faint);
+}
+
+.chat-activity .activity-todo .activity-spinner {
+  top: 4px;
+}
+
+.chat-activity .activity-group-heading {
+  cursor: default;
+}
+
+.chat-activity .activity-step-status {
+  margin-left: auto;
+  flex: 0 0 auto;
+  color: inherit;
+  font-size: 0.846rem;
+  white-space: nowrap;
+}
+
+.chat-activity .activity-step-unknown,
+.chat-activity .activity-step-stopped,
+.chat-activity .activity-step-paused {
+  color: var(--text-muted);
+}
+
+@keyframes chat-activity-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-activity .activity-spinner {
+    animation: none;
+  }
+}

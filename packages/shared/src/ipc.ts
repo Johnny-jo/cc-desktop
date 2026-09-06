@@ -156,6 +156,8 @@ export const IPC = {
   roomTakeover: "room:takeover",
   roomReturnSeat: "room:return-seat",
   roomSend: "room:send",
+  roomAttachment: "room:attachment",
+  roomTaskControl: "room:task-control",
   roomDice: "room:dice",
   roomRps: "room:rps",
   roomInvite: "room:invite",
@@ -168,6 +170,7 @@ export const IPC = {
   roomResetMod: "room:reset-mod",
   roomRecoverMod: "room:recover-mod",
   roomModIntent: "room:mod-intent",
+  roomModParticipation: "room:mod-participation",
   roomListMods: "room:list-mods",
   roomHasMod: "room:has-mod",
   roomEnableKernelMod: "room:enable-kernel-mod",
@@ -738,9 +741,16 @@ export type IpcInvokeMap = {
         seatId: string;
         text: string;
         quote?: import("./room-protocol").RoomQuoteRef;
+        attachments?: Attachment[];
+        mentions?: import("./room-mentions").RoomMention[];
+        clientMessageId?: string;
       },
     ];
     result: { ok: boolean; error?: string };
+  };
+  [IPC.roomAttachment]: {
+    args: [{ roomId: string; itemId: string; attachmentId: string; action: "preview" | "save" }];
+    result: { ok: boolean; error?: string; dataUrl?: string; saved?: boolean; cancelled?: boolean };
   };
   [IPC.roomDice]: {
     args: [{ roomId: string; seatId: string }];
@@ -832,6 +842,14 @@ export type IpcInvokeMap = {
   };
   [IPC.roomModIntent]: {
     args: [{ roomId: string; seatId: string; name: string; payload?: unknown }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.roomTaskControl]: {
+    args: [{ roomId: string; action: "stop" | "approve" | "policy"; taskId?: string; requestId?: string; allow?: boolean; policy?: import("./room-protocol").RoomDelegationPolicy }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.roomModParticipation]: {
+    args: [{ roomId: string; enabled: boolean }];
     result: { ok: boolean; error?: string };
   };
   [IPC.roomListMods]: {

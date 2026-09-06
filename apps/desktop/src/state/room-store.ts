@@ -4,9 +4,11 @@ import type {
   ModOfferPayload,
   RoomListItem,
   RoomLivePatch,
+  RoomMention,
   RoomQuoteRef,
   RoomSnapshot,
 } from "@claude-desktop/shared";
+import { createRoomMessageId, roomListPreview, validateRoomMentions } from "@claude-desktop/shared";
 import { getDesktop, hasDesktopApi } from "../lib/desktop-api";
 import {
   isRoomMuted,
@@ -120,14 +122,12 @@ export function closeRoomDialog(): void {
 }
 
 function pickDefaultSeat(room: RoomSnapshot | null | undefined): string | null {
-  if (!room) return null;
+  if (!room?.localUserId) return null;
   const mine = room.localUserId;
   return (
     room.seats.find(
-      (s) => s.kind === "human" && (!mine || s.occupantUserId === mine),
+      (s) => s.kind === "human" && s.occupantUserId === mine,
     )?.id ??
-    room.seats.find((s) => s.kind === "agent")?.id ??
-    room.seats[0]?.id ??
     null
   );
 }
@@ -243,10 +243,10 @@ function maybeNotifyRoomItems(room: RoomSnapshot): void {
   if (typeof Notification === "undefined") return;
   const fresh = items.slice(idx + 1);
   if (!fresh.length) return;
-  const mySeatName =
+  const mySeatId =
     room.seats.find(
       (s) => s.kind === "human" && s.occupantUserId === room.localUserId,
-    )?.name ?? null;
+    )?.id ?? null;
   const muted = isRoomMuted(room.roomId);
   const activeFocused = state.activeRoomId === room.roomId && document.hasFocus();
   for (const it of fresh) {
@@ -256,7 +256,9 @@ function maybeNotifyRoomItems(room: RoomSnapshot): void {
       text: it.text,
       recalled: it.recalled,
       myUserId: room.localUserId,
-      mySeatName,
+      mySeatId,
+      seats: room.seats,
+      mentions: it.mentions,
       muted,
       isActiveAndFocused: activeFocused,
     });
@@ -299,6 +301,31 @@ export function bindRoomEvents(): () => void {
       set({ joinPhase: "pending-approval" });
     }
     if (!ev?.roomId) return;
+
+    // Every full snapshot refreshes its list row, including inactive rooms and
+    // reconnect/error snapshots that return before the active-room handling.
+    if (ev.room) {
+      const snapshot = ev.room;
+      const rooms = state.rooms.filter(r => r.roomId !== ev.roomId);
+      const prev = state.rooms.find(r => r.roomId === ev.roomId);
+      rooms.unshift({
+        roomId: snapshot.roomId,
+        name: snapshot.name,
+        status: snapshot.status,
+        role: snapshot.members.find(m => m.userId === snapshot.localUserId)?.role ?? prev?.role ?? "member",
+        memberCount: snapshot.memberCount,
+        onlineCount: snapshot.onlineCount ?? snapshot.members.filter(m => m.online !== false).length,
+        port: snapshot.port,
+        inviteHost: snapshot.inviteHost,
+        offline: ev.offline ?? (
+          snapshot.status === "open" && !ev.reconnecting && !ev.closed && !ev.error
+            ? false
+            : prev?.offline
+        ),
+        lastMessage: roomListPreview(snapshot),
+      });
+      set({ rooms });
+    }
 
     // Streaming progress is intentionally a tiny patch: do not rebuild room
     // lists, notifications, seat-session bridges, or the timeline here.
@@ -364,17 +391,6 @@ export function bindRoomEvents(): () => void {
         ev.room.seats.map((s) => s.sessionId),
       );
     }
-    const rooms = state.rooms.filter((r) => r.roomId !== ev.roomId);
-    const prev = state.rooms.find((r) => r.roomId === ev.roomId);
-    rooms.unshift({
-      roomId: ev.room.roomId,
-      name: ev.room.name,
-      status: ev.room.status,
-      role: prev?.role ?? "member",
-      memberCount: ev.room.memberCount,
-      port: ev.room.port,
-      inviteHost: ev.room.inviteHost,
-    });
     const stillMine =
       state.selectedSeatId &&
       ev.room.seats.some((s) => s.id === state.selectedSeatId);
@@ -387,7 +403,6 @@ export function bindRoomEvents(): () => void {
       modsByRoom.set(ev.roomId, ev.mod);
     }
     set({
-      rooms,
       activeRoom:
         state.activeRoomId === ev.roomId ? ev.room : state.activeRoom,
       ...(state.activeRoomId === ev.roomId && !stillMine
@@ -532,23 +547,53 @@ export async function playRps(
   return getDesktop().roomRps(id, seatId, hand);
 }
 
+const sendReceipts = new Map<string, { signature: string; id: string }>();
 export async function sendToSeat(
   text: string,
   quote?: RoomQuoteRef,
-  /** 显式目标席位（@提及路由）；缺省用当前选中席位。 */
-  targetSeatId?: string,
-  /** 拖拽/选择进来的附件；内容只在本机执行的席位上有意义。 */
+  /** Kept for existing callers; authorship always uses the local human seat. */
+  _targetSeatId?: string,
+  /** Actual bytes are copied and confirmed by the room service before success. */
   attachments?: Attachment[],
+  mentions?: RoomMention[],
 ): Promise<{ ok: boolean; error?: string }> {
   const id = state.activeRoomId;
-  const seatId = targetSeatId ?? state.selectedSeatId;
-  if (!id || !seatId) return { ok: false, error: "请先选一个席位" };
+  const room = state.activeRoom;
+  const seatId = room?.localUserId && room.seats.find(s => s.kind === "human" && s.occupantUserId === room.localUserId)?.id;
+  if (!id || room?.roomId !== id || !seatId) return { ok: false, error: "没有可用的本人发言席位" };
   if (!hasDesktopApi("sendRoomMessage")) {
     return { ok: false, error: "请完全重启应用后再使用群聊" };
   }
-  const res = await getDesktop().sendRoomMessage(id, seatId, text, quote, attachments);
-  if (res.ok) set({ lastError: null });
-  return res;
+  const explicit = validateRoomMentions(text, mentions, room.seats);
+  const signature = JSON.stringify([seatId, text, quote, attachments, explicit]);
+  let receipt = sendReceipts.get(id);
+  if (!receipt || receipt.signature !== signature) {
+    receipt = { signature, id: createRoomMessageId() };
+    sendReceipts.set(id, receipt);
+    while (sendReceipts.size > 32) sendReceipts.delete(sendReceipts.keys().next().value!);
+  }
+  try {
+    const res = await getDesktop().sendRoomMessage(id, seatId, text, quote, attachments, explicit, receipt.id);
+    if (res.ok) {
+      if (sendReceipts.get(id) === receipt) sendReceipts.delete(id);
+      if (state.activeRoomId === id) set({ lastError: null });
+    }
+    return res;
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "消息发送失败，草稿已保留" };
+  }
+}
+
+export async function controlRoomTask(
+  args: Parameters<ReturnType<typeof getDesktop>["controlRoomTask"]>[0],
+): Promise<{ ok: boolean; error?: string }> {
+  if (!hasDesktopApi("controlRoomTask")) return { ok: false, error: "请完全重启应用后再使用任务控制" };
+  try {
+    // Task status and ownership are authoritative only in backend snapshots.
+    return await getDesktop().controlRoomTask(args);
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 /** @agent /stop：停止某个 Agent 席位正在跑的输出。 */
@@ -905,6 +950,16 @@ export async function enableRoomMod(
     set({ activeRoom: res.room, lastError: null });
   }
   return { ok: true };
+}
+
+export async function setRoomModParticipation(
+  roomId: string,
+  enabled: boolean,
+): Promise<{ ok: boolean; error?: string }> {
+  if (!hasDesktopApi("setRoomModParticipation")) {
+    return { ok: false, error: "请完全重启应用后再加载 Mod" };
+  }
+  return getDesktop().setRoomModParticipation(roomId, enabled);
 }
 
 export async function startRoomMod(): Promise<{ ok: boolean; error?: string }> {

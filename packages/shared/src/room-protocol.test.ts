@@ -6,12 +6,14 @@ import {
   encodeCdr1ForTest,
   encodeRoomInvite,
   looksLikeRoomInvite,
+  isRoomModParticipant,
   makeRoomFrame,
   parseRoomFrame,
   ROOM_PROTOCOL_VERSION,
   MOD_HOST_API,
   MOD_KERNEL_API,
   shortChecksum,
+  type RoomMember,
 } from "./room-protocol";
 
 describe("room invite secret key", () => {
@@ -73,10 +75,38 @@ const MOD_FRAME_TYPES = [
   "mod.fetch",
   "mod.bundle",
   "mod.intent",
+  "mod.participation",
+  "mod.participation.result",
   "mod.patch",
   "mod.priv",
   "mod.fail",
 ] as const;
+
+describe("activity participation", () => {
+  it("requires explicit acceptance of the current pack for members", () => {
+    const member: RoomMember = { userId: "guest", name: "Guest", role: "member" };
+    const room = { modChecksum: "pack", members: [member] };
+    expect(isRoomModParticipant(room, "guest")).toBe(false);
+    member.modChecksum = "old-pack";
+    expect(isRoomModParticipant(room, "guest")).toBe(false);
+    member.modChecksum = "pack";
+    expect(isRoomModParticipant(room, "guest")).toBe(true);
+    expect(isRoomModParticipant(room, "unknown")).toBe(false);
+    expect(isRoomModParticipant(room, null)).toBe(false);
+    room.modChecksum = "";
+    expect(isRoomModParticipant(room, "guest")).toBe(false);
+  });
+
+  it("preserves legacy host participation without overriding an explicit opt-out", () => {
+    const member: RoomMember = { userId: "host", name: "Host", role: "host" };
+    const room = { modChecksum: "pack", members: [member] };
+    expect(isRoomModParticipant(room, "host")).toBe(true);
+    member.modChecksum = "";
+    expect(isRoomModParticipant(room, "host")).toBe(false);
+    member.modChecksum = "old-pack";
+    expect(isRoomModParticipant(room, "host")).toBe(false);
+  });
+});
 
 const BORROW_AI_FRAME_TYPES = [
   "seat.update",
@@ -95,15 +125,15 @@ describe("mod protocol frames", () => {
       const frame = makeRoomFrame("room-1", 1, type, {});
       expect(frame.type).toBe(type);
       expect(frame.v).toBe(ROOM_PROTOCOL_VERSION);
-      expect(frame.v).toBe(1);
+      expect(frame.v).toBe(3);
     }
   });
 
-  it("parseRoomFrame accepts mod frames with v: 1", () => {
+  it("parseRoomFrame accepts mod frames with the current protocol version", () => {
     for (const type of MOD_FRAME_TYPES) {
       const parsed = parseRoomFrame(
         JSON.stringify({
-          v: 1,
+          v: ROOM_PROTOCOL_VERSION,
           roomId: "room-1",
           seq: 3,
           type,
@@ -112,8 +142,15 @@ describe("mod protocol frames", () => {
       );
       expect(parsed).not.toBeNull();
       expect(parsed?.type).toBe(type);
-      expect(parsed?.v).toBe(1);
+      expect(parsed?.v).toBe(ROOM_PROTOCOL_VERSION);
       expect(parsed?.roomId).toBe("room-1");
+    }
+  });
+
+  it("parseRoomFrame rejects mod frames with v: 1", () => {
+    for (const type of MOD_FRAME_TYPES) {
+      const frame = { ...makeRoomFrame("room-1", 3, type, {}), v: 1 };
+      expect(parseRoomFrame(JSON.stringify(frame))).toBeNull();
     }
   });
 });

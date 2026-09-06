@@ -1,9 +1,12 @@
 import type {
   Attachment,
+  AgentProgressUpdate,
   ChatItem,
+  ProgressAgent,
   SdkNormalizedEvent,
   ToolCardState,
 } from "./models";
+import { isTerminalAgent, mergeAgentProgress, mergeLinkedAgentProgress, mergeTaskUpdate, sameTaskApplication } from "./session-progress";
 
 export type TranscriptState = {
   items: ChatItem[];
@@ -101,6 +104,7 @@ export function shouldPersistTranscript(event: SdkNormalizedEvent): boolean {
     event.type === "text_done" ||
     event.type === "tool_start" ||
     event.type === "tool_end" ||
+    event.type === "agent_progress" ||
     event.type === "result" ||
     event.type === "turn_changes" ||
     event.type === "items_replaced"
@@ -227,12 +231,13 @@ export function applySdkEvent(
         }
       }
       const existing = items.findIndex(
-        (i) => i.kind === "tool" && i.tool.id === tool.id,
+        (i) => i.kind === "tool" && (i.tool.id === tool.id ||
+          (tool.agent != null && i.tool.agent?.id === tool.agent.id)),
       );
       if (existing >= 0) {
         const cur = items[existing];
         if (cur.kind === "tool") {
-          items[existing] = { kind: "tool", id: cur.id, tool: { ...tool } };
+          items[existing] = { kind: "tool", id: cur.id, tool: mergeToolCard(cur.tool, tool, true) };
         }
       } else {
         items.push({
@@ -241,6 +246,7 @@ export function applySdkEvent(
           tool: { ...tool },
         });
       }
+      if (tool.agent) reconcileToolAgents(items, tool.agent);
       return { ...state, items };
     }
     case "tool_end": {
@@ -251,23 +257,17 @@ export function applySdkEvent(
       if (existing >= 0) {
         const cur = items[existing];
         if (cur.kind === "tool") {
-          const merged: ToolCardState = {
-            ...cur.tool,
-            ...tool,
-            name: tool.name && tool.name !== "tool" ? tool.name : cur.tool.name,
-            summary: tool.summary || cur.tool.summary,
-            todos: tool.todos ?? cur.tool.todos,
-            isSubagent: tool.isSubagent ?? cur.tool.isSubagent,
-          };
+          const merged = stampTaskApplication(items, mergeToolCard(cur.tool, tool), cur.tool);
           items[existing] = { kind: "tool", id: cur.id, tool: merged };
         }
       } else {
         items.push({
           kind: "tool",
           id: tool.id || opts.nextId("tool"),
-          tool: { ...tool },
+          tool: stampTaskApplication(items, { ...tool }),
         });
       }
+      if (tool.agent) reconcileToolAgents(items, tool.agent);
       return { ...state, items };
     }
     case "tool_progress": {
@@ -277,13 +277,14 @@ export function applySdkEvent(
       if (existing >= 0) {
         const cur = items[existing];
         if (cur.kind === "tool") {
+          if (cur.tool.agent ? isTerminalAgent(cur.tool.agent.status) : cur.tool.status !== "running") return state;
           items[existing] = {
             kind: "tool",
             id: cur.id,
             tool: {
               ...cur.tool,
-              status: "running",
               elapsedSeconds: event.elapsedSeconds,
+              ...(cur.tool.agent ? { agent: mergeAgentProgress(cur.tool.agent, { id: cur.tool.agent.id, elapsedSeconds: event.elapsedSeconds }) } : {}),
               name:
                 event.toolName && event.toolName !== "tool"
                   ? event.toolName
@@ -294,6 +295,24 @@ export function applySdkEvent(
         }
       }
       return state;
+    }
+    case "agent_progress": {
+      const update = event.agent;
+      const reconciled = reconcileToolAgents(items, update, true);
+      if (reconciled.matched) return reconciled.changed ? { ...state, items } : state;
+      const agent = mergeAgentProgress(undefined, update);
+      if (!agent) return state;
+      const id = agent.toolUseId ?? "agent:" + agent.id;
+      const tool: ToolCardState = {
+        id, name: "Agent", summary: agent.title,
+        status: agent.status === "failed" ? "error" : isTerminalAgent(agent.status) ? "done" : "running",
+        agent,
+        ...(agent.parentToolUseId != null ? { parentToolUseId: agent.parentToolUseId, isSubagent: true } : {}),
+        ...(agent.elapsedSeconds != null ? { elapsedSeconds: agent.elapsedSeconds } : {}),
+        ...(isTerminalAgent(agent.status) && agent.summary != null ? { resultPreview: agent.summary } : {}),
+      };
+      items.push({ kind: "tool", id, tool });
+      return { ...state, items };
     }
     case "result": {
       // Tools can push after a streaming assistant, so the bubble is no
@@ -343,4 +362,82 @@ export function applySdkEvent(
     default:
       return state;
   }
+}
+
+function mergeToolCard(previous: ToolCardState, update: ToolCardState, isStart = false): ToolCardState {
+  const agent = update.agent ? mergeAgentProgress(previous.agent, update.agent) : previous.agent;
+  const lateLaunch = previous.agent && isTerminalAgent(previous.agent.status) && update.agent && !isTerminalAgent(update.agent.status);
+  return {
+    ...previous, ...update,
+    name: update.name && update.name !== "tool" ? update.name : previous.name,
+    summary: update.summary || previous.summary,
+    status: agent && isTerminalAgent(agent.status)
+      ? agent.status === "failed" ? "error" : "done"
+      : isStart && previous.status !== "running" ? previous.status : update.status,
+    todos: update.todos ?? previous.todos,
+    isSubagent: update.isSubagent ?? previous.isSubagent,
+    parentToolUseId: update.parentToolUseId ?? previous.parentToolUseId,
+    task: mergeTaskUpdate(previous.task, update.task),
+    agent,
+    resultPreview: lateLaunch ? previous.resultPreview : update.resultPreview ?? previous.resultPreview,
+    elapsedSeconds: update.elapsedSeconds ?? previous.elapsedSeconds,
+  };
+}
+
+function reconcileToolAgents(items: ChatItem[], update: AgentProgressUpdate, lifecycle = false): { matched: boolean; changed: boolean } {
+  const candidates: Array<{ index: number; item: Extract<ChatItem, { kind: "tool" }> }> = [];
+  const agents: ProgressAgent[] = [];
+  for (const [index, item] of items.entries()) {
+    if (item.kind !== "tool" || (!item.tool.agent && item.tool.id !== update.toolUseId)) continue;
+    candidates.push({ index, item });
+    agents.push(item.tool.agent ?? {
+      id: update.id, toolUseId: item.tool.id, title: item.tool.summary || item.tool.name, status: "unknown",
+    });
+  }
+  const { agent, indices } = mergeLinkedAgentProgress(agents, update);
+  if (!agent || !indices.length) return { matched: false, changed: false };
+  const linked = indices.map((index) => candidates[index]);
+  const isPlaceholder = (item: Extract<ChatItem, { kind: "tool" }>) => item.tool.id === "agent:" + item.tool.agent?.id;
+  const hasInvocation = linked.some(({ item }) => !isPlaceholder(item));
+  let changed = false;
+  for (let cursor = linked.length - 1; cursor >= 0; cursor--) {
+    const { index, item } = linked[cursor];
+    // Only synthetic lifecycle placeholders disappear. Real invocation and
+    // message positions are retained, including multiple calls to one agent.
+    if (isPlaceholder(item) && (hasInvocation || cursor > 0)) {
+      items.splice(index, 1);
+      changed = true;
+      continue;
+    }
+    const before = item.tool;
+    const tool: ToolCardState = {
+      ...before, agent,
+      status: isTerminalAgent(agent.status) ? agent.status === "failed" ? "error" : "done"
+        : lifecycle ? "running" : before.status,
+      ...(agent.parentToolUseId != null ? { parentToolUseId: agent.parentToolUseId, isSubagent: true } : {}),
+      ...(agent.elapsedSeconds != null ? { elapsedSeconds: agent.elapsedSeconds } : {}),
+      ...(isTerminalAgent(agent.status) && agent.summary != null ? { resultPreview: agent.summary } : {}),
+    };
+    if (Object.keys(tool).some((key) => tool[key as keyof ToolCardState] !== before[key as keyof ToolCardState])) {
+      items[index] = { ...item, tool };
+      changed = true;
+    }
+  }
+  return { matched: true, changed };
+}
+
+function stampTaskApplication(items: ChatItem[], tool: ToolCardState, previous?: ToolCardState): ToolCardState {
+  const task = tool.task;
+  if (tool.status !== "done" || !task || task.success === false) return tool;
+  if (previous?.status === "done" && previous.task &&
+      Number.isSafeInteger(previous.task.appliedOrder) && previous.task.appliedOrder! > 0 &&
+      sameTaskApplication(previous.task, task)) {
+    return { ...tool, task: { ...task, appliedOrder: previous.task.appliedOrder } };
+  }
+  let latest = 0;
+  for (const item of items) {
+    const order = item.kind === "tool" ? item.tool.task?.appliedOrder : undefined;
+    if (order != null && Number.isSafeInteger(order) && order > latest) latest = order;
+  }
+  return { ...tool, task: { ...task, appliedOrder: latest + 1 } };
 }

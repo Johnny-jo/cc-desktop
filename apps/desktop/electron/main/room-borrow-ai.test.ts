@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { RoomMention } from "@claude-desktop/shared";
 import { RoomService } from "./room-service";
 import { RoomMetrics } from "./room-metrics";
 import type { SessionManager } from "./session-manager";
@@ -118,6 +119,18 @@ async function joinGuest(
   return joined.room!.localUserId!;
 }
 
+/** Simulate selecting an Agent mention while composing from our own human seat. */
+function sendToAgent(svc: RoomService, roomId: string, agentSeatId: string, text: string) {
+  const room = svc.get(roomId)!;
+  const human = room.seats.find(
+    (s) => s.kind === "human" && s.occupantUserId === room.localUserId,
+  )!;
+  const agent = room.seats.find((s) => s.kind === "agent" && s.id === agentSeatId)!;
+  const label = `@${agent.name}`;
+  const mentions: RoomMention[] = [{ seatId: agent.id, start: 0, end: label.length }];
+  return svc.send(roomId, human.id, `${label} ${text}`, undefined, undefined, mentions);
+}
+
 describe("room borrow AI — admin + kick", () => {
   it("lets the host promote an admin who can kick members but not the host", async () => {
     const host = makeService({ sessions: mockSessions() });
@@ -184,7 +197,7 @@ describe("room borrow AI — seat axes + file policy", () => {
     expect(seat.workspaceUserId).toBe(guestId);
     expect(seat.executorUserId).toBe(guestId);
 
-    const sent = await host.send(roomId, seat.id, "改一下");
+    const sent = await sendToAgent(host, roomId, seat.id, "改一下");
     expect(sent.ok).toBe(true);
 
     await vi.waitFor(() => {
@@ -232,7 +245,7 @@ describe("room borrow AI — seat axes + file policy", () => {
       expect(host.get(roomId)!.seats.some((s) => s.name === "允许改")).toBe(true);
     });
     const seatId = host.get(roomId)!.seats.find((s) => s.name === "允许改")!.id;
-    await host.send(roomId, seatId, "动手");
+    await sendToAgent(host, roomId, seatId, "动手");
     await vi.waitFor(() => expect(guestStart).toHaveBeenCalledTimes(1));
     await vi.waitFor(() => {
       expect(
@@ -278,7 +291,7 @@ describe("room borrow AI — loop on files, env to borrowed AI", () => {
       model: "guest-sonnet",
     });
     const seatId = host.get(roomId)!.seats.find((s) => s.name === "借脑改自己")!.id;
-    await host.send(roomId, seatId, "帮我改本机");
+    await sendToAgent(host, roomId, seatId, "帮我改本机");
     await vi.waitFor(() => expect(hostStart).toHaveBeenCalledTimes(1));
     const extras = hostStart.mock.calls[0][2] as {
       skipCpa?: boolean;

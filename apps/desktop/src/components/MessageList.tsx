@@ -15,12 +15,12 @@ import type {
 } from "@claude-desktop/shared";
 import { MarkdownBody } from "./MarkdownBody";
 import { AttachmentChips } from "./AttachmentChips";
+import { ChatActivity } from "./ChatActivity";
 import { TurnDoneRow, TurnStatusBar } from "./TurnStatusBar";
 import { formatTurnUsageLine } from "../lib/format-usage";
 import {
   loadNewerMessages,
   loadOlderMessages,
-  requestRevealChange,
   rewindToMessage,
   selectSession,
   useAppStore,
@@ -30,11 +30,10 @@ import {
   buildConversationAnchors,
   type ConversationAnchor,
 } from "../lib/conversation-navigation";
-import {
-  buildConversationBlocks,
-  type ActivityEntry,
-} from "../lib/conversation-blocks";
+import { buildConversationBlocks } from "../lib/conversation-blocks";
 import { contentEndScrollTopForMetrics } from "../lib/chat-scroll";
+import { createChatScrollController } from "../lib/chat-scroll-controller";
+import "./ChatProgressLayout.css";
 import { toProjectRel } from "../lib/project-path";
 import { getDesktop } from "../lib/desktop-api";
 
@@ -342,406 +341,6 @@ function TurnChangesCard({
   );
 }
 
-function formatActivityDuration(milliseconds?: number): string | null {
-  if (milliseconds == null || !Number.isFinite(milliseconds)) return null;
-  if (milliseconds < 1000) return `${Math.max(1, Math.round(milliseconds))}ms`;
-  const seconds = milliseconds / 1000;
-  if (seconds < 10) return `${seconds.toFixed(1)}s`;
-  if (seconds < 60) return `${Math.round(seconds)}s`;
-  const minutes = Math.floor(seconds / 60);
-  const remainder = Math.round(seconds % 60);
-  return remainder > 0 ? `${minutes}m ${remainder}s` : `${minutes}m`;
-}
-
-function ToolActivityIcon({ name }: { name: string }) {
-  const normalized = name.toLowerCase();
-  const isTool = (toolName: string) =>
-    normalized === toolName ||
-    normalized.endsWith(`:${toolName}`) ||
-    normalized.endsWith(`__${toolName}`);
-
-  if (isTool("askuserquestion")) {
-    return (
-      <svg className="activity-step-icon" viewBox="0 0 16 16" aria-hidden>
-        <path d="M3.1 2.8h9.8a1.6 1.6 0 0 1 1.6 1.6v5.2a1.6 1.6 0 0 1-1.6 1.6H7l-3.8 2.3.7-2.3h-.8a1.6 1.6 0 0 1-1.6-1.6V4.4a1.6 1.6 0 0 1 1.6-1.6Z" />
-        <path d="M6.2 6a1.9 1.9 0 1 1 2.7 1.7c-.6.3-.9.7-.9 1.2M8 10.2h.01" />
-      </svg>
-    );
-  }
-
-  if (isTool("grep")) {
-    return (
-      <svg className="activity-step-icon" viewBox="0 0 16 16" aria-hidden>
-        <circle cx="6.6" cy="6.6" r="4.4" />
-        <path d="m9.8 9.8 3.6 3.6M4.6 5.4h4M4.6 7.5h2.8" />
-      </svg>
-    );
-  }
-
-  if (isTool("websearch")) {
-    return (
-      <svg className="activity-step-icon" viewBox="0 0 16 16" aria-hidden>
-        <circle cx="6.6" cy="6.6" r="4.5" />
-        <path d="M2.1 6.6h9M6.6 2.1a6.4 6.4 0 0 1 0 9M6.6 2.1a6.4 6.4 0 0 0 0 9m3.2-1.3 3.6 3.6" />
-      </svg>
-    );
-  }
-
-  if (normalized.includes("write") || normalized.includes("edit")) {
-    return (
-      <svg className="activity-step-icon" viewBox="0 0 16 16" aria-hidden>
-        <path d="m10.8 2.4 2.8 2.8-7.4 7.4-3.4.6.6-3.4 7.4-7.4Z" />
-        <path d="m9.7 3.5 2.8 2.8" />
-      </svg>
-    );
-  }
-
-  if (
-    normalized.includes("delete") ||
-    normalized.includes("remove") ||
-    normalized.includes("unlink")
-  ) {
-    return (
-      <svg className="activity-step-icon" viewBox="0 0 16 16" aria-hidden>
-        <path d="m6.1 3-3.6 5.2a1.7 1.7 0 0 0 .3 2.3l2.4 1.9h4.1l4.2-6L9.2 3H6.1Z" />
-        <path d="m5.2 12.4 4.1-5.8" />
-      </svg>
-    );
-  }
-
-  if (
-    normalized.includes("bash") ||
-    normalized.includes("shell") ||
-    normalized.includes("terminal") ||
-    normalized.includes("exec")
-  ) {
-    return (
-      <svg className="activity-step-icon" viewBox="0 0 16 16" aria-hidden>
-        <rect x="1.8" y="2.5" width="12.4" height="11" rx="2" />
-        <path d="m4.2 6 2 2-2 2M8 10h3.5" />
-      </svg>
-    );
-  }
-
-  if (isTool("read")) {
-    return (
-      <svg className="activity-step-icon" viewBox="0 0 16 16" aria-hidden>
-        <path d="M4.8 2.5h6.1a2 2 0 0 1 2 2v9H4.8a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2Z" />
-        <path d="M5.3 2.5v11M7.5 5.2h3" />
-      </svg>
-    );
-  }
-
-  if (normalized.includes("skill")) {
-    return (
-      <svg className="activity-step-icon" viewBox="0 0 16 16" aria-hidden>
-        <path d="M8 4.3C6.7 3 4.6 2.6 2.5 3.1v9.2c2.1-.5 4.2-.1 5.5 1.2V4.3Z" />
-        <path d="M8 4.3C9.3 3 11.4 2.6 13.5 3.1v9.2c-2.1-.5-4.2-.1-5.5 1.2" />
-      </svg>
-    );
-  }
-
-  return null;
-}
-
-function ToolActivityStep({
-  entry,
-  current,
-}: {
-  entry: Extract<ActivityEntry, { kind: "tool" }>;
-  current: boolean;
-}) {
-  const { t } = useI18n();
-  const activeSessionId = useAppStore((state) => state.activeSessionId);
-  const [detailsOpen, setDetailsOpen] = useState(false);
-  const tool = entry.tool;
-  const hasDetails = Boolean(tool.resultPreview || tool.todos?.length);
-  const isFileEdit = tool.name === "Write" || tool.name === "Edit";
-
-  return (
-    <div
-      className={`activity-step activity-step-${tool.status}${
-        current
-          ? " current"
-          : tool.status === "error"
-            ? ""
-            : " activity-step-done"
-      }`}
-      data-item-id={entry.id}
-    >
-      <button
-        type="button"
-        className="activity-step-main"
-        disabled={!hasDetails}
-        aria-expanded={hasDetails ? detailsOpen : undefined}
-        onClick={() => hasDetails && setDetailsOpen((value) => !value)}
-      >
-        {current ? <span className="activity-spinner" aria-hidden /> : null}
-        <ToolActivityIcon name={tool.name} />
-        <span className="activity-step-name">{tool.name}</span>
-        {tool.summary ? (
-          <span className="activity-step-summary" title={tool.summary}>
-            {tool.summary}
-          </span>
-        ) : null}
-        {current && tool.elapsedSeconds != null ? (
-          <span className="activity-step-meta">
-            {tool.elapsedSeconds < 10
-              ? `${tool.elapsedSeconds.toFixed(1)}s`
-              : `${Math.round(tool.elapsedSeconds)}s`}
-          </span>
-        ) : null}
-      </button>
-      {detailsOpen ? (
-        <div className="activity-step-details">
-          {tool.todos?.length ? (
-            <ul className="activity-todo-list">
-              {tool.todos.map((todo, index) => (
-                <li key={index} className={`activity-todo activity-todo-${todo.status}`}>
-                  {todo.status === "in_progress" ? (
-                    <span className="activity-spinner" aria-hidden />
-                  ) : null}
-                  <span>{todo.content}</span>
-                </li>
-              ))}
-            </ul>
-          ) : null}
-          {tool.resultPreview ? (
-            <pre className="activity-tool-preview">{tool.resultPreview}</pre>
-          ) : null}
-          {isFileEdit && activeSessionId ? (
-            <button
-              type="button"
-              className="activity-view-change"
-              onClick={() =>
-                requestRevealChange({
-                  sessionId: activeSessionId,
-                  toolUseId: tool.id,
-                  path: tool.summary || undefined,
-                })
-              }
-            >
-              {t.changes.viewChanges}
-            </button>
-          ) : null}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function ThinkingActivityEvent({
-  entry,
-  current,
-}: {
-  entry: Extract<ActivityEntry, { kind: "thinking" }>;
-  current: boolean;
-}) {
-  const { t } = useI18n();
-  const [expanded, setExpanded] = useState(false);
-  const [canExpand, setCanExpand] = useState(false);
-  const textRef = useRef<HTMLSpanElement | null>(null);
-  const text = entry.text || t.chat.activityThinkingNow;
-
-  useLayoutEffect(() => {
-    const node = textRef.current;
-    if (!node || expanded) return;
-    const measure = () => {
-      const overflowing = node.scrollWidth > node.clientWidth + 1;
-      setCanExpand((previous) =>
-        previous === overflowing ? previous : overflowing,
-      );
-    };
-    measure();
-    if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(measure);
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, [expanded, text]);
-
-  return (
-    <div
-      className={`activity-step activity-thinking-event${
-        current ? " current" : " activity-step-done"
-      }${expanded ? " expanded" : ""}`}
-      data-item-id={entry.id}
-    >
-      <button
-        type="button"
-        className={`activity-thinking-toggle${canExpand ? "" : " is-static"}`}
-        disabled={!canExpand}
-        aria-expanded={canExpand ? expanded : undefined}
-        aria-label={
-          canExpand
-            ? expanded
-              ? t.chat.activityCollapseThinking
-              : t.chat.activityExpandThinking
-            : undefined
-        }
-        onClick={() => canExpand && setExpanded((value) => !value)}
-      >
-        {current ? <span className="activity-spinner" aria-hidden /> : null}
-        <span ref={textRef} className="activity-thinking-text">{text}</span>
-        {canExpand ? (
-          <span className="activity-thinking-chevron" aria-hidden>
-            <svg viewBox="0 0 16 16">
-              <path d="m6 3 5 5-5 5" />
-            </svg>
-          </span>
-        ) : null}
-      </button>
-    </div>
-  );
-}
-
-function CompactionActivityEvent({ id }: { id: string }) {
-  const { t } = useI18n();
-
-  return (
-    <div
-      className="activity-step activity-step-done activity-compaction-event"
-      data-item-id={id}
-    >
-      <span className="activity-compaction-icon" aria-hidden>
-        <svg viewBox="0 0 16 16">
-          <path d="M5.5 2.5H3.8A1.3 1.3 0 0 0 2.5 3.8v1.7M10.5 2.5h1.7a1.3 1.3 0 0 1 1.3 1.3v1.7M5.5 13.5H3.8a1.3 1.3 0 0 1-1.3-1.3v-1.7M10.5 13.5h1.7a1.3 1.3 0 0 0 1.3-1.3v-1.7" />
-          <path d="m5 8 2-2M5 8l2 2M11 8 9 6M11 8l-2 2" />
-        </svg>
-      </span>
-      <span>{t.chat.activityContextCompacted}</span>
-    </div>
-  );
-}
-
-function ActivityGroup({
-  id,
-  entries,
-  durationMs,
-}: {
-  id: string;
-  entries: ActivityEntry[];
-  durationMs?: number;
-}) {
-  const { t } = useI18n();
-  const active = entries.some(
-    (entry) =>
-      (entry.kind === "thinking" && entry.active) ||
-      (entry.kind === "tool" && entry.tool.status === "running"),
-  );
-  const failureCount = entries.filter(
-    (entry) => entry.kind === "tool" && entry.tool.status === "error",
-  ).length;
-  const failed = failureCount > 0;
-  const hasCompaction = entries.some((entry) => entry.kind === "compaction");
-  const [open, setOpen] = useState(active || failed || hasCompaction);
-  const userOverrideRef = useRef(false);
-  const wasActiveRef = useRef(active);
-
-  useEffect(() => {
-    if (wasActiveRef.current && !active) {
-      setOpen(failed);
-      userOverrideRef.current = false;
-    } else if (!wasActiveRef.current && active && !userOverrideRef.current) {
-      setOpen(true);
-    }
-    wasActiveRef.current = active;
-  }, [active, failed]);
-
-  const thinkingCount = entries.filter((entry) => entry.kind === "thinking").length;
-  const toolCount = entries.filter((entry) => entry.kind === "tool").length;
-  const duration = formatActivityDuration(durationMs);
-  const currentEntry = [...entries]
-    .reverse()
-    .find(
-      (entry) =>
-        (entry.kind === "thinking" && entry.active) ||
-        (entry.kind === "tool" && entry.tool.status === "running"),
-    );
-  const completeSummary = [
-    thinkingCount > 0
-      ? t.chat.activityThinkingCount.replace("{count}", String(thinkingCount))
-      : null,
-    toolCount > 0
-      ? t.chat.activityToolCount.replace("{count}", String(toolCount))
-      : null,
-    duration
-      ? t.chat.activityDuration.replace("{duration}", duration)
-      : null,
-  ]
-    .filter(Boolean)
-    .join(" · ") || (hasCompaction ? t.chat.activityContextCompacted : "");
-  const currentSummary =
-    currentEntry?.kind === "thinking"
-      ? t.chat.activityThinkingStep
-      : currentEntry?.kind === "tool"
-        ? currentEntry.tool.summary || currentEntry.tool.name
-        : completeSummary;
-  const bodyId = `${id}-body`;
-
-  return (
-    <div
-      className={`activity-group${open ? " open" : ""}${
-        active ? " active" : ""
-      }${failed ? " failed" : ""}`}
-      data-item-id={entries[0]?.id}
-    >
-      <button
-        type="button"
-        className="activity-group-toggle"
-        aria-expanded={open}
-        aria-controls={bodyId}
-        title={open ? t.chat.activityCollapse : t.chat.activityExpand}
-        onClick={() => {
-          userOverrideRef.current = true;
-          setOpen((value) => !value);
-        }}
-      >
-        <span className="activity-group-title">
-          {active ? t.chat.activityRunning : t.chat.activityTitle}
-        </span>
-        <span className="activity-group-summary">
-          {active ? currentSummary : completeSummary}
-        </span>
-        <span className="activity-chevron" aria-hidden>
-          <svg viewBox="0 0 16 16">
-            <path d="m6 3 5 5-5 5" />
-          </svg>
-        </span>
-        <span className={`activity-group-status status-${failed ? "error" : active ? "running" : "done"}`}>
-          {failed
-            ? t.chat.activityFailedCount.replace(
-                "{count}",
-                String(failureCount),
-              )
-            : active
-              ? t.chat.activityInProgress
-              : t.chat.activityComplete}
-        </span>
-      </button>
-      {open ? (
-        <div id={bodyId} className="activity-group-body">
-          {entries.map((entry) => {
-            const current = entry.id === currentEntry?.id;
-            if (entry.kind === "compaction") {
-              return <CompactionActivityEvent key={entry.id} id={entry.id} />;
-            }
-            if (entry.kind === "tool") {
-              return <ToolActivityStep key={entry.id} entry={entry} current={current} />;
-            }
-            return (
-              <ThinkingActivityEvent
-                key={entry.id}
-                entry={entry}
-                current={current}
-              />
-            );
-          })}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
 function TurnResponseFooter({
   text,
   usage,
@@ -810,12 +409,10 @@ const MessageRow = memo(function MessageRow({
   item,
   sessionId,
   onOpenFile,
-  leadingSpace,
 }: {
   item: ChatItem;
   sessionId: string | null;
   onOpenFile?: (rel: string, line?: number) => void;
-  leadingSpace?: number;
 }) {
   if (item.kind === "tool") {
     return null;
@@ -850,7 +447,6 @@ const MessageRow = memo(function MessageRow({
     <div
       className={`message-row role-${role}${item.streaming ? " streaming" : ""}`}
       data-item-id={item.id}
-      style={leadingSpace ? { marginTop: leadingSpace } : undefined}
     >
       {role === "user" ? (
         <div className="bubble bubble-user" title={item.text}>
@@ -881,9 +477,6 @@ function lastItemStreaming(items: ChatItem[]): boolean {
 
 const SCROLL_LOAD_PX = 80;
 const SHOW_JUMP_BOTTOM_PX = 160;
-const TURN_USER_VIEWPORT_Y = 0.2;
-const TURN_STATUS_VIEWPORT_Y = 0.425;
-const TURN_SCROLL_RESERVE = 0.8;
 
 function itemTop(list: HTMLElement, id: string): number | null {
   const node = list.querySelector(`[data-item-id="${CSS.escape(id)}"]`);
@@ -1042,6 +635,9 @@ export function MessageList({
 }) {
   const { t } = useI18n();
   const listRef = useRef<HTMLDivElement | null>(null);
+  const contentRef = useRef<HTMLDivElement | null>(null);
+  const spacerRef = useRef<HTMLDivElement | null>(null);
+  const scrollControllerRef = useRef<ReturnType<typeof createChatScrollController> | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [loadingNewer, setLoadingNewer] = useState(false);
   const loadingRef = useRef(false);
@@ -1092,142 +688,28 @@ export function MessageList({
     ? `${last.id}:${last.kind === "text" ? `${last.text.length}:${last.streaming ? 1 : 0}` : last.kind}`
     : "0";
 
-  useEffect(() => {
-    if (hasNewer) return;
+  const hasItems = items.length > 0;
+  useLayoutEffect(() => {
     const list = listRef.current;
-    if (!list) return;
-    const pin = () => {
-      // The reserved zone below the transcript (if any) is not content: pins
-      // aim at the real content end, so removing the spacer never moves the view.
-      const spacerH = reservedTurnSpace(list);
-      const anchor = turnAnchorRef.current;
-      if (anchor && anchor.sessionId === sessionId) {
-        // Task start anchored near the vertical center: let the reply flow
-        // into the room below; only follow the tail once it overflows.
-        if (
-          list.scrollHeight - spacerH - anchor.scrollTop <=
-          list.clientHeight + 1
-        ) {
-          return;
-        }
-        turnAnchorRef.current = null;
-      }
-      list.scrollTop = contentEndScrollTop(list);
+    const content = contentRef.current;
+    const spacer = spacerRef.current;
+    if (!list || !content || !spacer) return;
+    const controller = createChatScrollController(list, content, spacer);
+    scrollControllerRef.current = controller;
+    return () => {
+      controller.dispose();
+      if (scrollControllerRef.current === controller) scrollControllerRef.current = null;
     };
-    pin();
-    requestAnimationFrame(pin);
-    // pinKey already encodes last-item id / length / streaming.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pinKey, sessionId, hasNewer]);
-
-  // Fresh send: reserve room below the list, then place the user's question at
-  // 20% of the viewport. The live status row gets its own 42.5% anchor so the
-  // initial "thinking" state is immediately visible without crowding the ask.
-  const turnScrollRef = useRef<{
-    sessionId: string | null;
-    running: boolean;
-    userId: string | null;
-  }>({
-    sessionId: null,
-    running: false,
-    userId: null,
-  });
-  const turnAnchorRef = useRef<{
-    sessionId: string | null;
-    scrollTop: number;
-  } | null>(null);
-  const [turnSpacerHeight, setTurnSpacerHeight] = useState(0);
-  const [turnUserLead, setTurnUserLead] = useState(0);
-  const [turnStatusLead, setTurnStatusLead] = useState(0);
+  }, [sessionId, hasItems]);
 
   useLayoutEffect(() => {
-    const prev = turnScrollRef.current;
-    let lastUserItem: Extract<ChatItem, { kind: "text" }> | undefined;
-    for (let index = items.length - 1; index >= 0; index -= 1) {
-      const item = items[index];
-      if (item?.kind === "text" && item.role === "user") {
-        lastUserItem = item;
-        break;
-      }
-    }
-    turnScrollRef.current = {
+    scrollControllerRef.current?.update({
       sessionId,
+      userId: anchors[anchors.length - 1]?.id ?? null,
       running: Boolean(running),
-      userId: lastUserItem?.id ?? null,
-    };
-    if (prev.sessionId !== sessionId) {
-      turnAnchorRef.current = null;
-      setTurnSpacerHeight(0);
-      setTurnUserLead(0);
-      setTurnStatusLead(0);
-    }
-    if (!running) {
-      // Turn finished: drop the reserved room; the view stays where it is.
-      if (prev.running) {
-        setTurnSpacerHeight(0);
-        setTurnUserLead(0);
-        setTurnStatusLead(0);
-      }
-      return;
-    }
-    if (
-      prev.running &&
-      prev.sessionId === sessionId &&
-      prev.userId === lastUserItem?.id
-    ) {
-      return;
-    }
-    const list = listRef.current;
-    if (!list) return;
-    if (!lastUserItem) return;
-    const userNode = list.querySelector(
-      `[data-item-id="${CSS.escape(lastUserItem.id)}"]`,
-    );
-    if (!(userNode instanceof HTMLElement)) return;
-    setTurnSpacerHeight(Math.round(list.clientHeight * TURN_SCROLL_RESERVE));
-
-    const listTop = list.getBoundingClientRect().top;
-    const desiredUserTop = list.clientHeight * TURN_USER_VIEWPORT_Y;
-    const unclampedScrollTop =
-      list.scrollTop +
-      userNode.getBoundingClientRect().top -
-      listTop -
-      desiredUserTop;
-    setTurnUserLead(Math.max(0, Math.round(-unclampedScrollTop)));
-
-    const status = list.querySelector("[data-current-turn-status]");
-    if (status instanceof HTMLElement) {
-      const currentDistance =
-        status.getBoundingClientRect().top - userNode.getBoundingClientRect().top;
-      const desiredDistance =
-        list.clientHeight * (TURN_STATUS_VIEWPORT_Y - TURN_USER_VIEWPORT_Y);
-      setTurnStatusLead((currentLead) =>
-        Math.max(
-          0,
-          Math.round(currentLead + desiredDistance - currentDistance),
-        ),
-      );
-    }
-
-    requestAnimationFrame(() => {
-      const node = list.querySelector(
-        `[data-item-id="${CSS.escape(lastUserItem.id)}"]`,
-      );
-      if (!(node instanceof HTMLElement)) return;
-      const listTop = list.getBoundingClientRect().top;
-      const target = Math.max(
-        0,
-        list.scrollTop +
-          node.getBoundingClientRect().top -
-          listTop -
-          list.clientHeight * TURN_USER_VIEWPORT_Y,
-      );
-      list.scrollTo({ top: target });
-      turnAnchorRef.current = { sessionId, scrollTop: target };
+      hasNewer: Boolean(hasNewer),
     });
-    // Only the idle-to-running transition should trigger this.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [running, sessionId, items]);
+  }, [sessionId, items, anchors, running, hasNewer]);
 
   const updateScrollUi = useCallback(() => {
     const list = listRef.current;
@@ -1272,6 +754,7 @@ export function MessageList({
 
   const onLoadOlder = async () => {
     if (!hasMore || !sessionId || loadingRef.current) return;
+    scrollControllerRef.current?.pause();
     const list = listRef.current;
     const anchorId = items[0]?.id;
     const prevTop = list && anchorId ? itemTop(list, anchorId) : null;
@@ -1288,6 +771,7 @@ export function MessageList({
 
   const onLoadNewer = async () => {
     if (!hasNewer || !sessionId || loadingRef.current) return;
+    scrollControllerRef.current?.pause();
     const list = listRef.current;
     const anchorId = items[items.length - 1]?.id;
     const prevTop = list && anchorId ? itemTop(list, anchorId) : null;
@@ -1338,6 +822,7 @@ export function MessageList({
     if (!list) return;
     const node = list.querySelector(`[data-item-id="${CSS.escape(id)}"]`);
     if (!(node instanceof HTMLElement)) return;
+    scrollControllerRef.current?.pause();
     const listTop = list.getBoundingClientRect().top;
     const nodeTop = node.getBoundingClientRect().top;
     list.scrollTo({
@@ -1364,9 +849,7 @@ export function MessageList({
     requestAnimationFrame(() => {
       const list = listRef.current;
       if (!list) return;
-      // Following the tail by hand releases the task-start anchor too.
-      turnAnchorRef.current = null;
-      list.scrollTo({ top: contentEndScrollTop(list), behavior: "smooth" });
+      scrollControllerRef.current?.followTail(true);
     });
   };
 
@@ -1393,7 +876,8 @@ export function MessageList({
 
   return (
     <div className="message-list-shell">
-      <div className="message-list" ref={listRef}>
+      <div className="message-list main-chat-message-list" ref={listRef} tabIndex={0}>
+        <div className="message-list-content" ref={contentRef}>
         {hasMore && sessionId ? (
           <button
             type="button"
@@ -1417,13 +901,13 @@ export function MessageList({
           return (
             <Fragment key={block.kind === "item" ? block.item.id : block.id}>
               {block.kind === "activity" ? (
-                <div className="message-row activity-row">
-                  <ActivityGroup
-                    id={block.id}
-                    entries={block.entries}
-                    durationMs={block.usage?.durationMs}
-                  />
-                </div>
+                <ChatActivity
+                  id={block.id}
+                  entries={block.entries}
+                  durationMs={block.usage?.durationMs}
+                />
+              ) : block.kind === "live-activity" ? (
+                <ChatActivity id={block.id} entries={block.entries} live />
               ) : block.kind === "turn-footer" ? (
                 <TurnResponseFooter
                   id={block.id}
@@ -1435,11 +919,6 @@ export function MessageList({
                   item={block.item}
                   sessionId={sessionId}
                   onOpenFile={onOpenFile}
-                  leadingSpace={
-                    userItem && index === lastUserBlockIndex && running
-                      ? turnUserLead
-                      : undefined
-                  }
                 />
               )}
               {userItem ? (
@@ -1448,7 +927,6 @@ export function MessageList({
                     <div
                       className="current-turn-status"
                       data-current-turn-status
-                      style={{ marginTop: turnStatusLead }}
                     >
                       <TurnStatusBar
                         sessionId={sessionId}
@@ -1474,13 +952,6 @@ export function MessageList({
             </Fragment>
           );
         })}
-        {turnSpacerHeight > 0 ? (
-          <div
-            className="turn-scroll-spacer"
-            style={{ height: turnSpacerHeight }}
-            aria-hidden
-          />
-        ) : null}
         {hasNewer && sessionId ? (
           <button
             type="button"
@@ -1491,6 +962,8 @@ export function MessageList({
             {loadingNewer ? t.common.loading : t.chat.loadNewer}
           </button>
         ) : null}
+        </div>
+        <div className="turn-scroll-spacer" ref={spacerRef} aria-hidden />
       </div>
       <ConversationNavigator
         anchors={anchors}

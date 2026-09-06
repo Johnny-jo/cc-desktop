@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { IPC } from "@claude-desktop/shared";
+import { IPC, type RoomMention } from "@claude-desktop/shared";
 import { RoomService } from "./room-service";
 import { RoomMetrics } from "./room-metrics";
 import { pathJailViolation } from "./session-manager";
@@ -136,15 +136,29 @@ async function joinGuest(
   guest: RoomService,
   port: number,
   hostFingerprint: string,
+  name?: string,
 ): Promise<string> {
   const res = await guest.join({
     host: "127.0.0.1",
     port,
     password: "pw",
     hostFingerprint,
+    name,
   });
   expect(res.ok).toBe(true);
   return res.room!.localUserId!;
+}
+
+/** Simulate selecting an Agent mention while composing from our own human seat. */
+function sendToAgent(svc: RoomService, roomId: string, agentSeatId: string, text: string) {
+  const room = svc.get(roomId)!;
+  const human = room.seats.find(
+    (s) => s.kind === "human" && s.occupantUserId === room.localUserId,
+  )!;
+  const agent = room.seats.find((s) => s.kind === "agent" && s.id === agentSeatId)!;
+  const label = `@${agent.name}`;
+  const mentions: RoomMention[] = [{ seatId: agent.id, start: 0, end: label.length }];
+  return svc.send(roomId, human.id, `${label} ${text}`, undefined, undefined, mentions);
 }
 
 describe("room turn ask (filePolicy = ask)", () => {
@@ -166,7 +180,7 @@ describe("room turn ask (filePolicy = ask)", () => {
       ).toBe(true),
     );
 
-    const sent = await guest.svc.send(roomId, seatId, "帮我改 a.ts");
+    const sent = await sendToAgent(guest.svc, roomId, seatId, "帮我改 a.ts");
     expect(sent.ok).toBe(true);
 
     // 宿主窗口收到审批弹窗事件，且任务尚未执行。
@@ -215,7 +229,7 @@ describe("room turn ask (filePolicy = ask)", () => {
       ).toBe(true),
     );
 
-    const sent = await guest.svc.send(roomId, seatId, "删库跑路");
+    const sent = await sendToAgent(guest.svc, roomId, seatId, "删库跑路");
     expect(sent.ok).toBe(true);
     await vi.waitFor(() => expect(lastAsk(host.sent)).toBeTruthy());
 
@@ -256,7 +270,7 @@ describe("room turn ask (filePolicy = ask)", () => {
       expect(hostMember?.filePolicy).toBe("allow");
     });
 
-    const sent = await guest.svc.send(roomId, seatId, "随便改");
+    const sent = await sendToAgent(guest.svc, roomId, seatId, "随便改");
     expect(sent.ok).toBe(true);
 
     await vi.waitFor(() =>
@@ -286,7 +300,7 @@ describe("room turn ask (filePolicy = ask)", () => {
       .seats.find((s) => s.name === "远端 bot")!.id;
 
     // 宿主（≠ 工作区主人）发言 → 派发到客人机器，客人先审批。
-    const sent = await host.svc.send(roomId, seatId, "读一下 b.ts");
+    const sent = await sendToAgent(host.svc, roomId, seatId, "读一下 b.ts");
     expect(sent.ok).toBe(true);
 
     await vi.waitFor(() => expect(lastAsk(guest.sent)).toBeTruthy());
@@ -336,7 +350,7 @@ describe("席位上下文占用与自动压缩", () => {
       ).toBe(true),
     );
 
-    const sent = await guest.svc.send(roomId, seatId, "干点活");
+    const sent = await sendToAgent(guest.svc, roomId, seatId, "干点活");
     expect(sent.ok).toBe(true);
     await vi.waitFor(() => expect(lastAsk(host.sent)).toBeTruthy());
     host.svc.respondTurnAsk(lastAsk(host.sent)!.requestId, true);
@@ -377,7 +391,7 @@ describe("席位上下文占用与自动压缩", () => {
       ).toBe(true),
     );
 
-    const sent = await guest.svc.send(roomId, seatId, "继续");
+    const sent = await sendToAgent(guest.svc, roomId, seatId, "继续");
     expect(sent.ok).toBe(true);
     await vi.waitFor(() => expect(lastAsk(host.sent)).toBeTruthy());
     host.svc.respondTurnAsk(lastAsk(host.sent)!.requestId, true);
@@ -423,7 +437,7 @@ describe("席位上下文占用与自动压缩", () => {
       .get(roomId)!
       .seats.find((s) => s.name === "远端 bot")!.id;
 
-    const sent = await host.svc.send(roomId, seatId, "跑一轮");
+    const sent = await sendToAgent(host.svc, roomId, seatId, "跑一轮");
     expect(sent.ok).toBe(true);
     // 客人本机审批（默认 ask）→ 允许 → 执行 → 超阈值压缩 → exec.result 回报
     await vi.waitFor(() => expect(lastAsk(guest.sent)).toBeTruthy());
@@ -469,7 +483,7 @@ describe("席位上下文占用与自动压缩", () => {
       .get(roomId)!
       .seats.find((s) => s.name === "远端 bot")!.id;
 
-    const sent = await host.svc.send(roomId, seatId, "跑一轮");
+    const sent = await sendToAgent(host.svc, roomId, seatId, "跑一轮");
     expect(sent.ok).toBe(true);
     await vi.waitFor(() => expect(lastAsk(guest.sent)).toBeTruthy());
     guest.svc.respondTurnAsk(lastAsk(guest.sent)!.requestId, true);
@@ -504,7 +518,7 @@ describe("seat stop 与本机流式", () => {
     const host = makeService({ sessions });
     const { roomId, port, hostFingerprint } = await createHost(host.svc);
     const guest = makeService();
-    await joinGuest(guest.svc, port, hostFingerprint);
+    const guestUserId = await joinGuest(guest.svc, port, hostFingerprint, "任务发起人");
 
     expect(host.svc.addSeat(roomId, "agent", "bot").ok).toBe(true);
     const seatId = host.svc.get(roomId)!.seats.find((s) => s.name === "bot")!.id;
@@ -512,22 +526,41 @@ describe("seat stop 与本机流式", () => {
       expect(guest.svc.get(roomId)!.seats.some((s) => s.name === "bot")).toBe(true),
     );
 
-    await guest.svc.send(roomId, seatId, "跑");
+    await sendToAgent(guest.svc, roomId, seatId, "跑");
     await vi.waitFor(() => expect(lastAsk(host.sent)).toBeTruthy());
     host.svc.respondTurnAsk(lastAsk(host.sent)!.requestId, true);
     await vi.waitFor(() =>
       expect(host.svc.get(roomId)!.seats.find((s) => s.name === "bot")!.running).toBe(true),
     );
+    await vi.waitFor(() => expect(start).toHaveBeenCalledTimes(1));
+
+    // pendingStart has not resolved: the host is stopping the guest's active task.
+    const beforeStop = host.svc.get(roomId)!;
+    const task = beforeStop.tasks!.find((t) => t.seatId === seatId)!;
+    const actor = beforeStop.members.find((m) => m.userId === beforeStop.localUserId)!;
+    const initiator = beforeStop.members.find((m) => m.userId === guestUserId)!;
+    const itemsBeforeStop = beforeStop.items.length;
+    expect(task).toMatchObject({ status: "running", initiatorUserId: guestUserId });
+    expect(actor.userId).not.toBe(guestUserId);
+    expect(actor.name).not.toBe(initiator.name);
 
     expect(host.svc.stopSeat(roomId, seatId).ok).toBe(true);
     expect(abort).toHaveBeenCalledWith("sess-run");
     const snap = host.svc.get(roomId)!;
     const seat = snap.seats.find((s) => s.name === "bot")!;
-    expect(seat.running).toBe(false);
-    expect(
-      snap.items.some((i) => i.kind === "system" && i.text.includes("停止了「bot」的输出")),
-    ).toBe(true);
+    expect(seat.running).toBe(true); // abort requested; pendingStart has not settled yet
+    expect(snap.tasks?.find((t) => t.id === task.id)?.status).toBe("stopping");
+    expect(snap.items.slice(itemsBeforeStop).filter((i) => i.kind === "system")).toEqual([
+      expect.objectContaining({
+        taskId: task.id,
+        text: `${actor.name} 请求中断任务 ${task.id.slice(0, 8)}`,
+      }),
+    ]);
     resolve();
+    await vi.waitFor(() => {
+      expect(host.svc.get(roomId)!.tasks?.find((t) => t.id === task.id)?.status).toBe("cancelled");
+      expect(host.svc.get(roomId)!.seats.find((s) => s.id === seatId)?.running).toBe(false);
+    });
   });
 
   it("远程席位：房主 stopSeat → 节点 abort 本机会话", async () => {
@@ -549,20 +582,35 @@ describe("seat stop 与本机流式", () => {
     });
     const seatId = host.svc.get(roomId)!.seats.find((s) => s.name === "远端 bot")!.id;
 
-    await host.svc.send(roomId, seatId, "干活");
+    await sendToAgent(host.svc, roomId, seatId, "干活");
     await vi.waitFor(() => expect(lastAsk(guest.sent)).toBeTruthy());
     guest.svc.respondTurnAsk(lastAsk(guest.sent)!.requestId, true);
     await vi.waitFor(() => expect(start).toHaveBeenCalledTimes(1));
 
+    // The remote execution Promise stays pending until resolve() below.
+    const beforeStop = host.svc.get(roomId)!;
+    const task = beforeStop.tasks!.find((t) => t.seatId === seatId)!;
+    const actor = beforeStop.members.find((m) => m.userId === beforeStop.localUserId)!;
+    const itemsBeforeStop = beforeStop.items.length;
+    expect(task).toMatchObject({ status: "running", initiatorUserId: actor.userId });
+
     expect(host.svc.stopSeat(roomId, seatId).ok).toBe(true);
+    expect(host.svc.get(roomId)!.tasks?.find((t) => t.id === task.id)?.status).toBe("stopping");
     await vi.waitFor(() => expect(abort).toHaveBeenCalledWith("sess-remote"));
     await vi.waitFor(() => {
       const snap = host.svc.get(roomId)!;
-      expect(
-        snap.items.some((i) => i.kind === "system" && i.text.includes("停止了「远端 bot」的输出")),
-      ).toBe(true);
+      expect(snap.tasks?.find((t) => t.id === task.id)?.status).toBe("stopping");
+      expect(snap.items.slice(itemsBeforeStop).filter((i) => i.kind === "system")).toEqual([
+        expect.objectContaining({
+          taskId: task.id,
+          text: `${actor.name} 请求中断任务 ${task.id.slice(0, 8)}`,
+        }),
+      ]);
     });
     resolve();
+    await vi.waitFor(() => {
+      expect(host.svc.get(roomId)!.tasks?.find((t) => t.id === task.id)?.status).toBe("cancelled");
+    });
   });
 
   it("本机席位：thinking/text 增量流式进 liveExec，轮次结束后清除", async () => {
@@ -580,7 +628,7 @@ describe("seat stop 与本机流式", () => {
       expect(guest.svc.get(roomId)!.seats.some((s) => s.name === "bot")).toBe(true),
     );
 
-    await guest.svc.send(roomId, seatId, "想想再答");
+    await sendToAgent(guest.svc, roomId, seatId, "想想再答");
     await vi.waitFor(() => expect(lastAsk(host.sent)).toBeTruthy());
     host.svc.respondTurnAsk(lastAsk(host.sent)!.requestId, true);
     await vi.waitFor(() =>

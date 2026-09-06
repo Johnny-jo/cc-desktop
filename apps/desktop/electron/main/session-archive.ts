@@ -3,8 +3,11 @@ import path from "node:path";
 import {
   DIFF_MAX_EVENTS_PER_FILE,
   compactFileChange,
+  rebuildSessionProgress,
+  restoreSessionProgress,
   type ChatItem,
   type FileChange,
+  type SessionProgress,
   type SessionSummary,
 } from "@claude-desktop/shared";
 import type { AppDatabase } from "./app-database";
@@ -13,6 +16,8 @@ const LEGACY_SESSION_MIGRATION_KEY = "migration.sessions-json-v1";
 
 export type StoredSession = SessionSummary & {
   sdkSessionId?: string;
+  /** Progress of the compressed prefix, retained for subsequent rewinds. */
+  progressBaseline?: SessionProgress;
 };
 
 type IndexFile = {
@@ -254,6 +259,8 @@ export class SessionArchive {
           : {}),
         ...(s.hiddenFromList ? { hiddenFromList: true } : {}),
         ...(s.pinned ? { pinned: true } : {}),
+        ...(s.progress ? { progress: restoreSessionProgress(s.progress) } : {}),
+        ...(s.progressBaseline ? { progressBaseline: restoreSessionProgress(s.progressBaseline) } : {}),
       }));
     } catch {
       return [];
@@ -273,6 +280,8 @@ export class SessionArchive {
           ...(s.sdkSessionId ? { sdkSessionId: s.sdkSessionId } : {}),
           ...(s.usage ? { usage: s.usage } : {}),
           ...(s.contextUsage ? { contextUsage: s.contextUsage } : {}),
+          ...(s.progress ? { progress: s.progress } : {}),
+          ...(s.progressBaseline ? { progressBaseline: s.progressBaseline } : {}),
           ...(s.hiddenFromList ? { hiddenFromList: true } : {}),
           ...(s.pinned ? { pinned: true } : {}),
         }))
@@ -391,6 +400,23 @@ export class SessionArchive {
       hasMore: start > 0,
       hasNewer: end < total,
     };
+  }
+
+  /** Backfill old summaries without retaining full transcript bodies in memory. */
+  loadProgress(sessionId: string, baseline?: SessionProgress): SessionProgress {
+    const toolPages: ChatItem[][] = [];
+    let beforeId: string | undefined;
+    while (true) {
+      const page = this.loadItemsPage(sessionId, { beforeId, limit: TRANSCRIPT_PAGE });
+      toolPages.push(page.items.filter(item => item.kind === "tool" && (
+        item.tool.task || item.tool.agent || (item.tool.name === "TodoWrite" && item.tool.todos)
+      )));
+      const firstId = page.items[0]?.id;
+      if (!page.hasMore || !firstId || firstId === beforeId) break;
+      beforeId = firstId;
+    }
+    return restoreSessionProgress(rebuildSessionProgress(toolPages.reverse().flat(), baseline))
+      ?? { tasks: [], agents: [] };
   }
 
   saveItems(sessionId: string, items: ChatItem[]): void {

@@ -1,5 +1,9 @@
 import React, { useMemo, useState } from "react";
-import type { RoomRole, RoomSeat } from "@claude-desktop/shared";
+import {
+  isRoomModParticipant,
+  type RoomRole,
+  type RoomSeat,
+} from "@claude-desktop/shared";
 import {
   actionFields,
   asModView,
@@ -14,6 +18,7 @@ import {
   recoverRoomMod,
   resetRoomMod,
   sendRoomModIntent,
+  setRoomModParticipation,
   startRoomMod,
   useRoomStore,
 } from "../state/room-store";
@@ -205,12 +210,14 @@ export function ModPlayPanel({
   localUserId?: string;
 }) {
   const { t } = useI18n();
-  const mod = useRoomStore((s) => s.mod);
+  const mod = useRoomStore((s) => s.mod) ?? {};
+  const room = useRoomStore((s) => s.activeRoom);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [confirmEnd, setConfirmEnd] = useState(false);
 
-  if (!mod) return null;
+  // Snapshots announce the activity before its first projection arrives.
+  if (!room?.modChecksum) return null;
 
   const offer = mod.offer;
   const badge = formatModBadge(offer, t.room.modBadge);
@@ -218,10 +225,11 @@ export function ModPlayPanel({
   const phase = publicView?.phase ?? "";
   const started = Boolean(phase) && phase !== "lobby" && phase !== "idle";
   const canHost = role === "host";
-  const seatViews = mod.seatViews ?? {};
+  const participating = Boolean(room && isRoomModParticipant(room, localUserId));
+  const seatViews = participating ? mod.seatViews ?? {} : {};
   const localIds = Object.keys(seatViews);
   const playSeatId = preferredPlaySeatId(seats, seatViews, localUserId);
-  const actions = normalizeActions(mod.actions);
+  const actions = participating ? normalizeActions(mod.actions) : {};
   const actionNames = Object.keys(actions);
   const showEnd = started || Boolean(mod.fail);
 
@@ -310,6 +318,28 @@ export function ModPlayPanel({
           </div>
         ) : null}
       </div>
+
+      {room ? (
+        <div className="room-mod-host">
+          <span className="room-join-hint">
+            {participating ? t.room.modParticipating : t.room.modOptional}
+          </span>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            disabled={busy || room.status !== "open"}
+            onClick={() => void runHost(() =>
+              setRoomModParticipation(room.roomId, !participating),
+            )}
+          >
+            {busy
+              ? t.room.modUpdating
+              : participating
+                ? t.room.modStopParticipation
+                : t.room.modLoadParticipation}
+          </button>
+        </div>
+      ) : null}
 
       {mod.fail ? (
         <div className="room-mod-fail">

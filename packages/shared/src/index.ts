@@ -7,7 +7,12 @@ export * from "./attachments";
 export * from "./model-context-limits";
 export * from "./mcp-servers";
 export * from "./transcript-reducer";
+export { updateSessionProgress, rebuildSessionProgress, restoreSessionProgress } from "./session-progress";
 export * from "./room-protocol";
+export * from "./room-list-preview";
+export * from "./room-mentions";
+export * from "./room-attachments";
+export * from "./room-message-receipts";
 export * from "./room-seat-bind";
 // room-crypto / room-handshake / room-pdu 依赖 node:crypto，仅供主进程经
 // "@claude-desktop/shared/room-crypto" 等子路径引入（同 mod-hash 惯例），

@@ -1,0 +1,25 @@
+.chat-panel .main-chat-message-list {
+  gap: 0;
+  padding-bottom: calc(var(--composer-h, 140px) + 24px);
+  overflow-anchor: auto;
+}
+
+.chat-panel .message-list-content {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.chat-panel .main-chat-message-list > .turn-scroll-spacer {
+  flex: none;
+  height: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.chat-panel .main-chat-message-list:focus-visible {
+  outline: 1px solid var(--border);
+  outline-offset: -1px;
+}

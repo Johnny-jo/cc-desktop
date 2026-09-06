@@ -1,8 +1,10 @@
-/** Room protocol v1 — transport-agnostic JSON frames. */
+/** Room protocol v3 — confirmed messages and verified attachment transport. */
 
 import type { FileChange } from "./models";
+import type { RoomMention } from "./room-mentions";
+import type { RoomAttachmentRef } from "./room-attachments";
 
-export const ROOM_PROTOCOL_VERSION = 1;
+export const ROOM_PROTOCOL_VERSION = 3;
 export const ROOM_DEFAULT_PORT = 18765;
 export const MOD_HOST_API = 1;
 export const MOD_KERNEL_API = 2;
@@ -19,6 +21,8 @@ export const ROOM_FRAME_LIMITS = {
   handshake: 8 * 1024,
   "chat.user": 64 * 1024,
   "chat.event": 64 * 1024,
+  "attachment.get": 4 * 1024,
+  "attachment.chunk": 68 * 1024,
   "state.live": 256 * 1024,
   "state.snapshot": 2 * 1024 * 1024,
   "mod.bundle": MOD_BUNDLE_MAX_BYTES,
@@ -27,6 +31,24 @@ export const ROOM_FRAME_LIMITS = {
 } as const;
 
 export type RoomRole = "host" | "admin" | "member";
+export type RoomDelegationPolicy = "ask" | "read-only" | "auto";
+export type RoomTaskStatus = "awaiting-approval" | "awaiting-workspace" | "queued" | "running" | "stopping" | "cancelled" | "completed" | "failed";
+export type RoomTask = {
+  id: string;
+  seatId: string;
+  initiatorUserId: string;
+  parentTaskId?: string;
+  rootTaskId: string;
+  status: RoomTaskStatus;
+  text: string;
+  readOnly: boolean;
+  createdAt: number;
+  finishedAt?: number;
+  approvalKind?: "delegation" | "write";
+  approvalRequestId?: string;
+  approvalDetail?: string;
+  error?: string;
+};
 export type RoomSeatKind = "human" | "agent";
 export type RoomStatus = "open" | "ended";
 /** 别人动我的项目时：完全允许 / 审批 / 禁止。缺省 ask。 */
@@ -59,8 +81,15 @@ export type RoomFrameType =
   | "file.policy"
   | "chat.user"
   | "chat.event"
+  | "chat.result"
+  | "attachment.get"
+  | "attachment.chunk"
   | "chat.recall"
   | "seat.stop"
+  | "task.control"
+  | "task.result"
+  | "agent.message"
+  | "agent.result"
   | "exec.run"
   | "exec.event"
   | "exec.result"
@@ -77,6 +106,8 @@ export type RoomFrameType =
   | "mod.fetch"
   | "mod.bundle"
   | "mod.intent"
+  | "mod.participation"
+  | "mod.participation.result"
   | "mod.patch"
   | "mod.priv"
   | "mod.fail";
@@ -139,6 +170,9 @@ export type RoomMember = {
   userId: string;
   name: string;
   role: RoomRole;
+  delegationPolicy?: RoomDelegationPolicy;
+  /** Activity pack explicitly accepted by this member; empty = ordinary chat only. */
+  modChecksum?: string;
   /**
    * 成员当前打开的项目路径（随 join 上报、node.info 更新）。
    * null/缺省 = 未开项目，远程执行席位选择时据此提示。
@@ -158,6 +192,19 @@ export type RoomMember = {
    */
   online?: boolean;
 };
+
+/** Pack participation is separate from room membership and seat permissions. */
+export function isRoomModParticipant(
+  room: { modChecksum: string; members: RoomMember[] },
+  userId: string | null | undefined,
+): boolean {
+  if (!room.modChecksum || !userId) return false;
+  const member = room.members.find((m) => m.userId === userId);
+  return Boolean(member && (
+    member.modChecksum === room.modChecksum ||
+    (member.role === "host" && member.modChecksum === undefined)
+  ));
+}
 
 export type RoomSeat = {
   id: string;
@@ -206,11 +253,15 @@ export type RoomExecRunPayload = {
   text: string;
   /** 谁发的这轮；节点用来套文件主人的 filePolicy。 */
   requesterUserId?: string | null;
+  taskId?: string;
+  readOnly?: boolean;
+  attachments?: RoomAttachmentRef[];
 };
 
 /** seat.stop：成员 → 房主，请求停止某个 Agent 席位正在跑的输出。 */
 export type RoomSeatStopPayload = {
   seatId: string;
+  taskId?: string;
 };
 
 /** exec.event：节点 → 房主，ack / 15s 心跳 / 阶段提示 / 流式进度（二期）。 */
@@ -341,6 +392,12 @@ export type RoomTimelineItem = {
   authorLabel: string;
   kind: "user" | "assistant" | "system" | "tool" | "game";
   text: string;
+  mentions?: RoomMention[];
+  attachments?: RoomAttachmentRef[];
+  /** Durable retry receipt for a confirmed user message (not a model instruction). */
+  clientMessageId?: string;
+  requestDigest?: string;
+  taskId?: string;
   /** kind === "game": dice faces / rps hands (emoji string) */
   game?: { type: "dice" | "rps"; value: string };
   /** Host kernel railway / system note. Guests render as a badge only. */
@@ -388,6 +445,7 @@ export type RoomSnapshot = {
   members: RoomMember[];
   seats: RoomSeat[];
   items: RoomTimelineItem[];
+  tasks?: RoomTask[];
   /**
    * 二期：远端执行中的实时进度（turnId → 截至目前的回复尾部/工具行），
    * 只活在快照里，不入时间线、不持久化。
@@ -414,6 +472,13 @@ export type RoomSnapshot = {
   };
 };
 
+/** Plain-text display data derived from a real human or Agent timeline message. */
+export type RoomListMessagePreview = {
+  authorLabel: string;
+  text: string;
+  at: number;
+};
+
 export type RoomListItem = {
   roomId: string;
   name: string;
@@ -426,6 +491,7 @@ export type RoomListItem = {
   inviteHost: string;
   /** guest lost connection — room + history kept locally, can rejoin */
   offline?: boolean;
+  lastMessage?: RoomListMessagePreview;
 };
 
 export function makeRoomFrame<T>(

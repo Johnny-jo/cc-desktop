@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import type { ChatItem, ModelQuotaInfo } from "@claude-desktop/shared";
 import { MessageList } from "./MessageList";
 import { Composer } from "./Composer";
+import { ChatTaskDock } from "./ChatTaskDock";
 import { useAppStore } from "../state/store";
 import { useI18n } from "../i18n/useI18n";
 import {
@@ -160,6 +161,9 @@ export function ChatPanel({ onOpenSettings, onOpenFile }: ChatPanelProps) {
 
       <div className="chat-composer" ref={composerRef}>
         <div className="chat-inner">
+          {activeSessionId ? (
+            <ChatTaskDock key={activeSessionId} sessionId={activeSessionId} progress={active?.progress} />
+          ) : null}
           <Composer onOpenSettings={onOpenSettings} />
         </div>
       </div>

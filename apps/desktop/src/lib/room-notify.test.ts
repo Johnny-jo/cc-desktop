@@ -46,7 +46,8 @@ describe("roomNotifyDecision", () => {
     authorUserId: "user-b",
     text: "在吗",
     myUserId: "user-a",
-    mySeatName: "乔尼",
+    mySeatId: "human-a",
+    seats: [{ id: "human-a", name: "乔尼" }, { id: "other", name: "乔尼" }],
     muted: false,
     isActiveAndFocused: false,
   };
@@ -73,8 +74,8 @@ describe("roomNotifyDecision", () => {
     expect(roomNotifyDecision({ ...base, recalled: true }).notify).toBe(false);
   });
 
-  it("detects @me by my human seat name", () => {
-    const d = roomNotifyDecision({ ...base, text: "@乔尼 看下这个" });
+  it("detects @me by validated seat metadata", () => {
+    const d = roomNotifyDecision({ ...base, text: "@乔尼 看下这个", mentions: [{ seatId: "human-a", start: 0, end: 3 }] });
     expect(d).toEqual({ notify: true, mention: true });
   });
 
@@ -84,6 +85,7 @@ describe("roomNotifyDecision", () => {
       ...base,
       muted: true,
       text: "@乔尼 在吗",
+      mentions: [{ seatId: "human-a", start: 0, end: 3 }],
     });
     expect(d).toEqual({ notify: true, mention: true });
   });
@@ -101,10 +103,21 @@ describe("roomNotifyDecision", () => {
     ).toBe(false);
   });
 
-  it("assistant messages from agents notify too", () => {
+  it("ordinary assistant prose does not produce extra notifications", () => {
     expect(roomNotifyDecision({ ...base, kind: "assistant" }).notify).toBe(
-      true,
+      false,
     );
+  });
+  it("notifies for a structured assistant tool mention with a null author", () => {
+    expect(roomNotifyDecision({ ...base, kind: "assistant", authorUserId: null,
+      text: "@乔尼 看下", mentions: [{ seatId: "human-a", start: 0, end: 3 }], muted: true,
+    })).toEqual({ notify: true, mention: true });
+  });
+  it("does not treat pasted names, duplicate display names or invalid ranges as @me", () => {
+    for (const mentions of [undefined, [{ seatId: "other", start: 0, end: 3 }], [{ seatId: "human-a", start: 1, end: 4 }]]) {
+      expect(roomNotifyDecision({ ...base, text: "@乔尼 看下", muted: true, mentions }))
+        .toEqual({ notify: false, mention: false });
+    }
   });
 });
 

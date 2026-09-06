@@ -15,14 +15,8 @@ export function fillTemplate(
   return template.replace(/\{(\w+)\}/g, (_, key: string) => vars[key] ?? "");
 }
 
-export function joinPrimaryAction(input: JoinPrimaryInput): JoinPrimaryAction {
-  const invite = input.inviteChecksum?.trim() ?? "";
-  const offerChecksum = input.offer?.checksum?.trim() ?? "";
-  const offerMatchesInvite = !invite || !offerChecksum || invite === offerChecksum;
-  if (offerMatchesInvite && offerChecksum) {
-    return input.cacheHit === true ? "join" : "sync-join";
-  }
-  if (invite && input.cacheHit === false) return "sync-join";
+export function joinPrimaryAction(_input: JoinPrimaryInput): JoinPrimaryAction {
+  // A pack offer is optional activity metadata, never a prerequisite to chat.
   return "join";
 }
 

@@ -3,8 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import type { AppSettings, FileChange, SdkNormalizedEvent, SessionSummary } from "@claude-desktop/shared";
-import type { QueryFn } from "./session-manager";
+import type { AppSettings, ChatItem, FileChange, SdkNormalizedEvent, SessionProgress, SessionSummary } from "@claude-desktop/shared";
+import type { QueryFn, SessionManagerDeps } from "./session-manager";
 import {
   MAX_HYDRATED_CHANGES,
   MAX_HYDRATED_TRANSCRIPTS,
@@ -99,6 +99,8 @@ function makeDeps(overrides: {
   onToolUse?: ReturnType<typeof vi.fn>;
   listDiffs?: ReturnType<typeof vi.fn>;
   diffTracker?: DiffTracker;
+  archive?: SessionManagerDeps["archive"];
+  compressor?: SessionManagerDeps["compressor"];
 } = {}) {
   const emitted: SdkNormalizedEvent[] = [];
   const sessions: SessionSummary[] = [];
@@ -167,6 +169,8 @@ function makeDeps(overrides: {
     emit,
     emitSession,
     emitDiff,
+    archive: overrides.archive,
+    compressor: overrides.compressor,
   });
 
   return {
@@ -189,6 +193,230 @@ function makeDeps(overrides: {
     capturedQueryArgs: [] as Array<{ prompt: string; options: Record<string, unknown> }>,
   };
 }
+
+describe("SessionManager progress snapshots", () => {
+  const agentStart = { type: "system", subtype: "task_started", task_id: "agent-a", task_type: "local_agent", tool_use_id: "call-a", description: "Inspect code" };
+  const warmAgentQuery: QueryFn = async function* (args) {
+    for await (const _ of args.prompt as AsyncIterable<unknown>) {
+      yield agentStart;
+      yield { type: "result", subtype: "success" };
+    }
+  };
+  const taskQuery: QueryFn = async function* (args) {
+    await takeFirstUserText(args.prompt);
+    yield { type: "assistant", message: { content: [{ type: "tool_use", id: "create", name: "TaskCreate", input: { subject: "Verify implementation", description: "Run the tests" } }] } };
+    // The SDK normally omits name on tool_result: resolve it from the start.
+    yield { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "create", content: JSON.stringify({ task: { id: "7", subject: "Verify implementation" } }) }] } };
+    yield { type: "assistant", message: { content: [{ type: "tool_use", id: "update", name: "TaskUpdate", input: { taskId: "7", status: "completed" } }] } };
+    yield { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "update", content: JSON.stringify({ success: true, taskId: "7", updatedFields: ["status"], statusChange: { from: "pending", to: "completed" } }) }] } };
+    for (let i = 0; i < 60; i++) {
+      yield { type: "assistant", message: { content: [{ type: "tool_use", id: `read-${i}`, name: "Read", input: { file_path: "src/index.ts" } }] } };
+      yield { type: "user", message: { content: [{ type: "tool_result", tool_use_id: `read-${i}`, content: "ok" }] } };
+    }
+    yield { type: "result", subtype: "success", total_cost_usd: 0 };
+  };
+
+  it("keeps task progress when task creation is outside the visible transcript page", async () => {
+    const ctx = makeDeps({ queryFn: taskQuery });
+    try {
+      const id = await ctx.manager.start({ text: "go", attachments: [] }, "D:/project");
+      expect(ctx.manager.getTranscriptPage(id).items.some(item => item.id === "create")).toBe(false);
+      expect(ctx.manager.getSummary(id)?.progress?.tasks).toEqual([
+        expect.objectContaining({ id: "7", title: "Verify implementation", status: "completed" }),
+      ]);
+      expect(ctx.sessions.some(summary => summary.progress?.tasks[0]?.status === "completed")).toBe(true);
+    } finally { ctx.manager.disposeAll(); }
+  });
+
+  it("restores a progress snapshot without loading a session's full transcript", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "chat-progress-"));
+    const archive = new SessionArchive(dir);
+    const ctx = makeDeps({ queryFn: taskQuery, archive });
+    let reopened: ReturnType<typeof makeDeps> | undefined;
+    try {
+      const id = await ctx.manager.start({ text: "go", attachments: [] }, "D:/project");
+      ctx.manager.flushPendingPersistence(); ctx.manager.disposeAll();
+      const loadItems = vi.spyOn(archive, "loadItems");
+      reopened = makeDeps({ archive });
+      expect(reopened.manager.getSummary(id)?.progress?.tasks[0]).toMatchObject({ id: "7", status: "completed" });
+      expect(loadItems).not.toHaveBeenCalled();
+      loadItems.mockRestore();
+    } finally {
+      ctx.manager.disposeAll(); reopened?.manager.disposeAll();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rebuilds progress after an authoritative transcript replacement", async () => {
+    const ctx = makeDeps({ queryFn: taskQuery });
+    try {
+      const id = await ctx.manager.start({ text: "go", attachments: [] }, "D:/project");
+      expect(ctx.manager.getSummary(id)?.progress?.tasks).toHaveLength(1);
+      ctx.manager.saveTranscript(id, [{ kind: "text", id: "u", role: "user", text: "Before task creation" }], { replace: true });
+      expect(ctx.manager.getSummary(id)?.progress?.tasks ?? []).toEqual([]);
+      expect(ctx.sessions.at(-1)?.progress?.tasks ?? []).toEqual([]);
+    } finally { ctx.manager.disposeAll(); }
+  });
+
+  it.each([false, true])("lazily backfills and caches archived progress without hydrating history (TodoWrite: %s)", (withTodos) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "chat-progress-legacy-"));
+    const archive = new SessionArchive(dir);
+    archive.upsertSummary({ id: "legacy", title: "Legacy", cwd: "D:/project", status: "idle", updatedAt: 1 });
+    const items: ChatItem[] = Array.from({ length: 90 }, (_, i) => ({ kind: "text", id: `text-${i}`, role: "assistant", text: "History" }));
+    if (withTodos) items.unshift({ kind: "tool", id: "todo", tool: { id: "todo", name: "TodoWrite", summary: "", status: "done", todos: [{ content: "Legacy plan", status: "in_progress" }] } });
+    archive.saveItems("legacy", items);
+    archive.releaseItems("legacy");
+    const full = vi.spyOn(archive, "loadItems");
+    const pages = vi.spyOn(archive, "loadItemsPage");
+    const ctx = makeDeps({ archive });
+    let reopened: ReturnType<typeof makeDeps> | undefined;
+    try {
+      expect(pages).not.toHaveBeenCalled();
+      const tail = ctx.manager.getTranscriptPage("legacy");
+      expect(tail.items).toHaveLength(40);
+      expect(tail.items.some(item => item.id === "todo")).toBe(false);
+      const expected: SessionProgress = { tasks: withTodos ? [{ id: "todo-1", title: "Legacy plan", status: "in_progress", scope: "todos" }] : [], agents: [] };
+      expect(ctx.manager.getSummary("legacy")?.progress).toEqual(expected);
+      expect(ctx.sessions.at(-1)?.progress).toEqual(expected);
+      expect(ctx.manager.getMemoryStats().hydratedTranscripts).toBe(0);
+      const scannedPages = pages.mock.calls.length;
+      ctx.manager.getTranscriptPage("legacy");
+      expect(pages).toHaveBeenCalledTimes(scannedPages + 1);
+      ctx.manager.disposeAll();
+      reopened = makeDeps({ archive });
+      reopened.manager.getTranscriptPage("legacy");
+      expect(pages).toHaveBeenCalledTimes(scannedPages + 2);
+      expect(reopened.manager.getSummary("legacy")?.progress).toEqual(expected);
+      expect(full).not.toHaveBeenCalled();
+    } finally {
+      ctx.manager.disposeAll(); reopened?.manager.disposeAll();
+      full.mockRestore(); pages.mockRestore();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([false, true])("preserves compressed tasks when rewinding a later turn (restart: %s)", async (restart) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "chat-progress-rewind-"));
+    const archive = new SessionArchive(dir);
+    let queries = 0;
+    const queryFn: QueryFn = (args) => {
+      const first = queries++ === 0;
+      const gen = (async function* () {
+        if (first) { yield* taskQuery(args); return; }
+        for await (const _ of args.prompt as AsyncIterable<unknown>) {
+          yield { type: "user", uuid: "after-compact", session_id: "sdk-after-compact", message: { role: "user", content: "Continue" } };
+          yield { type: "assistant", message: { content: [{ type: "tool_use", id: "later-create", name: "TaskCreate", input: { subject: "Later task" } }] } };
+          yield { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "later-create", content: JSON.stringify({ task: { id: "8", subject: "Later task" } }) }] } };
+          yield { type: "result", subtype: "success" };
+        }
+      })();
+      return Object.assign(gen, { rewindFiles: vi.fn().mockResolvedValue({ canRewind: true, filesChanged: [] }), close: vi.fn() });
+    };
+    const compressor = { compress: async (items: ChatItem[]) => ({ items: [{ kind: "text" as const, id: "summary", role: "system" as const, text: "Compressed" }], summaryText: "Compressed", compressedCount: items.length }) };
+    const ctx = makeDeps({ archive, queryFn, compressor });
+    let reopened: ReturnType<typeof makeDeps> | undefined;
+    try {
+      const id = await ctx.manager.start({ text: "go", attachments: [] }, "D:/project");
+      expect((await ctx.manager.compressSession(id)).ok).toBe(true);
+      await ctx.manager.continue(id, { text: "Continue", attachments: [] });
+      expect(ctx.manager.getSummary(id)?.progress?.tasks.map(task => task.id)).toEqual(["7", "8"]);
+      let manager = ctx.manager;
+      if (restart) {
+        manager.disposeAll();
+        reopened = makeDeps({ archive, queryFn });
+        manager = reopened.manager;
+      }
+      expect((await manager.rewindToUserMessage(id, "after-compact")).ok).toBe(true);
+      expect(manager.getSummary(id)?.progress?.tasks).toEqual([expect.objectContaining({ id: "7", status: "completed" })]);
+      expect(manager.getSummary(id)).not.toHaveProperty("progressBaseline");
+      expect(archive.loadIndex().find(summary => summary.id === id)?.progressBaseline?.tasks[0]).toMatchObject({ id: "7", status: "completed" });
+    } finally {
+      ctx.manager.disposeAll(); reopened?.manager.disposeAll();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("clears a compression baseline on authoritative transcript replacement", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "chat-progress-replace-"));
+    const archive = new SessionArchive(dir);
+    const progress: SessionProgress = { tasks: [{ id: "7", title: "Old task", status: "pending" }], agents: [] };
+    archive.upsertSummary({ id: "s", title: "Compressed", cwd: "D:/project", status: "idle", updatedAt: 1, progress, progressBaseline: progress });
+    const ctx = makeDeps({ archive });
+    try {
+      ctx.manager.saveTranscript("s", [], { replace: true });
+      expect(ctx.manager.getSummary("s")?.progress?.tasks ?? []).toEqual([]);
+      expect(archive.loadIndex()[0]?.progressBaseline).toBeUndefined();
+    } finally { ctx.manager.disposeAll(); fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("leaves a background agent live after the parent result and settles it on abort", async () => {
+    const ctx = makeDeps({ queryFn: warmAgentQuery });
+    try {
+      const id = await ctx.manager.start({ text: "go", attachments: [] }, "D:/project");
+      expect(ctx.manager.getSummary(id)).toMatchObject({ status: "idle", progress: { agents: [{ status: "running" }] } });
+      ctx.manager.abort(id);
+      expect(ctx.manager.getSummary(id)?.progress?.agents[0].status).toBe("stopped");
+      expect(ctx.emitted).toContainEqual(expect.objectContaining({ type: "agent_progress", agent: expect.objectContaining({ id: "agent-a", status: "stopped" }) }));
+      const tool = ctx.manager.getTranscript(id).find(item => item.kind === "tool");
+      expect(tool).toMatchObject({ tool: { agent: { status: "stopped" } } });
+    } finally { ctx.manager.disposeAll(); }
+  });
+
+  it("marks agents unknown when their SDK stream exits without a terminal notification", async () => {
+    const queryFn: QueryFn = async function* (args) {
+      await takeFirstUserText(args.prompt);
+      yield agentStart;
+      yield { type: "result", subtype: "success" };
+    };
+    const ctx = makeDeps({ queryFn });
+    try {
+      const id = await ctx.manager.start({ text: "go", attachments: [] }, "D:/project");
+      expect(ctx.manager.getSummary(id)?.progress?.agents[0].status).toBe("unknown");
+    } finally { ctx.manager.disposeAll(); }
+  });
+
+  it("flushes the final agent state after shutdown closes warm queries", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "chat-progress-close-"));
+    const archive = new SessionArchive(dir);
+    const ctx = makeDeps({ queryFn: warmAgentQuery, archive });
+    try {
+      const id = await ctx.manager.start({ text: "go", attachments: [] }, "D:/project");
+      ctx.manager.disposeAll();
+      expect(archive.loadItems(id).find(item => item.kind === "tool")).toMatchObject({ tool: { agent: { status: "unknown" } } });
+      const save = vi.spyOn(archive, "saveItems");
+      ctx.manager.flushPendingPersistence();
+      expect(save).not.toHaveBeenCalled();
+    } finally { ctx.manager.disposeAll(); fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("restores an unconfirmed agent as unknown in paginated and fully hydrated history", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "chat-progress-restore-"));
+    const archive = new SessionArchive(dir);
+    const agent = { id: "agent-a", toolUseId: "call-a", title: "Inspect", status: "running" as const };
+    archive.upsertSummary({ id: "s", title: "Inspect", cwd: "D:/project", updatedAt: 1, status: "idle", progress: { tasks: [], agents: [agent] } });
+    archive.saveItems("s", [{ kind: "tool", id: "call-a", tool: { id: "call-a", name: "Agent", summary: "Inspect", status: "done", agent } }]);
+    const ctx = makeDeps({ archive });
+    try {
+      const loadItems = vi.spyOn(archive, "loadItems");
+      expect(ctx.manager.getTranscriptPage("s").items[0]).toMatchObject({ tool: { agent: { status: "unknown" } } });
+      expect(loadItems).not.toHaveBeenCalled();
+      expect(ctx.manager.getTranscript("s")[0]).toMatchObject({ tool: { agent: { status: "unknown" } } });
+    } finally { ctx.manager.disposeAll(); fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("retains progress when context compression removes the original task events", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "chat-progress-compact-"));
+    const archive = new SessionArchive(dir);
+    const compressor = { compress: vi.fn(async () => ({ items: [{ kind: "text", id: "sum", role: "system", text: "summary" }], summaryText: "summary", compressedCount: 60 })) };
+    const ctx = makeDeps({ queryFn: taskQuery, archive, compressor: compressor as never });
+    try {
+      const id = await ctx.manager.start({ text: "go", attachments: [] }, "D:/project");
+      expect((await ctx.manager.compressSession(id)).ok).toBe(true);
+      expect(ctx.manager.getTranscript(id).some(item => item.kind === "tool")).toBe(false);
+      expect(ctx.manager.getSummary(id)?.progress?.tasks[0]).toMatchObject({ id: "7", status: "completed" });
+    } finally { ctx.manager.disposeAll(); fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+});
 
 describe("SessionManager", () => {
   beforeEach(() => {
@@ -1877,6 +2105,900 @@ describe("SessionManager", () => {
     expect(snap.env.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:8317");
     const summary = ctx.manager.getSummary(sessionId);
     expect(summary?.status).not.toBe("running");
+  });
+});
+
+type HookToolAttempt = {
+  name: string;
+  input: Record<string, unknown>;
+  signal?: AbortSignal;
+};
+
+type PreToolResult = {
+  hookSpecificOutput?: {
+    permissionDecision?: "allow" | "deny" | "ask";
+    permissionDecisionReason?: string;
+  };
+};
+
+type PreToolHook = (
+  input: { tool_name: string; tool_input: Record<string, unknown> },
+  toolUseId: string,
+  options: { signal: AbortSignal },
+) => Promise<PreToolResult>;
+
+/** Exercise the actual hooks built by SessionManager at the SDK query boundary. */
+function makeRoomHookSession(
+  turns: HookToolAttempt[][],
+  canUseTool?: ReturnType<typeof vi.fn>,
+  extras: Pick<SessionManagerDeps, "archive" | "compressor"> = {},
+) {
+  const outcomes: Array<{
+    name: string;
+    hook: PreToolResult;
+    executed: boolean;
+    permission?: { behavior: string };
+  }> = [];
+  const queryOptions: Record<string, unknown>[] = [];
+  let turn = 0;
+  const queryFn: QueryFn = (args) => {
+    queryOptions.push(args.options);
+    return (async function* () {
+      for await (const _message of args.prompt as AsyncIterable<unknown>) {
+        for (const attempt of turns[turn++] ?? []) {
+          const groups = (args.options.hooks as {
+            PreToolUse: Array<{ hooks: PreToolHook[] }>;
+          }).PreToolUse;
+          let hook: PreToolResult = {};
+          for (const callback of groups.flatMap((group) => group.hooks)) {
+            hook = await callback(
+              { tool_name: attempt.name, tool_input: attempt.input },
+              `tool-${outcomes.length}`,
+              {
+                signal: attempt.signal ??
+                  (args.options.abortController as AbortController).signal,
+              },
+            );
+            if (hook.hookSpecificOutput?.permissionDecision === "deny") break;
+          }
+          const denied = hook.hookSpecificOutput?.permissionDecision === "deny";
+          // Mirror SDK auto-allow/bypass: these calls still MUST pass PreToolUse.
+          const autoAllowed = ["auto", "bypassPermissions"].includes(String(args.options.permissionMode)) ||
+            (args.options.allowedTools as string[]).includes(attempt.name);
+          const permission = !denied && !autoAllowed
+            ? await (args.options.canUseTool as (
+                name: string,
+                input: Record<string, unknown>,
+                options: { signal: AbortSignal },
+              ) => Promise<{ behavior: string }>)(attempt.name, attempt.input, {
+                signal: (args.options.abortController as AbortController).signal,
+              })
+            : undefined;
+          outcomes.push({
+            name: attempt.name,
+            hook,
+            executed: !denied && (!permission || permission.behavior === "allow"),
+            permission,
+          });
+        }
+        yield { type: "result", subtype: "success", total_cost_usd: 0 };
+      }
+    })();
+  };
+  return { ...makeDeps({ queryFn, canUseTool, ...extras }), outcomes, queryOptions };
+}
+
+const roomPrompt = { text: "room turn", attachments: [] };
+const roomWrite = { name: "Write", input: { file_path: "a.txt", content: "hi" } };
+const roomChatTools = [
+  "mcp__room-chat__room_members",
+  "mcp__room-chat__room_message",
+];
+const roomChatBinding = {
+  extraMcpServers: { "room-chat": { type: "sdk", name: "room-chat", instance: {} } },
+  extraAllowedTools: roomChatTools,
+};
+
+describe("SessionManager room read-only query hooks", () => {
+  it.each(["default", "acceptEdits", "auto", "plan"] as const)(
+    "denies unsafe tools without a room approval callback in %s mode",
+    async (permissionMode) => {
+      const names = [
+        "Bash", "Edit", "Write", "MultiEdit", "NotebookEdit", "Task", "Agent",
+        "mcp__unknown__read_file", "mcp__room-chat__other", "TodoWrite", "WebFetch", "",
+      ];
+      const ctx = makeRoomHookSession([names.map((name) => ({ name, input: {} }))]);
+      try {
+        await ctx.manager.start(roomPrompt, "D:/room", {
+          roomReadOnly: true,
+          permissionMode,
+          // Even explicit auto-approval must not bypass the execution hook.
+          extraAllowedTools: names,
+        });
+        expect(ctx.outcomes).toHaveLength(names.length);
+        expect(ctx.outcomes.every((outcome) => !outcome.executed)).toBe(true);
+        for (const outcome of ctx.outcomes) {
+          expect(outcome.hook.hookSpecificOutput).toMatchObject({ permissionDecision: "deny" });
+        }
+      } finally {
+        ctx.manager.disposeAll();
+      }
+    },
+  );
+
+  it("allows Read/Glob/Grep only within pathJail without requesting write access", async () => {
+    const requestRoomWriteAccess = vi.fn().mockResolvedValue(true);
+    const ctx = makeRoomHookSession([[
+      { name: "Read", input: { file_path: "a.txt" } },
+      { name: "Glob", input: { pattern: "**/*" } },
+      { name: "Grep", input: { pattern: "hi", path: "." } },
+      { name: "Read", input: { file_path: "../outside.txt" } },
+      { name: "Glob", input: { path: "..", pattern: "*" } },
+      { name: "Grep", input: { path: "../outside", pattern: "hi" } },
+    ]]);
+    try {
+      await ctx.manager.start(roomPrompt, "D:/room", {
+        roomReadOnly: true, pathJail: "D:/room", requestRoomWriteAccess,
+      });
+      expect(ctx.outcomes.map((outcome) => outcome.executed)).toEqual([true, true, true, false, false, false]);
+      expect(requestRoomWriteAccess).not.toHaveBeenCalled();
+    } finally {
+      ctx.manager.disposeAll();
+    }
+  });
+
+  it("allows only the two room-chat tools attached by the current room task", async () => {
+    const requestRoomWriteAccess = vi.fn().mockResolvedValue(false);
+    const attempts = roomChatTools.map((name) => ({ name, input: {} }));
+    const ctx = makeRoomHookSession([attempts, attempts, attempts]);
+    try {
+      const id = await ctx.manager.start(roomPrompt, "D:/room", {
+        roomReadOnly: true, requestRoomWriteAccess, ...roomChatBinding,
+      });
+      expect(ctx.outcomes.map((outcome) => outcome.executed)).toEqual([true, true]);
+      expect(requestRoomWriteAccess).not.toHaveBeenCalled();
+      await ctx.manager.continue(id, roomPrompt, {
+        roomReadOnly: true, requestRoomWriteAccess, replaceExtras: true,
+      });
+      // Same names in user-configured MCP/allowedTools are not a task binding.
+      await ctx.manager.continue(id, roomPrompt, {
+        roomReadOnly: true, requestRoomWriteAccess, replaceExtras: true,
+        extraAllowedTools: roomChatTools,
+        extraMcpServers: { "room-chat": { command: "untrusted-server" } },
+      });
+      expect(ctx.outcomes.map((outcome) => outcome.executed)).toEqual([true, true, false, false, false, false]);
+      expect(requestRoomWriteAccess).toHaveBeenCalledTimes(4);
+    } finally {
+      ctx.manager.disposeAll();
+    }
+  });
+
+  it.each([false, "throw"])("fails closed when write approval returns %s", async (answer) => {
+    const requestRoomWriteAccess = vi.fn(async () => {
+      if (answer === "throw") throw new Error("approval unavailable");
+      return false;
+    });
+    const ctx = makeRoomHookSession([[roomWrite, { name: "Bash", input: { command: "echo hi" } }]]);
+    try {
+      await ctx.manager.start(roomPrompt, "D:/room", { roomReadOnly: true, requestRoomWriteAccess });
+      expect(requestRoomWriteAccess).toHaveBeenNthCalledWith(1, roomWrite.name, roomWrite.input);
+      expect(requestRoomWriteAccess).toHaveBeenCalledTimes(2);
+      expect(ctx.outcomes.map((outcome) => outcome.executed)).toEqual([false, false]);
+      expect(ctx.permissionBroker.canUseTool).not.toHaveBeenCalled();
+    } finally {
+      ctx.manager.disposeAll();
+    }
+  });
+
+  it("waits for approval then unlocks only this turn and preserves existing permissions", async () => {
+    let approve!: (value: boolean) => void;
+    const requestRoomWriteAccess = vi.fn(() => new Promise<boolean>((resolve) => { approve = resolve; }));
+    const canUseTool = vi.fn().mockResolvedValue({ behavior: "deny", message: "existing policy" });
+    const ctx = makeRoomHookSession([[roomWrite, { name: "Bash", input: { command: "echo hi" } }]], canUseTool);
+    try {
+      const started = ctx.manager.start(roomPrompt, "D:/room", { roomReadOnly: true, requestRoomWriteAccess });
+      await vi.waitFor(() => expect(requestRoomWriteAccess).toHaveBeenCalledTimes(1));
+      expect(ctx.outcomes).toEqual([]);
+      expect(canUseTool).not.toHaveBeenCalled();
+      approve(true);
+      await started;
+      expect(requestRoomWriteAccess).toHaveBeenCalledTimes(1);
+      expect(canUseTool).toHaveBeenCalledTimes(2);
+      expect(ctx.outcomes.map((outcome) => outcome.hook)).toEqual([{}, {}]);
+      expect(ctx.outcomes.map((outcome) => outcome.executed)).toEqual([false, false]);
+    } finally {
+      ctx.manager.disposeAll();
+    }
+  });
+
+  it("still denies out-of-jail writes after the turn was approved", async () => {
+    const requestRoomWriteAccess = vi.fn().mockResolvedValue(true);
+    const ctx = makeRoomHookSession([[
+      roomWrite,
+      { name: "Write", input: { file_path: "../outside.txt" } },
+      { name: "Bash", input: { command: "echo hi > ../outside.txt" } },
+    ]]);
+    try {
+      await ctx.manager.start(roomPrompt, "D:/room", {
+        roomReadOnly: true, requestRoomWriteAccess, pathJail: "D:/room",
+      });
+      expect(requestRoomWriteAccess).toHaveBeenCalledTimes(1);
+      expect(ctx.outcomes.map((outcome) => outcome.executed)).toEqual([true, false, false]);
+      expect(ctx.outcomes.slice(1).every((outcome) =>
+        outcome.hook.hookSpecificOutput?.permissionDecisionReason?.includes("工作区外"),
+      )).toBe(true);
+    } finally {
+      ctx.manager.disposeAll();
+    }
+  });
+
+  it("rejects out-of-jail writes before asking to leave read-only", async () => {
+    const requestRoomWriteAccess = vi.fn().mockResolvedValue(true);
+    const ctx = makeRoomHookSession([[
+      { name: "Write", input: { file_path: "../outside.txt" } },
+      { name: "Bash", input: { command: "echo hi > ../outside.txt" } },
+    ]]);
+    try {
+      await ctx.manager.start(roomPrompt, "D:/room", {
+        roomReadOnly: true, requestRoomWriteAccess, pathJail: "D:/room",
+      });
+      expect(ctx.outcomes.map((outcome) => outcome.executed)).toEqual([false, false]);
+      expect(requestRoomWriteAccess).not.toHaveBeenCalled();
+    } finally {
+      ctx.manager.disposeAll();
+    }
+  });
+
+  it("reads fresh flags and callbacks on every turn of the same reused query", async () => {
+    const oldApproval = vi.fn().mockResolvedValue(true);
+    const newApproval = vi.fn().mockResolvedValue(false);
+    const ctx = makeRoomHookSession(Array.from({ length: 6 }, () => [roomWrite]));
+    try {
+      const id = await ctx.manager.start(roomPrompt, "D:/room");
+      await ctx.manager.continue(id, roomPrompt, { roomReadOnly: true, requestRoomWriteAccess: oldApproval });
+      await ctx.manager.continue(id, roomPrompt, { roomReadOnly: true, requestRoomWriteAccess: newApproval });
+      await ctx.manager.continue(id, roomPrompt, { roomReadOnly: true });
+      await ctx.manager.continue(id, roomPrompt, { roomReadOnly: false, requestRoomWriteAccess: newApproval });
+      await ctx.manager.continue(id, roomPrompt);
+      expect(ctx.queryOptions).toHaveLength(1);
+      expect(ctx.outcomes.map((outcome) => outcome.executed)).toEqual([true, true, false, false, true, true]);
+      expect(oldApproval).toHaveBeenCalledTimes(1);
+      expect(newApproval).toHaveBeenCalledTimes(1);
+    } finally {
+      ctx.manager.disposeAll();
+    }
+  });
+
+  it("resets an approved start turn on reused continue and clears the callback when omitted", async () => {
+    const requestRoomWriteAccess = vi.fn().mockResolvedValue(true);
+    const ctx = makeRoomHookSession([[roomWrite], [roomWrite], [roomWrite], [roomWrite]]);
+    try {
+      const id = await ctx.manager.start(roomPrompt, "D:/room", { roomReadOnly: true, requestRoomWriteAccess });
+      await ctx.manager.continue(id, roomPrompt, { roomReadOnly: true, requestRoomWriteAccess });
+      await ctx.manager.continue(id, roomPrompt, { roomReadOnly: true });
+      await ctx.manager.continue(id, roomPrompt);
+      expect(ctx.queryOptions).toHaveLength(1);
+      expect(ctx.outcomes.map((outcome) => outcome.executed)).toEqual([true, true, false, true]);
+      expect(requestRoomWriteAccess).toHaveBeenCalledTimes(2);
+    } finally {
+      ctx.manager.disposeAll();
+    }
+  });
+
+  it("does not apply room restrictions or callbacks to ordinary sessions", async () => {
+    const requestRoomWriteAccess = vi.fn().mockResolvedValue(false);
+    const ctx = makeRoomHookSession([[roomWrite, { name: "Agent", input: {} }]]);
+    try {
+      await ctx.manager.start(roomPrompt, "D:/room", { requestRoomWriteAccess });
+      expect(ctx.outcomes.map((outcome) => outcome.executed)).toEqual([true, true]);
+      expect(requestRoomWriteAccess).not.toHaveBeenCalled();
+      expect(ctx.permissionBroker.canUseTool).toHaveBeenCalledTimes(2);
+    } finally {
+      ctx.manager.disposeAll();
+    }
+  });
+
+  it("denies late approval after abort even when a new query has already started", async () => {
+    let approve!: (value: boolean) => void;
+    const requestRoomWriteAccess = vi.fn(() => new Promise<boolean>((resolve) => { approve = resolve; }));
+    const ctx = makeRoomHookSession([[roomWrite], [roomWrite]]);
+    let id = "";
+    try {
+      const started = ctx.manager.start(roomPrompt, "D:/room", {
+        roomReadOnly: true, requestRoomWriteAccess, onSessionId: (value) => { id = value; },
+      });
+      await vi.waitFor(() => expect(requestRoomWriteAccess).toHaveBeenCalledTimes(1));
+      ctx.manager.abort(id);
+      await started;
+      await ctx.manager.continue(id, roomPrompt, { roomReadOnly: true });
+      approve(true);
+      await vi.waitFor(() => expect(ctx.outcomes).toHaveLength(2));
+      expect(ctx.queryOptions).toHaveLength(2);
+      expect(ctx.outcomes.every((outcome) => !outcome.executed)).toBe(true);
+      expect(ctx.permissionBroker.canUseTool).not.toHaveBeenCalled();
+    } finally {
+      ctx.manager.disposeAll();
+    }
+  });
+
+  it("honors the SDK hook signal when cancellation races with approval", async () => {
+    const hookController = new AbortController();
+    let approve!: (value: boolean) => void;
+    const requestRoomWriteAccess = vi.fn(() => new Promise<boolean>((resolve) => { approve = resolve; }));
+    const ctx = makeRoomHookSession([[{ ...roomWrite, signal: hookController.signal }, roomWrite]]);
+    try {
+      const started = ctx.manager.start(roomPrompt, "D:/room", { roomReadOnly: true, requestRoomWriteAccess });
+      await vi.waitFor(() => expect(requestRoomWriteAccess).toHaveBeenCalledTimes(1));
+      hookController.abort();
+      requestRoomWriteAccess.mockResolvedValue(false);
+      approve(true);
+      await started;
+      expect(ctx.outcomes.map((outcome) => outcome.executed)).toEqual([false, false]);
+      expect(requestRoomWriteAccess).toHaveBeenCalledTimes(2);
+    } finally {
+      ctx.manager.disposeAll();
+    }
+  });
+});
+
+function roomDeferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+describe("SessionManager MCP extras binding", () => {
+  const roomMessage = { name: "mcp__room-chat__room_message", input: { text: "delegate" } };
+  const readyStatus = { state: "ready" as const, port: 8317, managedByApp: false };
+  const sdkServer = (instance: object) => ({ type: "sdk", name: "room-chat", instance });
+  const boundServer = (options: Record<string, unknown>) =>
+    (options.mcpServers as Record<string, {
+      type?: string; instance?: unknown; command?: string; args?: string[]; env?: Record<string, string>;
+    }>)["room-chat"];
+
+  it.each(["replace", "merge"])("rebinds a same-name stdio server to SDK via %s", async (mode) => {
+    const requestRoomWriteAccess = vi.fn().mockResolvedValue(false);
+    const instance = {};
+    const ctx = makeRoomHookSession([[roomMessage], [roomMessage]]);
+    try {
+      const id = await ctx.manager.start(roomPrompt, "D:/room", {
+        roomReadOnly: true, requestRoomWriteAccess, extraAllowedTools: roomChatTools,
+        extraMcpServers: { "room-chat": { command: "old-stdio" } },
+      });
+      await ctx.manager.continue(id, roomPrompt, {
+        roomReadOnly: true, requestRoomWriteAccess, replaceExtras: mode === "replace",
+        extraAllowedTools: roomChatTools, extraMcpServers: { "room-chat": sdkServer(instance) },
+      });
+      expect(ctx.queryOptions).toHaveLength(2);
+      expect(boundServer(ctx.queryOptions[0]).command).toBe("old-stdio");
+      expect(boundServer(ctx.queryOptions[1]).instance).toBe(instance);
+      expect(ctx.outcomes.map((outcome) => outcome.executed)).toEqual([false, true]);
+      expect(requestRoomWriteAccess).toHaveBeenCalledTimes(1);
+    } finally {
+      ctx.manager.disposeAll();
+    }
+  });
+
+  it.each(["replace", "merge"])("binds SDK instance B instead of task A through %s", async (mode) => {
+    // Structurally identical instances still belong to different task closures.
+    const instanceA = {};
+    const instanceB = {};
+    const requestRoomWriteAccess = vi.fn().mockResolvedValue(false);
+    const ctx = makeRoomHookSession([[roomMessage], [roomMessage]]);
+    try {
+      const id = await ctx.manager.start(roomPrompt, "D:/room", {
+        roomReadOnly: true, requestRoomWriteAccess, roomAbortSignal: new AbortController().signal,
+        extraMcpServers: { "room-chat": sdkServer(instanceA) }, extraAllowedTools: roomChatTools,
+      });
+      await ctx.manager.continue(id, roomPrompt, {
+        roomReadOnly: true, requestRoomWriteAccess, roomAbortSignal: new AbortController().signal,
+        replaceExtras: mode === "replace",
+        extraMcpServers: { "room-chat": sdkServer(instanceB) }, extraAllowedTools: roomChatTools,
+      });
+      expect(ctx.queryOptions).toHaveLength(2);
+      expect(boundServer(ctx.queryOptions[0]).instance).toBe(instanceA);
+      expect(boundServer(ctx.queryOptions[1]).instance).toBe(instanceB);
+      expect(ctx.outcomes.every((outcome) => outcome.executed)).toBe(true);
+      expect(requestRoomWriteAccess).not.toHaveBeenCalled();
+    } finally {
+      ctx.manager.disposeAll();
+    }
+  });
+
+  it.each(["replace", "merge"])("reopens when same-name stdio configuration changes via %s", async (mode) => {
+    const configs = [
+      { command: "server", args: ["A"], env: { TASK: "A" } },
+      { command: "server", args: ["B"], env: { TASK: "A" } },
+      { command: "server", args: ["B"], env: { TASK: "B" } },
+      { command: "new-server", args: ["B"], env: { TASK: "B" } },
+    ];
+    const ctx = makeRoomHookSession(configs.map(() => []));
+    try {
+      const id = await ctx.manager.start(roomPrompt, "D:/room", { extraMcpServers: { "room-chat": configs[0] } });
+      for (const config of configs.slice(1)) {
+        await ctx.manager.continue(id, roomPrompt, {
+          replaceExtras: mode === "replace", extraMcpServers: { "room-chat": config },
+        });
+      }
+      expect(ctx.queryOptions).toHaveLength(configs.length);
+      expect(ctx.queryOptions.map(boundServer)).toEqual(configs);
+    } finally {
+      ctx.manager.disposeAll();
+    }
+  });
+
+  it.each(["replace", "merge"])("keeps equivalent configs and the same SDK instance warm via %s", async (mode) => {
+    const instance = {};
+    const ctx = makeRoomHookSession([[], []]);
+    try {
+      const id = await ctx.manager.start(roomPrompt, "D:/room", {
+        extraMcpServers: { "room-chat": sdkServer(instance), log: { command: "log", args: ["x"], env: { A: "a", B: "b" } } },
+        extraAllowedTools: roomChatTools,
+      });
+      await ctx.manager.continue(id, roomPrompt, {
+        replaceExtras: mode === "replace",
+        extraMcpServers: { log: { env: { B: "b", A: "a" }, args: ["x"], command: "log" }, "room-chat": sdkServer(instance) },
+        extraAllowedTools: [...roomChatTools].reverse(),
+      });
+      expect(ctx.queryOptions).toHaveLength(1);
+      expect(boundServer(ctx.queryOptions[0]).instance).toBe(instance);
+    } finally {
+      ctx.manager.disposeAll();
+    }
+  });
+
+  it.each(["replace", "merge"])("does not overwrite a required model reopen with unchanged %s extras", async (mode) => {
+    const servers = { "room-chat": sdkServer({}) };
+    const ctx = makeRoomHookSession([[], []]);
+    try {
+      const id = await ctx.manager.start(roomPrompt, "D:/room", { extraMcpServers: servers });
+      await ctx.manager.continue(id, roomPrompt, {
+        model: "next-model", extraMcpServers: servers, replaceExtras: mode === "replace",
+      });
+      expect(ctx.queryOptions).toHaveLength(2);
+      expect(ctx.queryOptions[1].model).toBe("next-model");
+    } finally {
+      ctx.manager.disposeAll();
+    }
+  });
+
+  it.each(["server", "allowed tools"])("does not grant old query exemptions from staged %s during CPA preparation", async (change) => {
+    const approval = roomDeferred<boolean>();
+    const ready = roomDeferred<typeof readyStatus>();
+    const requestRoomWriteAccess = vi.fn().mockResolvedValue(false).mockReturnValueOnce(approval.promise);
+    const server = sdkServer({});
+    const ctx = makeRoomHookSession([[roomWrite], []]);
+    let id = "";
+    let continued: Promise<void> | undefined;
+    const started = ctx.manager.start(roomPrompt, "D:/room", {
+      roomReadOnly: true, requestRoomWriteAccess,
+      extraMcpServers: { "room-chat": change === "server" ? { command: "old-stdio" } : server },
+      extraAllowedTools: change === "server" ? roomChatTools : [],
+      onSessionId: (value) => { id = value; },
+    });
+    try {
+      await vi.waitFor(() => expect(requestRoomWriteAccess).toHaveBeenCalledTimes(1));
+      vi.mocked(ctx.cpa.ensureReady).mockReturnValueOnce(ready.promise);
+      continued = ctx.manager.continue(id, roomPrompt, {
+        roomReadOnly: true, requestRoomWriteAccess, replaceExtras: true,
+        extraMcpServers: { "room-chat": server }, extraAllowedTools: roomChatTools,
+      });
+      const oldOptions = ctx.queryOptions[0];
+      const hook = (oldOptions.hooks as { PreToolUse: Array<{ hooks: PreToolHook[] }> }).PreToolUse[0].hooks[0];
+      const result = await hook({ tool_name: roomMessage.name, tool_input: roomMessage.input }, "old-query", {
+        signal: (oldOptions.abortController as AbortController).signal,
+      });
+      expect(ctx.queryOptions).toHaveLength(1);
+      expect(result.hookSpecificOutput?.permissionDecision).toBe("deny");
+      expect(requestRoomWriteAccess).toHaveBeenCalledTimes(2);
+    } finally {
+      approval.resolve(false);
+      await started;
+      ready.resolve(readyStatus);
+      await continued;
+      ctx.manager.disposeAll();
+    }
+  });
+
+  it("rebinds staged extras after failed preparation even when retry omits extras", async () => {
+    const instanceA = {};
+    const instanceB = {};
+    const ctx = makeRoomHookSession([[], []]);
+    try {
+      const id = await ctx.manager.start(roomPrompt, "D:/room", { extraMcpServers: { "room-chat": sdkServer(instanceA) } });
+      vi.mocked(ctx.cpa.ensureReady).mockRejectedValueOnce(new Error("CPA unavailable"));
+      await expect(ctx.manager.continue(id, roomPrompt, {
+        extraMcpServers: { "room-chat": sdkServer(instanceB) }, replaceExtras: true,
+      })).rejects.toThrow("CPA unavailable");
+      expect(ctx.queryOptions).toHaveLength(1);
+      await ctx.manager.continue(id, roomPrompt);
+      expect(ctx.queryOptions).toHaveLength(2);
+      expect(boundServer(ctx.queryOptions[1]).instance).toBe(instanceB);
+    } finally {
+      ctx.manager.disposeAll();
+    }
+  });
+
+  it.each(["stdio", "SDK"])("syncExtras invalidates a same-name %s binding before the next turn", async (kind) => {
+    const serverA = kind === "SDK" ? sdkServer({}) : { command: "stdio-A" };
+    const serverB = kind === "SDK" ? sdkServer({}) : { command: "stdio-B" };
+    const ctx = makeRoomHookSession([[], []]);
+    try {
+      const id = await ctx.manager.start(roomPrompt, "D:/room", { extraMcpServers: { "room-chat": serverA } });
+      ctx.manager.syncExtras(id, { extraMcpServers: { "room-chat": serverB } });
+      await ctx.manager.continue(id, roomPrompt);
+      expect(ctx.queryOptions).toHaveLength(2);
+      expect(boundServer(ctx.queryOptions[1])).toEqual(serverB);
+      if (kind === "SDK") expect(boundServer(ctx.queryOptions[1]).instance).toBe((serverB as ReturnType<typeof sdkServer>).instance);
+    } finally {
+      ctx.manager.disposeAll();
+    }
+  });
+
+  it("snapshots mutable SDK wrappers and rebinds their replacement instance", async () => {
+    const instanceA = {};
+    const instanceB = {};
+    const server = sdkServer(instanceA);
+    const ctx = makeRoomHookSession([[], []]);
+    try {
+      const id = await ctx.manager.start(roomPrompt, "D:/room", { extraMcpServers: { "room-chat": server } });
+      server.instance = instanceB;
+      await ctx.manager.continue(id, roomPrompt, { extraMcpServers: { "room-chat": server } });
+      expect(boundServer(ctx.queryOptions[0]).instance).toBe(instanceA);
+      expect(ctx.queryOptions).toHaveLength(2);
+      expect(boundServer(ctx.queryOptions[1]).instance).toBe(instanceB);
+    } finally {
+      ctx.manager.disposeAll();
+    }
+  });
+
+  it("snapshots mutable stdio arguments and environment before the next binding", async () => {
+    const server = { command: "stdio", args: ["A"], env: { TASK: "A" } };
+    const ctx = makeRoomHookSession([[], []]);
+    try {
+      const id = await ctx.manager.start(roomPrompt, "D:/room", { extraMcpServers: { "room-chat": server } });
+      server.args[0] = "B";
+      server.env.TASK = "B";
+      await ctx.manager.continue(id, roomPrompt, { extraMcpServers: { "room-chat": server } });
+      expect(boundServer(ctx.queryOptions[0]).args).toEqual(["A"]);
+      expect(boundServer(ctx.queryOptions[0]).env).toEqual({ TASK: "A" });
+      expect(ctx.queryOptions).toHaveLength(2);
+      expect(boundServer(ctx.queryOptions[1]).args).toEqual(["B"]);
+      expect(boundServer(ctx.queryOptions[1]).env).toEqual({ TASK: "B" });
+    } finally {
+      ctx.manager.disposeAll();
+    }
+  });
+
+  it("keeps ordinary sessions without extras on the same query", async () => {
+    const ctx = makeRoomHookSession([[roomWrite], [roomWrite], [roomWrite]]);
+    try {
+      const id = await ctx.manager.start(roomPrompt, "D:/room");
+      await ctx.manager.continue(id, roomPrompt);
+      await ctx.manager.continue(id, roomPrompt, { replaceExtras: true, extraMcpServers: {}, extraAllowedTools: [] });
+      expect(ctx.queryOptions).toHaveLength(1);
+      expect(ctx.queryOptions[0].mcpServers).toBeUndefined();
+      expect(ctx.outcomes.every((outcome) => outcome.executed)).toBe(true);
+    } finally {
+      ctx.manager.disposeAll();
+    }
+  });
+});
+
+describe("SessionManager room abort signal", () => {
+  const readyStatus = { state: "ready" as const, port: 8317, managedByApp: false };
+
+  it("does not prepare or open a query for an already cancelled room start", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const ctx = makeRoomHookSession([[roomWrite]]);
+    try {
+      const error = await ctx.manager.start(roomPrompt, "D:/room", {
+        roomAbortSignal: controller.signal,
+      }).catch((reason: unknown) => reason);
+      expect(ctx.queryOptions).toHaveLength(0);
+      expect(ctx.ensureReady).not.toHaveBeenCalled();
+      expect(error).toMatchObject({ name: "AbortError" });
+    } finally {
+      ctx.manager.disposeAll();
+    }
+  });
+
+  it("does not open a query when a room start is cancelled during CPA preparation", async () => {
+    const controller = new AbortController();
+    const ready = roomDeferred<typeof readyStatus>();
+    const ctx = makeRoomHookSession([[roomWrite]]);
+    vi.mocked(ctx.cpa.ensureReady).mockReturnValueOnce(ready.promise);
+    const onSessionId = vi.fn();
+    try {
+      const started = ctx.manager.start(roomPrompt, "D:/room", {
+        roomAbortSignal: controller.signal, onSessionId,
+      }).catch((reason: unknown) => reason);
+      expect(ctx.ensureReady).toHaveBeenCalledTimes(1);
+      controller.abort();
+      ready.resolve(readyStatus);
+      const error = await started;
+      expect(ctx.queryOptions).toHaveLength(0);
+      expect(onSessionId).not.toHaveBeenCalled();
+      expect(error).toMatchObject({ name: "AbortError" });
+    } finally {
+      ctx.manager.disposeAll();
+    }
+  });
+
+  it.each(["signal", "session abort"])("does not open a query after %s in onSessionId", async (cancel) => {
+    const controller = new AbortController();
+    const ctx = makeRoomHookSession([[roomWrite]]);
+    let id = "";
+    try {
+      const error = await ctx.manager.start(roomPrompt, "D:/room", {
+        roomAbortSignal: controller.signal,
+        onSessionId(value) {
+          id = value;
+          if (cancel === "signal") controller.abort();
+          else ctx.manager.abort(value);
+        },
+      }).catch((reason: unknown) => reason);
+      expect(id).not.toBe("");
+      expect(ctx.queryOptions).toHaveLength(0);
+      expect(ctx.manager.list().find((session) => session.id === id)?.status).toBe("idle");
+      expect(error).toMatchObject({ name: "AbortError" });
+    } finally {
+      ctx.manager.disposeAll();
+    }
+  });
+
+  it.each([false, true])("does not send or open a query after cancelled continue preparation (parked=%s)", async (parked) => {
+    const controller = new AbortController();
+    const ready = roomDeferred<typeof readyStatus>();
+    const ctx = makeRoomHookSession([[roomWrite], [roomWrite]]);
+    try {
+      const id = await ctx.manager.start(roomPrompt, "D:/room");
+      if (parked) ctx.manager.closeSession(id);
+      vi.mocked(ctx.cpa.ensureReady).mockReturnValueOnce(ready.promise);
+      const continued = ctx.manager.continue(id, roomPrompt, {
+        roomAbortSignal: controller.signal,
+      }).catch((reason: unknown) => reason);
+      controller.abort();
+      ready.resolve(readyStatus);
+      const error = await continued;
+      expect(ctx.queryOptions).toHaveLength(1);
+      expect(ctx.outcomes).toHaveLength(1);
+      expect(error).toMatchObject({ name: "AbortError" });
+    } finally {
+      ctx.manager.disposeAll();
+    }
+  });
+
+  it("does not revive a room continue after session abort during CPA preparation", async () => {
+    const controller = new AbortController();
+    const ready = roomDeferred<typeof readyStatus>();
+    const ctx = makeRoomHookSession([[roomWrite], [roomWrite]]);
+    try {
+      const id = await ctx.manager.start(roomPrompt, "D:/room");
+      vi.mocked(ctx.cpa.ensureReady).mockReturnValueOnce(ready.promise);
+      const continued = ctx.manager.continue(id, roomPrompt, {
+        roomAbortSignal: controller.signal,
+      }).catch((reason: unknown) => reason);
+      ctx.manager.abort(id);
+      ready.resolve(readyStatus);
+      const error = await continued;
+      expect(ctx.queryOptions).toHaveLength(1);
+      expect(ctx.outcomes).toHaveLength(1);
+      expect(error).toMatchObject({ name: "AbortError" });
+    } finally {
+      ctx.manager.disposeAll();
+    }
+  });
+
+  it("aborts the live query and denies late room approval and subsequent tools", async () => {
+    const controller = new AbortController();
+    const approval = roomDeferred<boolean>();
+    const requestRoomWriteAccess = vi.fn(() => approval.promise);
+    const ctx = makeRoomHookSession([[roomWrite, { name: "Read", input: { file_path: "a.txt" } }]]);
+    try {
+      const started = ctx.manager.start(roomPrompt, "D:/room", {
+        roomReadOnly: true, roomAbortSignal: controller.signal, requestRoomWriteAccess,
+      });
+      await vi.waitFor(() => expect(requestRoomWriteAccess).toHaveBeenCalledTimes(1));
+      controller.abort();
+      approval.resolve(true);
+      await started;
+      await vi.waitFor(() => expect(ctx.outcomes).toHaveLength(2));
+      expect((ctx.queryOptions[0].abortController as AbortController).signal.aborted).toBe(true);
+      expect(ctx.outcomes.every((outcome) => !outcome.executed)).toBe(true);
+      expect(ctx.permissionBroker.canUseTool).not.toHaveBeenCalled();
+    } finally {
+      approval.resolve(false);
+      ctx.manager.disposeAll();
+    }
+  });
+
+  it("denies a late permission broker answer for a cancelled writable room turn", async () => {
+    const controller = new AbortController();
+    const permission = roomDeferred<{ behavior: "allow"; updatedInput: Record<string, unknown> }>();
+    const canUseTool = vi.fn(() => permission.promise);
+    const ctx = makeRoomHookSession([[roomWrite, roomWrite]], canUseTool);
+    try {
+      const started = ctx.manager.start(roomPrompt, "D:/room", { roomAbortSignal: controller.signal });
+      await vi.waitFor(() => expect(canUseTool).toHaveBeenCalledTimes(1));
+      controller.abort();
+      permission.resolve({ behavior: "allow", updatedInput: {} });
+      await started;
+      await vi.waitFor(() => expect(ctx.outcomes).toHaveLength(2));
+      expect(ctx.outcomes.every((outcome) => !outcome.executed)).toBe(true);
+      expect(canUseTool).toHaveBeenCalledTimes(1);
+    } finally {
+      permission.resolve({ behavior: "allow", updatedInput: {} });
+      ctx.manager.disposeAll();
+    }
+  });
+
+  it("isolates previous signals from a reused room turn and an ordinary turn", async () => {
+    const previous = new AbortController();
+    const current = new AbortController();
+    const approval = roomDeferred<boolean>();
+    const requestRoomWriteAccess = vi.fn(() => approval.promise);
+    const ctx = makeRoomHookSession([[roomWrite], [roomWrite], [roomWrite]]);
+    try {
+      const id = await ctx.manager.start(roomPrompt, "D:/room", { roomAbortSignal: previous.signal });
+      const continued = ctx.manager.continue(id, roomPrompt, {
+        roomReadOnly: true, roomAbortSignal: current.signal, requestRoomWriteAccess,
+      });
+      await vi.waitFor(() => expect(requestRoomWriteAccess).toHaveBeenCalledTimes(1));
+      previous.abort();
+      expect((ctx.queryOptions[0].abortController as AbortController).signal.aborted).toBe(false);
+      approval.resolve(true);
+      await continued;
+      const permission = roomDeferred<{ behavior: "allow"; updatedInput: Record<string, unknown> }>();
+      vi.mocked(ctx.permissionBroker.canUseTool).mockReturnValueOnce(permission.promise);
+      const ordinary = ctx.manager.continue(id, roomPrompt);
+      await vi.waitFor(() => expect(ctx.permissionBroker.canUseTool).toHaveBeenCalledTimes(3));
+      current.abort();
+      permission.resolve({ behavior: "allow", updatedInput: {} });
+      await ordinary;
+      expect(ctx.queryOptions).toHaveLength(1);
+      expect(ctx.outcomes.every((outcome) => outcome.executed)).toBe(true);
+    } finally {
+      approval.resolve(false);
+      ctx.manager.disposeAll();
+    }
+  });
+
+  it("does not let a superseded CPA continuation replace the newer room turn", async () => {
+    const previous = new AbortController();
+    const current = new AbortController();
+    const ready = roomDeferred<typeof readyStatus>();
+    const ctx = makeRoomHookSession([[roomWrite], [roomWrite], [roomWrite]]);
+    try {
+      const id = await ctx.manager.start(roomPrompt, "D:/room");
+      vi.mocked(ctx.cpa.ensureReady).mockReturnValueOnce(ready.promise);
+      const stale = ctx.manager.continue(id, roomPrompt, {
+        roomAbortSignal: previous.signal,
+      }).catch((reason: unknown) => reason);
+      await ctx.manager.continue(id, roomPrompt, { roomAbortSignal: current.signal });
+      ready.resolve(readyStatus);
+      const error = await stale;
+      expect(ctx.outcomes).toHaveLength(2);
+      expect(error).toMatchObject({ name: "AbortError" });
+    } finally {
+      ctx.manager.disposeAll();
+    }
+  });
+
+  it("does not open a query if cancellation arrives while building its options", async () => {
+    const controller = new AbortController();
+    const ctx = makeRoomHookSession([[roomWrite]]);
+    vi.mocked(ctx.buildProcessEnv).mockImplementationOnce(() => {
+      controller.abort();
+      return {};
+    });
+    try {
+      const error = await ctx.manager.start(roomPrompt, "D:/room", {
+        roomAbortSignal: controller.signal, skipCpa: true,
+      }).catch((reason: unknown) => reason);
+      expect(ctx.queryOptions).toHaveLength(0);
+      expect(error).toMatchObject({ name: "AbortError" });
+    } finally {
+      ctx.manager.disposeAll();
+    }
+  });
+
+  it("denies stale query hooks while a newer writable room turn is active", async () => {
+    const previous = new AbortController();
+    const approval = roomDeferred<boolean>();
+    const permission = roomDeferred<{ behavior: "allow"; updatedInput: Record<string, unknown> }>();
+    const canUseTool = vi.fn(() => permission.promise);
+    const requestRoomWriteAccess = vi.fn(() => approval.promise);
+    const ctx = makeRoomHookSession([[roomWrite], [roomWrite]], canUseTool);
+    let id = "";
+    let continued: Promise<void> | undefined;
+    try {
+      const started = ctx.manager.start(roomPrompt, "D:/room", {
+        roomReadOnly: true, roomAbortSignal: previous.signal, requestRoomWriteAccess,
+        onSessionId: (value) => { id = value; },
+      });
+      await vi.waitFor(() => expect(requestRoomWriteAccess).toHaveBeenCalledTimes(1));
+      previous.abort();
+      await started;
+      continued = ctx.manager.continue(id, roomPrompt, { roomAbortSignal: new AbortController().signal });
+      await vi.waitFor(() => expect(canUseTool).toHaveBeenCalledTimes(1));
+      const oldOptions = ctx.queryOptions[0];
+      const hook = (oldOptions.hooks as { PreToolUse: Array<{ hooks: PreToolHook[] }> }).PreToolUse[0].hooks[0];
+      const result = await hook({ tool_name: "Read", tool_input: { file_path: "a.txt" } }, "stale-tool", {
+        signal: (oldOptions.abortController as AbortController).signal,
+      });
+      expect(result.hookSpecificOutput?.permissionDecision).toBe("deny");
+    } finally {
+      approval.resolve(false);
+      permission.resolve({ behavior: "allow", updatedInput: {} });
+      await continued;
+      ctx.manager.disposeAll();
+    }
+  });
+
+  it.each(["cancel", "new turn"])("does not auto-continue after %s while compression is pending", async (action) => {
+    const controller = new AbortController();
+    const compressed = roomDeferred<import("./context-compressor").CompressionResult>();
+    const compressor = { compress: vi.fn(() => compressed.promise) };
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sess-room-abort-"));
+    const archive = new SessionArchive(dir);
+    const ctx = makeRoomHookSession([[roomWrite], [roomWrite], [roomWrite]], undefined, { archive, compressor });
+    try {
+      const id = await ctx.manager.start(roomPrompt, "D:/room", { roomAbortSignal: controller.signal });
+      const items = Array.from({ length: 10 }, (_, i) => ({
+        kind: "text" as const, id: `room-abort-${i}`, role: "user" as const, text: `message ${i}`,
+      }));
+      ctx.manager.saveTranscript(id, items, { replace: true });
+      const compacting = ctx.manager.compressSession(id, undefined, { autoContinue: true });
+      expect(compressor.compress).toHaveBeenCalledTimes(1);
+      if (action === "cancel") controller.abort();
+      else await ctx.manager.continue(id, roomPrompt, { roomAbortSignal: new AbortController().signal });
+      const queryCount = ctx.queryOptions.length;
+      const turnCount = ctx.outcomes.length;
+      const transcript = ctx.manager.getTranscript(id);
+      compressed.resolve({ items: items.slice(0, 1), summaryText: "summary", compressedCount: 9 });
+      expect((await compacting).ok).toBe(false);
+      expect(ctx.queryOptions).toHaveLength(queryCount);
+      expect(ctx.outcomes).toHaveLength(turnCount);
+      expect(ctx.manager.getTranscript(id)).toEqual(transcript);
+    } finally {
+      ctx.manager.disposeAll();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a successful room auto-continuation cancellable", async () => {
+    const controller = new AbortController();
+    const permission = roomDeferred<{ behavior: "allow"; updatedInput: Record<string, unknown> }>();
+    const compressor = {
+      compress: async (items: import("@claude-desktop/shared").ChatItem[]) => ({
+        items: items.slice(0, 1), summaryText: "summary", compressedCount: 9,
+      }),
+    };
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sess-room-auto-abort-"));
+    const ctx = makeRoomHookSession([[roomWrite], [roomWrite]], undefined, {
+      archive: new SessionArchive(dir), compressor,
+    });
+    try {
+      const id = await ctx.manager.start(roomPrompt, "D:/room", { roomAbortSignal: controller.signal });
+      ctx.manager.saveTranscript(id, Array.from({ length: 10 }, (_, i) => ({
+        kind: "text" as const, id: `room-auto-${i}`, role: "user" as const, text: `message ${i}`,
+      })), { replace: true });
+      vi.mocked(ctx.permissionBroker.canUseTool).mockReturnValueOnce(permission.promise);
+      expect((await ctx.manager.compressSession(id, undefined, { autoContinue: true })).ok).toBe(true);
+      await vi.waitFor(() => expect(ctx.permissionBroker.canUseTool).toHaveBeenCalledTimes(2));
+      controller.abort();
+      permission.resolve({ behavior: "allow", updatedInput: {} });
+      await vi.waitFor(() => expect(ctx.outcomes).toHaveLength(2));
+      expect(ctx.queryOptions).toHaveLength(2);
+      expect((ctx.queryOptions[1].abortController as AbortController).signal.aborted).toBe(true);
+      expect(ctx.outcomes[1].executed).toBe(false);
+    } finally {
+      permission.resolve({ behavior: "allow", updatedInput: {} });
+      ctx.manager.disposeAll();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

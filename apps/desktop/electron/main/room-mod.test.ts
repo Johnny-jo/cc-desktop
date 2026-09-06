@@ -9,10 +9,12 @@ import {
   makeRoomFrame,
   parseRoomFrame,
   type ModOfferPayload,
+  type RoomMention,
   type RoomSnapshot,
 } from "@claude-desktop/shared";
 import { RoomService, ROOM_MOD_BUNDLE_CHUNK } from "./room-service";
 import { RoomMetrics } from "./room-metrics";
+import * as roomModAgent from "./room-mod-agent";
 import { loadModCache } from "./mod-package";
 import { parseKernelManifest } from "./mod-kernel";
 import { getKernelCacheDir } from "./runtime-paths";
@@ -25,6 +27,7 @@ const dirs: string[] = [];
 const services: RoomService[] = [];
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const s of [...services].reverse()) {
     try {
       s.disposeAll();
@@ -47,6 +50,18 @@ function tmp(): string {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), "room-mod-"));
   dirs.push(d);
   return d;
+}
+
+/** Simulate selecting an Agent mention while composing from our own human seat. */
+function sendToAgent(svc: RoomService, roomId: string, agentSeatId: string, text: string) {
+  const room = svc.get(roomId)!;
+  const human = room.seats.find(
+    (s) => s.kind === "human" && s.occupantUserId === room.localUserId,
+  )!;
+  const agent = room.seats.find((s) => s.kind === "agent" && s.id === agentSeatId)!;
+  const label = `@${agent.name}`;
+  const mentions: RoomMention[] = [{ seatId: agent.id, start: 0, end: label.length }];
+  return svc.send(roomId, human.id, `${label} ${text}`, undefined, undefined, mentions);
 }
 
 const FIXTURE_HOST = `
@@ -292,7 +307,7 @@ describe("room mod handshake + play loop", () => {
     expect(peeked.offer?.checksum).toBe(pack.checksum);
   });
 
-  it("guest join without checksum rejected; matching checksum accepted", async () => {
+  it("allows ordinary chat without a matching activity pack", async () => {
     const { rooms } = makeRooms();
     const pack = writeFixture(path.join(tmp(), "pack"));
     const { room, port } = await createHost(rooms);
@@ -303,8 +318,16 @@ describe("room mod handshake + play loop", () => {
       host: "127.0.0.1",
       port,
     });
-    expect(no.ok).toBe(false);
-    expect(no.error).toMatch(/模组校验码不一致/);
+    expect(no.ok).toBe(true);
+    const spectatorSeat = no.room!.seats.find((s) => s.occupantUserId === no.room!.localUserId)!;
+    expect((await guestBad.rooms.send(room.roomId, spectatorSeat.id, "ordinary chat")).ok).toBe(true);
+    await vi.waitFor(() => {
+      expect(rooms.get(room.roomId)!.items.some((i) => i.text === "ordinary chat")).toBe(true);
+    });
+    expect((await guestBad.rooms.modIntent(room.roomId, spectatorSeat.id, "inc", {})).ok).toBe(false);
+
+    const stale = makeRooms();
+    expect((await stale.rooms.join({ host: "127.0.0.1", port, modChecksum: "a".repeat(64) })).ok).toBe(true);
 
     const guestOk = makeRooms();
     const yes = await guestOk.rooms.join({
@@ -314,7 +337,50 @@ describe("room mod handshake + play loop", () => {
     });
     expect(yes.ok).toBe(true);
     expect(yes.room?.modChecksum).toBe(pack.checksum);
-    expect(rooms.get(room.roomId)!.members.length).toBe(2);
+    expect(rooms.get(room.roomId)!.members.length).toBe(4);
+  });
+
+  it("does not count spectators as players or send their private activity view", async () => {
+    const { rooms } = makeRooms();
+    const pack = writeFixture(path.join(tmp(), "pack"));
+    const { room, port } = await createHost(rooms);
+    await rooms.enableMod(room.roomId, pack.dir);
+    const events: RoomEvent[] = [];
+    const guest = makeRooms({ events });
+    expect((await guest.rooms.join({ host: "127.0.0.1", port })).ok).toBe(true);
+    expect((await rooms.startMod(room.roomId)).ok).toBe(false);
+    rooms.addSeat(room.roomId, "human", "second host seat");
+    expect((await rooms.startMod(room.roomId)).ok).toBe(true);
+    await vi.waitFor(() => expect(events.some((e) => e.mod?.publicView)).toBe(true));
+    expect(events.some((e) => Object.keys(e.mod?.seatViews ?? {}).length > 0)).toBe(false);
+    expect(events.some((e) => Object.keys(e.mod?.actions ?? {}).length > 0)).toBe(false);
+  });
+
+  it("lets a joined member load then stop participating without leaving chat", async () => {
+    const { rooms } = makeRooms();
+    const pack = writeFixture(path.join(tmp(), "pack"));
+    const { room, port } = await createHost(rooms);
+    await rooms.enableMod(room.roomId, pack.dir);
+    const events: RoomEvent[] = [];
+    const guest = makeRooms({ events });
+    const joined = await guest.rooms.join({ host: "127.0.0.1", port });
+    expect(joined.ok).toBe(true);
+    const seat = joined.room!.seats.find((s) => s.occupantUserId === joined.room!.localUserId)!;
+    expect((await guest.rooms.setModParticipation(room.roomId, true)).ok).toBe(true);
+    expect((await rooms.startMod(room.roomId)).ok).toBe(true);
+    expect((await guest.rooms.modIntent(room.roomId, seat.id, "inc", {})).ok).toBe(true);
+    await vi.waitFor(() => {
+      expect((events.at(-1)?.mod?.publicView as { n?: number })?.n).toBe(1);
+    });
+    expect((await guest.rooms.setModParticipation(room.roomId, false)).ok).toBe(true);
+    expect(guest.rooms.get(room.roomId)?.status).toBe("open");
+    expect((await guest.rooms.modIntent(room.roomId, seat.id, "inc", {})).ok).toBe(false);
+    expect(Object.keys(events.at(-1)?.mod?.seatViews ?? {})).toHaveLength(0);
+    expect(await rooms.resetMod(room.roomId)).toMatchObject({
+      ok: false, error: expect.stringContaining("席位数量"),
+    });
+    expect((await guest.rooms.send(room.roomId, seat.id, "still here")).ok).toBe(true);
+    await vi.waitFor(() => expect(rooms.get(room.roomId)!.items.some((i) => i.text === "still here")).toBe(true));
   });
 
   it("guest fetch writes cache matching hashModFiles", async () => {
@@ -335,6 +401,150 @@ describe("room mod handshake + play loop", () => {
     const cached = loadModCache(envFor(guestDir), pack.checksum);
     expect(cached.checksum).toBe(hashModFiles(pack.manifestSource, pack.hostJs));
     expect(rooms.get(room.roomId)!.members.length).toBe(1);
+  });
+
+  it("rejects spectator activity frames on the host while keeping the socket usable", async () => {
+    const { rooms } = makeRooms();
+    const pack = writeFixture(path.join(tmp(), "pack"));
+    const { room, port } = await createHost(rooms);
+    await rooms.enableMod(room.roomId, pack.dir);
+    rooms.addSeat(room.roomId, "human", "second host seat");
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+    await waitOpen(ws);
+    try {
+      const received: ReturnType<typeof parseRoomFrame>[] = [];
+      ws.on("message", (data) => received.push(parseRoomFrame(String(data))));
+      const welcome = waitType(ws, "welcome");
+      ws.send(JSON.stringify(makeRoomFrame("pending", 1, "join", {
+        userId: "spectator", name: "Spectator", protocol: ROOM_PROTOCOL_VERSION,
+      })));
+      expect((await welcome)?.type).toBe("welcome");
+      const seat = rooms.get(room.roomId)!.seats.find((s) => s.occupantUserId === "spectator")!;
+      expect((await rooms.startMod(room.roomId)).ok).toBe(true);
+      const denied = waitType(ws, "error");
+      ws.send(JSON.stringify(makeRoomFrame(room.roomId, 2, "mod.intent", {
+        seatId: seat.id, name: "inc", payload: {},
+        // A caller cannot claim the trusted internal Agent path.
+        internalAgent: true, actorUserId: "agent",
+      })));
+      expect((await denied)?.payload).toMatchObject({ message: expect.stringContaining("请先加载") });
+      expect(received.some((f) => f?.type === "mod.priv")).toBe(false);
+      const stale = waitType(ws, "mod.participation.result");
+      ws.send(JSON.stringify(makeRoomFrame(room.roomId, 3, "mod.participation", { requestId: "stale", checksum: "a".repeat(64) })));
+      expect((await stale)?.payload).toMatchObject({ requestId: "stale", ok: false });
+      ws.send(JSON.stringify(makeRoomFrame(room.roomId, 4, "chat.user", { seatId: seat.id, text: "chat survives" })));
+      await vi.waitFor(() => expect(rooms.get(room.roomId)!.items.some((i) => i.text === "chat survives")).toBe(true));
+      expect(ws.readyState).toBe(WebSocket.OPEN);
+    } finally {
+      ws.close();
+    }
+  });
+
+  it("preserves explicit participation and opting out across member restarts", async () => {
+    const { rooms } = makeRooms();
+    const pack = writeFixture(path.join(tmp(), "pack"));
+    const { room, port } = await createHost(rooms);
+    await rooms.enableMod(room.roomId, pack.dir);
+    const userDataDir = tmp();
+    const archive = new RoomArchive(userDataDir);
+    const guest = makeRooms({ userDataDir, archive });
+    expect((await guest.rooms.join({ host: "127.0.0.1", port })).ok).toBe(true);
+    expect((await guest.rooms.setModParticipation(room.roomId, true)).ok).toBe(true);
+    expect(archive.loadRoom(room.roomId)?.join?.modChecksum).toBe(pack.checksum);
+    const originalId = guest.rooms.get(room.roomId)!.localUserId;
+    guest.rooms.disposeAll();
+    const resumed = makeRooms({ userDataDir, archive });
+    expect((await resumed.rooms.rejoin(room.roomId)).ok).toBe(true);
+    expect(resumed.rooms.get(room.roomId)!.members.find((m) => m.userId === originalId)?.modChecksum).toBe(pack.checksum);
+    expect((await resumed.rooms.setModParticipation(room.roomId, false)).ok).toBe(true);
+    resumed.rooms.disposeAll();
+    const spectator = makeRooms({ userDataDir, archive });
+    expect((await spectator.rooms.rejoin(room.roomId)).ok).toBe(true);
+    expect(spectator.rooms.get(room.roomId)!.members.find((m) => m.userId === originalId)?.modChecksum).toBe("");
+    expect(spectator.rooms.get(room.roomId)?.status).toBe("open");
+  });
+
+  it("invalidates participation when the activity pack changes without disconnecting", async () => {
+    const { rooms } = makeRooms();
+    const pack = writeFixture(path.join(tmp(), "pack"));
+    const next = writeFixture(path.join(tmp(), "next-pack"), FIXTURE_HOST + "\n// new version");
+    const { room, port } = await createHost(rooms);
+    await rooms.enableMod(room.roomId, pack.dir);
+    const guest = makeRooms();
+    expect((await guest.rooms.join({ host: "127.0.0.1", port, modChecksum: pack.checksum })).ok).toBe(true);
+    expect((await rooms.enableMod(room.roomId, next.dir)).ok).toBe(true);
+    await vi.waitFor(() => expect(guest.rooms.get(room.roomId)?.modChecksum).toBe(next.checksum));
+    const current = guest.rooms.get(room.roomId)!;
+    expect(current.members.find((m) => m.userId === current.localUserId)?.modChecksum).toBe("");
+    const seat = current.seats.find((s) => s.occupantUserId === current.localUserId)!;
+    expect((await guest.rooms.modIntent(room.roomId, seat.id, "inc", {})).ok).toBe(false);
+    expect(current.status).toBe("open");
+    expect((await guest.rooms.setModParticipation(room.roomId, true)).ok).toBe(true);
+  });
+
+  it("keeps the existing Agent activity tool working independently of human opt-in", async () => {
+    let submit: ((act: roomModAgent.RoomModAct) => Promise<string>) | undefined;
+    vi.spyOn(roomModAgent, "tryCreateRoomModMcp").mockImplementation((handler) => {
+      submit = handler;
+      return { attached: true, opts: {} };
+    });
+    const events: RoomEvent[] = [];
+    const { rooms } = makeRooms({ events });
+    const pack = writeFixture(path.join(tmp(), "pack"));
+    const { room } = await createHost(rooms);
+    await rooms.enableMod(room.roomId, pack.dir);
+    rooms.addSeat(room.roomId, "agent", "player agent");
+    expect((await rooms.startMod(room.roomId)).ok).toBe(true);
+    await vi.waitFor(() => expect(submit).toBeTypeOf("function"));
+    expect(await submit!({ action: "inc", payload: {} })).toBe("ok");
+    expect((events.at(-1)?.mod?.publicView as { n?: number })?.n).toBe(1);
+  });
+
+  it("rechecks minimum participants when a queued start actually runs", async () => {
+    const { rooms } = makeRooms();
+    const pack = writeFixture(path.join(tmp(), "pack"));
+    const { room, port } = await createHost(rooms);
+    await rooms.enableMod(room.roomId, pack.dir);
+    const guest = makeRooms();
+    await guest.rooms.join({ host: "127.0.0.1", port, modChecksum: pack.checksum });
+    // Hold the existing serial queue to exercise two overlapping user requests.
+    const record = (rooms as unknown as {
+      rooms: Map<string, { intentChain?: Promise<unknown> }>;
+    }).rooms.get(room.roomId)!;
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => { release = resolve; });
+    record.intentChain = barrier;
+    try {
+      const stopping = guest.rooms.setModParticipation(room.roomId, false);
+      await vi.waitFor(() => expect(record.intentChain).not.toBe(barrier));
+      const starting = rooms.startMod(room.roomId);
+      release();
+      expect((await stopping).ok).toBe(true);
+      expect(await starting).toMatchObject({ ok: false, error: expect.stringContaining("席位数量") });
+    } finally {
+      release();
+    }
+  });
+
+  it("serializes the host participation choice with activity operations", async () => {
+    const { rooms } = makeRooms();
+    const pack = writeFixture(path.join(tmp(), "pack"));
+    const { room } = await createHost(rooms);
+    await rooms.enableMod(room.roomId, pack.dir);
+    const record = (rooms as unknown as {
+      rooms: Map<string, { intentChain?: Promise<unknown> }>;
+    }).rooms.get(room.roomId)!;
+    let release!: () => void;
+    record.intentChain = new Promise<void>((resolve) => { release = resolve; });
+    const stopping = rooms.setModParticipation(room.roomId, false);
+    try {
+      const host = rooms.get(room.roomId)!.members.find((m) => m.role === "host")!;
+      expect(host.modChecksum).toBe(pack.checksum);
+    } finally {
+      release();
+      expect((await stopping).ok).toBe(true);
+    }
+    expect(rooms.get(room.roomId)!.members.find((m) => m.role === "host")?.modChecksum).toBe("");
   });
 
   it("guest fetch accumulates every bundle chunk when envelope > BUNDLE_CHUNK", async () => {
@@ -364,7 +574,7 @@ describe("room mod handshake + play loop", () => {
     expect(cached.checksum).toBe(hashModFiles(pack.manifestSource, pack.hostJs));
   });
 
-  it("enableMod after join pushStates checksum so guest persist/reconnect uses it", async () => {
+  it("enableMod after join does not opt a spectator into the activity on reconnect", async () => {
     const { rooms } = makeRooms();
     const { room, port } = await createHost(rooms);
     const guestDir = tmp();
@@ -382,8 +592,8 @@ describe("room mod handshake + play loop", () => {
       expect(guest.rooms.get(room.roomId)?.modChecksum).toBe(pack.checksum);
     });
     const stored = archive.loadRoom(room.roomId);
-    expect(stored?.join?.modChecksum).toBe(pack.checksum);
-    expect(stored?.requireMods).toBe(true);
+    expect(stored?.join?.modChecksum).toBeFalsy();
+    expect(stored?.requireMods).toBe(false);
   });
 
   it("enableMod rejects a pack whose envelope exceeds 512KB", async () => {
@@ -655,7 +865,7 @@ describe("room mod handshake + play loop", () => {
     expect(rooms.enableKernelMod(room.roomId, pulse.packDir).ok).toBe(true);
     rooms.addSeat(room.roomId, "agent", "ImpBot");
     const agent = rooms.get(room.roomId)!.seats.find((s) => s.kind === "agent")!;
-    await rooms.send(room.roomId, agent.id, "can you improve?");
+    await sendToAgent(rooms, room.roomId, agent.id, "can you improve?");
     await vi.waitFor(() => {
       expect(sessions.start).toHaveBeenCalled();
     });
@@ -682,7 +892,7 @@ describe("room mod handshake + play loop", () => {
     expect(rooms.enableKernelMod(room.roomId, mem.packDir).ok).toBe(true);
     rooms.addSeat(room.roomId, "agent", "MemBot");
     const agent = rooms.get(room.roomId)!.seats.find((s) => s.kind === "agent")!;
-    await rooms.send(room.roomId, agent.id, "remember foo=bar");
+    await sendToAgent(rooms, room.roomId, agent.id, "remember foo=bar");
     await vi.waitFor(() => {
       expect(sessions.start).toHaveBeenCalled();
     });
@@ -720,7 +930,7 @@ describe("room mod handshake + play loop", () => {
     expect(rooms.enableKernelMod(room.roomId, mem.packDir).ok).toBe(true);
     rooms.addSeat(room.roomId, "agent", "MemBot");
     const agent = rooms.get(room.roomId)!.seats.find((s) => s.kind === "agent")!;
-    await rooms.send(room.roomId, agent.id, "hi");
+    await sendToAgent(rooms, room.roomId, agent.id, "hi");
     await vi.waitFor(() => {
       expect(sessions.start).toHaveBeenCalled();
     });

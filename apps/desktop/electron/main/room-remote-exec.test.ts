@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { RoomMention } from "@claude-desktop/shared";
 import { RoomService } from "./room-service";
 import { RoomMetrics } from "./room-metrics";
 import type { SessionManager } from "./session-manager";
@@ -97,6 +98,18 @@ async function createHost(svc: RoomService): Promise<{ roomId: string; port: num
   throw new Error(last);
 }
 
+/** Simulate selecting an Agent mention while composing from our own human seat. */
+function sendToAgent(svc: RoomService, roomId: string, agentSeatId: string, text: string) {
+  const room = svc.get(roomId)!;
+  const human = room.seats.find(
+    (s) => s.kind === "human" && s.occupantUserId === room.localUserId,
+  )!;
+  const agent = room.seats.find((s) => s.kind === "agent" && s.id === agentSeatId)!;
+  const label = `@${agent.name}`;
+  const mentions: RoomMention[] = [{ seatId: agent.id, start: 0, end: label.length }];
+  return svc.send(roomId, human.id, `${label} ${text}`, undefined, undefined, mentions);
+}
+
 describe("room remote exec", () => {
   it("routes a seat turn to the member's machine and posts the result back", async () => {
     // Host: local sessions must NEVER run for a remote-bound seat.
@@ -166,7 +179,7 @@ describe("room remote exec", () => {
     const seatId = host.get(roomId)!.seats.find((s) => s.name === "远端小助手")!.id;
 
     // Guest messages the seat → host routes exec.run to the guest machine.
-    const sent = await guest.send(roomId, seatId, "帮我修 a.ts");
+    const sent = await sendToAgent(guest, roomId, seatId, "帮我修 a.ts");
     expect(sent.ok).toBe(true);
 
     // Node executed locally (hidden session, guest's project dir).
@@ -508,7 +521,7 @@ describe("room remote exec", () => {
     guest.disposeAll();
     await new Promise((r) => setTimeout(r, 300));
 
-    const sent = await host.send(roomId, seatId, "在吗");
+    const sent = await sendToAgent(host, roomId, seatId, "在吗");
     expect(sent.ok).toBe(true);
     await vi.waitFor(() => {
       expect(

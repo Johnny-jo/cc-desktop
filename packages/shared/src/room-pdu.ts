@@ -1,6 +1,6 @@
 import { ROOM_TRANSPORT_VERSION, type AeadEnvelope } from "./room-crypto";
 import { parseHandshake, type Handshake } from "./room-handshake";
-import type { RoomFrame } from "./room-protocol";
+import { parseRoomFrame, type RoomFrame } from "./room-protocol";
 
 export type Pdu =
   | { kind: "hs"; hs: Handshake }
@@ -34,8 +34,6 @@ export function parsePdu(raw: string): Pdu | null {
   ) {
     return { kind: "env", env: obj as unknown as AeadEnvelope };
   }
-  if (obj.v === 1 && typeof obj.type === "string" && typeof obj.roomId === "string") {
-    return { kind: "frame", frame: obj as unknown as RoomFrame };
-  }
-  return null;
+  const frame = parseRoomFrame(raw);
+  return frame ? { kind: "frame", frame } : null;
 }

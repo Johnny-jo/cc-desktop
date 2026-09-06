@@ -32,8 +32,10 @@ export type AppState = {
   /** SDK skills / slash commands keyed by session */
   slashBySession: Record<string, SlashCommandItem[]>;
   permissionRequest: PermissionRequest | null;
-  /** 房间远程执行的本地审批弹窗（filePolicy = ask，工作区主人在本机作答）。 */
+  /** 房间远程执行审批队首；保留单条读取 API。 */
   roomPermAsk: RoomPermAskPayload | null;
+  /** 按 requestId 去重的 FIFO 待审批队列，包含当前队首。 */
+  roomPermAskQueue: RoomPermAskPayload[];
   userPromptRequest: UserPromptRequest | null;
   cpaStatus: CpaStatus;
   settings: PublicSettings | null;
@@ -79,6 +81,7 @@ let state: AppState = {
   slashBySession: {},
   permissionRequest: null,
   roomPermAsk: null,
+  roomPermAskQueue: [],
   userPromptRequest: null,
   cpaStatus: { state: "unknown" },
   settings: null,
@@ -491,14 +494,14 @@ function subscribeDesktopEvents(): void {
   unsubs.push(
     desktop.on(IPC.roomPermAsk, (payload) => {
       const p = payload as RoomPermAskPayload;
-      // resolved 广播：任一窗口作答后，清掉其他窗口的同名弹窗。
+      const queued = state.roomPermAskQueue.find((ask) => ask.requestId === p.requestId);
+      // resolved 广播也可能对应尚未显示的请求，仅删除匹配项。
       if (p.resolved) {
-        if (state.roomPermAsk?.requestId === p.requestId) {
-          setState({ roomPermAsk: null });
-        }
+        if (queued) removeRoomPermAsk(queued);
         return;
       }
-      setState({ roomPermAsk: p });
+      if (queued) return;
+      setRoomPermAskQueue([...state.roomPermAskQueue, p]);
     }),
   );
 
@@ -1360,21 +1363,31 @@ export function clearPermissionRequest(): void {
   setState({ permissionRequest: null });
 }
 
-export function clearRoomPermAsk(): void {
-  setState({ roomPermAsk: null });
+function setRoomPermAskQueue(queue: RoomPermAskPayload[]): void {
+  setState({ roomPermAskQueue: queue, roomPermAsk: queue[0] ?? null });
 }
 
-/** 房间远程执行审批作答：允许/拒绝后本地立即清弹窗。 */
+function removeRoomPermAsk(request: RoomPermAskPayload): void {
+  if (!state.roomPermAskQueue.includes(request)) return;
+  setRoomPermAskQueue(state.roomPermAskQueue.filter((ask) => ask !== request));
+}
+
+/** 清空所有本地待审批项。 */
+export function clearRoomPermAsk(): void {
+  setRoomPermAskQueue([]);
+}
+
+/** 房间远程执行审批作答：完成后移除本次请求，展示下一项。 */
 export async function respondRoomPermAsk(
   requestId: string,
   allow: boolean,
 ): Promise<void> {
+  // 捕获本次请求，防止 resolved / clear / reset 后的迟到响应删除新请求。
+  const request = state.roomPermAskQueue.find((ask) => ask.requestId === requestId);
   try {
     await getDesktop().respondRoomPermAsk(requestId, allow);
   } finally {
-    if (state.roomPermAsk?.requestId === requestId) {
-      setState({ roomPermAsk: null });
-    }
+    if (request) removeRoomPermAsk(request);
   }
 }
 
@@ -1409,6 +1422,7 @@ export function __resetStoreForTests(): void {
     slashBySession: {},
     permissionRequest: null,
     roomPermAsk: null,
+    roomPermAskQueue: [],
     userPromptRequest: null,
     cpaStatus: { state: "unknown" },
     settings: null,

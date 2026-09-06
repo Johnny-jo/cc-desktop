@@ -5,6 +5,7 @@ import type {
   RoomPath,
   RoomSnapshot,
   RoomTimelineItem,
+  RoomMessageReceipt,
 } from "@claude-desktop/shared";
 import { AppDatabase } from "./app-database";
 
@@ -31,6 +32,8 @@ export type StoredRoom = {
   localUserId?: string;
   offline?: boolean;
   items: RoomTimelineItem[];
+  messageReceipts?: RoomMessageReceipt[];
+  minMessageTime?: number;
   seats?: RoomSnapshot["seats"];
   members?: RoomSnapshot["members"];
   autoApprove?: boolean;
@@ -217,6 +220,8 @@ export class RoomArchive {
       memberCount: Number(room.memberCount) || 0,
       updatedAt: Number(room.updatedAt) || Date.now(),
       items: Array.isArray(room.items) ? room.items : [],
+      ...(Array.isArray(room.messageReceipts) ? { messageReceipts: room.messageReceipts } : {}),
+      ...(Number.isFinite(room.minMessageTime) ? { minMessageTime: room.minMessageTime } : {}),
       ...(room.localUserId ? { localUserId: room.localUserId } : {}),
       ...(room.offline ? { offline: true } : {}),
       ...(room.join ? { join: room.join } : {}),

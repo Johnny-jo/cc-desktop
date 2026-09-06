@@ -28,11 +28,42 @@ export type ConversationBlock =
       usage?: TurnUsage;
     }
   | {
+      kind: "live-activity";
+      id: string;
+      entries: ActivityEntry[];
+    }
+  | {
       kind: "turn-footer";
       id: string;
       text: string;
       usage: TurnUsage;
     };
+
+/** Agent execution can outlive the tool call that launched it. */
+export function getToolActivityStatus(
+  tool: ToolCardState,
+): ToolCardState["status"] | "unknown" | "stopped" | "paused" {
+  const agentStatus = tool.agent?.status;
+  if (agentStatus == null) return tool.status;
+  switch (agentStatus) {
+    case "running":
+    case "unknown":
+    case "stopped":
+    case "paused":
+      return agentStatus;
+    case "completed":
+      return "done";
+    case "failed":
+      return "error";
+    default:
+      return "unknown";
+  }
+}
+
+export function isLiveActivityEntry(entry: ActivityEntry): boolean {
+  if (entry.kind === "thinking") return entry.active;
+  return entry.kind === "tool" && getToolActivityStatus(entry.tool) === "running";
+}
 
 function isThinkingItem(
   item: ChatItem,
@@ -67,29 +98,31 @@ function withoutThinking(item: TextChatItem): TextChatItem {
 
 function buildTurnBlocks(items: ChatItem[]): ConversationBlock[] {
   const entries: ActivityEntry[] = [];
-  let firstActivityIndex = -1;
 
-  items.forEach((item, index) => {
+  items.forEach((item) => {
     if (isAutoCompactionItem(item)) {
-      if (firstActivityIndex < 0) firstActivityIndex = index;
       entries.push({ kind: "compaction", id: item.id });
       return;
     }
     if (item.kind === "tool") {
-      if (firstActivityIndex < 0) firstActivityIndex = index;
       entries.push({ kind: "tool", id: item.id, tool: item.tool });
       return;
     }
     if (isThinkingItem(item)) {
-      if (firstActivityIndex < 0) firstActivityIndex = index;
       entries.push({
         kind: "thinking",
         id: item.id,
         text: item.thinkingText ?? "",
-        active: Boolean(item.thinking && item.streaming),
+        active: Boolean(item.thinking && item.streaming && !item.text.trim()),
       });
     }
   });
+
+  const archived = entries.filter(entry => !isLiveActivityEntry(entry));
+  const live = entries.filter(isLiveActivityEntry);
+  // The anchor belongs to the turn's first activity, including when it is live.
+  // Keep the empty archive block so its React key survives parallel completions.
+  const firstActivityId = entries[0]?.id;
 
   const usageItem = items.find(
     (item): item is Extract<ChatItem, { kind: "usage" }> =>
@@ -105,20 +138,18 @@ function buildTurnBlocks(items: ChatItem[]): ConversationBlock[] {
     .map((item) => item.text.trim())
     .join("\n\n");
   const blocks: ConversationBlock[] = [];
-  let activityInserted = firstActivityIndex < 0 || entries.length === 0;
+  // History leads the turn, even when prose preceded its first activity.
+  if (entries.length > 0) {
+    blocks.push({
+      kind: "activity",
+      id: `activity-${firstActivityId}`,
+      entries: archived,
+      ...(usageItem ? { usage: usageItem.usage } : {}),
+    });
+  }
   let footerInserted = false;
 
-  items.forEach((item, index) => {
-    if (!activityInserted && index >= firstActivityIndex) {
-      blocks.push({
-        kind: "activity",
-        id: `activity-${entries[0]!.id}`,
-        entries,
-        ...(usageItem ? { usage: usageItem.usage } : {}),
-      });
-      activityInserted = true;
-    }
-
+  items.forEach((item) => {
     if (item.kind === "usage") {
       if (!footerInserted && usageItem) {
         blocks.push({
@@ -139,6 +170,15 @@ function buildTurnBlocks(items: ChatItem[]): ConversationBlock[] {
     }
     blocks.push({ kind: "item", item });
   });
+
+  if (live.length > 0) {
+    const footerIndex = blocks.findIndex(block => block.kind === "turn-footer");
+    blocks.splice(footerIndex < 0 ? blocks.length : footerIndex, 0, {
+      kind: "live-activity",
+      id: `live-activity-${firstActivityId}`,
+      entries: live,
+    });
+  }
 
   return blocks;
 }

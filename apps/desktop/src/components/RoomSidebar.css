@@ -1,0 +1,60 @@
+.room-list-row .session-item {
+  display: grid;
+  grid-template-columns: 2.75rem minmax(0, 1fr);
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.65rem 0.75rem;
+}
+
+.room-list-avatar {
+  display: grid;
+  place-items: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  border-radius: 0.7rem;
+  background: var(--bg-active);
+  color: var(--text-muted);
+  font-size: 1.15rem;
+  font-weight: 600;
+}
+
+.room-list-content {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.room-list-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.room-list-name,
+.room-list-preview {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.room-list-name {
+  font-size: 1rem;
+  font-weight: 500;
+}
+
+.room-list-time {
+  color: var(--text-faint);
+  font-size: 0.769rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.room-list-preview {
+  color: var(--text-muted);
+  font-size: 0.846rem;
+  line-height: 1.4;
+}

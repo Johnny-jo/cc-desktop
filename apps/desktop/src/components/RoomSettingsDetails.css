@@ -1,0 +1,20 @@
+.room-settings-modal .room-connection-details-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: .6rem;
+}
+.room-settings-modal .room-connection-details dl {
+  display: grid;
+  gap: .65rem;
+  margin: .8rem 0 0;
+  font-size: .923rem;
+}
+.room-settings-modal .room-connection-details dl > div {
+  display: grid;
+  grid-template-columns: 4em minmax(0, 1fr);
+  gap: .75rem;
+}
+.room-settings-modal .room-connection-details dt { color: var(--text-muted); }
+.room-settings-modal .room-connection-details dd { margin: 0; overflow-wrap: anywhere; }

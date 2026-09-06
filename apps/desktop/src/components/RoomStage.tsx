@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { Attachment, RoomQuoteRef, RoomTimelineItem } from "@claude-desktop/shared";
-import { formatFileSize } from "@claude-desktop/shared";
+import type { Attachment, RoomQuoteRef, RoomSeat, RoomTimelineItem } from "@claude-desktop/shared";
+import { formatFileSize, validateRoomMentions } from "@claude-desktop/shared";
 import { useAppStore } from "../state/store";
 import {
   askRoomAiShare,
+  controlRoomTask,
   recallRoomMessage,
   rejoinRoom,
   selectSeat,
@@ -23,7 +24,8 @@ import {
 import { fillTemplate } from "../lib/room-mod-ui";
 import { getDesktop, hasDesktopApi } from "../lib/desktop-api";
 import { parseTrailingAt } from "../lib/at-mention";
-import { formatModBadge } from "../lib/room-mod-ui";
+import { resolveRoomComposeTargets } from "../lib/room-compose";
+import { editRoomMentionDraft, insertRoomMention, reconcileRoomMentionDraft, type RoomDraftEdit, type RoomMentionDraft } from "../lib/room-mention-draft";
 import {
   contextLevel,
   formatContextPercent,
@@ -36,7 +38,15 @@ import { RoomInviteModal } from "./RoomInviteModal";
 import { RoomPendingBanner } from "./RoomPendingBanner";
 import { RoomRemoteChanges } from "./RoomRemoteChanges";
 import { RoomSettingsModal } from "./RoomSettingsModal";
-import { RoomTimeline, SeatAvatar } from "./RoomTimeline";
+import { RoomTimeline, SeatAvatar, resolveRoomMessageAuthorSeat } from "./RoomTimeline";
+import { RoomTaskPanel, summarizeRoomTasks } from "./RoomTaskPanel";
+import { RoomCollaborationSidebar, type RoomCollaborationTab } from "./RoomCollaborationSidebar";
+import "./RoomWorkspace.css";
+
+const MAX_ROOM_COMPOSER_FILES = 5;
+const MAX_ROOM_COMPOSER_FILE_SIZE = 10 * 1024 * 1024;
+const MAX_CLIPBOARD_IMAGE_SIZE = 5 * 1024 * 1024;
+const CLIPBOARD_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 
 export function RoomStage() {
   const { t } = useI18n();
@@ -45,9 +55,22 @@ export function RoomStage() {
   const rooms = useRoomStore((s) => s.rooms);
   const reconnectNote = useRoomStore((s) => s.reconnectNote);
   const lastError = useRoomStore((s) => s.lastError);
-  const mod = useRoomStore((s) => s.mod);
   const settings = useAppStore((s) => s.settings);
-  const [draft, setDraft] = useState("");
+  const [composer, setComposer] = useState<RoomMentionDraft>({ text: "", mentions: [] });
+  const composerRef = useRef(composer);
+  composerRef.current = composer;
+  const draft = composer.text;
+  const [caret, setCaret] = useState(0);
+  const pendingEdit = useRef<RoomDraftEdit | null>(null);
+  const [pendingTaskKeys, setPendingTaskKeys] = useState<string[]>([]);
+  const pendingTaskRefs = useRef(new Set<string>());
+  // A new object also distinguishes A → B → A from the first visit to A.
+  const roomGenerationRef = useRef({ roomId: room?.roomId });
+  if (roomGenerationRef.current.roomId !== room?.roomId) roomGenerationRef.current = { roomId: room?.roomId };
+  const roomGeneration = roomGenerationRef.current;
+  const [submission, setSubmission] = useState<{ generation: typeof roomGeneration } | null>(null);
+  const sendingRef = useRef<typeof submission>(null);
+  const submitting = submission?.generation === roomGeneration;
   const [invite, setInvite] = useState<{
     code: string;
     port?: number;
@@ -57,11 +80,18 @@ export function RoomStage() {
   const [editSeat, setEditSeat] = useState<SeatDraft | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  // 右侧成员/席位面板：默认展开，可折叠成窄条
-  const [sideOpen, setSideOpen] = useState(true);
+  const settingsEpochRef = useRef(0);
+  const [sideOpen, setSideOpen] = useState(() => typeof window === "undefined" || window.innerWidth > 960);
+  const [sideTab, setSideTab] = useState<RoomCollaborationTab>("tasks");
+  const workspaceRef = useRef<HTMLDivElement | null>(null);
+  const sideToggleRef = useRef<HTMLButtonElement | null>(null);
   const [quote, setQuote] = useState<RoomQuoteRef | null>(null);
   // 拖拽进来的待发送附件（复用主对话的 readAttachment 管道）
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const attachmentReads = useRef({ roomId: room?.roomId, pending: 0, reserved: 0 });
+  if (attachmentReads.current.roomId !== room?.roomId) attachmentReads.current = { roomId: room?.roomId, pending: 0, reserved: 0 };
+  const [attachmentProgress, setAttachmentProgress] = useState({ roomId: room?.roomId, pending: 0 });
+  const preparingAttachments = attachmentProgress.roomId === room?.roomId && attachmentProgress.pending > 0;
   const [attErr, setAttErr] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   // 气泡右键菜单：复制 / 引用 / 撤回
@@ -101,6 +131,23 @@ export function RoomStage() {
     requestAnimationFrame(pin);
   }, [room?.roomId, timelinePinKey]);
 
+  useEffect(() => {
+    const workspace = workspaceRef.current;
+    if (!workspace) return;
+    let wasCompact = false;
+    const updateWidth = (width: number) => {
+      if (!width) return;
+      const compact = width <= 820;
+      if (compact && !wasCompact) setSideOpen(false);
+      wasCompact = compact;
+    };
+    updateWidth(workspace.getBoundingClientRect().width);
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(entries => updateWidth(entries[0]?.contentRect.width ?? 0));
+    observer.observe(workspace);
+    return () => observer.disconnect();
+  }, [room?.roomId]);
+
   // 气泡菜单：点击别处 / Esc 关闭
   useEffect(() => {
     if (!bubbleMenu) return;
@@ -111,9 +158,28 @@ export function RoomStage() {
     return () => window.removeEventListener("keydown", onKey);
   }, [bubbleMenu]);
 
+  useEffect(() => {
+    setComposer({ text: "", mentions: [] });
+    setCaret(0);
+    setQuote(null);
+    setAttachments([]);
+    setAttErr(null);
+    setErr(null);
+    setMentionClosed(false);
+    pendingEdit.current = null;
+    const input = inputRef.current;
+    if (!input) return;
+    // Native beforeinput includes replacement/IME/delete ranges that a text diff loses.
+    const beforeInput = (event: Event) => {
+      pendingEdit.current = { start: input.selectionStart, end: input.selectionEnd, inputType: (event as InputEvent).inputType };
+    };
+    input.addEventListener("beforeinput", beforeInput);
+    return () => input.removeEventListener("beforeinput", beforeInput);
+  }, [room?.roomId]);
+
   if (!room) {
     return (
-      <div className="room-stage">
+      <div className="room-stage room-workspace" ref={workspaceRef}>
         <div className="room-stage-empty-wrap">
           <div className="room-stage-empty-icon" aria-hidden>
             <svg width="44" height="44" viewBox="0 0 24 24" fill="none">
@@ -134,7 +200,6 @@ export function RoomStage() {
     );
   }
 
-  const selected = room.seats.find((s) => s.id === selectedSeatId) ?? null;
   const myRole = rooms.find((r) => r.roomId === room.roomId)?.role ?? "member";
   const offline = Boolean(
     rooms.find((r) => r.roomId === room.roomId)?.offline,
@@ -142,8 +207,8 @@ export function RoomStage() {
   const canHost = myRole === "host";
   const myUserId = room.localUserId;
   const myMember = room.members.find((m) => m.userId === myUserId);
-  const myHumanSeat = room.seats.find(
-    (seat) => seat.kind === "human" && seat.occupantUserId === myUserId,
+  const composeTargets = resolveRoomComposeTargets(
+    draft, room.seats, myUserId, selectedSeatId, composer.mentions,
   );
   const canManage = canHost || canManageSeats(myMember?.role);
   const hostMember = room.members.find((m) => m.role === "host");
@@ -158,20 +223,15 @@ export function RoomStage() {
   }));
   const defaultBindId = myUserId ?? hostUserId ?? "";
   const modActive = Boolean(room.modChecksum);
-  const stageBadge = formatModBadge(
-    mod?.offer?.checksum === room.modChecksum
-      ? mod.offer
-      : room.modChecksum
-        ? { id: "", version: "", checksum: room.modChecksum }
-        : null,
-    t.room.modBadge,
-  );
-  const pulseOn = Boolean(
-    room.kernel?.mods.some((m) => m.id === "room-pulse" && m.state === "active"),
-  );
+  const taskSummary = summarizeRoomTasks(room);
+  const sideId = `room-collaboration-${room.roomId}`;
+  const mentionListId = `room-mentions-${room.roomId}`;
+  const onSideOpenChange = (open: boolean) => {
+    setSideOpen(open);
+    if (!open) sideToggleRef.current?.focus();
+  };
 
-  // @提及：候选来自席位，弹层复用 .slash-menu 样式（纯渲染层，协议不改）
-  const mention = room.status === "open" ? parseTrailingAt(draft) : null;
+  const mention = room.status === "open" ? parseTrailingAt(draft.slice(0, caret)) : null;
   const mentionMatches = mention
     ? room.seats.filter((s) =>
         s.name.toLowerCase().includes(mention.query.toLowerCase()),
@@ -182,34 +242,13 @@ export function RoomStage() {
     ? mentionIndex % mentionMatches.length
     : 0;
 
-  const pickMention = (name: string) => {
-    if (!mention) return;
-    setDraft(`${draft.slice(0, mention.start)}@${name} `);
-    setMentionIndex(0);
-    inputRef.current?.focus();
-  };
-
-  const mentionFromSeat = (seat: (typeof room.seats)[number]) => {
-    selectSeat(seat.id);
-    if (seat.kind === "human" && seat.occupantUserId === myUserId) {
-      inputRef.current?.focus();
-      return;
-    }
-    const input = inputRef.current;
-    const selectionStart = input?.selectionStart ?? draft.length;
-    const selectionEnd = input?.selectionEnd ?? selectionStart;
-    let nextCaret = selectionStart;
-    setDraft((current) => {
-      const start = Math.min(selectionStart, current.length);
-      const end = Math.min(Math.max(selectionEnd, start), current.length);
-      const before = current.slice(0, start);
-      const after = current.slice(end);
-      const lead = before && !/\s$/.test(before) ? " " : "";
-      const tail = after && /^\s/.test(after) ? "" : " ";
-      const mention = `${lead}@${seat.name}${tail}`;
-      nextCaret = before.length + mention.length;
-      return `${before}${mention}${after}`;
-    });
+  const insertMention = (seat: RoomSeat, start: number, end: number) => {
+    if (room.status !== "open" || offline) return;
+    const next = insertRoomMention(composer, start, end, seat);
+    const nextCaret = start + next.text.length - (draft.length - (end - start));
+    setComposer(next);
+    setCaret(nextCaret);
+    pendingEdit.current = null;
     setMentionIndex(0);
     setMentionClosed(true);
     requestAnimationFrame(() => {
@@ -218,153 +257,221 @@ export function RoomStage() {
     });
   };
 
-  const addFiles = async (files: File[]) => {
-    if (!hasDesktopApi("getPathForFile") || !hasDesktopApi("readAttachment")) return;
+  const pickMention = (seat: RoomSeat) => {
+    if (mention) insertMention(seat, mention.start, inputRef.current?.selectionEnd ?? caret);
+  };
+
+  const mentionFromSeat = (seat: RoomSeat) => {
+    if (seat.kind === "agent") selectSeat(seat.id);
+    const input = inputRef.current;
+    const selectionStart = input?.selectionStart ?? draft.length;
+    const selectionEnd = input?.selectionEnd ?? selectionStart;
+    insertMention(seat, selectionStart, selectionEnd);
+  };
+
+  const onTaskControl = async (args: Parameters<typeof controlRoomTask>[0]) => {
+    const key = args.taskId ?? "policy";
+    const scopedKey = `${args.roomId}:${key}`;
+    if (pendingTaskRefs.current.has(scopedKey)) return;
+    pendingTaskRefs.current.add(scopedKey);
+    setPendingTaskKeys(current => [...current, scopedKey]);
+    setErr(null);
+    try {
+      const result = await controlRoomTask(args);
+      if (!result.ok) setErr(result.error ?? "任务操作失败");
+    } finally {
+      pendingTaskRefs.current.delete(scopedKey);
+      setPendingTaskKeys(current => current.filter(k => k !== scopedKey));
+    }
+  };
+
+  const addFiles = async (files: File[], fromClipboard = false) => {
+    if (room.status !== "open" || offline) return;
+    if (!hasDesktopApi("getPathForFile") && !hasDesktopApi("saveClipboardImage")) return;
     const desktop = getDesktop();
     const added: Attachment[] = [];
+    const errors: string[] = [];
+    const batch = attachmentReads.current;
+    const prepared: { file: File; path: string }[] = [];
+    const available = Math.max(0, MAX_ROOM_COMPOSER_FILES - attachments.length - batch.reserved);
+    // Validate and reserve the whole selection before reading bytes or allocating base64.
     for (const file of files) {
+      if (prepared.length >= available) {
+        errors.push("最多 5 个附件");
+        break;
+      }
       try {
-        const path = desktop.getPathForFile(file);
-        added.push(await desktop.readAttachment(path));
-      } catch (e) {
-        setAttErr(e instanceof Error ? e.message : String(e));
+        const path = hasDesktopApi("getPathForFile") ? desktop.getPathForFile(file) : "";
+        if (path) {
+          if (file.size > MAX_ROOM_COMPOSER_FILE_SIZE) throw new Error("单个附件最大 10 MiB");
+          if (!hasDesktopApi("readAttachment")) throw new Error("当前版本无法读取附件");
+        } else if (fromClipboard && file.type.startsWith("image/")) {
+          if (!CLIPBOARD_IMAGE_TYPES.has(file.type)) throw new Error("剪贴板图片仅支持 PNG、JPEG、WebP、GIF");
+          if (!file.size) throw new Error("剪贴板图片为空");
+          if (file.size > MAX_CLIPBOARD_IMAGE_SIZE) throw new Error("剪贴板图片最大 5 MiB");
+          if (!hasDesktopApi("saveClipboardImage")) throw new Error("当前版本无法保存剪贴板图片");
+        } else {
+          throw new Error("无法获取文件路径，请从文件管理器拖入文件");
+        }
+        prepared.push({ file, path });
+      } catch (error) {
+        errors.push(error instanceof Error ? error.message : String(error));
       }
     }
-    let next = [...attachments, ...added];
-    if (next.length > 5) {
-      setAttErr("最多 5 个附件");
-      next = next.slice(0, 5);
+    setAttErr(errors.length ? errors.join("；") : null);
+    if (!prepared.length) return;
+    batch.pending++;
+    batch.reserved += prepared.length;
+    setAttachmentProgress({ ...batch });
+    try {
+      for (const { file, path } of prepared) {
+        if (attachmentReads.current !== batch) return;
+        try {
+          if (path) {
+            added.push(await desktop.readAttachment(path));
+          } else {
+            const dataUrl = await new Promise<string>((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(String(reader.result));
+              reader.onerror = () => reject(reader.error ?? new Error("图片读取失败"));
+              reader.onabort = () => reject(new Error("图片读取已取消"));
+              reader.readAsDataURL(file);
+            });
+            if (attachmentReads.current !== batch) return;
+            // This API returns an Attachment directly, including its locally saved path.
+            added.push(await desktop.saveClipboardImage(dataUrl.slice(dataUrl.indexOf(",") + 1), file.type));
+          }
+        } catch (e) {
+          if (attachmentReads.current !== batch) return;
+          const message = e instanceof Error ? e.message : String(e);
+          setAttErr(current => current ? `${current}；${message}` : message);
+        }
+      }
+      if (attachmentReads.current !== batch) return;
+      if (added.length) setAttachments(current => [...current, ...added]);
+    } finally {
+      batch.pending--;
+      batch.reserved -= prepared.length;
+      if (attachmentReads.current === batch) setAttachmentProgress({ ...batch });
     }
-    if (added.length) setAttErr(null);
-    setAttachments(next);
   };
 
   const onSend = async () => {
-    const t = draft.trim();
-    if (!t && attachments.length === 0) return;
+    if (sendingRef.current?.generation === roomGeneration || attachmentReads.current.pending || room.status !== "open" || offline) return;
+    const text = draft;
+    if (!text.trim() && attachments.length === 0) return;
     setErr(null);
-    // @Agent 直接触发对应 Agent；@成员则从自己的成员席位发出。
-    const mentionedSeat = [...room.seats]
-      .sort((a, b) => b.name.length - a.name.length)
-      .find((seat) => t.includes(`@${seat.name}`)) ?? null;
-    const mentionedAgent =
-      mentionedSeat?.kind === "agent" ? mentionedSeat : null;
-    // /stop 指令：@agent /stop 停止它正在跑的输出（没 @ 就停当前选中的席位）。
-    const isStop = /(^|\s)\/stop\b/.test(t);
-    if (isStop) {
-      const target =
-        mentionedAgent ?? (selected?.kind === "agent" ? selected : null);
-      if (!target) {
-        setErr("@某个 Agent 席位再加 /stop 才能停止它");
-        return;
+    const request = { generation: roomGeneration };
+    const isCurrentSubmission = () => roomGenerationRef.current === roomGeneration && sendingRef.current === request;
+    sendingRef.current = request;
+    setSubmission(request);
+    try {
+      if (/(^|\s)\/stop\b/.test(text)) {
+        if (!composeTargets.stopSeatIds.length) {
+          setErr("请从 @ 候选中选择 Agent，或选中一个 Agent 后使用 /stop");
+          return;
+        }
+        const results = await Promise.all(composeTargets.stopSeatIds.map(async (id) => {
+          try {
+            const res = await stopRoomSeat(id);
+            return res.ok ? "" : `${room.seats.find(s => s.id === id)?.name ?? id}：${res.error ?? "停止失败"}`;
+          } catch (error) {
+            return `${room.seats.find(s => s.id === id)?.name ?? id}：${String(error)}`;
+          }
+        }));
+        if (!isCurrentSubmission()) return;
+        const failures = results.filter(Boolean);
+        if (failures.length) {
+          setErr(failures.join("；"));
+          return;
+        }
+      } else {
+        if (!composeTargets.sendSeatId) {
+          setErr("没有可用的发言席位，请重新加入群聊");
+          return;
+        }
+        // Submit once; the host resolves all mentioned Agents independently.
+        const res = await sendToSeat(text, quote ?? undefined, composeTargets.sendSeatId, attachments, validateRoomMentions(text, composer.mentions, room.seats));
+        if (!isCurrentSubmission()) return;
+        if (!res.ok) {
+          setErr(res.error ?? "发送失败");
+          return;
+        }
       }
-      const res = await stopRoomSeat(target.id);
-      if (!res.ok) {
-        setErr(res.error ?? "停止失败");
-        return;
+      if (composerRef.current === composer) {
+        setComposer(current => current === composer ? { text: "", mentions: [] } : current);
+        setMentionIndex(0);
+        setMentionClosed(false);
       }
-      setDraft("");
-      setQuote(null);
-      setAttachments([]);
-      return;
+      setQuote(current => current === quote ? null : current);
+      setAttachments(current => current.filter(a => !attachments.includes(a)));
+      setAttErr(current => current === attErr ? null : current);
+    } catch (error) {
+      if (isCurrentSubmission()) setErr(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (isCurrentSubmission()) {
+        sendingRef.current = null;
+        setSubmission(current => current === request ? null : current);
+      }
     }
-    const targetSeatId = mentionedAgent?.id ??
-      (mentionedSeat?.kind === "human" ? myHumanSeat?.id : undefined);
-    const res = await sendToSeat(t, quote ?? undefined, targetSeatId, attachments);
-    if (!res.ok) {
-      setErr(res.error ?? "发送失败");
-      return;
-    }
-    setDraft("");
-    setQuote(null);
-    setAttachments([]);
-    setAttErr(null);
-    setMentionIndex(0);
-    setMentionClosed(false);
   };
 
   const onInvite = async () => {
-    if (!hasDesktopApi("getRoomInvite")) return;
+    const settingsEpoch = settingsEpochRef.current;
+    if (!hasDesktopApi("getRoomInvite")) return { ok: false, error: "邀请功能需要新版主进程，请重启应用" };
     const inv = await getDesktop().getRoomInvite(room.roomId);
     if (!inv.ok) {
-      setErr(inv.error ?? "只有群主可以邀请");
-      return;
+      return { ok: false, error: inv.error ?? "只有群主可以邀请" };
     }
     if (!inv.secret) {
-      setErr("生成邀请码失败，请重试");
-      return;
+      return { ok: false, error: "生成邀请码失败，请重试" };
     }
+    if (roomGenerationRef.current !== roomGeneration) return { ok: false, error: "群聊已切换，请重新邀请" };
+    if (settingsEpochRef.current !== settingsEpoch) return { ok: false, error: "邀请请求已取消" };
     setInvite({
       code: inv.secret,
       port: inv.port,
       listening: inv.listening !== false,
     });
+    return { ok: true };
   };
 
   return (
-    <div className="room-stage">
+    <div className="room-stage room-workspace" ref={workspaceRef}>
       {/* ── Header ── */}
       <header className="room-stage-head">
         <div className="room-stage-title">
           <div className="room-stage-name-row">
-            <span className="chat-title">{room.name}</span>
-            <span
-              className={`room-dot${room.status === "open" ? " on" : ""}${pulseOn ? " is-pulse" : ""}`}
-              title={pulseOn ? t.room.pulseLive : undefined}
-              aria-label={pulseOn ? t.room.pulseLive : undefined}
-            />
-          </div>
-          <div className="room-stage-meta-row">
-            <span className="room-meta">
-              {offline
-                ? t.room.offline
-                : room.status === "open"
-                  ? fillTemplate(t.room.peopleOnline, {
-                      n: String(
-                        room.onlineCount ?? countOnlineMembers(room.members),
-                      ),
-                    })
-                  : "已结束"}
-              {room.kernel?.mods.some((m) => m.state === "active")
-                ? ` · ${t.room.settingsExtensions} ${
-                    room.kernel.mods.filter((m) => m.state === "active").length
-                  }`
-                : ""}
-            </span>
-            {stageBadge ? (
-              <span className="room-mod-badge" title={stageBadge}>
-                {stageBadge}
-              </span>
-            ) : null}
+            <span className="chat-title" title={room.name}>{room.name}</span>
           </div>
         </div>
         <div className="room-stage-actions">
+          <button ref={sideToggleRef} type="button" className="room-head-icon-btn room-collaboration-toggle"
+            title={`${sideOpen ? "收起协作侧栏" : "展开协作侧栏"}${taskSummary.approvals ? ` · ${taskSummary.approvals} 项待我确认` : ""}`}
+            aria-label={sideOpen ? "收起协作侧栏" : "展开协作侧栏"}
+            aria-description={taskSummary.approvals ? `${taskSummary.approvals} 项待我确认` : undefined}
+            aria-expanded={sideOpen} aria-controls={sideId} onClick={() => {
+              if (!sideOpen && taskSummary.approvals) setSideTab("tasks");
+              onSideOpenChange(!sideOpen);
+            }}>
+            <svg width="17" height="17" viewBox="0 0 18 18" fill="none" aria-hidden>
+              <rect x="2" y="3" width="14" height="12" rx="2" stroke="currentColor" strokeWidth="1.3" />
+              <path d="M11 3v12" stroke="currentColor" strokeWidth="1.3" />
+            </svg>
+            {taskSummary.approvals ? <span className="room-collaboration-alert" aria-hidden /> : null}
+          </button>
           <button
             type="button"
             className="room-head-icon-btn"
             title="群聊设置"
             aria-label="群聊设置"
-            onClick={() => setSettingsOpen(true)}
+            onClick={() => { settingsEpochRef.current += 1; setSettingsOpen(true); }}
           >
             <svg width="17" height="17" viewBox="0 0 16 16" fill="none" aria-hidden>
               <path d="M6.7 2.2h2.6l.4 1.45c.4.16.77.38 1.1.64l1.45-.38 1.3 2.25-1.05 1.07c.07.42.07.84 0 1.26l1.05 1.07-1.3 2.25-1.45-.38c-.33.26-.7.48-1.1.64l-.4 1.45H6.7l-.4-1.45a5.2 5.2 0 0 1-1.1-.64l-1.45.38-1.3-2.25L3.5 8.49a4 4 0 0 1 0-1.26L2.45 6.16l1.3-2.25 1.45.38c.33-.26.7-.48 1.1-.64l.4-1.45Z" stroke="currentColor" strokeWidth="1.25" strokeLinejoin="round" />
               <circle cx="8" cy="7.86" r="1.75" stroke="currentColor" strokeWidth="1.25" />
             </svg>
           </button>
-          {canHost && room.status === "open" ? (
-            <button
-              type="button"
-              className="room-head-icon-btn"
-              title="邀请成员"
-              aria-label="邀请成员"
-              onClick={() => void onInvite()}
-            >
-              <svg width="17" height="17" viewBox="0 0 16 16" fill="none" aria-hidden>
-                <circle cx="6" cy="5" r="2.3" stroke="currentColor" strokeWidth="1.35" />
-                <path d="M2.2 13c.2-2.3 1.7-3.8 3.8-3.8 1.4 0 2.5.6 3.2 1.5M12.2 4.2v5M9.7 6.7h5" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" />
-              </svg>
-            </button>
-          ) : null}
         </div>
       </header>
 
@@ -427,21 +534,15 @@ export function RoomStage() {
           )
         : null}
 
-      {modActive ? (
-        <ModPlayPanel
-          role={myRole}
-          seats={room.seats}
-          localUserId={myUserId}
-        />
-      ) : null}
-
       {settingsOpen ? (
         <RoomSettingsModal
           room={room}
           canHost={canHost}
           canAdmin={canManage}
           offline={offline}
-          onClose={() => setSettingsOpen(false)}
+          onInvite={onInvite}
+          suspended={Boolean(invite)}
+          onClose={() => { settingsEpochRef.current += 1; setSettingsOpen(false); }}
         />
       ) : null}
 
@@ -484,11 +585,12 @@ export function RoomStage() {
         />
       ) : null}
 
-      {/* ── Body: 主区（时间线+输入框） + 右侧成员面板 ── */}
+      {/* ── Body: 时间线 / 输入框 + 协作侧栏 ── */}
       <div className="room-body">
         <div className="room-main">
           {/* ── Timeline ── */}
           <RoomTimeline
+            roomId={room.roomId}
             items={room.items}
             seats={room.seats}
             liveExec={room.liveExec}
@@ -496,6 +598,7 @@ export function RoomStage() {
             myUserId={myUserId}
             timelineRef={timelineRef}
             onOpenMenu={openBubbleMenu}
+            onMentionSeat={mentionFromSeat}
           />
 
       {err || lastError ? <p className="room-err">{err || lastError}</p> : null}
@@ -527,21 +630,24 @@ export function RoomStage() {
           setDragging(false);
         }}
         onDrop={(e) => {
-          e.preventDefault();
           setDragging(false);
           const files = Array.from(e.dataTransfer.files);
-          if (files.length) void addFiles(files);
+          if (files.length) { e.preventDefault(); void addFiles(files); }
         }}
       >
         {mentionOpen ? (
-          <ul className="slash-menu at-menu" role="listbox" aria-label="提及席位">
+          <ul id={mentionListId} className="slash-menu at-menu" role="listbox" aria-label="提及席位">
             {mentionMatches.map((s, i) => (
-              <li key={s.id}>
+              <li key={s.id} role="presentation">
                 <button
                   type="button"
+                  id={`${mentionListId}-${s.id}`}
+                  role="option"
+                  aria-selected={i === mentionSel}
                   className={i === mentionSel ? "slash-item active" : "slash-item"}
                   onMouseEnter={() => setMentionIndex(i)}
-                  onClick={() => pickMention(s.name)}
+                  onMouseDown={event => event.preventDefault()}
+                  onClick={() => pickMention(s)}
                 >
                   <span className="slash-name at-name">@{s.name}</span>
                   <span className="slash-desc">
@@ -595,23 +701,48 @@ export function RoomStage() {
             </div>
           ) : null}
           {attErr ? <div className="composer-attachment-error">{attErr}</div> : null}
+          {preparingAttachments ? <div className="room-attachment-progress" role="status" aria-live="polite">正在准备附件…</div> : null}
+          {submitting ? <div className="room-attachment-progress" role="status" aria-live="polite">正在发送并等待确认</div> : null}
           <textarea
             ref={inputRef}
             className="room-input"
+            aria-label="群聊消息"
+            aria-autocomplete="list"
+            aria-controls={mentionOpen ? mentionListId : undefined}
+            aria-activedescendant={mentionOpen ? `${mentionListId}-${mentionMatches[mentionSel].id}` : undefined}
             rows={2}
-            placeholder={
-              selected
-                ? `发给「${selected.name}」…  @ 提及，/stop 停止，Enter 发送`
-                : "先在上方点一个席位再输入"
-            }
+            placeholder="发送消息，从 @ 候选中选择成员或 Agent；/stop 停止，Enter 发送"
             value={draft}
             disabled={room.status !== "open" || offline}
-            onChange={(e) => {
-              setDraft(e.target.value);
+            onSelect={event => setCaret(event.currentTarget.selectionStart)}
+            onBeforeInput={event => {
+              const input = event.currentTarget;
+              pendingEdit.current = { start: input.selectionStart, end: input.selectionEnd, inputType: (event.nativeEvent as InputEvent).inputType ?? "insertText" };
+            }}
+            onPaste={event => {
+              event.preventDefault();
+              const files = Array.from(event.clipboardData.files);
+              if (files.length) return addFiles(files, true);
+              const text = event.clipboardData.getData("text/plain");
+              const { selectionStart: start, selectionEnd: end } = event.currentTarget;
+              setComposer(current => editRoomMentionDraft(current, start, end, text));
+              pendingEdit.current = null;
+              setCaret(start + text.length);
+              setMentionClosed(true);
+              requestAnimationFrame(() => inputRef.current?.setSelectionRange(start + text.length, start + text.length));
+            }}
+            onInput={(e) => {
+              // Same-value replacements still emit input; React may omit onChange.
+              const text = e.currentTarget.value;
+              const edit = pendingEdit.current;
+              pendingEdit.current = null;
+              setComposer(current => reconcileRoomMentionDraft(current, text, edit));
+              setCaret(e.currentTarget.selectionStart);
               setMentionIndex(0);
               setMentionClosed(false);
             }}
             onKeyDown={(e) => {
+              if (e.nativeEvent.isComposing) return;
               if (mentionOpen) {
                 if (e.key === "ArrowDown") {
                   e.preventDefault();
@@ -628,7 +759,7 @@ export function RoomStage() {
                 if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
                   e.preventDefault();
                   const pick = mentionMatches[mentionSel];
-                  if (pick) pickMention(pick.name);
+                  if (pick) pickMention(pick);
                   return;
                 }
                 if (e.key === "Escape") {
@@ -650,8 +781,10 @@ export function RoomStage() {
               disabled={
                 room.status !== "open" ||
                 offline ||
+                submitting ||
+                preparingAttachments ||
                 (!draft.trim() && attachments.length === 0) ||
-                !selected
+                !composeTargets.sendSeatId
               }
               onClick={() => void onSend()}
               title="发送"
@@ -669,14 +802,25 @@ export function RoomStage() {
             </button>
           </div>
         </div>
+        {/* <div className="room-composer-foot">Enter 发送 · Shift + Enter 换行 · 可粘贴截图或拖入文件</div> */}
       </div>
         </div>
 
-        {/* ── 右侧成员/席位面板（可折叠） ── */}
-        <aside className={`room-side${sideOpen ? "" : " collapsed"}`}>
-          {sideOpen ? (
-            <>
-              <div className="room-side-head">
+        <RoomCollaborationSidebar
+          id={sideId} open={sideOpen} activeTab={sideTab} onOpenChange={onSideOpenChange} onTabChange={setSideTab}
+          taskCount={taskSummary.active} seatCount={room.seats.length}
+          tasks={<RoomTaskPanel room={room} offline={offline}
+            pendingKeys={pendingTaskKeys.filter(key => key.startsWith(`${room.roomId}:`)).map(key => key.slice(room.roomId.length + 1))}
+            onControl={args => { void onTaskControl(args); }}
+          />}
+          activity={modActive ? <ModPlayPanel role={myRole} seats={room.seats} localUserId={myUserId} /> : (
+            <div className="room-collaboration-empty">
+              <strong>本群暂无活动</strong>
+              <p>群主启用 Mod 后，可在这里查看活动和参与设置。</p>
+            </div>
+          )}
+          members={<>
+              <div className="room-members-heading">
                 <div className="room-side-heading">
                   <span className="room-side-title">席位 {room.seats.length}</span>
                   <span className="room-side-subtitle">
@@ -690,23 +834,6 @@ export function RoomStage() {
                       : ""}
                   </span>
                 </div>
-                <button
-                  type="button"
-                  className="room-side-toggle"
-                  title="收起成员栏"
-                  aria-label="收起成员栏"
-                  onClick={() => setSideOpen(false)}
-                >
-                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
-                    <path
-                      d="M6 3l5 5-5 5"
-                      stroke="currentColor"
-                      strokeWidth="1.8"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                </button>
               </div>
               <div className="room-side-list" aria-label="席位">
                 {room.seats.map((s) => {
@@ -722,7 +849,7 @@ export function RoomStage() {
                     <div
                       key={s.id}
                       role="button"
-                      aria-label={isMine ? `选择 ${s.name}` : `提及 ${s.name}`}
+                      aria-label={`提及 ${s.name}`}
                       tabIndex={0}
                       className={`room-seat${active ? " active" : ""}${s.kind === "agent" ? " is-agent" : ""}${s.running ? " is-running" : ""}${isMine ? " is-mine" : ""}`}
                       onClick={() => mentionFromSeat(s)}
@@ -744,6 +871,9 @@ export function RoomStage() {
                               <span className="room-seat-tag is-offline">{t.room.memberOffline}</span>
                             ) : null}
                             {isMine ? <span className="room-seat-tag mine">我</span> : null}
+                            {s.kind === "agent" && s.contextUsage === null ? (
+                              <span className="room-seat-tag ctx" title="上下文已压缩，等待下一次真实用量更新">已压缩，待新用量</span>
+                            ) : null}
                             {s.kind === "agent" && s.contextUsage ? (
                               <span
                                 className={`room-seat-tag ctx is-${contextLevel(s.contextUsage.ratio)}`}
@@ -819,30 +949,8 @@ export function RoomStage() {
                   </button>
                 ) : null}
               </div>
-            </>
-          ) : (
-            <button
-              type="button"
-              className="room-side-toggle room-side-expand"
-              title="展开成员栏"
-              aria-label="展开成员栏"
-              onClick={() => setSideOpen(true)}
-            >
-              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
-                <path
-                  d="M10 3l-5 5 5 5"
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </svg>
-              <span className="room-side-count">
-                {room.onlineCount ?? countOnlineMembers(room.members)}
-              </span>
-            </button>
-          )}
-        </aside>
+          </>}
+        />
       </div>
 
       {bubbleMenu
@@ -880,15 +988,20 @@ export function RoomStage() {
                       authorLabel: bubbleMenu.item.authorLabel,
                       text: bubbleMenu.item.text.slice(0, 120),
                     });
-                    // 引用顺带 @对方（已带同名 @ 就不重复加）
-                    const mention = `@${bubbleMenu.item.authorLabel} `;
-                    setDraft((d) => (d.startsWith(mention) ? d : mention + d));
                     setBubbleMenu(null);
                     inputRef.current?.focus();
                   }}
                 >
                   引用
                 </button>
+                {resolveRoomMessageAuthorSeat(bubbleMenu.item, room.seats) ? <button
+                  type="button" role="menuitem"
+                  onClick={() => {
+                    const authorSeat = resolveRoomMessageAuthorSeat(bubbleMenu.item, room.seats);
+                    if (authorSeat) mentionFromSeat(authorSeat);
+                    setBubbleMenu(null);
+                  }}
+                >提及</button> : null}
                 {canHost ||
                 (bubbleMenu.item.authorUserId &&
                   bubbleMenu.item.authorUserId === myUserId) ? (

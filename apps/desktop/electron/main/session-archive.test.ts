@@ -8,6 +8,7 @@ import {
   DIFF_MAX_EVENTS_PER_FILE,
   type ChatItem,
   type FileChange,
+  type SessionProgress,
 } from "@claude-desktop/shared";
 import {
   SessionArchive,
@@ -113,6 +114,27 @@ describe("SessionArchive", () => {
     expect(manifest).toMatchObject({ version: 2, total: 2 });
   });
 
+  it("restores progress independently from transcript pages and never restores an agent as running", () => {
+    const arch = new SessionArchive(tmpDir());
+    arch.upsertSummary({
+      id: "progress", title: "Long task", cwd: "D:/project", updatedAt: 10, status: "idle",
+      progress: {
+        tasks: [{ id: "7", title: "Verify", status: "completed" }],
+        agents: [
+          { id: "agent-live", title: "Research", status: "running", toolUseId: "launch" },
+          { id: "agent-done", title: "Review", status: "completed", summary: "Reviewed" },
+        ],
+      },
+    });
+    expect(arch.loadIndex()[0]?.progress).toEqual({
+      tasks: [{ id: "7", title: "Verify", status: "completed" }],
+      agents: [
+        { id: "agent-live", title: "Research", status: "unknown", toolUseId: "launch" },
+        { id: "agent-done", title: "Review", status: "completed", summary: "Reviewed" },
+      ],
+    });
+  });
+
   it("loads legacy transcripts and migrates them on the next save", () => {
     const dir = tmpDir();
     const sessionsDir = path.join(dir, "sessions");
@@ -137,6 +159,44 @@ describe("SessionArchive", () => {
       fs.existsSync(path.join(sessionsDir, "legacy.transcript", "manifest.json")),
     ).toBe(true);
     expect(arch.loadItems("legacy").map((item) => item.id)).toEqual(["m1"]);
+  });
+
+  it("persists a compression baseline separately and clears it on replacement", () => {
+    const arch = new SessionArchive(tmpDir());
+    const progressBaseline: SessionProgress = {
+      tasks: [{ id: "7", title: "Before compression", status: "pending" }],
+      agents: [{ id: "agent", title: "Inspect", status: "running" }],
+    };
+    arch.upsertSummary({ id: "s", title: "Compressed", cwd: "D:/project", status: "idle", updatedAt: 1, progressBaseline });
+    expect(arch.loadIndex()[0]?.progressBaseline).toEqual({
+      ...progressBaseline, agents: [{ id: "agent", title: "Inspect", status: "unknown" }],
+    });
+    arch.upsertSummary({ ...arch.loadIndex()[0]!, progressBaseline: undefined });
+    expect(arch.loadIndex()[0]?.progressBaseline).toBeUndefined();
+  });
+
+  it("rebuilds structured progress across bounded pages without loading the full transcript", () => {
+    const arch = new SessionArchive(tmpDir());
+    const items: ChatItem[] = [
+      { kind: "tool", id: "todo", tool: { id: "todo", name: "TodoWrite", summary: "", status: "done", todos: [{ content: "Legacy plan", status: "pending" }] } },
+      ...Array.from({ length: 90 }, (_, i): ChatItem => ({ kind: "text", id: `text-${i}`, role: "assistant", text: "History" })),
+      { kind: "tool", id: "update", tool: { id: "update", name: "TaskUpdate", summary: "", status: "done", task: { operation: "update", taskId: "7", patch: { status: "completed" }, success: true } } },
+      { kind: "tool", id: "agent", tool: { id: "agent", name: "Agent", summary: "", status: "done", agent: { id: "agent", title: "Inspect", status: "running" } } },
+    ];
+    arch.saveItems("s", items);
+    arch.releaseItems("s");
+    const full = vi.spyOn(arch, "loadItems");
+    const pages = vi.spyOn(arch, "loadItemsPage");
+    expect(arch.loadProgress("s", { tasks: [{ id: "7", title: "Baseline task", status: "pending" }], agents: [] })).toEqual({
+      tasks: [
+        { id: "7", title: "Baseline task", status: "completed" },
+        { id: "todo-1", title: "Legacy plan", status: "pending", scope: "todos" },
+      ],
+      agents: [{ id: "agent", title: "Inspect", status: "unknown" }],
+    });
+    expect(full).not.toHaveBeenCalled();
+    expect(pages.mock.results.length).toBeGreaterThan(1);
+    expect(pages.mock.results.every(result => result.value.items.length <= 40)).toBe(true);
   });
 
   it("returns empty for missing transcript", () => {

@@ -27,30 +27,30 @@ describe("joinPrimaryAction", () => {
     ).toBe("join");
   });
 
-  it("sync-joins when the offer is missing locally", () => {
+  it("joins without downloading when the offer is missing locally", () => {
     expect(
       joinPrimaryAction({
         offer: { checksum: "abc12345deadbeef" },
         cacheHit: false,
       }),
-    ).toBe("sync-join");
+    ).toBe("join");
   });
 
-  it("sync-joins when offer is known but cache has not been confirmed", () => {
+  it("joins without waiting for the activity cache", () => {
     expect(
       joinPrimaryAction({
         offer: { checksum: "abc12345deadbeef" },
       }),
-    ).toBe("sync-join");
+    ).toBe("join");
   });
 
-  it("sync-joins from invite checksum only after a cache miss", () => {
+  it("does not require a pack mentioned in the invite", () => {
     expect(
       joinPrimaryAction({
         inviteChecksum: "abc12345deadbeef",
         cacheHit: false,
       }),
-    ).toBe("sync-join");
+    ).toBe("join");
     expect(
       joinPrimaryAction({
         inviteChecksum: "abc12345deadbeef",
@@ -66,7 +66,7 @@ describe("joinPrimaryAction", () => {
         offer: { checksum: "aaaaaaaa" },
         cacheHit: false,
       }),
-    ).toBe("sync-join");
+    ).toBe("join");
     expect(
       joinPrimaryAction({
         inviteChecksum: "bbbbbbbb",
