@@ -5,6 +5,7 @@ import {
   compactFileChange,
   rebuildSessionProgress,
   restoreSessionProgress,
+  restoreTaskPlan,
   type ChatItem,
   type FileChange,
   type SessionProgress,
@@ -116,7 +117,12 @@ export function mergeTranscriptItems(
   if (disk.length === 0) return incoming.map(stripStreaming);
   const byId = new Map<string, ChatItem>();
   for (const item of disk) byId.set(item.id, item);
-  for (const item of incoming) byId.set(item.id, stripStreaming(item));
+  for (const item of incoming) {
+    const previous = byId.get(item.id);
+    const next = stripStreaming(item);
+    byId.set(item.id, previous?.kind === "text" && previous.turnOutcome && next.kind === "text"
+      ? { ...next, turnOutcome: previous.turnOutcome } : next);
+  }
   const diskIds = new Set(disk.map((i) => i.id));
   const out = disk.map((i) => byId.get(i.id) ?? i);
   for (const item of incoming) {
@@ -260,6 +266,7 @@ export class SessionArchive {
         ...(s.hiddenFromList ? { hiddenFromList: true } : {}),
         ...(s.pinned ? { pinned: true } : {}),
         ...(s.progress ? { progress: restoreSessionProgress(s.progress) } : {}),
+        ...(restoreTaskPlan(s.taskPlan) ? { taskPlan: restoreTaskPlan(s.taskPlan) } : {}),
         ...(s.progressBaseline ? { progressBaseline: restoreSessionProgress(s.progressBaseline) } : {}),
       }));
     } catch {
@@ -281,6 +288,7 @@ export class SessionArchive {
           ...(s.usage ? { usage: s.usage } : {}),
           ...(s.contextUsage ? { contextUsage: s.contextUsage } : {}),
           ...(s.progress ? { progress: s.progress } : {}),
+          ...(s.taskPlan ? { taskPlan: s.taskPlan } : {}),
           ...(s.progressBaseline ? { progressBaseline: s.progressBaseline } : {}),
           ...(s.hiddenFromList ? { hiddenFromList: true } : {}),
           ...(s.pinned ? { pinned: true } : {}),

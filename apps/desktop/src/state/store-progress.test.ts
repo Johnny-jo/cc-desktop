@@ -16,6 +16,14 @@ const summary: SessionSummary = {
 beforeEach(() => __resetStoreForTests());
 
 describe("main chat progress summary routing", () => {
+  it("receives closure and reopening without losing progress", () => {
+    __upsertSessionForTests({ ...summary, taskPlan: { closedAt: 10, changedSinceClose: false } });
+    __upsertSessionForTests({ ...summary, taskPlan: { closedAt: 10, changedSinceClose: true } });
+    expect(getState().sessions[0].taskPlan?.changedSinceClose).toBe(true);
+    __upsertSessionForTests(summary);
+    expect(getState().sessions[0].taskPlan).toBeUndefined();
+    expect(getState().sessions[0].progress).toEqual(summary.progress);
+  });
   it("keeps progress beyond the renderer history cap and the parent's result", () => {
     __upsertSessionForTests(summary);
     for (let i = 0; i < RENDERER_TRANSCRIPT_CAP + 10; i++) {

@@ -20,6 +20,17 @@ function apply(state: TranscriptState, event: SdkNormalizedEvent): TranscriptSta
 }
 
 describe("applySdkEvent", () => {
+  it.each([false, true])("persists interruption without completing pending work (activity: %s)", activity => {
+    const state: TranscriptState = { items: [
+      { kind: "text", id: "u", role: "user", text: "Work" },
+      ...(activity ? [{ kind: "tool" as const, id: "t", tool: { id: "t", name: "Read", summary: "Read file", status: "running" as const } }] : []),
+    ], optimisticUserTexts: [] };
+    const stopped = apply(state, { type: "result", sessionId: "s", ok: false, outcome: "interrupted" } as SdkNormalizedEvent);
+    expect(stopped.items[0]).toMatchObject({ turnOutcome: activity ? "interrupted" : "cancelled" });
+    if (activity) expect(stopped.items[1]).toMatchObject({ tool: { status: "stopped" } });
+    const late = apply(stopped, { type: "result", sessionId: "s", ok: true });
+    expect(late.items[0]).toMatchObject({ turnOutcome: activity ? "interrupted" : "cancelled" });
+  });
   it("appends user_message", () => {
     const next = apply(emptyTranscript(), {
       type: "user_message",

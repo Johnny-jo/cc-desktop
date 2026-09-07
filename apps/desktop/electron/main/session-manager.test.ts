@@ -235,11 +235,15 @@ describe("SessionManager progress snapshots", () => {
     let reopened: ReturnType<typeof makeDeps> | undefined;
     try {
       const id = await ctx.manager.start({ text: "go", attachments: [] }, "D:/project");
+      ctx.manager.setTaskPlanClosed(id, true);
       ctx.manager.flushPendingPersistence(); ctx.manager.disposeAll();
       const loadItems = vi.spyOn(archive, "loadItems");
       reopened = makeDeps({ archive });
       expect(reopened.manager.getSummary(id)?.progress?.tasks[0]).toMatchObject({ id: "7", status: "completed" });
+      expect(reopened.manager.getSummary(id)?.taskPlan).toEqual({ closedAt: expect.any(Number), changedSinceClose: false });
       expect(loadItems).not.toHaveBeenCalled();
+      reopened.manager.setTaskPlanClosed(id, false);
+      expect(archive.loadIndex().find(session => session.id === id)?.taskPlan).toBeUndefined();
       loadItems.mockRestore();
     } finally {
       ctx.manager.disposeAll(); reopened?.manager.disposeAll();
@@ -255,6 +259,35 @@ describe("SessionManager progress snapshots", () => {
       ctx.manager.saveTranscript(id, [{ kind: "text", id: "u", role: "user", text: "Before task creation" }], { replace: true });
       expect(ctx.manager.getSummary(id)?.progress?.tasks ?? []).toEqual([]);
       expect(ctx.sessions.at(-1)?.progress?.tasks ?? []).toEqual([]);
+    } finally { ctx.manager.disposeAll(); }
+  });
+
+  it("keeps closure independent of successful SDK task updates and broadcasts reopening", async () => {
+    let id = "";
+    const ctx = makeDeps({ queryFn: async function* (args) {
+      let closed = false;
+      for await (const message of taskQuery(args) as AsyncIterable<any>) {
+        if (!closed && message.type === "assistant" && message.message?.content?.[0]?.name === "TaskUpdate") {
+          id = ctx.manager.list()[0].id;
+          ctx.manager.setTaskPlanClosed(id, true);
+          closed = true;
+          expect(ctx.manager.getSummary(id)?.progress?.tasks[0].status).toBe("pending");
+        }
+        yield message;
+      }
+    } });
+    try {
+      await ctx.manager.start({ text: "go", attachments: [] }, "D:/project");
+      expect(ctx.manager.getSummary(id)).toMatchObject({ taskPlan: { changedSinceClose: true }, progress: { tasks: [{ status: "completed" }] } });
+      expect(ctx.sessions.at(-1)?.taskPlan?.changedSinceClose).toBe(true);
+      const closedAt = ctx.manager.getSummary(id)?.taskPlan?.closedAt;
+      ctx.manager.setTaskPlanClosed(id, true);
+      expect(ctx.manager.getSummary(id)?.taskPlan?.closedAt).toBe(closedAt);
+      ctx.manager.setTaskPlanClosed(id, false);
+      expect(ctx.manager.getSummary(id)?.taskPlan).toBeUndefined();
+      expect(ctx.sessions.at(-1)?.taskPlan).toBeUndefined();
+      expect(ctx.manager.getSummary(id)?.progress?.tasks[0].status).toBe("completed");
+      expect(ctx.manager.setTaskPlanClosed("missing", true)).toBeUndefined();
     } finally { ctx.manager.disposeAll(); }
   });
 
@@ -317,7 +350,9 @@ describe("SessionManager progress snapshots", () => {
     let reopened: ReturnType<typeof makeDeps> | undefined;
     try {
       const id = await ctx.manager.start({ text: "go", attachments: [] }, "D:/project");
+      ctx.manager.setTaskPlanClosed(id, true);
       expect((await ctx.manager.compressSession(id)).ok).toBe(true);
+      expect(ctx.manager.getSummary(id)?.taskPlan?.changedSinceClose).toBe(false);
       await ctx.manager.continue(id, { text: "Continue", attachments: [] });
       expect(ctx.manager.getSummary(id)?.progress?.tasks.map(task => task.id)).toEqual(["7", "8"]);
       let manager = ctx.manager;
@@ -327,6 +362,9 @@ describe("SessionManager progress snapshots", () => {
         manager = reopened.manager;
       }
       expect((await manager.rewindToUserMessage(id, "after-compact")).ok).toBe(true);
+      expect(manager.getTranscriptPage(id).items.at(-1)).not.toHaveProperty("turnOutcome");
+      expect(manager.getSummary(id)?.taskPlan).toBeUndefined();
+      expect(archive.loadIndex().find(session => session.id === id)?.taskPlan).toBeUndefined();
       expect(manager.getSummary(id)?.progress?.tasks).toEqual([expect.objectContaining({ id: "7", status: "completed" })]);
       expect(manager.getSummary(id)).not.toHaveProperty("progressBaseline");
       expect(archive.loadIndex().find(summary => summary.id === id)?.progressBaseline?.tasks[0]).toMatchObject({ id: "7", status: "completed" });
@@ -1056,7 +1094,7 @@ describe("SessionManager", () => {
     expect(ctx.manager.list()[0]?.status).toBe("idle");
   });
 
-  it("abort aborts the active AbortController", async () => {
+  it.each([false, true])("abort persists cancellation/interruption and ignores late success (activity: %s)", async activity => {
     let controller: AbortController | undefined;
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
@@ -1066,17 +1104,21 @@ describe("SessionManager", () => {
     const queryFn: QueryFn = async function* (args) {
       controller = args.options.abortController as AbortController;
       await takeFirstUserText(args.prompt);
+      if (activity) yield { type: "assistant", message: { content: [{ type: "tool_use", id: "pending-read", name: "Read", input: { file_path: "a" } }] } };
       await gate;
       // After abort/release, end the turn so waitForTurnIdle unblocks
       yield { type: "result", subtype: "success", total_cost_usd: 0 };
     };
 
-    const ctx = makeDeps({ queryFn });
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "turn-outcome-"));
+    const archive = new SessionArchive(dir);
+    const ctx = makeDeps({ queryFn, archive });
     const startPromise = ctx.manager.start({ text: "slow", attachments: [] }, "D:/p");
 
     // allow start to reach queryFn
     await vi.waitFor(() => {
       expect(controller).toBeDefined();
+      if (activity) expect(ctx.emitted.some(event => event.type === "tool_start")).toBe(true);
     });
 
     const id = ctx.manager.list()[0]?.id;
@@ -1085,6 +1127,13 @@ describe("SessionManager", () => {
     expect(controller!.signal.aborted).toBe(true);
     release();
     await startPromise;
+    ctx.manager.flushPendingPersistence();
+    const saved = archive.loadItems(id!);
+    expect(saved.find(item => item.kind === "text" && item.role === "user")).toMatchObject({ turnOutcome: activity ? "interrupted" : "cancelled" });
+    if (activity) expect(saved.find(item => item.kind === "tool")).toMatchObject({ tool: { status: "stopped" } });
+    expect(ctx.emitted).toContainEqual(expect.objectContaining({ type: "result", ok: false, outcome: "interrupted" }));
+    ctx.manager.disposeAll();
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 
   it("throws and emits result error when CPA ensureReady fails", async () => {

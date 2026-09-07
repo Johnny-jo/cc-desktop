@@ -162,7 +162,11 @@ export function ChatPanel({ onOpenSettings, onOpenFile }: ChatPanelProps) {
       <div className="chat-composer" ref={composerRef}>
         <div className="chat-inner">
           {activeSessionId ? (
-            <ChatTaskDock key={activeSessionId} sessionId={activeSessionId} progress={active?.progress} />
+            <ChatTaskDock key={activeSessionId} sessionId={activeSessionId} progress={active?.progress} taskPlan={active?.taskPlan}
+              onSetPlanClosed={async closed => {
+                const result = await getDesktop().setTaskPlanClosed(activeSessionId, closed);
+                if (!result.ok) throw new Error(result.error || "Unable to update task plan");
+              }} />
           ) : null}
           <Composer onOpenSettings={onOpenSettings} />
         </div>

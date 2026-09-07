@@ -1,4 +1,4 @@
-import type { ChatItem, ToolCardState, TurnUsage } from "@claude-desktop/shared";
+import type { ChatItem, ToolCardState, TurnUsage, TurnOutcome } from "@claude-desktop/shared";
 
 type TextChatItem = Extract<ChatItem, { kind: "text" }>;
 
@@ -26,6 +26,7 @@ export type ConversationBlock =
       id: string;
       entries: ActivityEntry[];
       usage?: TurnUsage;
+      outcome?: TurnOutcome;
     }
   | {
       kind: "live-activity";
@@ -96,7 +97,7 @@ function withoutThinking(item: TextChatItem): TextChatItem {
   return answer;
 }
 
-function buildTurnBlocks(items: ChatItem[]): ConversationBlock[] {
+function buildTurnBlocks(items: ChatItem[], outcome?: TurnOutcome): ConversationBlock[] {
   const entries: ActivityEntry[] = [];
 
   items.forEach((item) => {
@@ -144,6 +145,7 @@ function buildTurnBlocks(items: ChatItem[]): ConversationBlock[] {
       kind: "activity",
       id: `activity-${firstActivityId}`,
       entries: archived,
+      ...(outcome ? { outcome } : {}),
       ...(usageItem ? { usage: usageItem.usage } : {}),
     });
   }
@@ -190,10 +192,11 @@ function buildTurnBlocks(items: ChatItem[]): ConversationBlock[] {
 export function buildConversationBlocks(items: ChatItem[]): ConversationBlock[] {
   const blocks: ConversationBlock[] = [];
   let turn: ChatItem[] = [];
+  let outcome: TurnOutcome | undefined;
 
   const flushTurn = () => {
     if (turn.length === 0) return;
-    blocks.push(...buildTurnBlocks(turn));
+    blocks.push(...buildTurnBlocks(turn, outcome));
     turn = [];
   };
 
@@ -203,6 +206,7 @@ export function buildConversationBlocks(items: ChatItem[]): ConversationBlock[] 
     if (isContextSummaryItem(item)) continue;
     if (item.kind === "text" && item.role === "user") {
       flushTurn();
+      outcome = item.turnOutcome;
       blocks.push({ kind: "item", item });
       continue;
     }
@@ -211,4 +215,21 @@ export function buildConversationBlocks(items: ChatItem[]): ConversationBlock[] 
   flushTurn();
 
   return blocks;
+}
+
+/** Prepending part of a turn must not remount its already expanded activity. */
+export function preserveActivityBlockIds(blocks: ConversationBlock[], previous: ConversationBlock[]): ConversationBlock[] {
+  const byEntry = new Map<string, string>();
+  for (const block of previous) {
+    if (block.kind !== "activity" && block.kind !== "live-activity") continue;
+    for (const entry of block.entries) byEntry.set(`${block.kind}:${entry.id}`, block.id);
+  }
+  const used = new Set<string>();
+  return blocks.map(block => {
+    if (block.kind !== "activity" && block.kind !== "live-activity") return block;
+    const oldId = block.entries.map(entry => byEntry.get(`${block.kind}:${entry.id}`)).find(id => id && !used.has(id));
+    const id = oldId ?? block.id;
+    used.add(id);
+    return id === block.id ? block : { ...block, id };
+  });
 }

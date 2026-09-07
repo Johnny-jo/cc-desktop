@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import type { ChatItem } from "@claude-desktop/shared";
+import type { ChatItem, TurnOutcome } from "@claude-desktop/shared";
 import type { Messages } from "../i18n";
 import { useI18n } from "../i18n/useI18n";
 
@@ -20,11 +20,15 @@ function formatElapsed(totalSeconds: number, chat: Messages["chat"]): string {
 }
 
 /** Static completion marker for a finished turn (history turns included). */
-export function TurnDoneRow({ durationMs }: { durationMs?: number }) {
-  const { t } = useI18n();
+export function TurnDoneRow({ durationMs, outcome }: { durationMs?: number; outcome?: TurnOutcome }) {
+  const { t, locale } = useI18n();
+  const label = outcome === "interrupted" ? (locale === "zh" ? "已中断" : "Interrupted")
+    : outcome === "cancelled" ? (locale === "zh" ? "已取消" : "Cancelled")
+    : outcome === "failed" ? (locale === "zh" ? "执行失败" : "Failed")
+    : outcome === "completed" ? t.chat.turnStatusDone : (locale === "zh" ? "已结束" : "Ended");
   return (
-    <div className="turn-status turn-status-done" role="status">
-      <span className="turn-status-label">{t.chat.turnStatusDone}</span>
+    <div className={`turn-status turn-status-${outcome ?? "done"}`} role="status">
+      <span className="turn-status-label">{label}</span>
       {durationMs != null ? (
         <span className="turn-status-time">
           {formatElapsed(Math.max(0, Math.round(durationMs / 1000)), t.chat)}
@@ -62,6 +66,7 @@ export function TurnStatusBar({
   items,
   done,
   doneDurationMs,
+  outcome,
 }: {
   sessionId: string | null;
   running: boolean;
@@ -70,6 +75,7 @@ export function TurnStatusBar({
   done?: boolean;
   /** SDK-measured turn duration for the persisted completion marker. */
   doneDurationMs?: number;
+  outcome?: TurnOutcome;
 }) {
   const { t } = useI18n();
   const timingRef = useRef<TurnTiming | null>(null);
@@ -98,8 +104,8 @@ export function TurnStatusBar({
     }
   }, [sessionId, running]);
 
-  if (!sessionId || !timing || timing.sessionId !== sessionId) {
-    return done ? <TurnDoneRow durationMs={doneDurationMs} /> : null;
+  if (!running || !sessionId || !timing || timing.sessionId !== sessionId) {
+    return done || outcome ? <TurnDoneRow durationMs={doneDurationMs} outcome={outcome} /> : null;
   }
 
   const phase = running

@@ -315,11 +315,29 @@ export function applySdkEvent(
       return { ...state, items };
     }
     case "result": {
+      let userIndex = -1;
+      for (let index = items.length - 1; index >= 0; index--) {
+        const candidate = items[index];
+        if (candidate.kind === "text" && candidate.role === "user") { userIndex = index; break; }
+      }
+      const user = items[userIndex];
+      const activeItems = items.slice(userIndex + 1);
+      const interrupted = event.outcome === "interrupted" || event.outcome === "cancelled";
+      const hadActivity = activeItems.some(item => item.kind === "tool" ||
+        (item.kind === "text" && item.role === "assistant" && Boolean(item.text.trim() || item.thinkingText?.trim())));
+      const outcome = interrupted ? (hadActivity ? "interrupted" : "cancelled") : event.outcome ?? (event.ok ? "completed" : "failed");
+      // Late success/duplicate stop notifications cannot rewrite a terminal turn.
+      if (user?.kind === "text" && (user.turnOutcome === "interrupted" || user.turnOutcome === "cancelled")) return state;
+      if (user?.kind === "text") items[userIndex] = { ...user, turnOutcome: outcome };
       // Tools can push after a streaming assistant, so the bubble is no
       // longer last — still settle every in-flight assistant so markdown
       // mounts and "思考中…" does not stick after the turn ends.
       const settled: typeof items = [];
-      for (const item of items) {
+      for (const [index, item] of items.entries()) {
+        if (index > userIndex && interrupted && item.kind === "tool" && item.tool.status === "running" && !item.tool.agent) {
+          settled.push({ ...item, tool: { ...item.tool, status: "stopped" } });
+          continue;
+        }
         if (
           item.kind === "text" &&
           item.role === "assistant" &&

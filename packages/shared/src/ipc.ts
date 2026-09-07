@@ -41,6 +41,7 @@ export const IPC = {
   sessionCompress: "session:compress",
   /** Pin / unpin a session to the top of the sidebar list */
   sessionSetPinned: "session:set-pinned",
+  sessionSetTaskPlanClosed: "session:set-task-plan-closed",
   /** Rename a session title */
   sessionRename: "session:rename",
   /** Delete a session and its transcript/changes files */
@@ -363,6 +364,10 @@ export type IpcInvokeMap = {
   };
   [IPC.sessionSetPinned]: {
     args: [{ sessionId: string; pinned: boolean }];
+    result: { ok: boolean; session?: SessionSummary; error?: string };
+  };
+  [IPC.sessionSetTaskPlanClosed]: {
+    args: [{ sessionId: string; closed: boolean }];
     result: { ok: boolean; session?: SessionSummary; error?: string };
   };
   [IPC.sessionRename]: {

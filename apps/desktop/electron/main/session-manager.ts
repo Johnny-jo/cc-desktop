@@ -37,6 +37,7 @@ import {
   shouldPersistTranscript,
   rebuildSessionProgress,
   restoreSessionProgress,
+  taskListsEqual,
   updateSessionProgress,
   summarizeTurnFiles,
   type TranscriptState,
@@ -638,6 +639,7 @@ export class SessionManager {
             ...(stored.hiddenFromList ? { hiddenFromList: true } : {}),
             ...(stored.pinned ? { pinned: true } : {}),
             ...(stored.progress ? { progress: stored.progress } : {}),
+            ...(stored.taskPlan ? { taskPlan: stored.taskPlan } : {}),
           },
           abortController: null,
           sdkSessionId: stored.sdkSessionId,
@@ -684,6 +686,23 @@ export class SessionManager {
     entry.summary = next;
     this.persistSummary(entry);
     if (!entry.summary.hiddenFromList) this.emitSession({ ...entry.summary });
+    return { ...entry.summary };
+  }
+
+  /** Close the displayed plan without changing execution or SDK task states. */
+  setTaskPlanClosed(sessionId: string, closed: boolean): SessionSummary | undefined {
+    const entry = this.sessions.get(sessionId);
+    if (!entry || entry.summary.hiddenFromList) return undefined;
+    this.restoreProgress(entry);
+    if (Boolean(entry.summary.taskPlan) === closed) return { ...entry.summary };
+    const previous = entry.summary;
+    const next = { ...previous };
+    if (closed) next.taskPlan = { closedAt: Date.now(), changedSinceClose: false };
+    else delete next.taskPlan;
+    entry.summary = next;
+    try { this.persistSummary(entry); }
+    catch (error) { entry.summary = previous; throw error; }
+    this.emitSession({ ...entry.summary });
     return { ...entry.summary };
   }
 
@@ -1058,6 +1077,8 @@ export class SessionManager {
     if (!this.archive) return;
     const stored: StoredSession = {
       ...entry.summary,
+      // Legacy JSON archives merge summaries; explicitly clear a reopened plan.
+      taskPlan: entry.summary.taskPlan,
       progressBaseline: entry.progressBaseline,
       ...(entry.sdkSessionId ? { sdkSessionId: entry.sdkSessionId } : {}),
     };
@@ -1070,12 +1091,16 @@ export class SessionManager {
     const progress = items
       ? restoreSessionProgress(rebuildSessionProgress(items, entry.progressBaseline))
       : this.archive?.loadProgress(entry.summary.id, entry.progressBaseline);
-    this.setProgress(entry, progress ?? { tasks: [], agents: [] });
+    this.setProgress(entry, progress ?? { tasks: [], agents: [] }, false);
   }
 
   /** Progress is session-wide, independent of the renderer's transcript page. */
-  private setProgress(entry: SessionEntry, progress: SessionProgress | undefined): void {
+  private setProgress(entry: SessionEntry, progress: SessionProgress | undefined, trackChanges = true): void {
     if (entry.summary.hiddenFromList || progress === entry.summary.progress) return;
+    if (trackChanges && entry.summary.taskPlan && !entry.summary.taskPlan.changedSinceClose &&
+        !taskListsEqual(entry.summary.progress?.tasks, progress?.tasks)) {
+      entry.summary = { ...entry.summary, taskPlan: { ...entry.summary.taskPlan, changedSinceClose: true } };
+    }
     entry.summary = { ...entry.summary, progress };
     this.persistSummary(entry);
     this.emitSession({ ...entry.summary });
@@ -1691,7 +1716,15 @@ export class SessionManager {
           i.sdkMsgId === userMessageId,
       );
       if (itemIdx >= 0) {
-        this.replaceTranscript(entry, entry.items.slice(0, itemIdx + 1), {
+        const { taskPlan: _closedPlan, ...openSummary } = entry.summary;
+        entry.summary = openSummary;
+        const retained = entry.items.slice(0, itemIdx + 1);
+        const target = retained[itemIdx];
+        if (target.kind === "text") {
+          const { turnOutcome: _discardedOutcome, ...pendingUser } = target;
+          retained[itemIdx] = pendingUser;
+        }
+        this.replaceTranscript(entry, retained, {
           persist: true,
           replace: true,
         });
@@ -1759,6 +1792,7 @@ export class SessionManager {
   abort(sessionId: string): void {
     const entry = this.sessions.get(sessionId);
     if (!entry) return;
+    const wasRunning = entry.turnActive || entry.summary.status === "running";
     this.settleLiveAgents(entry, "stopped");
     if (entry.roomAbortTurn) {
       entry.roomAbortTurn.cancelled = true;
@@ -1784,10 +1818,13 @@ export class SessionManager {
     const resultEvent: SdkNormalizedEvent = {
       type: "result",
       sessionId,
-      ok: true,
+      ok: false,
+      outcome: "interrupted",
     };
-    this.applyAndMaybePersist(entry, resultEvent);
-    this.emit(resultEvent);
+    if (wasRunning) {
+      this.applyAndMaybePersist(entry, resultEvent);
+      this.emit(resultEvent);
+    }
 
     try {
       void entry.query?.interrupt?.();

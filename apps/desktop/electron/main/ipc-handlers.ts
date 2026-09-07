@@ -425,6 +425,18 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
     },
   );
 
+  ipcMain.handle(IPC.sessionSetTaskPlanClosed, async (_e, input: { sessionId: string; closed: boolean }) => {
+    if (!input || typeof input.sessionId !== "string" || typeof input.closed !== "boolean") {
+      return { ok: false, error: "Invalid task plan update" };
+    }
+    try {
+      const session = ctx.sessions.setTaskPlanClosed(input.sessionId, input.closed);
+      return session ? { ok: true, session } : { ok: false, error: "Session unavailable" };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
   ipcMain.handle(
     IPC.sessionDelete,
     async (_e, { sessionId }: { sessionId: string }) => {

@@ -33,6 +33,10 @@ const desktop = {
     }>,
 
   listSessions: () => ipcRenderer.invoke(IPC.sessionList),
+  setTaskPlanClosed: (sessionId: string, closed: boolean) =>
+    ipcRenderer.invoke(IPC.sessionSetTaskPlanClosed, { sessionId, closed }) as Promise<
+      import("@claude-desktop/shared").IpcInvokeMap[typeof IPC.sessionSetTaskPlanClosed]["result"]
+    >,
 
   /** Full-text search over persisted session transcript content. */
   searchSessions: (query: string, limit?: number) =>
