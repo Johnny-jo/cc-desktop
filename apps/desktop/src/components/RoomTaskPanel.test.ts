@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { RoomTask, RoomRole } from "@claude-desktop/shared";
 import { RoomTaskPanel, RoomTaskRow } from "./RoomTaskPanel";
+import { ThemedSelect } from "./Select";
 import { readFileSync } from "node:fs";
 
 const task: RoomTask = { id: "child", seatId: "agent", initiatorUserId: "owner", parentTaskId: "parent", rootTaskId: "root", status: "awaiting-approval", text: "审查变更", readOnly: true, createdAt: 1, approvalKind: "delegation", approvalRequestId: "request-1", approvalDetail: "转交检查" };
@@ -31,7 +32,7 @@ describe("RoomTaskPanel", () => {
     expect(disclosure?.props.open).not.toBe(true);
     const summary = nodes(disclosure).find(node => node.type === "summary");
     expect(renderToStaticMarkup(summary!)).toContain("逐次确认");
-    expect(nodes(disclosure).some(node => node.type === "select")).toBe(true);
+    expect(nodes(disclosure).some(node => node.type === ThemedSelect)).toBe(true);
   });
   it("puts real running and queued counts in the task panel instead of the chat header", () => {
     const html = renderToStaticMarkup(RoomTaskPanel({ room: { ...room(), tasks: [
@@ -59,7 +60,7 @@ describe("RoomTaskPanel", () => {
   it("keeps personal policy after task content and recent history initially collapsed", () => {
     const panel = RoomTaskPanel({ room: { ...room(), tasks: [task, { ...task, id: "done", status: "completed" }] }, onControl: () => {} });
     const elements = nodes(panel);
-    expect(elements.findIndex(node => node.type === "select")).toBeGreaterThan(elements.findIndex(node => node.type === RoomTaskRow));
+    expect(elements.findIndex(node => node.type === ThemedSelect)).toBeGreaterThan(elements.findIndex(node => node.type === RoomTaskRow));
     expect(elements.find(node => node.type === "details")?.props.open).not.toBe(true);
   });
   it("has a useful empty state without an empty approval group", () => {
@@ -105,14 +106,15 @@ describe("RoomTaskPanel", () => {
   });
   it("defaults personal delegation to ask and submits only the selected personal policy", () => {
     const onControl = vi.fn();
-    const select = nodes(RoomTaskPanel({ room: room(), onControl })).find(node => node.type === "select")!;
+    const select = nodes(RoomTaskPanel({ room: room(), onControl })).find(node => node.type === ThemedSelect)!;
     expect(select.props.value).toBe("ask");
     for (const policy of ["ask", "read-only", "auto"]) {
-      (select.props.onChange as (event: unknown) => void)({ target: { value: policy } });
+      (select.props.onChange as (value: string) => void)(policy);
       expect(onControl).toHaveBeenLastCalledWith({ roomId: "r", action: "policy", policy });
     }
     const configured = room();
     const html = renderToStaticMarkup(React.createElement(RoomTaskPanel, { room: { ...configured, members: [{ ...configured.members[0], delegationPolicy: "read-only" }] }, onControl }));
-    expect(html).toContain('value="read-only" selected=""');
+    expect(html).toContain('aria-haspopup="listbox"');
+    expect(html).toContain("只读自动，修改需批");
   });
 });

@@ -37,6 +37,7 @@ export function RoomModsSettings() {
   const rooms = useRoomStore((s) => s.rooms);
   const canHost = Boolean(
     activeRoom &&
+      !activeRoom.hosted &&
       activeRoom.status === "open" &&
       (rooms.find((r) => r.roomId === activeRoom.roomId)?.role ?? "member") ===
         "host",
@@ -187,7 +188,7 @@ function ModManageTab(props: {
     <div className="mods-list">
       {!canHost ? (
         <p className="settings-hint">
-          启用 / 禁用需要你是某个进行中的群聊的群主；进入群聊后此处可操作。
+          启用 / 禁用需要你是进行中的本地主持群聊的群主；服务器托管群暂不支持扩展。
         </p>
       ) : null}
       {packs.map((p) => {

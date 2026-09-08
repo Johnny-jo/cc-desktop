@@ -102,6 +102,7 @@ const DEFAULTS: AppSettings = {
   pluginPaths: [],
   projects: [],
   hiddenProjects: [],
+  galaxyEffectsEnabled: true,
   uiFontSize: 13,
   editorFontSize: 12.5,
   updateFeedUrl: "",
@@ -217,6 +218,9 @@ export class SettingsStore {
     ) {
       delete publicPatch.theme;
     }
+    if (typeof publicPatch.galaxyEffectsEnabled !== "boolean") {
+      delete publicPatch.galaxyEffectsEnabled;
+    }
     if (publicPatch.uiFontSize !== undefined) {
       const n = Number(publicPatch.uiFontSize);
       if (!Number.isFinite(n)) delete publicPatch.uiFontSize;
@@ -310,6 +314,8 @@ export class SettingsStore {
         pluginPaths: sanitizePluginPaths(rest.pluginPaths) ?? [],
         projects: sanitizePluginPaths(rest.projects) ?? [],
         hiddenProjects: sanitizePluginPaths(rest.hiddenProjects) ?? [],
+        galaxyEffectsEnabled:
+          typeof rest.galaxyEffectsEnabled === "boolean" ? rest.galaxyEffectsEnabled : true,
         uiFontSize: clampFont(rest.uiFontSize, 11, 20, DEFAULTS.uiFontSize ?? 13),
         editorFontSize: clampFont(
           rest.editorFontSize,

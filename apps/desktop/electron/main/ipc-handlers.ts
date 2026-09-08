@@ -4,6 +4,7 @@ import { execFile } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { controlWindow } from "./window-control";
 import iconv from "iconv-lite";
 import { IPC, validateMcpServers } from "@claude-desktop/shared";
 import type {
@@ -52,7 +53,7 @@ export type IpcHandlerContext = {
   snapshots: SnapshotStore;
   terminal: TerminalHost;
   /** Sync native window chrome when the UI theme flips */
-  onThemeChanged?: (theme: "dark" | "light") => void;
+  onThemeChanged?: (theme: "dark" | "light", senderId: number) => void;
   /** Optional hot-update controller (packaged builds only) */
   autoUpdater?: {
     getStatus: () => unknown;
@@ -964,11 +965,17 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
 
   ipcMain.handle(
     IPC.appThemeChanged,
-    (_e, { theme }: { theme: "dark" | "light" }) => {
-      ctx.onThemeChanged?.(theme);
+    (event, { theme }: { theme: "dark" | "light" }) => {
+      if (theme !== "dark" && theme !== "light") return { ok: false };
+      ctx.onThemeChanged?.(theme, event.sender.id);
       return { ok: true };
     },
   );
+
+  ipcMain.handle(IPC.appWindowControl, (event, { action }: { action: string }) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    return controlWindow(win, action);
+  });
 
   ipcMain.handle(
     IPC.appMemoryDiagnostics,

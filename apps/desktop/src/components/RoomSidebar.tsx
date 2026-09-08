@@ -49,6 +49,7 @@ import "./RoomSidebar.css";
 function RoomRow({ r, active }: { r: RoomListItem; active: boolean }) {
   const { t } = useI18n();
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const [rejoining, setRejoining] = useState(false);
   const DRAG_THRESHOLD = 6;
   const DRAG_SLACK = 6;
   const dragRef = useRef<{
@@ -184,14 +185,17 @@ function RoomRow({ r, active }: { r: RoomListItem; active: boolean }) {
       {r.offline ? (
         <button
           type="button"
-          className="btn btn-ghost btn-sm room-row-rejoin"
+          className="room-row-rejoin"
           title={t.room.rejoin}
-          onClick={(e) => {
+          disabled={rejoining}
+          onClick={async (e) => {
             e.stopPropagation();
-            void rejoinRoom(r.roomId);
+            setRejoining(true);
+            try { await rejoinRoom(r.roomId); }
+            finally { setRejoining(false); }
           }}
         >
-          {t.room.rejoin}
+          {rejoining ? "连接中" : t.room.rejoin}
         </button>
       ) : null}
       {dragGhost

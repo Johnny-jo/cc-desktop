@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { fileEditRecovery } from "./file-edit-recovery";
 import type {
   ChatItem,
   FileChange,
@@ -2374,6 +2375,7 @@ export class SessionManager {
       // Surface SDK Notification events (permission needed, idle, task done)
       // for desktop notifications.
       hooks: {
+        PostToolUseFailure: [{ hooks: [fileEditRecovery] }],
         // 路径围栏必须挂在 PreToolUse：canUseTool 只管需要授权的工具，
         // Read/Glob/Grep 等只读工具在多数权限模式下根本不进 canUseTool，
         // 而 PreToolUse 对每一次工具调用都会触发（含只读、含 bypass 模式）。

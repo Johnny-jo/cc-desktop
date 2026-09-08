@@ -1,0 +1,40 @@
+.ft-explorer .ft-node {
+  gap: 5px;
+  min-height: 26px;
+  padding-top: 0;
+  padding-bottom: 0;
+  font-size: 1rem;
+  color: var(--text);
+}
+.ft-explorer .ft-node.selected {
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-sidebar));
+}
+.ft-node:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.ft-explorer .ft-chevron { display: inline-flex; align-items: center; width: 16px; height: 16px; }
+.ft-chevron svg { width: 16px; height: 16px; stroke: currentColor; stroke-width: 1.3; }
+.ft-type-icon { width: 16px; height: 16px; flex: 0 0 16px; stroke: currentColor; stroke-width: 1.2; color: var(--text-muted); }
+.ft-type-sheet { color: #639d46; }
+.ft-type-code, .ft-type-markdown { color: #4e9dc6; }
+.ft-ext-js, .ft-ext-jsx { color: #b29a20; }
+.ft-ext-vue { color: #479c79; }
+.ft-type-config { color: #8296a1; }
+.ft-type-git { color: #b67d64; }
+.ft-children { position: relative; }
+.ft-children::before {
+  content: "";
+  position: absolute;
+  left: var(--ft-guide-left);
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border-strong);
+  opacity: 0;
+  pointer-events: none;
+}
+.ft-tree:hover .ft-children::before { opacity: 0.65; }
+.ft-project-head { display: flex; align-items: center; gap: 2px; min-height: 30px; padding: 0 8px 0 12px; }
+.ft-project-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; font-size: 0.923rem; }
+.ft-action { width: 28px; height: 28px; flex: 0 0 28px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 4px; color: var(--text-muted); background: transparent; cursor: pointer; }
+.ft-action:hover { background: var(--bg-hover); color: var(--text); }
+.ft-action:focus-visible { outline: 1px solid var(--accent); }
+.ft-action svg { display: block; width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }

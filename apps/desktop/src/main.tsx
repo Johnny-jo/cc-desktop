@@ -1,6 +1,7 @@
 import React, { lazy, Suspense } from "react";
 import ReactDOM from "react-dom/client";
 import "./styles.css";
+import "./motion.css";
 
 const query = new URLSearchParams(window.location.search);
 const isDetached = query.get("detached") === "1";

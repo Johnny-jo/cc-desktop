@@ -308,6 +308,11 @@ function finishSessionTurn(sessionId: string): SessionSummary[] {
 
 function applySessionEvent(event: SdkNormalizedEvent): void {
   const { sessionId } = event;
+  // Also reconcile on completion when a renderer missed permission:resolved.
+  if (event.type === "result") {
+    if (state.permissionRequest?.sessionId === sessionId) setState({ permissionRequest: null });
+    if (state.userPromptRequest?.sessionId === sessionId) setState({ userPromptRequest: null });
+  }
   if (event.type === "result" && (event.outcome === "interrupted" || event.outcome === "cancelled") &&
       sessionId === state.activeSessionId && state.queuedPrompts.length) {
     setState({ queuedPrompts: [] });
@@ -492,6 +497,12 @@ function subscribeDesktopEvents(): void {
   unsubs.push(
     desktop.on(IPC.permissionRequest, (payload) => {
       setState({ permissionRequest: payload as PermissionRequest });
+    }),
+    desktop.on(IPC.permissionResolved, (payload) => {
+      const { requestId } = payload as { requestId: string };
+      if (state.permissionRequest?.requestId === requestId) {
+        setState({ permissionRequest: null });
+      }
     }),
   );
 

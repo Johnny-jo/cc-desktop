@@ -385,6 +385,8 @@ export type AppSettings = {
   modelEfforts?: Record<string, ReasoningEffort>;
   /** UI theme: dark / light / follow system (omit = system). */
   theme?: "dark" | "light" | "system";
+  /** Animate the welcome-page S into a galaxy in dark mode (omit = enabled). */
+  galaxyEffectsEnabled?: boolean;
   /** UI language: zh / en / follow system (omit = system). */
   locale?: "zh" | "en" | "system";
   /**

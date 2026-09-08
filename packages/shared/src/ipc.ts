@@ -94,6 +94,7 @@ export const IPC = {
   appCompleteOnboarding: "app:complete-onboarding",
   /** Renderer → Main: current UI theme changed (sync window chrome) */
   appThemeChanged: "app:theme-changed",
+  appWindowControl: "app:window-control",
   /** Read-only process and bounded-cache memory diagnostics snapshot. */
   appMemoryDiagnostics: "app:memory-diagnostics",
   /** List installed skills (user dir + project dir) */
@@ -125,6 +126,7 @@ export const IPC = {
   // main → renderer (webContents.send)
   sessionEvent: "session:event",
   permissionRequest: "permission:request",
+  permissionResolved: "permission:resolved",
   userPromptRequest: "user-prompt:request",
   diffUpdated: "diff:updated",
   cpaStatusEvent: "cpa:status-event",
@@ -554,6 +556,10 @@ export type IpcInvokeMap = {
   [IPC.appThemeChanged]: {
     args: [{ theme: "dark" | "light" }];
     result: { ok: boolean };
+  };
+  [IPC.appWindowControl]: {
+    args: [{ action: "minimize" | "maximize" | "close" | "state" }];
+    result: { ok: boolean; maximized: boolean };
   };
   [IPC.appMemoryDiagnostics]: {
     args: [];
@@ -1047,6 +1053,7 @@ export type UpdateStatusDto =
 export type IpcEventMap = {
   [IPC.sessionEvent]: SdkNormalizedEvent;
   [IPC.permissionRequest]: PermissionRequest;
+  [IPC.permissionResolved]: { requestId: string };
   [IPC.userPromptRequest]: UserPromptRequest;
   [IPC.diffUpdated]: { sessionId: string; changes: FileChange[] };
   [IPC.cpaStatusEvent]: CpaStatus;

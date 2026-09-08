@@ -140,29 +140,26 @@ function task(id: string, status: RoomTask["status"], initiatorUserId = "me"): R
 }
 
 describe("RoomStage collaboration workspace", () => {
-  it("does not reopen a dismissed invitation request after settings closes and reopens", async () => {
+  it("does not open an old invitation after switching rooms", async () => {
     const request = deferred<{ ok: boolean; secret: string; port: number; listening: boolean }>();
     desktop.getRoomInvite.mockReturnValueOnce(request.promise);
-    click(button("群聊设置"));
-    const oldSettings = render().find(node => node.type === RoomSettingsModal)!;
-    const inviting = (oldSettings.props.onInvite as () => Promise<unknown>)();
-    (oldSettings.props.onClose as () => void)();
-    click(button("群聊设置"));
+    const inviting = (button("邀请成员").props.onClick as () => Promise<unknown>)();
+    state.room = { ...state.room, roomId: "other" };
+    render();
     request.resolve({ ok: true, secret: "stale-invite", port: 18765, listening: true });
     await inviting;
     expect(render().some(node => node.type === RoomInviteModal)).toBe(false);
-    expect(render().find(node => node.type === RoomSettingsModal)?.props.suspended).toBe(false);
   });
-  it("opens invitation from settings and suspends the settings dialog without discarding its draft", async () => {
-    click(button("群聊设置"));
-    const settings = () => render().find(node => node.type === RoomSettingsModal)!;
-    await (settings().props.onInvite as () => Promise<unknown>)();
+  it("opens invitation directly from the first header icon", async () => {
+    const header = render().find(node => node.type === "header")!;
+    expect(nodes(header).filter(node => node.type === "button").map(node => node.props["aria-label"])).toEqual(["邀请成员", "收起协作侧栏", "群聊设置"]);
+    await (button("邀请成员").props.onClick as () => Promise<unknown>)();
     expect(desktop.getRoomInvite).toHaveBeenCalledWith("r");
-    expect(settings().props.suspended).toBe(true);
+    expect(render().some(node => node.type === RoomSettingsModal)).toBe(false);
     const invite = render().find(node => node.type === RoomInviteModal)!;
     expect(invite.props.code).toBe("test-invite");
     (invite.props.onClose as () => void)();
-    expect(settings().props.suspended).toBe(false);
+    expect(render().some(node => node.type === RoomInviteModal)).toBe(false);
   });
   it("passes the active room identity explicitly to the timeline across room switches", () => {
     for (const roomId of ["r", "another-room", "r"]) {
@@ -230,7 +227,7 @@ describe("RoomStage collaboration workspace", () => {
       task("own", "awaiting-approval"), task("other", "awaiting-approval", "other"), task("done", "completed")];
     const header = render().find(node => node.type === "header")!;
     expect(textContent(header)).toBe("群");
-    expect(nodes(header).filter(node => node.type === "button").map(node => node.props["aria-label"])).toEqual(["收起协作侧栏", "群聊设置"]);
+    expect(nodes(header).filter(node => node.type === "button").map(node => node.props["aria-label"])).toEqual(["邀请成员", "收起协作侧栏", "群聊设置"]);
     expect(button("收起协作侧栏").props.title).toContain("1 项待我确认");
     expect(textContent(tab("任务"))).toContain("5");
     click(tab("成员"));
@@ -248,7 +245,8 @@ describe("RoomStage collaboration workspace", () => {
     const settings = render().find(node => node.type === RoomSettingsModal)!;
     expect(settings.props.offline).toBe(true);
     expect(settings.props.room).toBe(state.room);
-    expect(settings.props.onInvite).toBeTypeOf("function");
+    expect(settings.props.onInvite).toBeUndefined();
+    expect(button("邀请成员").props.disabled).toBe(true);
     click(tab("活动"));
     const panel = render().find(node => node.props.id === tab("活动").props["aria-controls"])!;
     expect(textContent(panel)).toContain("本群暂无活动");

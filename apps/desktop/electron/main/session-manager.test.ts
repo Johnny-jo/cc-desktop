@@ -12,6 +12,7 @@ import {
   humanizeAgentError,
 } from "./session-manager";
 import type { PermissionBroker } from "./permission-broker";
+import { fileEditRecovery } from "./file-edit-recovery";
 import { DiffTracker } from "./diff-tracker";
 import type { CpaSupervisor } from "./cpa-supervisor";
 import type { SettingsStore } from "./settings-store";
@@ -622,6 +623,9 @@ describe("SessionManager", () => {
     ]);
     // CLAUDE.md hierarchy auto-loaded into the system prompt
     expect(opts.settingSources).toEqual(["user", "project", "local"]);
+    const failureHooks = (opts.hooks as { PostToolUseFailure: Array<{ hooks: Array<typeof fileEditRecovery> }> }).PostToolUseFailure;
+    const recovery = await failureHooks[0].hooks[0]({ tool_name: "Edit" });
+    expect(recovery.hookSpecificOutput?.additionalContext).toContain("AskUserQuestion");
     expect(opts.env).toMatchObject({
       ANTHROPIC_BASE_URL: "http://127.0.0.1:8317",
     });

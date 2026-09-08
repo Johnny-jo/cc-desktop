@@ -1,10 +1,10 @@
 import React, { lazy, Suspense, useEffect, useState } from "react";
 import { ErrorBanner } from "./components/ErrorBanner";
+import { SettingsPresence } from "./components/SettingsPresence";
+import { WindowControls } from "./components/WindowControls";
 import { ThemeToggle } from "./components/LayoutChrome";
 import { OnboardingModal } from "./components/OnboardingModal";
-import { PermissionModal } from "./components/PermissionModal";
 import { RoomPermAskModal } from "./components/RoomPermAskModal";
-import { UserPromptModal } from "./components/UserPromptModal";
 import { getDesktop } from "./lib/desktop-api";
 import {
   applyTheme,
@@ -39,16 +39,19 @@ export function DetachedWindowShell({
   }, []);
 
   useEffect(() => {
-    applyTheme(settings?.theme);
-    try {
-      getDesktop()
-        .notifyTheme(effectiveTheme(settings?.theme))
-        .catch(() => undefined);
-    } catch {
-      // Browser/unit-test fallback.
-    }
+    const syncTheme = () => {
+      applyTheme(settings?.theme);
+      try {
+        getDesktop()
+          .notifyTheme(effectiveTheme(settings?.theme))
+          .catch(() => undefined);
+      } catch {
+        // Browser/unit-test fallback.
+      }
+    };
+    syncTheme();
     if (settings?.theme && settings.theme !== "system") return;
-    return onSystemThemeChange(() => applyTheme(settings?.theme));
+    return onSystemThemeChange(syncTheme);
   }, [settings?.theme]);
 
   useEffect(() => {
@@ -85,7 +88,7 @@ export function DetachedWindowShell({
           isLight={effectiveTheme(settings?.theme) === "light"}
           onToggle={() => void setTheme(nextTheme(settings?.theme))}
         />
-        <div className="titlebar-caption-space" aria-hidden />
+        <WindowControls />
       </div>
       <ErrorBanner />
 
@@ -97,18 +100,16 @@ export function DetachedWindowShell({
         </div>
       </div>
 
-      <PermissionModal />
       <RoomPermAskModal />
-      <UserPromptModal />
       <OnboardingModal open={needsOnboarding} />
-      {settingsOpen ? (
+      <SettingsPresence open={settingsOpen}>
         <Suspense fallback={null}>
           <SettingsDrawer
             open
             onClose={() => setSettingsOpen(false)}
           />
         </Suspense>
-      ) : null}
+      </SettingsPresence>
     </div>
   );
 }

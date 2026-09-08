@@ -44,4 +44,9 @@ describe("RoomSettingsModal connection details", () => {
     expect(html).toContain("未启用扩展");
     expect(html).toContain("暂无群活动");
   });
+  it("identifies the owner's server-hosted connection without calling it local hosting", () => {
+    const html = render({ room: { ...room, hosted: true } });
+    expect(html).toContain("服务器托管");
+    expect(html).not.toContain("本地主持");
+  });
 });

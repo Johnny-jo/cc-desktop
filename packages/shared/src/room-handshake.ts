@@ -16,7 +16,7 @@ export type HandshakePayloads = {
   challenge: { pub: string; fp: string; nonce: string; encrypt: boolean };
   prove: { proof: string };
   pending: { fp: string };
-  ok: { kid: string; encrypt: boolean };
+  ok: { kid: string; encrypt: boolean; /** Server-restored identity for a verified returning device. */ userId?: string };
   reject: { reason: HandshakeReject };
 };
 

@@ -1,0 +1,25 @@
+[Unit]
+Description=CC Desktop persistent room server
+After=network.target
+
+[Service]
+Type=simple
+User=cc-room
+Group=cc-room
+WorkingDirectory=/opt/cc-room
+EnvironmentFile=/etc/cc-room/server.env
+ExecStart=/usr/bin/node /opt/cc-room/room-relay-server.mjs --port 7600 --host 127.0.0.1 --data-dir /var/lib/cc-room
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=10
+StateDirectory=cc-room
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/cc-room
+
+[Install]
+WantedBy=multi-user.target

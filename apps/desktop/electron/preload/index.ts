@@ -403,6 +403,9 @@ const desktop = {
     }>,
 
   /** Tell the main process the effective UI theme (window chrome sync). */
+  controlWindow: (action: "minimize" | "maximize" | "close" | "state") =>
+    ipcRenderer.invoke(IPC.appWindowControl, { action }) as Promise<{ ok: boolean; maximized: boolean }>,
+
   notifyTheme: (theme: "dark" | "light") =>
     ipcRenderer.invoke(IPC.appThemeChanged, { theme }) as Promise<{
       ok: boolean;

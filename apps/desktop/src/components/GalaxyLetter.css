@@ -1,0 +1,23 @@
+.galaxy-letter { position: relative; }
+.galaxy-letter-base { display: inline-block; }
+.galaxy-letter[data-galaxy-active="true"] .galaxy-letter-base {
+  opacity: var(--galaxy-letter-opacity, 1);
+}
+.galaxy-scene {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 0;
+  pointer-events: none;
+  visibility: hidden;
+  contain: strict;
+}
+.chat-panel.has-galaxy { isolation: isolate; }
+.chat-panel.has-galaxy > .galaxy-scene { visibility: visible; }
+.chat-panel.has-galaxy > .chat-body { position: relative; z-index: 1; }
+.chat-panel.hero.has-galaxy > .chat-composer { position: relative; z-index: 2; }
+@media (prefers-reduced-motion: reduce) {
+  .galaxy-letter[data-galaxy-active="true"] .galaxy-letter-base { opacity: 1; }
+  .galaxy-scene { visibility: hidden !important; }
+}

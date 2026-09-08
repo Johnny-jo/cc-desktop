@@ -33,13 +33,13 @@ export function RoomCollaborationSidebar(props: Props) {
         }
       }}>
       <div className="room-collaboration-heading">
-        <span>协作</span>
+        {/* <span>协作</span>
         <button type="button" className="room-head-icon-btn" aria-label="收起协作侧栏"
           title="收起协作侧栏" aria-controls={id} aria-expanded={open} onClick={() => onOpenChange(false)}>
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
             <path d="m6 3 5 5-5 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
-        </button>
+        </button> */}
       </div>
       <div className="room-collaboration-tabs" role="tablist" aria-label="协作分类">
         {tabs.map((tab, index) => (

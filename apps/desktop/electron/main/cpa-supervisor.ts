@@ -18,6 +18,7 @@ export type SpawnedProcess = {
   pid?: number;
   kill: (signal?: NodeJS.Signals | number) => boolean;
   on?: (event: string, listener: (...args: unknown[]) => void) => unknown;
+  stdout?: { on?: (event: string, listener: (...args: unknown[]) => void) => unknown } | null;
   stderr?: { on?: (event: string, listener: (...args: unknown[]) => void) => unknown } | null;
 };
 
@@ -39,12 +40,15 @@ export type CpaSupervisorDeps = {
   pollIntervalMs?: number;
   /** max wait after spawn (ms) */
   readyTimeoutMs?: number;
+  /** delay before one retry when an upgrade leaves CPA's log briefly locked */
+  startupRetryDelayMs?: number;
 };
 
 const DEFAULT_POLL_MS = 250;
 /** First launch after install often waits on Defender scanning the 60MB exe. */
 const DEFAULT_READY_TIMEOUT_MS = 45_000;
 const DEFAULT_PROBE_TIMEOUT_MS = 300;
+const DEFAULT_STARTUP_RETRY_DELAY_MS = 1_000;
 const QUOTA_REQUEST_TIMEOUT_MS = 15_000;
 const ACTIVE_QUOTA_PROVIDERS = new Set(["kimi", "xai", "antigravity"]);
 const KIMI_USAGE_URL = "https://api.kimi.com/coding/v1/usages";
@@ -178,6 +182,13 @@ function defaultSpawnProcess(
   }) as ChildProcess as SpawnedProcess;
 }
 
+/** Windows upgrades can leave CPA's rolling log locked for a short moment. */
+export function isTransientCpaStartupError(status: CpaStatus): boolean {
+  if (status.state !== "error") return false;
+  return /(?:can't rename log file|failed to write to log)[\s\S]{0,240}(?:access is denied|permission denied|used by another process|being used by another process)/i
+    .test(status.message);
+}
+
 export class CpaSupervisor {
   private readonly getSettings: CpaSupervisorDeps["getSettings"];
   private readonly getToken: CpaSupervisorDeps["getToken"];
@@ -186,6 +197,7 @@ export class CpaSupervisor {
   private readonly onStatusChange?: (status: CpaStatus) => void;
   private readonly pollIntervalMs: number;
   private readonly readyTimeoutMs: number;
+  private readonly startupRetryDelayMs: number;
 
   private status: CpaStatus = { state: "unknown" };
   private child: SpawnedProcess | null = null;
@@ -203,6 +215,8 @@ export class CpaSupervisor {
     this.onStatusChange = deps.onStatusChange;
     this.pollIntervalMs = deps.pollIntervalMs ?? DEFAULT_POLL_MS;
     this.readyTimeoutMs = deps.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
+    this.startupRetryDelayMs =
+      deps.startupRetryDelayMs ?? DEFAULT_STARTUP_RETRY_DELAY_MS;
   }
 
   getStatus(): CpaStatus {
@@ -678,10 +692,21 @@ export class CpaSupervisor {
     if (this.ensurePromise) {
       return this.ensurePromise;
     }
-    this.ensurePromise = this.doEnsureReady().finally(() => {
+    this.ensurePromise = this.ensureReadyWithUpgradeRetry().finally(() => {
       this.ensurePromise = null;
     });
     return this.ensurePromise;
+  }
+
+  private async ensureReadyWithUpgradeRetry(): Promise<CpaStatus> {
+    const first = await this.doEnsureReady();
+    if (!isTransientCpaStartupError(first)) return first;
+
+    // NSIS stops the old bundled CPA during an update. Windows may keep its
+    // rolling-log handle alive just long enough for the first new process to
+    // fail. Preserve the config and retry once after the handle can settle.
+    await sleep(this.startupRetryDelayMs);
+    return this.doEnsureReady();
   }
 
   stopIfManaged(): void {
@@ -740,7 +765,16 @@ export class CpaSupervisor {
 
     this.setStatus({ state: "starting" });
 
-    const stderrChunks: string[] = [];
+    // CPA writes some fatal startup failures to stdout (and may still exit 0),
+    // so stderr alone is not enough to explain an immediate exit after upgrade.
+    const outputChunks: string[] = [];
+    const captureOutput = (buf: unknown) => {
+      const text = Buffer.isBuffer(buf) ? buf.toString("utf8") : String(buf);
+      if (text) {
+        outputChunks.push(text);
+        if (outputChunks.length > 20) outputChunks.shift();
+      }
+    };
     const configDir = settings.cpaConfigPath
       ? path.dirname(settings.cpaConfigPath)
       : undefined;
@@ -763,20 +797,21 @@ export class CpaSupervisor {
       );
       this.managedByApp = true;
 
-      this.child.stderr?.on?.("data", (buf: unknown) => {
-        const text = Buffer.isBuffer(buf) ? buf.toString("utf8") : String(buf);
-        if (text) {
-          stderrChunks.push(text);
-          if (stderrChunks.length > 20) stderrChunks.shift();
-        }
-      });
+      this.child.stdout?.on?.("data", captureOutput);
+      this.child.stderr?.on?.("data", captureOutput);
 
       if (this.child.on) {
         this.child.on("exit", (code: unknown, signal: unknown) => {
           if (this.managedByApp) {
             this.managedByApp = false;
             this.child = null;
-            const detail = stderrChunks.join("").trim().slice(0, 400);
+            const detail = outputChunks
+              .join("")
+              // Strip terminal colour/control sequences before showing output
+              // in the renderer status message.
+              .replace(/\x1B(?:[@-_][0-?]*[ -/]?[@-~]|\][^\x07]*(?:\x07|\x1B\\))/g, "")
+              .trim()
+              .slice(0, 400);
             const why = [
               code != null ? `exit ${code}` : null,
               signal ? `signal ${String(signal)}` : null,

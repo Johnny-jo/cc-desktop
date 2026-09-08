@@ -308,7 +308,7 @@ export function TerminalPanel({ open }: Props) {
   );
 
   return (
-    <div className="terminal-panel" aria-hidden={!open}>
+    <div className="terminal-panel" aria-hidden={!open} inert={!open}>
       <div className="terminal-tabbar">
         <div className="terminal-tabs" role="tablist">
           {tabs.map((t) => (

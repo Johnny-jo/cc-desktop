@@ -340,12 +340,10 @@ describe("RoomService resume hosting", () => {
       // Guest A restarts its own app (same userDataDir) and rejoins with the
       // archived identity — the host kept its seat.
       const guestA2 = makeService(guestADir);
-      expect(guestA2.get(room.roomId)?.status).toBe("ended"); // member rooms never resume
-      const rejoined = await guestA2.rejoin(room.roomId);
-      expect(rejoined.ok).toBe(true);
-      expect(rejoined.room?.localUserId).toBe(aSnap.localUserId);
+      await vi.waitFor(() => expect(guestA2.list().find(r => r.roomId === room.roomId)?.offline).toBeUndefined(), { timeout: 10000 });
+      expect(guestA2.get(room.roomId)?.localUserId).toBe(aSnap.localUserId);
       expect(
-        rejoined.room!.items.some((i) => i.text === "before-restart-1"),
+        guestA2.get(room.roomId)!.items.some((i) => i.text === "before-restart-1"),
       ).toBe(true);
     },
     40_000,
@@ -400,63 +398,25 @@ describe("RoomService resume hosting", () => {
   );
 
   it(
-    "re-registers the same relay room id after restart, so the relay invite URL is stable",
+    "preserves old relay history but requires a new server-hosted room",
     async () => {
-      const relay = await spawnRelay(await freePort());
       const hostDir = tmp();
       const host1 = makeService(hostDir);
       const port = await freePort();
       const room = await createHostRoom(host1, {
         port,
         password: "pw",
-        relay: relay.url,
       });
-      expect(room.encrypt).toBe(true);
-      const inv1 = host1.invite(room.roomId);
-      const relayUrl1 = (decodeRoomInvite(inv1.secret!).wss ?? []).find((u) =>
-        u.includes(`:${relay.port}/`),
-      )!;
-      expect(relayUrl1).toMatch(
-        new RegExp(`^ws://127\\.0\\.0\\.1:${relay.port}/r/[0-9a-f]{12}$`),
-      );
-      const relayRoomId = relayUrl1.split("/r/")[1]!;
-
-      // "Exit": the relay ctl channel closes and the relay frees the room id.
       host1.disposeAll();
-      await vi.waitFor(
-        () => {
-          expect(relay.out()).toContain(`ctl closed id=${relayRoomId}`);
-        },
-        { timeout: 10_000, interval: 100 },
-      );
       await waitPortFree(port);
-
+      const archive = new RoomArchive(hostDir);
+      const stored = archive.loadRoom(room.roomId)!;
+      archive.saveRoom({ ...stored, relay: "wss://old.invalid", relayRoomId: "0123456789ab" });
       const host2 = makeService(hostDir);
-      await waitResumed(host2, room.roomId);
-      // Resume re-registers the SAME room id → the old invite URL is back.
-      await vi.waitFor(
-        () => {
-          const wss =
-            decodeRoomInvite(host2.invite(room.roomId).secret!).wss ?? [];
-          expect(wss).toContain(relayUrl1);
-        },
-        { timeout: 15_000, interval: 200 },
-      );
-      expect(
-        countOccurrences(relay.out(), `ctl registered id=${relayRoomId}`),
-      ).toBeGreaterThanOrEqual(2);
-
-      // A guest can still join through the ORIGINAL relay URL.
-      const guest = makeService(tmp());
-      const joined = await guest.join({
-        // Dead LAN candidate forces the relay path (see room-relay.test.ts).
-        host: "192.0.0.1",
-        port: 1,
-        password: "pw",
-        wss: [relayUrl1],
-        hostFingerprint: inv1.hostFingerprint,
-      });
-      expect(joined.ok).toBe(true);
+      await vi.waitFor(() => expect(host2.get(room.roomId)?.status).toBe("ended"));
+      expect(host2.get(room.roomId)?.items.some(i => i.text.includes("旧版中继群不再恢复"))).toBe(true);
+      expect(host2.get(room.roomId)?.items.length).toBeGreaterThanOrEqual(room.items.length);
+      archive.database?.close();
     },
     40_000,
   );
@@ -539,7 +499,7 @@ describe("RoomService resume hosting", () => {
     40_000,
   );
 
-  it("never resumes member (guest) rooms — they stay ended for manual rejoin", async () => {
+  it("automatically resumes member rooms when the host comes back", async () => {
     const hostDir = tmp();
     const host1 = makeService(hostDir);
     const port = await freePort();
@@ -559,17 +519,16 @@ describe("RoomService resume hosting", () => {
     host1.disposeAll();
     await waitPortFree(port);
 
-    // Guest restart: hydrate is synchronous in the constructor; a member
-    // room must come back ended and must NOT dial out by itself.
+    // The archive remains browseable while a background connection resumes.
     const guest2 = makeService(guestDir);
-    expect(guest2.get(room.roomId)?.status).toBe("ended");
+    expect(guest2.list()[0].offline).toBe(true);
     await sleep(300);
-    expect(guest2.get(room.roomId)?.status).toBe("ended");
+    expect(guest2.list()[0].offline).toBe(true);
 
-    // Manual rejoin still works once the host resumed.
+    // No manual rejoin: the pending startup retry uses the saved credentials.
     const host2 = makeService(hostDir);
     await waitResumed(host2, room.roomId);
-    const rejoined = await guest2.rejoin(room.roomId);
-    expect(rejoined.ok).toBe(true);
+    await vi.waitFor(() => expect(guest2.list()[0].offline).toBeUndefined(), { timeout: 10000 });
+    expect(guest2.get(room.roomId)?.status).toBe("open");
   }, 40_000);
 });

@@ -1,0 +1,114 @@
+.agent-welcome { text-align: center; margin: 0 auto 32px; padding: 12px 0 0; }
+.agent-wordmark {
+  --agent-eye-color: #a0eff4;
+  position: relative;
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 0.24em;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 16px;
+  background: transparent;
+  color: var(--text);
+  font-family: "Segoe UI", system-ui, sans-serif;
+  font-size: clamp(38px, 5vw, 64px);
+  font-weight: 650;
+  line-height: 1.15;
+  letter-spacing: -0.055em;
+  cursor: pointer;
+  user-select: none;
+}
+.agent-wordmark:focus-visible { outline: 2px solid var(--accent); outline-offset: 8px; }
+.agent-word, .agent-os { display: inline-flex; align-items: baseline; }
+.agent-letter { display: inline-block; }
+.agent-os { color: var(--accent); gap: 0.11em; }
+.agent-orbit {
+  position: relative;
+  display: inline-flex;
+  width: 1.04em;
+  height: 1.04em;
+  align-self: center;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+}
+.agent-orbit-body {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  box-sizing: border-box;
+  transform: translateY(0.08em);
+}
+.agent-slime-art {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.agent-slime-outline { stroke: var(--agent-eye-color, #a0eff4); stroke-width: 0.75px; vector-effect: non-scaling-stroke; }
+[data-theme="light"] .agent-slime-outline { stroke: transparent; }
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]):not([data-theme="light"]) .agent-slime-outline { stroke: transparent; }
+}
+.agent-slime-face {
+  position: absolute;
+  inset: 10% 14% 18%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  overflow: hidden;
+  pointer-events: none;
+}
+.agent-eyes { position: relative; z-index: 1; display: block; width: 0.7em; height: 0.4em; color: var(--agent-eye-color, #a0eff4); transform: translate(var(--look-x, 0px), var(--look-y, 0px)); transition: transform 160ms ease-out; }
+.agent-eyes svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.agent-expression { opacity: 0; transform: scale(0.9, 0.7); transform-origin: 28px 16px; transition: opacity 160ms ease, transform 180ms ease; }
+.agent-expression.is-active { opacity: 1; transform: scale(1); }
+.agent-wordmark.is-idle-looking .agent-eyes { animation: agent-idle-look 2400ms ease-in-out; }
+.agent-wordmark.is-idle-looking .agent-eye-open { animation: agent-idle-blink 2400ms linear; transform-box: fill-box; transform-origin: center; }
+.agent-wordmark.is-idle-blinking .agent-eye-open { animation: agent-soft-blink 850ms ease-in-out; transform-box: fill-box; transform-origin: center; }
+.agent-wordmark.is-idle-double-blinking .agent-eye-open { animation: agent-double-blink 1100ms ease-in-out; transform-box: fill-box; transform-origin: center; }
+.agent-expression.is-active .agent-eye-spiral { animation: agent-dizzy 1100ms ease-in-out infinite alternate; }
+@keyframes agent-dizzy { from { transform: rotate(-12deg); } to { transform: rotate(12deg); } }
+@keyframes agent-soft-blink {
+  0%, 20%, 65%, 100% { transform: scaleY(1); }
+  38%, 43% { transform: scaleY(0.12); }
+}
+@keyframes agent-double-blink {
+  0%, 12%, 38%, 53%, 80%, 100% { transform: scaleY(1); }
+  24%, 28%, 65%, 69% { transform: scaleY(0.12); }
+}
+@keyframes agent-idle-look {
+  0%, 18% { transform: translate(0, 0); }
+  30%, 40% { transform: translate(-0.065em, 0); }
+  55%, 65% { transform: translate(0.065em, 0); }
+  76%, 100% { transform: translate(0, 0); }
+}
+@keyframes agent-idle-blink {
+  0%, 81%, 91%, 100% { transform: scaleY(1); }
+  85%, 87% { transform: scaleY(0.12); }
+}
+.agent-spark { position: absolute; opacity: 0; pointer-events: none; font-size: 0.36em; letter-spacing: 0; }
+.spark-one { left: -0.1em; top: 0; color: #eab45d; }
+.spark-two { right: -0.2em; top: -0.2em; color: var(--accent); }
+.spark-three { right: 0.7em; bottom: -0.3em; color: #58a88a; }
+.agent-welcome-caption { margin: 12px 0 0; color: var(--text-muted); font-size: 1rem; letter-spacing: 0.04em; }
+@media (max-height: 650px) {
+  .agent-welcome { margin-bottom: 20px; }
+  .agent-wordmark { font-size: 42px; }
+  .chat-panel.hero { padding-top: 3vh; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .agent-eyes, .agent-expression { transition: none; }
+  .agent-wordmark.is-idle-looking .agent-eyes,
+  .agent-wordmark.is-idle-looking .agent-eye-open,
+  .agent-wordmark.is-idle-blinking .agent-eye-open,
+  .agent-wordmark.is-idle-double-blinking .agent-eye-open,
+  .agent-expression.is-active .agent-eye-spiral { animation: none; }
+}

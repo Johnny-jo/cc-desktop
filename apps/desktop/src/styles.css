@@ -254,7 +254,8 @@ textarea {
   left: 0;
   right: 0;
   height: var(--titlebar-h);
-  background: color-mix(in srgb, var(--bg-title-top) 55%, transparent);
+  /* Match the native caption button background exactly. */
+  background: var(--bg-title-top);
   backdrop-filter: blur(24px) saturate(1.5);
   z-index: 200;
   display: flex;
@@ -273,7 +274,8 @@ textarea {
 /* Interactive children sit above the drag surface and never drag. */
 .titlebar-toggles,
 .titlebar-theme,
-.titlebar-right {
+.titlebar-right,
+.window-controls {
   position: relative;
   z-index: 2;
   -webkit-app-region: no-drag;
@@ -405,7 +407,7 @@ textarea {
 
 .app > .workspace.workspace-terminal-open {
   /* main | resize handle | terminal — keep 3 rows so the panel stays mounted */
-  grid-template-rows: minmax(0, 1fr) 4px var(--terminal-h, 180px);
+  grid-template-rows: minmax(0, 1fr) 0px var(--terminal-h, 180px);
 }
 
 .app > .workspace.workspace-terminal-collapsed {
@@ -413,8 +415,10 @@ textarea {
 }
 
 .terminal-resize-slot {
+  position: relative;
+  z-index: 50;
   min-height: 0;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .terminal-resize-slot.is-collapsed {
@@ -1057,7 +1061,9 @@ textarea {
 }
 
 .editor-divider {
-  flex: 0 0 6px;
+  flex: 0 0 10px;
+  margin: 0 -5px;
+  touch-action: none;
   cursor: col-resize;
   background: transparent;
   position: relative;
@@ -1750,8 +1756,8 @@ textarea {
 }
 
 /*
- * Resize handles sit BETWEEN flex children with a real 10px box so they
- * always receive pointer events (pseudo-element hit targets were flaky).
+ * Real 10px hit targets overlap neighboring panels; negative margins cancel
+ * their layout footprint, so removing a handle never shifts the content.
  */
 .resize-handle {
   position: relative;
@@ -1770,8 +1776,7 @@ textarea {
   max-width: 10px;
   cursor: col-resize;
   align-self: stretch;
-  /* Pull slightly over neighboring panels without collapsing the flex gap */
-  margin: 0 -2px;
+  margin: 0 -5px;
 }
 
 /* Center hairline — invisible at rest; the 10px hit area + resize cursor do
@@ -1812,7 +1817,7 @@ body.is-resizing-col .resize-handle-changes::after {
   min-height: 10px;
   max-height: 10px;
   cursor: row-resize;
-  margin: -2px 0;
+  margin: -5px 0;
 }
 
 .resize-handle-terminal::after {
@@ -2203,6 +2208,24 @@ body.is-resizing-row * {
 }
 
 /* —— Themed dropdown (replaces native select popups) —— */
+:is(.settings-modal, .room-settings-modal) button:not([role="switch"]) {
+  border-radius: 8px;
+}
+:is(.settings-modal, .room-settings-modal) .btn {
+  border-color: transparent;
+  box-shadow: none;
+}
+:is(.settings-modal, .room-settings-modal) .btn:focus-visible {
+  box-shadow: var(--focus-ring);
+}
+:is(.settings-modal, .room-settings-modal) .btn:not(.btn-primary):not(.btn-danger) {
+  background: transparent;
+}
+:is(.settings-modal, .room-settings-modal) .btn:hover:not(:disabled):not(.btn-primary):not(.btn-danger) {
+  background: var(--bg-hover);
+  border-color: transparent;
+}
+
 .themed-select {
   position: relative;
   display: inline-flex;
@@ -2376,6 +2399,31 @@ body.is-resizing-row * {
 .themed-select-option svg {
   flex-shrink: 0;
 }
+
+.themed-select-field { width: 100%; }
+.themed-select-field .themed-select-btn {
+  width: 100%;
+  min-height: 36px;
+  padding: 7px 11px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-input);
+  font-size: .923rem;
+  line-height: 1.5;
+}
+.themed-select-field .themed-select-value { flex: 1; text-align: left; }
+.themed-select-field.open .themed-select-btn,
+.themed-select-field .themed-select-btn:focus-visible {
+  border-color: var(--border-strong);
+  box-shadow: var(--focus-ring);
+}
+.themed-select-field-menu {
+  padding: 5px;
+  background: color-mix(in srgb, var(--bg-input) 94%, transparent);
+  border-radius: 12px;
+}
+.themed-select-field-menu .themed-select-option { min-height: 34px; }
+.room-autonomy-select { width: min(100%, 220px); }
 
 /* Ghost variants keep their own paddings */
 /* composer 内的审批模式选择器：无背景，直接透出 composer 整体的毛玻璃。 */
@@ -10231,6 +10279,66 @@ button.activity-step-main:not(:disabled):hover .activity-step-name {
 .agent-prompt-link {
   margin: 10px 0 0;
   font-size: 0.885rem;
+}
+
+.permission-file-path {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  user-select: text;
+  margin: 6px 0 16px;
+}
+
+.window-controls {
+  display: flex;
+  flex: 0 0 138px;
+  height: 100%;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+.window-controls button {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+}
+.app-detached .window-controls {
+  margin-left: auto;
+}
+.window-controls button:hover { background: var(--bg-hover); }
+.window-controls button:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+.window-controls .window-close:hover { background: #c42b1c; color: #fff; }
+.window-controls svg { width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1; }
+
+.permission-field-label,
+.permission-snippet h4 {
+  font-size: 0.923rem;
+  font-weight: 600;
+  margin: 12px 0 6px;
+}
+
+.permission-snippet .agent-prompt-preview,
+.permission-raw-details .agent-prompt-preview {
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.permission-snippet .agent-prompt-preview {
+  color: var(--text);
+  margin-top: 6px;
+}
+
+.permission-raw-details > summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  margin-top: 12px;
 }
 
 .permission-allow-group {

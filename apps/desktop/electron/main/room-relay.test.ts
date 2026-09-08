@@ -3,496 +3,242 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { decodeRoomInvite, type RoomSnapshot } from "@claude-desktop/shared";
-import { startRoomRelay, type RoomRelayResult } from "./room-relay";
+import { afterEach, describe, expect, it } from "vitest";
+import { decodeRoomInvite } from "@claude-desktop/shared";
+import { RoomArchive } from "./room-archive";
 import { RoomService } from "./room-service";
-import { RoomMetrics } from "./room-metrics";
 import type { SessionManager } from "./session-manager";
 import type { SettingsStore } from "./settings-store";
-
-// The real relay script runs as a child process via the current Node — the
-// same file users deploy to a VPS (`node room-relay-server.mjs --port …`).
-const RELAY_SCRIPT = path.resolve(
-  __dirname,
-  "../../../../scripts/room-relay-server.mjs",
-);
-
-const dirs: string[] = [];
-const relays: ChildProcess[] = [];
-const kills: Array<() => void> = [];
+const token = "test-room-server-token-not-a-real-secret";
+const children: ChildProcess[] = [];
 const services: RoomService[] = [];
-const silentServers: net.Server[] = [];
-const silentSockets = new Set<net.Socket>();
-
-afterEach(() => {
-  for (const kill of kills.splice(0)) {
-    try {
-      kill();
-    } catch {
-      // ignore
-    }
-  }
-  for (const s of services.splice(0)) {
-    try {
-      s.disposeAll();
-    } catch {
-      // ignore
-    }
-  }
-  for (const p of relays.splice(0)) {
-    try {
-      p.kill();
-    } catch {
-      // ignore
-    }
-  }
-  for (const sock of [...silentSockets]) {
-    try {
-      sock.destroy();
-    } catch {
-      // ignore
-    }
-  }
-  for (const s of silentServers.splice(0)) {
-    try {
-      s.close();
-    } catch {
-      // ignore
-    }
-  }
-  for (const d of dirs.splice(0)) {
-    try {
-      fs.rmSync(d, { recursive: true, force: true });
-    } catch {
-      // ignore
-    }
-  }
+const dirs: string[] = [];
+const archives: RoomArchive[] = [];
+function temp() { const dir = fs.mkdtempSync(path.join(os.tmpdir(), "room-hosted-test-")); dirs.push(dir); return dir; }
+function client(userDataDir = temp(), persistent = false) {
+  const archive = persistent ? new RoomArchive(userDataDir) : undefined;
+  if (archive) archives.push(archive);
+  const service = new RoomService({ getWindow: () => null, userDataDir,
+    ...(archive ? { archive } : {}),
+    sessions: {} as SessionManager, settings: { get: () => ({ lastProjectPath: null }) } as SettingsStore });
+  services.push(service); return service;
+}
+async function stop(proc: ChildProcess) {
+  if (proc.exitCode !== null || proc.signalCode !== null) return;
+  await new Promise<void>(resolve => { proc.once("exit", () => resolve()); proc.kill(); });
+}
+afterEach(async () => {
+  for (const service of services.splice(0)) service.disposeAll();
+  await Promise.all(children.splice(0).map(stop));
+  for (const archive of archives.splice(0)) archive.database?.close();
+  for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
-
-function tmp(): string {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), "room-relay-"));
-  dirs.push(d);
-  return d;
+async function freePort() {
+  const server = net.createServer();
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as net.AddressInfo).port;
+  await new Promise<void>(resolve => server.close(() => resolve())); return port;
 }
-
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = net.createServer();
-    srv.once("error", reject);
-    srv.listen(0, "127.0.0.1", () => {
-      const port = (srv.address() as net.AddressInfo).port;
-      srv.close(() => resolve(port));
-    });
+async function start(port = 0, data = temp()) {
+  port ||= await freePort();
+  // Run outside the repo: no workspace node_modules may mask missing bundle dependencies.
+  const script = path.join(temp(), "room-relay-server.mjs");
+  fs.copyFileSync(path.resolve(__dirname, "../../../../scripts/room-relay-server.mjs"), script);
+  const proc = spawn(process.execPath, [script, "--port", String(port), "--data-dir", data], {
+    env: { ...process.env, ROOM_SERVER_TOKEN: token }, stdio: ["ignore", "pipe", "pipe"],
   });
-}
-
-/** Spawn the real relay script and wait for its "listening" stdout line. */
-async function spawnRelay(
-  port: number,
-  token?: string,
-): Promise<{ port: number; url: string; out: () => string }> {
-  const args = [RELAY_SCRIPT, "--port", String(port)];
-  if (token) args.push("--token", token);
-  const proc = spawn(process.execPath, args, {
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  relays.push(proc);
-  let buf = "";
-  proc.stdout!.on("data", (c: Buffer) => {
-    buf += String(c);
-  });
+  children.push(proc);
   await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(
-      () => reject(new Error(`relay start timeout: ${buf}`)),
-      10_000,
-    );
-    const onData = () => {
-      if (/listening/.test(buf)) {
-        clearTimeout(timer);
-        resolve();
-      }
-    };
-    proc.stdout!.on("data", onData);
-    proc.once("exit", (code) => {
-      clearTimeout(timer);
-      reject(new Error(`relay exited (${code}): ${buf}`));
-    });
-    proc.once("error", (err) => {
-      clearTimeout(timer);
-      reject(err);
-    });
+    let output = "";
+    const timer = setTimeout(() => reject(new Error(output || "startup timeout")), 10000);
+    proc.stderr!.on("data", c => { output += String(c); });
+    proc.stdout!.on("data", c => { output += String(c); if (output.includes("listening")) { clearTimeout(timer); resolve(); } });
+    proc.once("exit", code => { clearTimeout(timer); reject(new Error(`server exited ${code}: ${output}`)); });
   });
-  return { port, url: `ws://127.0.0.1:${port}`, out: () => buf };
+  return { proc, port, data, url: `ws://127.0.0.1:${port}` };
 }
-
-async function startRelay(opts?: {
-  token?: string;
-}): Promise<{ port: number; url: string; out: () => string }> {
-  return spawnRelay(await freePort(), opts?.token);
+async function create(owner: RoomService, url: string, autoApprove = true) {
+  const result = await owner.create({ name: "托管群", relay: url, relayToken: token, password: "password123", autoApprove });
+  expect(result.ok, result.error).toBe(true); return result.room!;
 }
+function join(service: RoomService, owner: RoomService, id: string) {
+  const invite = owner.invite(id); expect(invite.ok).toBe(true);
+  return service.join({ ...decodeRoomInvite(invite.secret!), password: "password123" });
+}
+async function send(service: RoomService, id: string, text: string) {
+  const snapshot = service.get(id)!;
+  const seat = snapshot.seats.find(s => s.occupantUserId === snapshot.localUserId && s.kind === "human")!;
+  const result = await service.send(id, seat.id, text); expect(result.ok, result.error).toBe(true);
+}
+describe("server-owned rooms (real deployment bundle)", () => {
+  it("does not auto-rejoin a dismissed room after restarting the desktop", async () => {
+    const server = await start(), memberDir = temp();
+    const owner = client(), member = client(memberDir, true);
+    const room = await create(owner, server.url);
+    expect((await join(member, owner, room.roomId)).ok).toBe(true);
+    expect(owner.end(room.roomId).ok).toBe(true);
+    await expect.poll(() => member.get(room.roomId)?.status).toBe("ended");
+    member.disposeAll();
+    const restarted = client(memberDir, true);
+    expect(restarted.get(room.roomId)?.status).toBe("ended");
+    expect(restarted.list()[0].offline).toBeUndefined();
+  }, 15000);
+  it("automatically restores owner and member connections after desktop restart", async () => {
+    const server = await start();
+    const ownerDir = temp(), memberDir = temp();
+    const owner = client(ownerDir, true), member = client(memberDir, true);
+    const room = await create(owner, server.url);
+    expect((await join(member, owner, room.roomId)).ok).toBe(true);
+    const memberId = member.get(room.roomId)!.localUserId;
+    owner.disposeAll(); member.disposeAll();
+    const restoredOwner = client(ownerDir, true), restoredMember = client(memberDir, true);
+    await expect.poll(() => restoredOwner.list().find(r => r.roomId === room.roomId)?.offline, { timeout: 10000 }).toBeUndefined();
+    await expect.poll(() => restoredMember.list().find(r => r.roomId === room.roomId)?.offline, { timeout: 10000 }).toBeUndefined();
+    expect(restoredOwner.get(room.roomId)?.localUserId).toBe(room.localUserId);
+    expect(restoredMember.get(room.roomId)?.localUserId).toBe(memberId);
+    expect(restoredOwner.list()[0].role).toBe("host");
+    await send(restoredMember, room.roomId, "自动重连后发送");
+    await expect.poll(() => restoredOwner.get(room.roomId)?.items.some(i => i.text === "自动重连后发送")).toBe(true);
+    expect(restoredOwner.get(room.roomId)?.memberCount).toBe(2);
+  }, 20000);
 
-/** Rebind a relay on a port whose previous process was just killed. */
-async function respawnRelay(
-  port: number,
-): Promise<{ port: number; url: string; out: () => string }> {
-  let lastErr: unknown;
-  for (let i = 0; i < 10; i++) {
-    try {
-      return await spawnRelay(port);
-    } catch (err) {
-      lastErr = err;
-      await new Promise((r) => setTimeout(r, 300));
+  it("keeps guests chatting after creator disconnect and preserves history across restart", async () => {
+    const server = await start();
+    const owner = client(), alice = client(), bob = client();
+    const room = await create(owner, server.url);
+    expect(room.hosted).toBe(true);
+    expect(room.members).toHaveLength(1);
+    expect(room.members.find(m => m.userId === room.localUserId)?.role).toBe("host");
+    expect(room.seats).toHaveLength(1);
+    expect(owner.list()[0].role).toBe("host");
+    expect(room.memberCount).toBe(1);
+    expect(room.onlineCount).toBe(1);
+    expect((await join(alice, owner, room.roomId)).ok).toBe(true);
+    expect((await join(bob, owner, room.roomId)).ok).toBe(true);
+    owner.disposeAll();
+    await expect.poll(() => alice.get(room.roomId)?.members.find(m => m.userId === room.localUserId)?.online).toBe(false);
+    expect(alice.get(room.roomId)?.onlineCount).toBe(2);
+    await send(alice, room.roomId, "群主离线后仍能发送");
+    await expect.poll(() => bob.get(room.roomId)?.items.some(i => i.text === "群主离线后仍能发送")).toBe(true);
+    await stop(server.proc); await start(server.port, server.data);
+    expect((await alice.rejoin(room.roomId)).ok).toBe(true);
+    expect((await bob.rejoin(room.roomId)).ok).toBe(true);
+    expect(bob.get(room.roomId)?.members.filter(m => m.role === "host").map(m => m.userId)).toEqual([room.localUserId]);
+    expect(bob.get(room.roomId)?.members).toHaveLength(3);
+    expect(bob.get(room.roomId)?.items.some(i => i.text === "群主离线后仍能发送")).toBe(true);
+    await send(bob, room.roomId, "重启后继续");
+    await expect.poll(() => alice.get(room.roomId)?.items.some(i => i.text === "重启后继续")).toBe(true);
+  }, 30000);
+  it("keeps admission approval with the authenticated creator", async () => {
+    const server = await start(); const owner = client(), guest = client();
+    const room = await create(owner, server.url, false);
+    const pending = join(guest, owner, room.roomId);
+    await expect.poll(() => owner.pendingDevices(room.roomId).pending.length).toBe(1);
+    expect(owner.approveDevice(room.roomId, owner.pendingDevices(room.roomId).pending[0].fp).ok).toBe(true);
+    expect((await pending).ok).toBe(true);
+    expect(guest.end(room.roomId).ok).toBe(false);
+    const internals = guest as unknown as { rooms: Map<string, unknown>; sendClient: (room: unknown, type: string, payload: unknown) => void };
+    internals.sendClient(internals.rooms.get(room.roomId), "host.control", { action: "rename", value: "非法名称" });
+    // Follow the attack with a confirmed chat so the same socket has processed it.
+    await send(guest, room.roomId, "权限检查");
+    expect(guest.get(room.roomId)?.name).toBe("托管群");
+    expect(owner.rename(room.roomId, "新名称").ok).toBe(true);
+    await expect.poll(() => guest.get(room.roomId)?.name).toBe("新名称");
+    owner.end(room.roomId);
+    await expect.poll(() => guest.get(room.roomId)?.status).toBe("ended");
+  }, 20000);
+  it("lets only the authenticated owner grant and revoke admins, and protects the owner", async () => {
+    const server = await start(); const owner = client(), admin = client(), guest = client();
+    const room = await create(owner, server.url);
+    const adminRoom = (await join(admin, owner, room.roomId)).room!;
+    const guestRoom = (await join(guest, owner, room.roomId)).room!;
+    expect(adminRoom.members.find(m => m.userId === adminRoom.localUserId)?.role).toBe("member");
+    expect(owner.setMemberRole(room.roomId, adminRoom.localUserId!, "admin").ok).toBe(true);
+    await expect.poll(() => admin.get(room.roomId)?.members.find(m => m.userId === adminRoom.localUserId)?.role).toBe("admin");
+    expect(admin.setMemberRole(room.roomId, guestRoom.localUserId!, "admin").ok).toBe(false);
+    expect(admin.end(room.roomId).ok).toBe(false);
+    expect(admin.kick(room.roomId, room.localUserId!).ok).toBe(false);
+    expect(owner.setMemberRole(room.roomId, room.localUserId!, "member").ok).toBe(false);
+    const internals = admin as unknown as { rooms: Map<string, unknown>; sendClient: (room: unknown, type: string, payload: unknown) => void };
+    const connection = internals.rooms.get(room.roomId);
+    internals.sendClient(connection, "member.role", { userId: guestRoom.localUserId, role: "admin" });
+    internals.sendClient(connection, "member.role", { userId: room.localUserId, role: "member" });
+    internals.sendClient(connection, "member.role", { userId: adminRoom.localUserId, role: "host" });
+    internals.sendClient(connection, "join", { userId: room.localUserId, name: "冒充群主", protocol: 3, role: "host" });
+    internals.sendClient(connection, "host.control", { action: "end" });
+    await send(admin, room.roomId, "管理员越权请求已处理");
+    await expect.poll(() => owner.get(room.roomId)?.items.some(i => i.text === "管理员越权请求已处理")).toBe(true);
+    expect(owner.get(room.roomId)?.status).toBe("open");
+    expect(owner.get(room.roomId)?.members.filter(m => m.role === "host").map(m => m.userId)).toEqual([room.localUserId]);
+    expect(owner.get(room.roomId)?.members.find(m => m.userId === guestRoom.localUserId)?.role).toBe("member");
+    const message = owner.get(room.roomId)!.items.find(i => i.text === "管理员越权请求已处理")!;
+    expect(owner.recall(room.roomId, message.id).ok).toBe(true);
+    await expect.poll(() => admin.get(room.roomId)?.items.find(i => i.id === message.id)?.recalled).toBe(true);
+    expect(owner.setMemberRole(room.roomId, adminRoom.localUserId!, "member").ok).toBe(true);
+    await expect.poll(() => admin.get(room.roomId)?.members.find(m => m.userId === adminRoom.localUserId)?.role).toBe("member");
+  }, 20000);
+  it("restores one owner identity when the creating device rejoins from an invitation", async () => {
+    const server = await start(), deviceDir = temp();
+    const owner = client(deviceDir), guest = client();
+    const room = await create(owner, server.url);
+    expect((await join(guest, owner, room.roomId)).ok).toBe(true);
+    owner.disposeAll();
+    const restored = client(deviceDir);
+    const joined = await join(restored, guest, room.roomId);
+    expect(joined.ok, joined.error).toBe(true);
+    expect(joined.room?.localUserId).toBe(room.localUserId);
+    expect(joined.room?.members.filter(m => m.role === "host")).toHaveLength(1);
+    expect(joined.room?.members).toHaveLength(2);
+    expect(restored.rename(room.roomId, "恢复群主身份").ok).toBe(true);
+    await expect.poll(() => guest.get(room.roomId)?.name).toBe("恢复群主身份");
+  }, 20000);
+  it.each([false, true])("restores an old owner only with unambiguous persisted device evidence (ambiguous: %s)", async (ambiguous) => {
+    const server = await start(), owner = client(), guest = client();
+    const room = await create(owner, server.url);
+    expect((await join(guest, owner, room.roomId)).ok).toBe(true);
+    await send(guest, room.roomId, "迁移前消息");
+    await stop(server.proc);
+    const archive = new RoomArchive(server.data);
+    const stored = archive.loadRoom(room.roomId)!;
+    expect(stored.hosted).toBe(true);
+    expect(stored.hostedOwnerFp).toMatch(/^[a-f0-9]{64}$/);
+    const ownerMember = stored.members!.find(m => m.userId === room.localUserId)!;
+    ownerMember.role = "admin";
+    if (ambiguous) stored.members!.find(m => m.userId !== room.localUserId)!.role = "admin";
+    stored.members!.push({ userId: stored.localUserId!, name: "群聊服务器", role: "host", online: true });
+    stored.seats!.push({ id: "legacy-server-seat", kind: "human", name: "群聊服务器", occupantUserId: stored.localUserId!, takenOverBy: null, sessionId: null, running: false, agentName: null });
+    // Old normalize() discarded these fields, despite create() writing them.
+    delete stored.hosted;
+    delete stored.hostedOwnerFp;
+    archive.saveRoom(stored); archive.close();
+    await start(server.port, server.data);
+    const joined = await guest.rejoin(room.roomId);
+    expect(joined.ok, joined.error).toBe(true);
+    expect(joined.room?.members.filter(m => m.role === "host").map(m => m.userId)).toEqual(ambiguous ? [] : [room.localUserId]);
+    expect(joined.room?.members.some(m => m.userId === stored.localUserId)).toBe(false);
+    expect(joined.room?.seats.some(s => s.occupantUserId === stored.localUserId)).toBe(false);
+    expect(joined.room?.memberCount).toBe(2);
+    expect((await owner.rejoin(room.roomId)).ok).toBe(true);
+    if (ambiguous) {
+      expect(owner.rename(room.roomId, "不能凭管理员角色猜群主").ok).toBe(false);
+      return;
     }
-  }
-  throw lastErr;
-}
-
-function keep(res: RoomRelayResult): RoomRelayResult {
-  if (res.ok) kills.push(res.kill);
-  return res;
-}
-
-describe("startRoomRelay (client)", () => {
-  it("registers a room id and reports the public join url", async () => {
-    const relay = await startRelay();
-    const res = keep(
-      await startRoomRelay({
-        relay: relay.url,
-        roomId: "0123456789ab",
-        localPort: 1,
-      }),
-    );
-    expect(res.ok).toBe(true);
-    if (res.ok) expect(res.url).toBe(`${relay.url}/r/0123456789ab`);
-    // kill is idempotent
-    if (res.ok) {
-      res.kill();
-      res.kill();
-    }
+    expect(owner.rename(room.roomId, "旧群已修复").ok).toBe(true);
+    await expect.poll(() => guest.get(room.roomId)?.name).toBe("旧群已修复");
+  }, 20000);
+  it("rejects missing token, unsafe admission and removed legacy endpoints", async () => {
+    const server = await start(); const base = `http://127.0.0.1:${server.port}`;
+    expect((await fetch(`${base}/api/rooms`, { method: "POST" })).status).toBe(401);
+    expect((await fetch(`${base}/ctl?id=0123456789ab`)).status).toBe(404);
+    const result = await client().create({ name: "unsafe", relay: server.url, relayToken: token, autoApprove: true });
+    expect(result.ok).toBe(false); expect(result.error).toContain("8");
   });
-
-  it("reports 中继服务器不可达 when nothing listens on the relay address", async () => {
-    const port = await freePort();
-    const res = await startRoomRelay({
-      relay: `ws://127.0.0.1:${port}`,
-      roomId: "0123456789ab",
-      localPort: 1,
-      timeoutMs: 3000,
-    });
-    expect(res.ok).toBe(false);
-    if (!res.ok) expect(res.error).toBe("中继服务器不可达");
+  it("keeps LAN rooms hosted on the creator desktop", async () => {
+    const owner = client(), guest = client();
+    const result = await owner.create({ name: "局域网", port: await freePort(), autoApprove: true });
+    expect(result.ok).toBe(true); expect(result.room?.hosted).toBe(false);
+    expect((await guest.join({ host: "127.0.0.1", port: result.room!.port })).ok).toBe(true);
+    await send(guest, result.room!.roomId, "LAN正常"); owner.disposeAll();
+    await expect.poll(() => guest.list().find(r => r.roomId === result.room!.roomId)?.offline).toBe(true);
   });
-
-  it("reports 中继 token 错误 when the token mismatches", async () => {
-    const relay = await startRelay({ token: "secret-token" });
-    const res = await startRoomRelay({
-      relay: relay.url,
-      token: "nope",
-      roomId: "0123456789ab",
-      localPort: 1,
-      timeoutMs: 5000,
-    });
-    expect(res.ok).toBe(false);
-    if (!res.ok) expect(res.error).toBe("中继 token 错误");
-  });
-
-  it("accepts the matching token", async () => {
-    const relay = await startRelay({ token: "secret-token" });
-    const res = keep(
-      await startRoomRelay({
-        relay: relay.url,
-        token: "secret-token",
-        roomId: "0123456789ab",
-        localPort: 1,
-      }),
-    );
-    expect(res.ok).toBe(true);
-  });
-
-  it("rejects a second ctl with the same room id (4409 → 中继 id 被占用)", async () => {
-    const relay = await startRelay();
-    const first = keep(
-      await startRoomRelay({
-        relay: relay.url,
-        roomId: "aabbccddeeff",
-        localPort: 1,
-      }),
-    );
-    expect(first.ok).toBe(true);
-    const second = await startRoomRelay({
-      relay: relay.url,
-      roomId: "aabbccddeeff",
-      localPort: 1,
-      timeoutMs: 5000,
-    });
-    expect(second.ok).toBe(false);
-    if (!second.ok) expect(second.error).toBe("中继 id 被占用");
-  });
-
-  it("times out with 中继握手超时 when the server never answers", async () => {
-    // Accepts TCP but never completes the ws upgrade.
-    const silent = net.createServer((sock) => {
-      silentSockets.add(sock);
-      sock.on("close", () => silentSockets.delete(sock));
-      sock.on("error", () => {});
-    });
-    silentServers.push(silent);
-    await new Promise<void>((resolve) => silent.listen(0, "127.0.0.1", resolve));
-    const port = (silent.address() as net.AddressInfo).port;
-    const res = await startRoomRelay({
-      relay: `ws://127.0.0.1:${port}`,
-      roomId: "0123456789ab",
-      localPort: 1,
-      timeoutMs: 300,
-    });
-    expect(res.ok).toBe(false);
-    if (!res.ok) expect(res.error).toBe("中继握手超时");
-  });
-
-  it("rejects a relay address without a ws/wss scheme", async () => {
-    const res = await startRoomRelay({
-      relay: "http://example.com",
-      roomId: "0123456789ab",
-      localPort: 1,
-      timeoutMs: 300,
-    });
-    expect(res.ok).toBe(false);
-  });
-
-  it(
-    "re-registers the same room id after the relay restarts",
-    async () => {
-      const first = await startRelay();
-      const roomId = "ff0011223344";
-      const res = keep(
-        await startRoomRelay({ relay: first.url, roomId, localPort: 1 }),
-      );
-      expect(res.ok).toBe(true);
-
-      // Bounce the relay; the client's 3s ctl reconnect must re-register the
-      // same room id on the fresh process (visible in its stdout log).
-      const dead = relays[relays.length - 1]!;
-      dead.kill();
-      const second = await respawnRelay(first.port);
-
-      await vi.waitFor(
-        () => {
-          expect(second.out()).toContain(`ctl registered id=${roomId}`);
-        },
-        { timeout: 15_000, interval: 250 },
-      );
-    },
-    30_000,
-  );
-});
-
-// --- RoomService integration -------------------------------------------------
-
-function mockWindow() {
-  return () =>
-    ({
-      isDestroyed: () => false,
-      webContents: { isDestroyed: () => false, send: () => {} },
-    }) as never;
-}
-
-function mockSessions() {
-  return {
-    start: vi.fn().mockResolvedValue("sess-agent"),
-    continue: vi.fn().mockResolvedValue(undefined),
-    getTranscript: vi.fn().mockReturnValue([]),
-    abort: vi.fn(),
-    syncExtras: vi.fn(),
-  } as unknown as SessionManager;
-}
-
-function mockSettings(project: string) {
-  return {
-    get: vi.fn().mockReturnValue({ lastProjectPath: project }),
-  } as unknown as SettingsStore;
-}
-
-function makeRooms(): RoomService {
-  const userDataDir = tmp();
-  const rooms = new RoomService({
-    getWindow: mockWindow(),
-    sessions: mockSessions(),
-    settings: mockSettings(userDataDir),
-    userDataDir,
-    archive: null,
-    // Keep the [room-metrics] console.info lines out of the test output.
-    metrics: new RoomMetrics(() => {}),
-  });
-  services.push(rooms);
-  return rooms;
-}
-
-async function createRelayHost(
-  rooms: RoomService,
-  relay: string,
-  password = "pw",
-  autoApprove = true,
-): Promise<RoomSnapshot> {
-  let last = "create failed";
-  for (let i = 0; i < 10; i++) {
-    const res = await rooms.create({
-      name: "t",
-      port: 21000 + Math.floor(Math.random() * 20000),
-      password,
-      autoApprove,
-      relay,
-    });
-    if (res.ok && res.room) return res.room;
-    last = res.error ?? last;
-  }
-  throw new Error(last);
-}
-
-describe("RoomService relay option", () => {
-  it(
-    "guest joins through the relay and the host receives its chat (relay + AEAD)",
-    async () => {
-      const relay = await startRelay();
-      const host = makeRooms();
-      const room = await createRelayHost(host, relay.url);
-      // A relayed room is forced onto the encrypted transport.
-      expect(room.encrypt).toBe(true);
-
-      const inv = host.invite(room.roomId);
-      expect(inv.ok).toBe(true);
-      const decoded = decodeRoomInvite(inv.secret!);
-      const relayUrl = (decoded.wss ?? []).find((u) =>
-        u.includes(`:${relay.port}/`),
-      );
-      expect(relayUrl).toMatch(
-        new RegExp(`^ws://127\\.0\\.0\\.1:${relay.port}/r/[0-9a-f]{12}$`),
-      );
-
-      const guest = makeRooms();
-      const joined = await guest.join({
-        // TEST-NET-1 + port 1: the LAN candidate can never win, so the join
-        // must go through the relay candidate.
-        host: "192.0.0.1",
-        port: 1,
-        password: "pw",
-        wss: [relayUrl!],
-        hostFingerprint: room.hostFingerprint,
-      });
-      expect(joined.ok).toBe(true);
-
-      const gSnap = guest.get(joined.room!.roomId)!;
-      const gSeat = gSnap.seats.find(
-        (s) => s.occupantUserId === gSnap.localUserId,
-      );
-      expect(gSeat).toBeTruthy();
-      const sent = await guest.send(
-        joined.room!.roomId,
-        gSeat!.id,
-        "hello via relay",
-      );
-      expect(sent.ok).toBe(true);
-
-      await vi.waitFor(
-        () => {
-          const items = host.get(room.roomId)!.items;
-          expect(
-            items.some(
-              (i) => i.kind === "user" && i.text === "hello via relay",
-            ),
-          ).toBe(true);
-        },
-        { timeout: 10_000 },
-      );
-    },
-    30_000,
-  );
-
-  it(
-    "guest held for host approval still joins through the relay after approve",
-    async () => {
-      const relay = await startRelay();
-      const host = makeRooms();
-      const room = await createRelayHost(host, relay.url, "pw", false);
-      const inv = host.invite(room.roomId);
-      const decoded = decodeRoomInvite(inv.secret!);
-      const relayUrl = (decoded.wss ?? []).find((u) =>
-        u.includes(`:${relay.port}/`),
-      );
-
-      const guest = makeRooms();
-      const joinP = guest.join({
-        host: "192.0.0.1",
-        port: 1,
-        password: "pw",
-        wss: [relayUrl!],
-        hostFingerprint: room.hostFingerprint,
-      });
-
-      await vi.waitFor(
-        () => {
-          const pend = host.pendingDevices(room.roomId);
-          expect(pend.ok).toBe(true);
-          expect(pend.pending).toHaveLength(1);
-        },
-        { timeout: 10_000 },
-      );
-      expect(guest.list()).toHaveLength(0);
-
-      const fp = host.pendingDevices(room.roomId).pending[0].fp;
-      const approved = host.approveDevice(room.roomId, fp);
-      expect(approved.ok).toBe(true);
-
-      const joined = await joinP;
-      expect(joined.ok).toBe(true);
-      expect(joined.error).toBeUndefined();
-      expect(joined.room?.roomId).toBe(room.roomId);
-      expect(host.pendingDevices(room.roomId).pending).toHaveLength(0);
-      expect(
-        host.get(room.roomId)?.members.some((m) => m.role === "member"),
-      ).toBe(true);
-    },
-    30_000,
-  );
-
-  it(
-    "peeks the mod offer through the relay without a LAN path",
-    async () => {
-      const relay = await startRelay();
-      const host = makeRooms();
-      const room = await createRelayHost(host, relay.url);
-      const inv = host.invite(room.roomId);
-      const decoded = decodeRoomInvite(inv.secret!);
-      const relayUrl = (decoded.wss ?? []).find((u) =>
-        u.includes(`:${relay.port}/`),
-      );
-      const guest = makeRooms();
-      const peeked = await guest.peek({
-        host: "192.0.0.1",
-        port: 1,
-        wss: [relayUrl!],
-      });
-      expect(peeked.ok).toBe(true);
-      expect(peeked.offer?.checksum ?? "").toBe(room.modChecksum);
-    },
-    30_000,
-  );
-
-  it(
-    "relay outage degrades create to a LAN-only room without failing",
-    async () => {
-      const deadPort = await freePort();
-      const rooms = makeRooms();
-      const room = await createRelayHost(rooms, `ws://127.0.0.1:${deadPort}`);
-      // relay forces encryption even when the relay itself is down.
-      expect(room.encrypt).toBe(true);
-      const inv = rooms.invite(room.roomId);
-      expect(inv.ok).toBe(true);
-      const decoded = decodeRoomInvite(inv.secret ?? "");
-      expect(decoded.wss ?? []).toEqual([]);
-      const items = rooms.get(room.roomId)!.items;
-      expect(items.some((i) => i.text.includes("中继不可用"))).toBe(true);
-    },
-    30_000,
-  );
 });

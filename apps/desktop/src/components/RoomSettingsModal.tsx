@@ -14,6 +14,7 @@ import {
   enableRoomKernelMod,
   enableRoomMod,
   endRoomMod,
+  endActiveRoom,
   getRoomKernelImprove,
   kickRoomMember,
   leaveActiveRoom,
@@ -34,6 +35,7 @@ import {
 import { RoomLeaveConfirm } from "./RoomLeaveConfirm";
 import { isRoomMuted, setRoomMuted } from "../lib/room-notify";
 import { ToggleSwitch } from "./ToggleSwitch";
+import { ThemedSelect } from "./Select";
 import "./RoomSettingsDetails.css";
 
 type Props = {
@@ -45,6 +47,7 @@ type Props = {
   onInvite?: () => Promise<{ ok: boolean; error?: string }>;
   /** Keep draft state mounted, but let the invitation dialog own focus / Escape. */
   suspended?: boolean;
+  exiting?: boolean;
 };
 
 type RoomSettingsTab = "mods" | "improve" | "memory" | "overview";
@@ -91,6 +94,7 @@ export function RoomSettingsModal({
   onClose,
   onInvite,
   suspended = false,
+  exiting = false,
 }: Props) {
   const { t } = useI18n();
   const [packs, setPacks] = useState<RoomModPack[]>([]);
@@ -111,6 +115,7 @@ export function RoomSettingsModal({
   // 消息免打扰：本机偏好（localStorage），普通消息不弹通知，@ 仍弹
   const [muted, setMutedState] = useState(() => isRoomMuted(room.roomId));
   const [tab, setTab] = useState<RoomSettingsTab>("overview");
+  const canManageExtensions = canHost && !room.hosted;
   const nameValid = Boolean(nameDraft.trim());
   const nameDirty = Boolean(
     canHost &&
@@ -133,7 +138,7 @@ export function RoomSettingsModal({
   );
 
   const refreshMemory = async () => {
-    if (!canHost || !memoryOn) {
+    if (!canManageExtensions || !memoryOn) {
       setEntries([]);
       return;
     }
@@ -146,7 +151,7 @@ export function RoomSettingsModal({
   };
 
   const refreshImprove = async () => {
-    if (!canHost) {
+    if (!canManageExtensions) {
       setImprove(null);
       return;
     }
@@ -168,16 +173,16 @@ export function RoomSettingsModal({
     void refreshImprove();
     // room.kernel changes when enable/disable/apply completes
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [room.roomId, room.kernel, canHost, memoryOn]);
+  }, [room.roomId, room.kernel, canManageExtensions, memoryOn]);
 
   useEffect(() => {
-    if (suspended) return;
+    if (suspended || exiting) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") requestClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [requestClose, suspended]);
+  }, [requestClose, suspended, exiting]);
 
   // 改名成功后快照回流 → 草稿跟随最新名字
   useEffect(() => {
@@ -363,7 +368,7 @@ export function RoomSettingsModal({
   if (suspended) return null;
 
   return createPortal(
-    <div className="room-modal-overlay" role="presentation" onClick={requestClose}>
+    <div className={`room-modal-overlay room-settings-motion${exiting ? " is-exiting" : ""}`} inert={exiting} role="presentation" onClick={exiting ? undefined : requestClose}>
       <div
         className="room-modal room-settings-modal"
         role="dialog"
@@ -412,7 +417,7 @@ export function RoomSettingsModal({
             ))}
           </nav>
 
-          <div className="room-modal-body room-settings-content">
+          <div className="room-modal-body room-settings-content" key={tab}>
           {tab === "overview" ? (
             <section className="room-settings-section room-overview">
               <div className="room-overview-identity">
@@ -482,7 +487,7 @@ export function RoomSettingsModal({
                 </div>
                 {inviteError ? <p className="settings-error room-invite-error" role="alert">{inviteError}</p> : null}
                 <dl>
-                  <div><dt>连接</dt><dd>{offline ? "连接已断开" : room.status !== "open" ? "已结束" : canHost ? "本地主持" : "成员连接"}</dd></div>
+                  <div><dt>连接</dt><dd>{offline ? "连接已断开" : room.status !== "open" ? "已结束" : room.hosted ? "服务器托管" : canHost ? "本地主持" : "成员连接"}</dd></div>
                   <div><dt>传输</dt><dd>{room.encrypt ? "已启用加密" : "未启用加密"}</dd></div>
                   <div><dt>扩展</dt><dd>{room.kernel?.mods.filter(m => m.state === "active").map(m => m.name).join("、") || "未启用扩展"}</dd></div>
                   <div><dt>群活动</dt><dd>{room.modChecksum ? "已启用群活动" : "暂无群活动"}</dd></div>
@@ -575,7 +580,7 @@ export function RoomSettingsModal({
                               className={`room-action-icon${m.role === "admin" ? " is-active" : ""}`}
                               title={m.role === "admin" ? "取消管理员" : "设为管理员"}
                               aria-label={m.role === "admin" ? `取消 ${m.name} 的管理员` : `将 ${m.name} 设为管理员`}
-                              disabled={busyId === `role:${m.userId}`}
+                              disabled={offline || busyId === `role:${m.userId}`}
                               onClick={() => void changeRole(m.userId, m.role === "admin" ? "member" : "admin")}
                             >
                               <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
@@ -590,7 +595,7 @@ export function RoomSettingsModal({
                               className="room-action-icon is-danger"
                               title={t.room.kick}
                               aria-label={`${t.room.kick} ${m.name}`}
-                              disabled={busyId === `kick:${m.userId}`}
+                              disabled={offline || busyId === `kick:${m.userId}`}
                               onClick={() => void kickMember(m.userId)}
                             >
                               <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
@@ -630,7 +635,7 @@ export function RoomSettingsModal({
 
           {tab === "mods" ? (
             <div className="room-mods-page">
-              {!canHost ? <p className="settings-hint">{t.room.settingsGuestHint}</p> : null}
+              {!canManageExtensions ? <p className="settings-hint">{room.hosted ? t.room.settingsHostedExtensionsHint : t.room.settingsGuestHint}</p> : null}
               {playPacks.length === 0 && kernelPacks.length === 0 ? (
                 <p className="settings-hint">{t.room.settingsMemoryEmpty}</p>
               ) : null}
@@ -656,7 +661,7 @@ export function RoomSettingsModal({
                           <ToggleSwitch
                             checked={on}
                             label={on ? `停用 ${pack.name}` : `启用 ${pack.name}`}
-                            disabled={!canHost || room.status !== "open" || busyId === "play"}
+                            disabled={!canManageExtensions || room.status !== "open" || busyId === "play"}
                             onCheckedChange={(next) => void setPlayPack(next ? pack.packDir : "")}
                           />
                         </div>
@@ -692,7 +697,7 @@ export function RoomSettingsModal({
                           <ToggleSwitch
                             checked={on}
                             label={on ? `停用 ${pack.name}` : `启用 ${pack.name}`}
-                            disabled={!canHost || room.status !== "open" || busyId === pack.id}
+                            disabled={!canManageExtensions || room.status !== "open" || busyId === pack.id}
                             onCheckedChange={(next) => void togglePack(pack, next)}
                           />
                         </div>
@@ -708,25 +713,28 @@ export function RoomSettingsModal({
             <section className="room-settings-section">
               <h4>{t.room.settingsImprove}</h4>
               <p className="settings-hint">{t.room.settingsImproveHint}</p>
-              {!canHost ? (
-                <p className="settings-hint">{t.room.settingsGuestHint}</p>
+              {!canManageExtensions ? (
+                <p className="settings-hint">{room.hosted ? t.room.settingsHostedExtensionsHint : t.room.settingsGuestHint}</p>
               ) : (
                 <>
-                  <label className="room-improve-actions">
+                  <div className="room-improve-actions">
                     <span className="settings-hint">{t.room.settingsAutonomy}</span>
-                    <select
-                      className="select"
-                      value={improve?.autonomy ?? 0}
+                    <ThemedSelect
+                      className="room-autonomy-select"
+                      variant="field"
+                      ariaLabel={t.room.settingsAutonomy}
+                      value={String(improve?.autonomy ?? 0)}
                       disabled={room.status !== "open" || busyId === "autonomy"}
-                      onChange={(e) =>
-                        void changeAutonomy(Number(e.target.value) as 0 | 1 | 2)
+                      options={[
+                        { value: "0", label: t.room.settingsAutonomyL0 },
+                        { value: "1", label: t.room.settingsAutonomyL1 },
+                        { value: "2", label: t.room.settingsAutonomyL2 },
+                      ]}
+                      onChange={(value) =>
+                        void changeAutonomy(Number(value) as 0 | 1 | 2)
                       }
-                    >
-                      <option value={0}>{t.room.settingsAutonomyL0}</option>
-                      <option value={1}>{t.room.settingsAutonomyL1}</option>
-                      <option value={2}>{t.room.settingsAutonomyL2}</option>
-                    </select>
-                  </label>
+                    />
+                  </div>
                   {enabledKernel.length === 0 ? (
                     <p className="settings-hint">{t.room.settingsExtOff}</p>
                   ) : (
@@ -825,7 +833,9 @@ export function RoomSettingsModal({
             <section className="room-settings-section">
               <h4>{t.room.settingsMemory}</h4>
               <p className="settings-hint">{t.room.settingsMemoryHint}</p>
-              {!memoryOn ? (
+              {room.hosted ? (
+                <p className="settings-hint">{t.room.settingsHostedExtensionsHint}</p>
+              ) : !memoryOn ? (
                 <p className="settings-hint">{t.room.settingsMemoryNeedPack}</p>
               ) : !canHost ? (
                 <p className="settings-hint">{t.room.settingsGuestHint}</p>
@@ -933,7 +943,8 @@ export function RoomSettingsModal({
           onConfirm={() => {
             setConfirmLeave(false);
             onClose();
-            void leaveActiveRoom();
+            if (canHost && room.status === "open") void endActiveRoom();
+            else void leaveActiveRoom();
           }}
         />
       ) : null}

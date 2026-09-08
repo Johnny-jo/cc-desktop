@@ -16,6 +16,7 @@ import {
   validateMcpServers,
 } from "@claude-desktop/shared";
 import { getDesktop, hasDesktopApi } from "../lib/desktop-api";
+import { useI18n } from "../i18n/useI18n";
 import {
   getState,
   saveSettings,
@@ -300,6 +301,7 @@ function parseRulesText(
 }
 
 export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
+  const { t } = useI18n();
   const settings = useAppStore((s) => s.settings);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
   const sessionStatus = useAppStore((s) =>
@@ -311,6 +313,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   const [catalog, setCatalog] = useState<ModelInfo[]>([]);
   const [modelDraft, setModelDraft] = useState("");
   const [saving, setSaving] = useState(false);
+  const [savingGalaxyEffects, setSavingGalaxyEffects] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const [savedNote, setSavedNote] = useState<string | null>(null);
@@ -335,6 +338,21 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   );
   const [closePending, setClosePending] = useState(false);
   const openedRef = useRef(false);
+
+  async function onGalaxyEffectsChange(enabled: boolean) {
+    setLocalError(null);
+    setSavedNote(null);
+    setSavingGalaxyEffects(true);
+    try {
+      // Keep this immediate preference separate from the unsaved settings draft.
+      await saveSettings({ galaxyEffectsEnabled: enabled });
+      setSavedNote(t.settings.saved);
+    } catch (err) {
+      setLocalError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSavingGalaxyEffects(false);
+    }
+  }
 
   async function refreshSkills() {
     try {
@@ -1620,6 +1638,18 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
             </select>
             <p className="settings-hint">界面语言（保存后生效）</p>
           </label>
+          <div className="settings-toggle-row">
+            <div>
+              <span>{t.settings.galaxyEffects}</span>
+              <small>{t.settings.galaxyEffectsHint}</small>
+            </div>
+            <ToggleSwitch
+              checked={settings?.galaxyEffectsEnabled !== false}
+              label={t.settings.galaxyEffects}
+              disabled={saving || savingGalaxyEffects}
+              onCheckedChange={(enabled) => { void onGalaxyEffectsChange(enabled); }}
+            />
+          </div>
           <label className="settings-field">
             全局字体大小
             <div className="settings-font-control">

@@ -20,6 +20,7 @@ export type ToolPermissionResult =
 export type PermissionBrokerDeps = {
   getMode: () => PermissionMode;
   requestFromUi: (req: PermissionRequest) => void;
+  onResolved?: (requestId: string, sessionId: string) => void;
   /** Persisted Claude Code-style rules from settings (allow wins after deny) */
   getAllowRules?: () => string[];
   getDenyRules?: () => string[];
@@ -91,12 +92,14 @@ export class PermissionBroker {
   private readonly getDenyRules: () => string[];
   private readonly onAddAllowRule: ((rule: string) => void) | undefined;
   private readonly timeoutMs: number;
+  private readonly onResolved: PermissionBrokerDeps["onResolved"];
 
   private readonly rules = new Map<string, SessionAllowRule[]>();
   private readonly pending = new Map<string, PendingEntry>();
 
   constructor(deps: PermissionBrokerDeps) {
     this.getMode = deps.getMode;
+    this.onResolved = deps.onResolved;
     this.requestFromUi = deps.requestFromUi;
     this.getAllowRules = deps.getAllowRules ?? (() => []);
     this.getDenyRules = deps.getDenyRules ?? (() => []);
@@ -169,6 +172,7 @@ export class PermissionBroker {
 
     clearTimeout(entry.timer);
     this.pending.delete(requestId);
+    this.onResolved?.(requestId, entry.sessionId);
 
     if (decision.behavior === "allow") {
       if (decision.scope === "session") {
@@ -221,6 +225,7 @@ export class PermissionBroker {
       const timer = setTimeout(() => {
         if (!this.pending.has(requestId)) return;
         this.pending.delete(requestId);
+        this.onResolved?.(requestId, sessionId);
         resolve({
           behavior: "deny",
           message: "Permission request timed out",
