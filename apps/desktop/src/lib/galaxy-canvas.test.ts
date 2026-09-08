@@ -2,6 +2,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { attachGalaxyCanvas } from "./galaxy-canvas";
 import * as particles from "./galaxy-particles";
 
+// Pixel appearance is verified with the real browser canvas; keep lifecycle tests small.
+vi.mock("./galaxy-nebula-renderer", () => ({
+  createGalaxyNebulaRenderer: () => ({ draw() {}, dispose() {} }),
+}));
+
 class TestElement extends EventTarget {
   dataset: Record<string, string> = {};
   classes = new Set<string>();
@@ -34,6 +39,11 @@ class TestObserver {
 function drawingContext() {
   return {
     setTransform() {},
+    save() {},
+    restore() {},
+    translate() {},
+    rotate() {},
+    scale() {},
     clearRect: vi.fn(),
     fillRect() {},
     drawImage() {},

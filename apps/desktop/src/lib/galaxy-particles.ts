@@ -1,5 +1,19 @@
+export type StellarKind = "red-dwarf" | "white-dwarf" | "sunlike" | "red-giant" | "blue-star";
+
+/** Apparent point sizes, not physical radii: even giants are unresolved here. */
+export const STELLAR_PALETTE = {
+  "red-dwarf": { hue: 18, saturation: 55, lightness: 64, size: 0.38, alpha: 0.065 },
+  "white-dwarf": { hue: 212, saturation: 5, lightness: 96, size: 0.7, alpha: 0.34 },
+  sunlike: { hue: 43, saturation: 75, lightness: 77, size: 0.7, alpha: 0.3 },
+  "red-giant": { hue: 12, saturation: 68, lightness: 73, size: 0.85, alpha: 0.36 },
+  "blue-star": { hue: 215, saturation: 62, lightness: 82, size: 0.8, alpha: 0.34 },
+} satisfies Record<StellarKind, object>;
+
 /** Stable stars in a rotating spiral density wave, independent of frame rate. */
 export type GalaxyParticle = {
+  kind: StellarKind;
+  /** Artistic violet halo around a small subset of hot blue stars. */
+  violetHalo: boolean;
   radius: number;
   angle: number;
   speed: number;
@@ -14,10 +28,10 @@ export type GalaxyParticle = {
 };
 
 const TAU = Math.PI * 2;
-const PATTERN_SPEED = 0.105;
-const INCLINATION_COS = 0.59;
+export const PATTERN_SPEED = 0.105;
+export const INCLINATION_COS = 0.59;
 const INCLINATION_SIN = Math.sqrt(1 - INCLINATION_COS ** 2);
-const POSITION_ANGLE = -0.32;
+export const POSITION_ANGLE = -0.32;
 
 function smoothUnit(value: number): number {
   const unit = Math.min(1, Math.max(0, value));
@@ -63,7 +77,7 @@ export function galaxyCameraAt(
   };
 }
 
-function spiralAngle(radius: number): number {
+export function spiralAngle(radius: number): number {
   return -1.3 + 3.05 * Math.log1p(radius * 4.5);
 }
 
@@ -78,20 +92,33 @@ export function createGalaxyParticles(count: number): GalaxyParticle[] {
   const scatter = () => (random() + random() + random() - 1.5) / 1.5;
   return Array.from({ length: Math.floor(count) }, () => {
     const core = random() < 0.32;
-    const radius = core
-      ? 0.028 + 0.25 * random() ** 1.65
-      : 0.065 + 0.875 * random() ** 0.88;
     const arm = core ? -1 : random() < 0.5 ? 0 : 1;
-    const jitter = scatter() * (0.18 + radius * 0.34);
+    // The central SMBH's horizon is subpixel at galactic scale. Populate its
+    // surrounding nuclear cluster instead of carving out a visible black disc.
+    const radius = core
+      ? 0.0004 + 0.275 * random() ** 1.65
+      : 0.065 + 0.875 * random() ** 0.88;
+    // Continuous scatter avoids regularly spaced, overexposed knots on the arms.
+    const jitter = scatter() * (0.2 + radius * 0.42);
+    const population = random();
+    // Visual mix: white first, yellow second, with isolated red/blue accents.
+    const kind: StellarKind = population < 0.7 ? "white-dwarf"
+      : population < 0.92 ? "sunlike"
+      : population < 0.96 ? "red-dwarf"
+      : population < 0.98 ? "red-giant" : "blue-star";
+    const palette = STELLAR_PALETTE[kind];
+    const violetHalo = kind === "blue-star" && random() < 0.12;
     const phase = random() * TAU;
     return {
+      kind,
+      violetHalo,
       radius,
       angle: core ? random() * TAU : spiralAngle(radius) + arm * Math.PI + jitter,
       speed: 0.12 + 0.32 / (0.22 + radius),
       jitter,
-      size: 0.45 + random() ** 3 * 1.35,
-      alpha: 0.23 + random() * 0.57 + (1 - radius) * 0.12,
-      hue: 194 + random() * 69,
+      size: palette.size * (0.75 + random() ** 2 * 0.9),
+      alpha: Math.min(1, palette.alpha * (0.65 + random() * 0.8)),
+      hue: palette.hue + (random() - 0.5) * 12,
       phase,
       height: scatter() * (core ? 0.048 : 0.02) * (1 - radius * 0.55),
       arm,

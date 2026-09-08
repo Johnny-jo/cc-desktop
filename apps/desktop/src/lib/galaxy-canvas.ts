@@ -1,4 +1,6 @@
-import { createGalaxyParticles, galaxyParticlePosition, galaxyCameraAt } from "./galaxy-particles";
+import { createGalaxyParticles, galaxyParticlePosition, galaxyCameraAt, STELLAR_PALETTE } from "./galaxy-particles";
+import { galaxyMediumAt } from "./galaxy-nebula";
+import { createGalaxyNebulaRenderer } from "./galaxy-nebula-renderer";
 
 type Point = { x: number; y: number };
 
@@ -9,16 +11,28 @@ export function attachGalaxyCanvas(root: HTMLElement, canvas: HTMLCanvasElement,
   const stars = createGalaxyParticles(16000);
   const reduced = window.matchMedia("(prefers-reduced-motion: reduce)");
   const systemLight = window.matchMedia("(prefers-color-scheme: light)");
-  const colors = stars.map((star) => star.arm < 0 ? "#ecdbc9" : `hsl(${star.hue} 65% ${72 + star.alpha * 14}%)`);
-  const glow = document.createElement("canvas");
-  glow.width = glow.height = 32;
-  const glowContext = glow.getContext("2d")!;
-  const light = glowContext.createRadialGradient(16, 16, 0, 16, 16, 16);
-  light.addColorStop(0, "rgba(178,209,255,0.6)");
-  light.addColorStop(0.22, "rgba(122,160,227,0.2)");
-  light.addColorStop(1, "rgba(100,126,211,0)");
-  glowContext.fillStyle = light;
-  glowContext.fillRect(0, 0, 32, 32);
+  const colors = stars.map((star) => {
+    const palette = STELLAR_PALETTE[star.kind];
+    return `hsl(${star.hue} ${palette.saturation}% ${palette.lightness}%)`;
+  });
+  const extinction = stars.map((star) => star.arm < 0 ? 1 : galaxyMediumAt(
+    Math.cos(star.angle) * star.radius, Math.sin(star.angle) * star.radius,
+  ).transmission);
+  let nebula: ReturnType<typeof createGalaxyNebulaRenderer> | undefined;
+  const glows = new Map<string, HTMLCanvasElement>();
+  for (const [kind, palette] of [...Object.entries(STELLAR_PALETTE), ["violet", { hue: 270, saturation: 82 }]] as const) {
+    const glow = document.createElement("canvas");
+    glow.width = glow.height = 64;
+    const glowContext = glow.getContext("2d")!;
+    const light = glowContext.createRadialGradient(32, 32, 0, 32, 32, 32);
+    light.addColorStop(0, `hsl(${palette.hue} ${palette.saturation}% 83% / 0.85)`);
+    light.addColorStop(0.13, `hsl(${palette.hue} ${palette.saturation}% 69% / 0.45)`);
+    light.addColorStop(0.4, `hsl(${palette.hue} ${palette.saturation}% 59% / 0.1)`);
+    light.addColorStop(1, `hsl(${palette.hue} ${palette.saturation}% 50% / 0)`);
+    glowContext.fillStyle = light;
+    glowContext.fillRect(0, 0, 64, 64);
+    glows.set(kind, glow);
+  }
 
   let center: Point = { x: 0, y: 0 };
   let width = 0;
@@ -59,8 +73,11 @@ export function attachGalaxyCanvas(root: HTMLElement, canvas: HTMLCanvasElement,
     const camera = galaxyCameraAt(seconds, width, height, center, fontSize * 1.4);
     const orbitRadius = camera.radius;
     const galaxyCenter = { x: camera.x, y: camera.y };
+    nebula ??= createGalaxyNebulaRenderer();
+    context.globalAlpha = 0.85;
+    nebula.draw(context, { ...camera, width, height, dpr, seconds });
     // Keep the letter-sized spiral legible without overexposing its dense core.
-    const resolved = Math.min(1, (orbitRadius / 85) ** 2);
+    const resolved = Math.min(1, (orbitRadius / 260) ** 1.35);
     for (let i = 0; i < stars.length; i++) {
       const particle = stars[i];
       // Start with the upright S-shaped arms from the reference, then keep orbiting.
@@ -69,43 +86,29 @@ export function attachGalaxyCanvas(root: HTMLElement, canvas: HTMLCanvasElement,
       const x = galaxyCenter.x + position.x * orbitRadius * perspective;
       const y = galaxyCenter.y + position.y * orbitRadius * perspective;
       if (x < -70 || x > width + 70 || y < -70 || y > height + 70) continue;
-      const twinkle = 0.86 + Math.sin(seconds * 1.6 + particle.phase) * 0.14;
-      const alpha = particle.alpha * twinkle * (0.64 + position.depth * 0.15) * resolved;
+      const twinkle = 0.97 + Math.sin(seconds * 0.6 + particle.phase) * 0.03;
+      const alpha = particle.alpha * twinkle * (0.7 + position.depth * 0.12) * resolved
+        * (0.2 + extinction[i] * 0.8);
       const size = Math.max(0.35, particle.size * Math.min(1.4, fontSize / 60) * (0.55 + camera.journey * 0.55));
-      // Sparse, bounded halos preserve crisp arm texture as the camera approaches.
-      if (i % 29 === 0) {
-        const spread = 4 + particle.radius * 5;
-        context.globalAlpha = alpha * 0.14;
+      const glow = glows.get(particle.violetHalo ? "violet" : particle.kind)!;
+      // Only luminous stars get broad, color-matched halos. Most stay small and dim.
+      if (particle.kind === "red-giant" || particle.kind === "blue-star") {
+        const spread = size * (particle.violetHalo ? 6 : 5);
+        context.globalAlpha = alpha * 0.3;
         context.drawImage(glow, x - spread / 2, y - spread / 2, spread, spread);
       }
       context.globalAlpha = Math.min(1, alpha);
       context.fillStyle = colors[i];
       context.fillRect(x - size / 2, y - size / 2, size, size);
       if (size > 1.2) {
-        context.globalAlpha = alpha * 0.24;
-        context.drawImage(glow, x - 3, y - 3, 6, 6);
-        if (i % 7 === 0) {
+        context.globalAlpha = alpha * 0.45;
+        context.drawImage(glow, x - size * 2, y - size * 2, size * 4, size * 4);
+        if (alpha > 0.5 && i % 11 === 0) {
           context.globalAlpha = alpha * 0.32;
           context.fillRect(x - size * 1.8, y - 0.25, size * 3.6, 0.5);
           context.fillRect(x - 0.25, y - size * 1.8, 0.5, size * 3.6);
         }
       }
-    }
-    // A compact, softly glowing centre anchors the live spiral without a solid disc.
-    {
-      const glowRadius = Math.min(32, 2 + orbitRadius * 0.025);
-      const light = context.createRadialGradient(galaxyCenter.x, galaxyCenter.y, 0, galaxyCenter.x, galaxyCenter.y, glowRadius);
-      light.addColorStop(0, "rgba(255,224,189,0.55)");
-      light.addColorStop(0.25, "rgba(186,188,242,0.25)");
-      light.addColorStop(1, "rgba(126,159,234,0)");
-      context.globalAlpha = 1;
-      context.fillStyle = light;
-      context.fillRect(galaxyCenter.x - glowRadius, galaxyCenter.y - glowRadius, glowRadius * 2, glowRadius * 2);
-      context.globalAlpha = (1 - resolved) * 0.85;
-      context.fillStyle = "#e8f5ff";
-      context.beginPath();
-      context.arc(galaxyCenter.x, galaxyCenter.y, 0.8, 0, Math.PI * 2);
-      context.fill();
     }
     context.globalAlpha = 1;
     context.globalCompositeOperation = "source-over";
@@ -158,6 +161,7 @@ export function attachGalaxyCanvas(root: HTMLElement, canvas: HTMLCanvasElement,
   return () => {
     disposed = true;
     stop();
+    nebula?.dispose();
     sizeObserver.disconnect();
     themeObserver.disconnect();
     document.removeEventListener("visibilitychange", refresh);

@@ -85,14 +85,42 @@ describe("galaxy particles", () => {
     expect(createGalaxyParticles(Number.POSITIVE_INFINITY)).toEqual([]);
   });
 
-  it("keeps a dense centre, a tiny dark core, and two populated arms", () => {
+  it("keeps a dense nucleus without an oversized empty black-hole disc", () => {
     const stars = createGalaxyParticles(2000);
     expect(stars.filter((star) => star.radius < 0.3).length).toBeGreaterThan(750);
     expect(stars.filter((star) => star.arm === -1).length).toBeGreaterThan(580);
-    expect(stars.every((star) => star.radius >= 0.028)).toBe(true);
+    expect(stars.some((star) => star.radius < 0.008)).toBe(true);
+    expect(stars.every((star) => star.radius > 0)).toBe(true);
     expect(stars.filter((star) => star.arm === 0).length).toBeGreaterThan(600);
     expect(stars.filter((star) => star.arm === 1).length).toBeGreaterThan(600);
     expect(stars.some((star) => star.radius > 0.85)).toBe(true);
+  });
+
+  it("makes white stars dominant, yellow secondary, and other colors sparse accents", () => {
+    const stars = createGalaxyParticles(12000);
+    expect(new Set(stars.map(star => star.kind))).toEqual(new Set([
+      "red-dwarf", "white-dwarf", "sunlike", "red-giant", "blue-star",
+    ]));
+    const white = stars.filter(star => star.kind === "white-dwarf");
+    const yellow = stars.filter(star => star.kind === "sunlike");
+    const accents = stars.filter(star => !["white-dwarf", "sunlike"].includes(star.kind));
+    expect(white.length / stars.length).toBeGreaterThan(0.65);
+    expect(yellow.length / stars.length).toBeGreaterThan(0.18);
+    expect(yellow.length).toBeGreaterThan(accents.length * 2);
+    const brightness = (group: typeof stars) => group.reduce((sum, star) => sum + star.alpha * star.size ** 2, 0);
+    expect(brightness(white)).toBeGreaterThan(brightness(yellow) * 2);
+    expect(brightness(yellow)).toBeGreaterThan(brightness(accents) * 2);
+  });
+
+  it("spreads stars along the arms without regularly spaced bright knots", () => {
+    const stars = createGalaxyParticles(12000);
+    for (const arm of [0, 1]) {
+      const bins = Array.from({ length: 28 }, (_, i) => stars.filter(star =>
+        star.arm === arm && star.radius >= 0.1 + i * 0.03 && star.radius < 0.13 + i * 0.03).length);
+      expect(Math.max(...bins) / Math.min(...bins)).toBeLessThan(2.5);
+      const group = stars.filter(star => star.arm === arm);
+      expect(group.filter(star => star.kind === "white-dwarf").length / group.length).toBeGreaterThan(0.65);
+    }
   });
 
   it("stays finite and inside a stable drawing area over long runtimes", () => {
@@ -113,7 +141,7 @@ describe("galaxy particles", () => {
     for (const star of stars) {
       const start = galaxyParticlePosition(star, 0);
       const later = galaxyParticlePosition(star, 2);
-      expect(Math.hypot(later.x - start.x, later.y - start.y)).toBeGreaterThan(0.001);
+      expect(Math.hypot(later.x - start.x, later.y - start.y)).toBeGreaterThan(1e-8);
       // The varying depth is used by the renderer as stars cross the disc.
       expect(later.depth).not.toBe(start.depth);
     }
