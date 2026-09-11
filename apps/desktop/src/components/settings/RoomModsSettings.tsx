@@ -187,7 +187,7 @@ function ModManageTab(props: {
     <div className="mods-list">
       {!canHost ? (
         <p className="settings-hint">
-          启用 / 禁用需要你是某个进行中的群聊的群主；进入群聊后此处可操作。
+          启用 / 禁用需要你是进行中群聊的群主。托管群的扩展在群主电脑运行，群主离线时暂停；服务器不执行扩展代码。
         </p>
       ) : null}
       {packs.map((p) => {

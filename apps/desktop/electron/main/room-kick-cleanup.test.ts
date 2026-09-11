@@ -204,7 +204,7 @@ describe("kick cleanup", () => {
         s.takenOverBy === member!.userId,
     );
     expect(dangling ?? []).toHaveLength(0);
-    // 席位保留，绑定回落到房主（缺省链）
+    // 席位保留，绑定回落到群主（缺省链）
     const seat = after?.seats.find((s) => s.kind === "agent");
     expect(seat).toBeTruthy();
     expect(seat?.workspaceUserId ?? null).toBeNull();

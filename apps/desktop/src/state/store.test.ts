@@ -25,6 +25,13 @@ function runningSession(id: string) {
 }
 
 describe("prompt queue", () => {
+  it("drops unsent prompts after interruption without reporting a failure", () => {
+    runningSession("s1");
+    sendMessage("Queued work");
+    __applySessionEventForTests({ type: "result", sessionId: "s1", ok: false, outcome: "interrupted" });
+    expect(getState().queuedPrompts).toEqual([]);
+    expect(getState().lastError).toBeNull();
+  });
   beforeEach(() => {
     __resetStoreForTests();
     // sendMessage calls getDesktop() when NOT queueing — provide a stub so a
@@ -345,6 +352,17 @@ describe("sliding transcript window", () => {
     expect(after.some((i) => i.kind === "text" && i.text === "msg-79")).toBe(false);
     expect(getState().hasMoreBySession.s1).toBe(true);
     expect(getState().hasNewerBySession.s1).toBe(true);
+  });
+
+  it("does not erase streamed output that arrives while an older page is in flight", async () => {
+    fillLiveTail(3);
+    let resolvePage!: (page: unknown) => void;
+    desktop.loadOlderMessages.mockReturnValue(new Promise(resolve => { resolvePage = resolve; }));
+    const loading = loadOlderMessages("s1");
+    __applySessionEventForTests({ type: "text_done", sessionId: "s1", text: "new live output" });
+    resolvePage({ items: [textItem("older", "Older")], hasMore: false });
+    await loading;
+    expect(getState().itemsBySession.s1.at(-1)).toMatchObject({ text: "new live output" });
   });
 
   it("loadNewer appends a page and prunes the older head so the window stays capped", async () => {

@@ -1,6 +1,8 @@
 import type { PublicSettings } from "@claude-desktop/shared";
 
 type ThemeChoice = NonNullable<PublicSettings["theme"]>;
+let themeTransition: ReturnType<Document["startViewTransition"]> | undefined;
+let themeRevision = 0;
 
 function systemIsLight(): boolean {
   return (
@@ -11,18 +13,43 @@ function systemIsLight(): boolean {
 }
 
 /**
- * Apply the theme to the document root. "system" clears the attribute so the
- * CSS prefers-color-scheme media query decides.
+ * Reveal the new theme from the bottom-left corner. Initial load and reduced
+ * motion apply immediately; a newer choice supersedes any pending snapshot.
  */
 export function applyTheme(choice: ThemeChoice | undefined): void {
   const root = document.documentElement;
-  if (choice === "dark" || choice === "light") {
-    root.dataset.theme = choice;
+  const next = effectiveTheme(choice);
+  const revision = ++themeRevision;
+  themeTransition?.skipTransition();
+  themeTransition = undefined;
+  root.classList.remove("theme-reveal");
+  const update = () => {
+    if (revision === themeRevision) root.dataset.theme = next;
+  };
+  if (!root.dataset.theme || root.dataset.theme === next ||
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ||
+      typeof document.startViewTransition !== "function") {
+    update();
     return;
   }
-  // system / unset → follow OS, react to OS changes
-  delete root.dataset.theme;
-  root.dataset.theme = systemIsLight() ? "light" : "dark";
+  root.style.setProperty("--theme-reveal-radius", `${Math.ceil(Math.hypot(window.innerWidth, window.innerHeight))}px`);
+  root.classList.add("theme-reveal");
+  try {
+    const transition = document.startViewTransition(update);
+    themeTransition = transition;
+    // Snapshot capture can be skipped (hidden windows or rapid toggles).
+    void transition.ready.catch(() => undefined);
+    void transition.finished.catch(update).finally(() => {
+      if (revision !== themeRevision) return;
+      themeTransition = undefined;
+      root.classList.remove("theme-reveal");
+      root.style.removeProperty("--theme-reveal-radius");
+    });
+  } catch {
+    root.classList.remove("theme-reveal");
+    root.style.removeProperty("--theme-reveal-radius");
+    update();
+  }
 }
 
 /** Titlebar toggle: flip the *effective* theme (system resolves first). */

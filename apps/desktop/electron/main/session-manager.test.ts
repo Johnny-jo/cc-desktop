@@ -12,6 +12,7 @@ import {
   humanizeAgentError,
 } from "./session-manager";
 import type { PermissionBroker } from "./permission-broker";
+import { fileEditRecovery } from "./file-edit-recovery";
 import { DiffTracker } from "./diff-tracker";
 import type { CpaSupervisor } from "./cpa-supervisor";
 import type { SettingsStore } from "./settings-store";
@@ -194,6 +195,100 @@ function makeDeps(overrides: {
   };
 }
 
+describe("official room sandbox", () => {
+  it("enables strict sandboxing only for room queries and uses their workspace", async () => {
+    const options: Record<string, unknown>[] = [];
+    const queryFn: QueryFn = async function* (args) {
+      options.push(args.options);
+      await takeFirstUserText(args.prompt);
+      yield { type: "result", subtype: "success", total_cost_usd: 0 };
+    };
+    const { manager } = makeDeps({ queryFn });
+    await manager.start({ text: "personal", attachments: [] }, "D:/personal");
+    await manager.start({ text: "room", attachments: [] }, "D:/personal", {
+      pathJail: "D:/room", permissionMode: "auto",
+    });
+    expect(options[0]?.sandbox).toBeUndefined();
+    expect(options[0]?.cwd).toBe("D:/personal");
+    expect(options[1]).toMatchObject({
+      cwd: "D:/room",
+      permissionMode: "auto",
+      sandbox: {
+        enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false,
+        autoAllowBashIfSandboxed: false, excludedCommands: [],
+        filesystem: { disabled: false },
+      },
+    });
+    // Sandboxing must not replace the existing approval/hook layers.
+    expect(options[1]?.canUseTool).toBeTypeOf("function");
+    expect(options[1]?.hooks).toHaveProperty("PreToolUse");
+  });
+
+  it("reopens a live personal query when adding a jail, and on root changes", async () => {
+    const options: Record<string, unknown>[] = [];
+    const queryFn: QueryFn = async function* (args) {
+      options.push(args.options);
+      for await (const _message of args.prompt as AsyncIterable<unknown>) {
+        yield { type: "result", subtype: "success", total_cost_usd: 0, session_id: "sdk-room" };
+      }
+    };
+    const { manager } = makeDeps({ queryFn });
+    const prompt = { text: "hi", attachments: [] };
+    const id = await manager.start(prompt, "D:/personal");
+    try {
+      await manager.continue(id, prompt, { pathJail: "D:/room" });
+      expect(options).toHaveLength(2);
+      expect(options[1]).toMatchObject({ cwd: "D:/room", resume: "sdk-room", sandbox: { enabled: true } });
+      await manager.continue(id, prompt, { pathJail: "D:/room" });
+      expect(options).toHaveLength(2);
+      await manager.continue(id, prompt, { pathJail: "D:/another-room" });
+      expect(options).toHaveLength(3);
+      expect(options[2]).toMatchObject({ cwd: "D:/another-room", sandbox: { enabled: true } });
+    } finally {
+      manager.abort(id);
+    }
+  });
+
+  it("still reopens after preparation fails with a staged jail", async () => {
+    const options: Record<string, unknown>[] = [];
+    const queryFn: QueryFn = async function* (args) {
+      options.push(args.options);
+      for await (const _message of args.prompt as AsyncIterable<unknown>) {
+        yield { type: "result", subtype: "success", total_cost_usd: 0 };
+      }
+    };
+    const ctx = makeDeps({ queryFn });
+    const prompt = { text: "hi", attachments: [] };
+    const id = await ctx.manager.start(prompt, "D:/personal");
+    try {
+      (ctx.ensureReady as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("CPA unavailable"));
+      await expect(ctx.manager.continue(id, prompt, { pathJail: "D:/room" })).rejects.toThrow("CPA unavailable");
+      expect(options).toHaveLength(1);
+      await ctx.manager.continue(id, prompt, { pathJail: "D:/room" });
+      expect(options).toHaveLength(2);
+      expect(options[1]?.sandbox).toMatchObject({ enabled: true });
+    } finally {
+      ctx.manager.abort(id);
+    }
+  });
+
+  it.each(["throw", "result"])("surfaces sandbox startup failure (%s) without an unsandboxed retry", async (kind) => {
+    const queryFn = vi.fn(async function* (args: Parameters<QueryFn>[0]) {
+      await takeFirstUserText(args.prompt);
+      const error = "Sandbox required but unavailable: the Windows sandbox is not active (feature gate off). Set sandbox.failIfUnavailable=false to allow unsandboxed execution.";
+      if (kind === "throw") throw new Error(error);
+      yield { type: "result", subtype: "error_during_execution", is_error: true, errors: [error] };
+    });
+    const ctx = makeDeps({ queryFn });
+    const id = await ctx.manager.start({ text: "hi", attachments: [] }, "D:/room", { pathJail: "D:/room" });
+    expect(queryFn).toHaveBeenCalledTimes(1);
+    const errors = ctx.emitted.filter(event => event.type === "result" && !event.ok).map(event => event.type === "result" ? event.error : "");
+    expect(errors.some(error => error?.includes("官方内置沙箱不可用"))).toBe(true);
+    expect(errors.join("\n")).not.toContain("failIfUnavailable=false");
+    expect(ctx.manager.list().find(session => session.id === id)?.status).toBe("error");
+  });
+});
+
 describe("SessionManager progress snapshots", () => {
   const agentStart = { type: "system", subtype: "task_started", task_id: "agent-a", task_type: "local_agent", tool_use_id: "call-a", description: "Inspect code" };
   const warmAgentQuery: QueryFn = async function* (args) {
@@ -235,11 +330,15 @@ describe("SessionManager progress snapshots", () => {
     let reopened: ReturnType<typeof makeDeps> | undefined;
     try {
       const id = await ctx.manager.start({ text: "go", attachments: [] }, "D:/project");
+      ctx.manager.setTaskPlanClosed(id, true);
       ctx.manager.flushPendingPersistence(); ctx.manager.disposeAll();
       const loadItems = vi.spyOn(archive, "loadItems");
       reopened = makeDeps({ archive });
       expect(reopened.manager.getSummary(id)?.progress?.tasks[0]).toMatchObject({ id: "7", status: "completed" });
+      expect(reopened.manager.getSummary(id)?.taskPlan).toEqual({ closedAt: expect.any(Number), changedSinceClose: false });
       expect(loadItems).not.toHaveBeenCalled();
+      reopened.manager.setTaskPlanClosed(id, false);
+      expect(archive.loadIndex().find(session => session.id === id)?.taskPlan).toBeUndefined();
       loadItems.mockRestore();
     } finally {
       ctx.manager.disposeAll(); reopened?.manager.disposeAll();
@@ -255,6 +354,35 @@ describe("SessionManager progress snapshots", () => {
       ctx.manager.saveTranscript(id, [{ kind: "text", id: "u", role: "user", text: "Before task creation" }], { replace: true });
       expect(ctx.manager.getSummary(id)?.progress?.tasks ?? []).toEqual([]);
       expect(ctx.sessions.at(-1)?.progress?.tasks ?? []).toEqual([]);
+    } finally { ctx.manager.disposeAll(); }
+  });
+
+  it("keeps closure independent of successful SDK task updates and broadcasts reopening", async () => {
+    let id = "";
+    const ctx = makeDeps({ queryFn: async function* (args) {
+      let closed = false;
+      for await (const message of taskQuery(args) as AsyncIterable<any>) {
+        if (!closed && message.type === "assistant" && message.message?.content?.[0]?.name === "TaskUpdate") {
+          id = ctx.manager.list()[0].id;
+          ctx.manager.setTaskPlanClosed(id, true);
+          closed = true;
+          expect(ctx.manager.getSummary(id)?.progress?.tasks[0].status).toBe("pending");
+        }
+        yield message;
+      }
+    } });
+    try {
+      await ctx.manager.start({ text: "go", attachments: [] }, "D:/project");
+      expect(ctx.manager.getSummary(id)).toMatchObject({ taskPlan: { changedSinceClose: true }, progress: { tasks: [{ status: "completed" }] } });
+      expect(ctx.sessions.at(-1)?.taskPlan?.changedSinceClose).toBe(true);
+      const closedAt = ctx.manager.getSummary(id)?.taskPlan?.closedAt;
+      ctx.manager.setTaskPlanClosed(id, true);
+      expect(ctx.manager.getSummary(id)?.taskPlan?.closedAt).toBe(closedAt);
+      ctx.manager.setTaskPlanClosed(id, false);
+      expect(ctx.manager.getSummary(id)?.taskPlan).toBeUndefined();
+      expect(ctx.sessions.at(-1)?.taskPlan).toBeUndefined();
+      expect(ctx.manager.getSummary(id)?.progress?.tasks[0].status).toBe("completed");
+      expect(ctx.manager.setTaskPlanClosed("missing", true)).toBeUndefined();
     } finally { ctx.manager.disposeAll(); }
   });
 
@@ -317,7 +445,9 @@ describe("SessionManager progress snapshots", () => {
     let reopened: ReturnType<typeof makeDeps> | undefined;
     try {
       const id = await ctx.manager.start({ text: "go", attachments: [] }, "D:/project");
+      ctx.manager.setTaskPlanClosed(id, true);
       expect((await ctx.manager.compressSession(id)).ok).toBe(true);
+      expect(ctx.manager.getSummary(id)?.taskPlan?.changedSinceClose).toBe(false);
       await ctx.manager.continue(id, { text: "Continue", attachments: [] });
       expect(ctx.manager.getSummary(id)?.progress?.tasks.map(task => task.id)).toEqual(["7", "8"]);
       let manager = ctx.manager;
@@ -327,6 +457,9 @@ describe("SessionManager progress snapshots", () => {
         manager = reopened.manager;
       }
       expect((await manager.rewindToUserMessage(id, "after-compact")).ok).toBe(true);
+      expect(manager.getTranscriptPage(id).items.at(-1)).not.toHaveProperty("turnOutcome");
+      expect(manager.getSummary(id)?.taskPlan).toBeUndefined();
+      expect(archive.loadIndex().find(session => session.id === id)?.taskPlan).toBeUndefined();
       expect(manager.getSummary(id)?.progress?.tasks).toEqual([expect.objectContaining({ id: "7", status: "completed" })]);
       expect(manager.getSummary(id)).not.toHaveProperty("progressBaseline");
       expect(archive.loadIndex().find(summary => summary.id === id)?.progressBaseline?.tasks[0]).toMatchObject({ id: "7", status: "completed" });
@@ -584,6 +717,9 @@ describe("SessionManager", () => {
     ]);
     // CLAUDE.md hierarchy auto-loaded into the system prompt
     expect(opts.settingSources).toEqual(["user", "project", "local"]);
+    const failureHooks = (opts.hooks as { PostToolUseFailure: Array<{ hooks: Array<typeof fileEditRecovery> }> }).PostToolUseFailure;
+    const recovery = await failureHooks[0].hooks[0]({ tool_name: "Edit" });
+    expect(recovery.hookSpecificOutput?.additionalContext).toContain("AskUserQuestion");
     expect(opts.env).toMatchObject({
       ANTHROPIC_BASE_URL: "http://127.0.0.1:8317",
     });
@@ -1056,7 +1192,7 @@ describe("SessionManager", () => {
     expect(ctx.manager.list()[0]?.status).toBe("idle");
   });
 
-  it("abort aborts the active AbortController", async () => {
+  it.each([false, true])("abort persists cancellation/interruption and ignores late success (activity: %s)", async activity => {
     let controller: AbortController | undefined;
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
@@ -1066,17 +1202,21 @@ describe("SessionManager", () => {
     const queryFn: QueryFn = async function* (args) {
       controller = args.options.abortController as AbortController;
       await takeFirstUserText(args.prompt);
+      if (activity) yield { type: "assistant", message: { content: [{ type: "tool_use", id: "pending-read", name: "Read", input: { file_path: "a" } }] } };
       await gate;
       // After abort/release, end the turn so waitForTurnIdle unblocks
       yield { type: "result", subtype: "success", total_cost_usd: 0 };
     };
 
-    const ctx = makeDeps({ queryFn });
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "turn-outcome-"));
+    const archive = new SessionArchive(dir);
+    const ctx = makeDeps({ queryFn, archive });
     const startPromise = ctx.manager.start({ text: "slow", attachments: [] }, "D:/p");
 
     // allow start to reach queryFn
     await vi.waitFor(() => {
       expect(controller).toBeDefined();
+      if (activity) expect(ctx.emitted.some(event => event.type === "tool_start")).toBe(true);
     });
 
     const id = ctx.manager.list()[0]?.id;
@@ -1085,6 +1225,13 @@ describe("SessionManager", () => {
     expect(controller!.signal.aborted).toBe(true);
     release();
     await startPromise;
+    ctx.manager.flushPendingPersistence();
+    const saved = archive.loadItems(id!);
+    expect(saved.find(item => item.kind === "text" && item.role === "user")).toMatchObject({ turnOutcome: activity ? "interrupted" : "cancelled" });
+    if (activity) expect(saved.find(item => item.kind === "tool")).toMatchObject({ tool: { status: "stopped" } });
+    expect(ctx.emitted).toContainEqual(expect.objectContaining({ type: "result", ok: false, outcome: "interrupted" }));
+    ctx.manager.disposeAll();
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 
   it("throws and emits result error when CPA ensureReady fails", async () => {

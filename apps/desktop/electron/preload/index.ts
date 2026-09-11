@@ -33,6 +33,10 @@ const desktop = {
     }>,
 
   listSessions: () => ipcRenderer.invoke(IPC.sessionList),
+  setTaskPlanClosed: (sessionId: string, closed: boolean) =>
+    ipcRenderer.invoke(IPC.sessionSetTaskPlanClosed, { sessionId, closed }) as Promise<
+      import("@claude-desktop/shared").IpcInvokeMap[typeof IPC.sessionSetTaskPlanClosed]["result"]
+    >,
 
   /** Full-text search over persisted session transcript content. */
   searchSessions: (query: string, limit?: number) =>
@@ -399,6 +403,9 @@ const desktop = {
     }>,
 
   /** Tell the main process the effective UI theme (window chrome sync). */
+  controlWindow: (action: "minimize" | "maximize" | "close" | "state") =>
+    ipcRenderer.invoke(IPC.appWindowControl, { action }) as Promise<{ ok: boolean; maximized: boolean }>,
+
   notifyTheme: (theme: "dark" | "light") =>
     ipcRenderer.invoke(IPC.appThemeChanged, { theme }) as Promise<{
       ok: boolean;

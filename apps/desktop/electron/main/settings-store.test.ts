@@ -59,6 +59,34 @@ describe("SettingsStore", () => {
     expect(again.getPublic().defaultContextLimit).toBe(256_000);
   });
 
+  it("defaults galaxy effects to enabled for fresh and legacy settings", () => {
+    const deps = { userDataDir: dir, encrypt: (s: string) => s, decrypt: (s: string) => s };
+    expect(new SettingsStore(deps).getPublic().galaxyEffectsEnabled).toBe(true);
+    fs.writeFileSync(path.join(dir, "settings.json"), JSON.stringify({ theme: "dark" }), "utf8");
+    expect(new SettingsStore(deps).getPublic().galaxyEffectsEnabled).toBe(true);
+  });
+
+  it("preserves the galaxy effect choice across unrelated saves and restarts", () => {
+    const deps = { userDataDir: dir, encrypt: (s: string) => s, decrypt: (s: string) => s };
+    const store = new SettingsStore(deps);
+    store.update({ galaxyEffectsEnabled: false });
+    store.update({ uiFontSize: 14 });
+    const restarted = new SettingsStore(deps);
+    expect(restarted.getPublic().galaxyEffectsEnabled).toBe(false);
+    restarted.update({ galaxyEffectsEnabled: true });
+    expect(new SettingsStore(deps).getPublic().galaxyEffectsEnabled).toBe(true);
+  });
+
+  it("ignores malformed galaxy effect values instead of overriding the preference", () => {
+    const deps = { userDataDir: dir, encrypt: (s: string) => s, decrypt: (s: string) => s };
+    const store = new SettingsStore(deps);
+    store.update({ galaxyEffectsEnabled: false });
+    store.update({ galaxyEffectsEnabled: "true" as unknown as boolean });
+    expect(store.getPublic().galaxyEffectsEnabled).toBe(false);
+    fs.writeFileSync(path.join(dir, "settings.json"), JSON.stringify({ galaxyEffectsEnabled: "false" }), "utf8");
+    expect(new SettingsStore(deps).getPublic().galaxyEffectsEnabled).toBe(true);
+  });
+
   it("persists and reloads MCP servers, dropping invalid entries", () => {
     const crypto = {
       encrypt: (s: string) => Buffer.from(s, "utf8").toString("base64"),

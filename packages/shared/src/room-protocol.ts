@@ -60,6 +60,10 @@ export type RoomAiShare = "off" | "pending" | "on";
 export type RoomPath = "T0" | "T1" | "T2";
 
 export type RoomFrameType =
+  | "extension.request"
+  | "extension.result"
+  | "host.control"
+  | "host.pending"
   | "hello"
   | "welcome"
   | "error"
@@ -321,7 +325,7 @@ export type RoomSeatUpdatePayload = {
   executorUserId?: string;
 };
 
-/** member.role：房主 → 自己落座 / 客人不可发。客人侧不会发此帧。 */
+/** member.role：经过身份验证的群主 → 服务端，授予或撤销管理员。不能授予 host。 */
 export type RoomMemberRolePayload = {
   userId: string;
   role: "admin" | "member";
@@ -429,6 +433,8 @@ export type RoomChatRecallPayload = {
 };
 
 export type RoomSnapshot = {
+  /** Server owns the lifecycle; desktop disconnects do not end the room. */
+  hosted?: boolean;
   roomId: string;
   name: string;
   status: RoomStatus;
@@ -705,7 +711,7 @@ export function encodeRoomInvite(payload: RoomInvitePayload): string {
  */
 export function decodeRoomInvite(secret: string): RoomInvitePayload {
   if (extractInviteLine(secret, LEGACY_INVITE_PREFIX)) {
-    throw new Error("该邀请码由旧版本生成，安全性不足，请让房主重新生成");
+    throw new Error("该邀请码由旧版本生成，安全性不足，请让群主重新生成");
   }
   const line = extractInviteLine(secret, INVITE_PREFIX);
   if (!line) {

@@ -6,6 +6,7 @@
   },
   "packageManager": "pnpm@9.15.0",
   "scripts": {
+    "build:room-server": "node scripts/build-room-server.mjs",
     "dev": "pnpm --filter @claude-desktop/desktop dev",
     "build": "pnpm -r build",
     "test": "pnpm -r test",

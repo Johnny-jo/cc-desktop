@@ -1,6 +1,7 @@
 import React from "react";
 import type { RoomDelegationPolicy, RoomSnapshot, RoomTask, RoomTaskStatus } from "@claude-desktop/shared";
 import type { controlRoomTask } from "../state/room-store";
+import { ThemedSelect } from "./Select";
 import "./RoomTaskPanel.css";
 
 type Control = Parameters<typeof controlRoomTask>[0];
@@ -102,14 +103,12 @@ export function RoomTaskPanel(props: Props) {
       </details> : null}
       <details className="room-task-policy-wrap">
         <summary><span>我的转交策略</span><span className="room-task-policy-current">{policyLabels[policy]}</span></summary>
-        <label className="room-task-policy">
-          <select aria-label="我的转交策略" value={policy} disabled={!member || offline || room.status !== "open" || pendingKeys.includes("policy")}
-            onChange={event => onControl({ roomId: room.roomId, action: "policy", policy: event.target.value as RoomDelegationPolicy })}>
-            <option value="ask">逐次确认</option>
-            <option value="read-only">只读自动，修改需批</option>
-            <option value="auto">授权范围内自动</option>
-          </select>
-        </label>
+        <div className="room-task-policy">
+          <ThemedSelect ariaLabel="我的转交策略" variant="field" value={policy}
+            disabled={!member || offline || room.status !== "open" || pendingKeys.includes("policy")}
+            options={Object.entries(policyLabels).map(([value, label]) => ({ value, label }))}
+            onChange={value => onControl({ roomId: room.roomId, action: "policy", policy: value as RoomDelegationPolicy })} />
+        </div>
         <p className="room-task-policy-hint">仅用于我发起任务的后续转交</p>
       </details>
     </section>

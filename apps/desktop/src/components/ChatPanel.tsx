@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import type { ChatItem, ModelQuotaInfo } from "@claude-desktop/shared";
 import { MessageList } from "./MessageList";
 import { Composer } from "./Composer";
+import { AgentWelcome } from "./AgentWelcome";
 import { ChatTaskDock } from "./ChatTaskDock";
 import { useAppStore } from "../state/store";
 import { useI18n } from "../i18n/useI18n";
@@ -161,8 +162,13 @@ export function ChatPanel({ onOpenSettings, onOpenFile }: ChatPanelProps) {
 
       <div className="chat-composer" ref={composerRef}>
         <div className="chat-inner">
+          {!activeSessionId ? <AgentWelcome english={t.common.ok === "OK"} galaxyEffectsEnabled={settings?.galaxyEffectsEnabled !== false} /> : null}
           {activeSessionId ? (
-            <ChatTaskDock key={activeSessionId} sessionId={activeSessionId} progress={active?.progress} />
+            <ChatTaskDock key={activeSessionId} sessionId={activeSessionId} progress={active?.progress} taskPlan={active?.taskPlan}
+              onSetPlanClosed={async closed => {
+                const result = await getDesktop().setTaskPlanClosed(activeSessionId, closed);
+                if (!result.ok) throw new Error(result.error || "Unable to update task plan");
+              }} />
           ) : null}
           <Composer onOpenSettings={onOpenSettings} />
         </div>

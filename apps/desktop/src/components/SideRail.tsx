@@ -184,11 +184,12 @@ export function SideRail({
       <div className="side-rail-top">
         <button
           type="button"
-          className={`side-rail-btn${mode === "chat" ? " active" : ""}`}
+          className={`side-rail-btn${mode === "chat" && !cliMode ? " active" : ""}`}
           title="AI 对话"
           aria-label="AI 对话"
-          aria-pressed={mode === "chat"}
+          aria-pressed={mode === "chat" && !cliMode}
           onClick={() => {
+            if (cliMode) onToggleCli();
             selectRoom(null);
             onModeChange("chat");
           }}
@@ -240,7 +241,7 @@ export function SideRail({
           aria-label={isLight ? "切换到夜间模式" : "切换到日间模式"}
           onClick={() => void setTheme(nextTheme(settings?.theme))}
         >
-          <IconTheme isLight={isLight} />
+          <span className="theme-icon-motion" key={String(isLight)}><IconTheme isLight={isLight} /></span>
         </button>
         <button
           type="button"

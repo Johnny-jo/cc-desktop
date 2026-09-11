@@ -28,6 +28,10 @@ import {
   useRoomStore,
 } from "./state/room-store";
 import { usePanelLayout } from "./hooks/usePanelLayout";
+import { useMotionPresence } from "./hooks/useMotionPresence";
+import { SettingsPresence } from "./components/SettingsPresence";
+import { WindowControls } from "./components/WindowControls";
+import { EditorPresence } from "./components/EditorPresence";
 import {
   applyTheme,
   effectiveTheme,
@@ -334,6 +338,17 @@ export function App() {
     setChangesWidth,
     setTerminalHeight,
   } = usePanelLayout();
+  const sidebarMounted = useMotionPresence(layout.sidebarOpen);
+  const changesMounted = useMotionPresence(layout.changesOpen);
+  const modeSurfaceRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+    const animation = modeSurfaceRef.current?.animate?.(
+      [{ opacity: 0.35, transform: "translateY(5px)" }, { opacity: 1, transform: "translateY(0)" }],
+      { duration: 180, easing: "ease-out" },
+    );
+    return () => animation?.cancel();
+  }, [cliMode, effectiveMode]);
   // Keep PTYs alive after the panel has been opened once, while deferring the
   // xterm bundle entirely for users who never open the terminal.
   const terminalWasOpenedRef = useRef(false);
@@ -358,16 +373,19 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    applyTheme(settings?.theme);
-    try {
-      getDesktop()
-        .notifyTheme(effectiveTheme(settings?.theme))
-        .catch(() => undefined);
-    } catch {
-      // not in electron
-    }
+    const syncTheme = () => {
+      applyTheme(settings?.theme);
+      try {
+        getDesktop()
+          .notifyTheme(effectiveTheme(settings?.theme))
+          .catch(() => undefined);
+      } catch {
+        // not in electron
+      }
+    };
+    syncTheme();
     if (settings?.theme && settings.theme !== "system") return;
-    return onSystemThemeChange(() => applyTheme(settings?.theme));
+    return onSystemThemeChange(syncTheme);
   }, [settings?.theme]);
 
   // Global UI font size → CSS variable on <html>
@@ -472,7 +490,7 @@ export function App() {
             isLight={effectiveTheme(settings?.theme) === "light"}
             onToggle={() => void setTheme(nextTheme(settings?.theme))}
           />
-          <div className="titlebar-caption-space" aria-hidden />
+          <WindowControls />
         </div>
         <ErrorBanner />
 
@@ -486,14 +504,14 @@ export function App() {
 
         <RoomPermAskModal />
         <OnboardingModal open={needsOnboarding} />
-        {settingsOpen ? (
+        <SettingsPresence open={settingsOpen}>
           <Suspense fallback={null}>
             <SettingsDrawer
               open
               onClose={() => setSettingsOpen(false)}
             />
           </Suspense>
-        ) : null}
+        </SettingsPresence>
       </div>
     );
   }
@@ -508,7 +526,7 @@ export function App() {
             isLight={effectiveTheme(settings?.theme) === "light"}
             onToggle={() => void setTheme(nextTheme(settings?.theme))}
           />
-          <div className="titlebar-caption-space" aria-hidden />
+          <WindowControls />
         </div>
         <ErrorBanner />
 
@@ -524,14 +542,14 @@ export function App() {
 
         <RoomPermAskModal />
         <OnboardingModal open={needsOnboarding} />
-        {settingsOpen ? (
+        <SettingsPresence open={settingsOpen}>
           <Suspense fallback={null}>
             <SettingsDrawer
               open
               onClose={() => setSettingsOpen(false)}
             />
           </Suspense>
-        ) : null}
+        </SettingsPresence>
       </div>
     );
   }
@@ -551,7 +569,7 @@ export function App() {
         <div className="titlebar-right">
           <ChangelogToggle onClick={() => setChangelogOpen(true)} />
         </div>
-        <div className="titlebar-caption-space" aria-hidden />
+        <WindowControls />
       </div>
       <ErrorBanner />
 
@@ -569,10 +587,11 @@ export function App() {
             onModeChange={setRailMode}
             onOpenSettings={() => setSettingsOpen(true)}
           />
-          {layout.sidebarOpen ? (
+          {sidebarMounted ? (
             <>
               <aside
-                className="panel panel-sessions"
+                className={`panel panel-sessions motion-side-panel${layout.sidebarOpen ? "" : " is-exiting"}`}
+                inert={!layout.sidebarOpen}
                 style={{
                   width: layout.sidebarWidth,
                   flex: `0 0 ${layout.sidebarWidth}px`,
@@ -595,7 +614,7 @@ export function App() {
                   }}
                 />
               </aside>
-              {settingsOpen ? null : (
+              {settingsOpen || !layout.sidebarOpen ? null : (
                 <ResizeHandle
                   axis="sidebar"
                   size={layout.sidebarWidth}
@@ -606,20 +625,21 @@ export function App() {
           ) : null}
 
           {changesFull ? null : (
-          <main className="panel panel-chat">
+          <main className="panel panel-chat" ref={modeSurfaceRef}>
             {cliMode ? (
               <Suspense fallback={null}>
                 <CliModePage />
               </Suspense>
             ) : (
             <div className="chat-editor-row">
+              <EditorPresence open={editorOpen}>
               {editorOpen && activeEditor ? (
                 <>
                   <div
                     className="editor-col"
                     style={
                       editorFull
-                        ? { flex: "1 1 0" }
+                        ? { flex: "0 0 100%" }
                         : { flex: `0 0 ${editorRatio * 100}%` }
                     }
                   >
@@ -743,7 +763,7 @@ export function App() {
                     {editorTabs
                       .filter((tab) => mountedEditorSet.has(tab))
                       .map((tab) => (
-                        <Suspense key={tab} fallback={null}>
+                        <Suspense key={tab} fallback={<div className="file-editor-body"><p className="file-editor-hint">加载编辑器…</p></div>}>
                           <FileEditor
                             rel={tab}
                             hidden={tab !== activeEditor}
@@ -764,9 +784,10 @@ export function App() {
                       role="separator"
                       aria-orientation="vertical"
                       onPointerDown={(e) => {
+                        if (e.button !== 0) return;
                         e.preventDefault();
                         const el = e.currentTarget;
-                        const row = el.parentElement as HTMLElement;
+                        const row = el.closest(".chat-editor-row") as HTMLElement;
                         const editorCol = row.querySelector(
                           ".editor-col",
                         ) as HTMLElement | null;
@@ -785,6 +806,7 @@ export function App() {
                         let reachedSoftMax = startRatio >= EDITOR_SOFT_MAX - 0.001;
                         let liveRatio = startRatio;
                         el.setPointerCapture(e.pointerId);
+                        document.body.classList.add("is-resizing-col");
 
                         const paint = (ratio: number) => {
                           liveRatio = ratio;
@@ -792,7 +814,7 @@ export function App() {
                             editorCol.style.flex = `0 0 ${ratio * 100}%`;
                           }
                           if (chatCol) {
-                            chatCol.style.flex = `0 0 ${(1 - ratio) * 100}%`;
+                            chatCol.style.flex = "1 1 0";
                             chatCol.style.minWidth = "0";
                           }
                         };
@@ -840,6 +862,7 @@ export function App() {
                         };
 
                         const cleanup = () => {
+                          document.body.classList.remove("is-resizing-col");
                           window.removeEventListener("pointermove", onMove);
                           window.removeEventListener("pointerup", onUp);
                           window.removeEventListener("pointercancel", onUp);
@@ -861,18 +884,12 @@ export function App() {
                   ) : null}
                 </>
               ) : null}
+              </EditorPresence>
 
               {editorOpen && editorFull ? null : (
                 <div
                   className="chat-col"
-                  style={
-                    editorOpen
-                      ? {
-                          flex: `0 0 ${(1 - editorRatio) * 100}%`,
-                          minWidth: 0,
-                        }
-                      : { flex: "1 1 0" }
-                  }
+                  style={{ flex: "1 1 0", minWidth: 0 }}
                 >
                   {effectiveMode === "rooms" ? (
                     <Suspense fallback={null}>
@@ -891,9 +908,9 @@ export function App() {
           </main>
           )}
 
-          {layout.changesOpen ? (
+          {changesMounted ? (
             <>
-              {settingsOpen ? null : (
+              {settingsOpen || !layout.changesOpen ? null : (
                 <div
                   className="resize-handle resize-handle-changes"
                   role="separator"
@@ -985,7 +1002,8 @@ export function App() {
                 />
               )}
               <aside
-                className="panel panel-changes"
+                className={`panel panel-changes motion-side-panel${layout.changesOpen ? "" : " is-exiting"}`}
+                inert={!layout.changesOpen}
                 style={
                   changesFull
                     ? { flex: "1 1 0", width: "auto" }
@@ -1106,11 +1124,11 @@ export function App() {
           )
         : null}
       <OnboardingModal open={needsOnboarding} />
-      {settingsOpen ? (
+      <SettingsPresence open={settingsOpen}>
         <Suspense fallback={null}>
           <SettingsDrawer open onClose={() => setSettingsOpen(false)} />
         </Suspense>
-      ) : null}
+      </SettingsPresence>
       {fileSearchOpen ? (
         <Suspense fallback={null}>
           <FileSearchModal

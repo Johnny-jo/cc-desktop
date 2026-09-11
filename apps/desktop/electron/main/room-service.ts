@@ -28,6 +28,7 @@ import type {
   RoomLivePatch,
   RoomMember,
   RoomMemberKickPayload,
+  RoomMemberRolePayload,
   RoomNodeInfoPayload,
   RoomPath,
   RoomQuoteRef,
@@ -80,7 +81,6 @@ import { RoomAttachmentTransfer } from "./room-attachment-transfer";
 import { readAttachment } from "./attachment-reader";
 import { createRoomChatMcp, type RoomAgentMessage } from "./room-chat-agent";
 import type { SettingsStore } from "./settings-store";
-import { BUILTIN_PATH_GUARD_SKILL } from "./skill-store";
 import type { CpaSupervisor } from "./cpa-supervisor";
 import {
   buildReqFrames,
@@ -134,7 +134,6 @@ import {
   TokenBucket,
 } from "./room-limits";
 import { isHandshakeReason, RoomMetrics } from "./room-metrics";
-import { startRoomRelay } from "./room-relay";
 import { readNamedTunnelConfig, startRoomTunnel } from "./room-tunnel";
 import {
   getKernelCacheDir,
@@ -177,6 +176,8 @@ const ROOM_OVERSIZED_MAX_STREAK = 5;
  * packages/shared/src/room-protocol.ts.
  */
 const KNOWN_ROOM_FRAME_TYPES: ReadonlySet<string> = new Set<RoomFrameType>([
+  "extension.request", "extension.result",
+  "host.control", "host.pending",
   "hello",
   "welcome",
   "error",
@@ -272,6 +273,7 @@ type RemoteTurn = {
   dispatchedAt: number;
   lastEventAt: number;
   doneAt?: number;
+  resultText?: string;
   error?: string;
   ackTimer?: ReturnType<typeof setTimeout>;
   heartbeatTimer?: ReturnType<typeof setInterval>;
@@ -362,6 +364,9 @@ type GuestHandshakeState = {
 };
 
 type RoomRecord = {
+  hosted?: boolean;
+  hostedOwnerFp?: string;
+  remotePending?: Array<{ fp: string; name: string }>;
   roomId: string;
   name: string;
   password: string;
@@ -472,6 +477,9 @@ type RoomRecord = {
   kernelLoaded?: LoadedKernelMod[];
   kernelImprove?: KernelImproveStore;
   kernelProjection?: RoomSnapshot["kernel"];
+  /** Hosted extensions execute only on the owner's desktop. No source is sent to the server. */
+  extensionSyncChain?: Promise<void>;
+  extensionAgentSeats?: Set<string>;
   inboundChain?: Promise<unknown>;
   /** Local dispatch reservations include time spent waiting for workspace approval. */
   agentRuns?: Map<string, AgentRun>;
@@ -645,6 +653,7 @@ function waitForListening(
 }
 
 export class RoomService {
+  private readonly hostedTransport?: (roomId: string, accept: (ws: WebSocket) => void) => WebSocketServer;
   private rooms = new Map<string, RoomRecord>();
   private disposed = false;
   private readonly pendingPersists = new Map<string, RoomRecord>();
@@ -733,6 +742,8 @@ export class RoomService {
   >();
 
   constructor(opts: {
+    /** Headless chat authority: no per-room TCP port, no agent execution. */
+    hostedTransport?: (roomId: string, accept: (ws: WebSocket) => void) => WebSocketServer;
     getWindow: () => BrowserWindow | null;
     /** Push a channel to every live renderer window (main + detached). */
     sendToAllWindows?: (channel: string, payload: unknown) => void;
@@ -747,6 +758,7 @@ export class RoomService {
     metrics?: RoomMetrics;
     cpa?: CpaSupervisor;
   }) {
+    this.hostedTransport = opts.hostedTransport;
     this.getWindow = opts.getWindow;
     this.sendToAllWindows = opts.sendToAllWindows;
     this.sessions = opts.sessions;
@@ -887,11 +899,11 @@ export function activate(ctx) {
   private hydrateFromArchive(): void {
     if (!this.archive) return;
     for (const stored of this.archive.loadIndex()) {
-      // No live socket after restart: guest rooms show ended (manual rejoin);
-      // host rooms left open are flagged resumePending and rebound by
-      // resumeArchivedRooms() right after this hydrate.
+      // Restore both listeners and member connections after process startup.
       const status = stored.status === "open" ? "ended" : stored.status;
       const rec: RoomRecord = {
+        hosted: stored.hosted,
+        hostedOwnerFp: stored.hostedOwnerFp,
         roomId: stored.roomId,
         name: stored.name,
         // Host rooms persist their own password (resume hosting); older
@@ -927,7 +939,7 @@ export function activate(ctx) {
         members: (stored.members ?? []).map((m) => ({
           ...m,
           // 重启后没有活 socket：只有房主自己算在线，客人等手动重连。
-          online: stored.role === "host" ? m.role === "host" : m.online,
+          online: stored.role === "host" ? m.userId === stored.localUserId : m.online,
         })),
         // 接管功能已下线；旧存档里的接管状态不再恢复。
         seats: (stored.seats ?? []).map((seat) => ({
@@ -961,9 +973,37 @@ export function activate(ctx) {
             }
           : {}),
       };
+      if (this.hostedTransport) {
+        rec.hosted = true;
+        // Older hosted archives assigned host to the server and admin to the
+        // creator. Only the persisted, handshake-verified device binding may
+        // recover ownership; a role or display name is not ownership evidence.
+        if (!rec.hostedOwnerFp) {
+          // The old archive normalizer dropped hostedOwnerFp. That server
+          // assigned admin only to its verified creator and had no role-grant
+          // handler. Recover only an unambiguous privileged member AND device
+          // binding from that trusted server archive; never from join input.
+          const owners = rec.members.filter(m => m.userId !== rec.localUserId && (m.role === "admin" || m.role === "host"));
+          const bindings = owners.length === 1
+            ? [...rec.knownDevices.values()].filter(d => d.userId === owners[0].userId)
+            : [];
+          if (bindings.length === 1) rec.hostedOwnerFp = bindings[0].fp;
+        }
+        const ownerId = rec.hostedOwnerFp ? rec.knownDevices.get(rec.hostedOwnerFp)?.userId : undefined;
+        rec.members = rec.members.filter(m => m.userId !== rec.localUserId).map(m => ({
+          ...m,
+          role: m.userId === ownerId ? "host" : m.role === "host" ? "member" : m.role,
+          online: false,
+        }));
+        rec.seats = rec.seats.filter(s => s.occupantUserId !== rec.localUserId);
+      }
       // Host rooms left open at exit resume hosting on startup: same port +
       // persisted device keys → same fingerprint → the old invite stays valid.
       if (stored.status === "open" && stored.role === "host") {
+        rec.resumePending = true;
+      }
+      if (stored.role === "member" && rec.joinInfo && (stored.status === "open" || stored.offline)) {
+        rec.status = "open";
         rec.resumePending = true;
       }
       this.rooms.set(rec.roomId, rec);
@@ -973,12 +1013,13 @@ export function activate(ctx) {
     }
   }
 
-  /** Rebind every archived host room left open at exit (fire-and-forget). */
+  /** Restore connections once in main, independent of renderer/window count. */
   private resumeArchivedRooms(): void {
     for (const r of this.rooms.values()) {
       if (!r.resumePending) continue;
       r.resumePending = undefined;
-      void this.resumeHostRoom(r);
+      if (r.localRole === "host") void this.resumeHostRoom(r);
+      else void this.reconnectGuest(r);
     }
   }
 
@@ -990,12 +1031,19 @@ export function activate(ctx) {
    */
   private async resumeHostRoom(r: RoomRecord): Promise<void> {
     try {
+      if (r.relayAddr && !this.hostedTransport) {
+        r.status = "ended";
+        this.append(r, { kind: "system", authorLabel: "系统", text: "旧版中继群不再恢复，请使用新版服务器重新创建托管群；历史消息保留。" });
+        this.persistNow(r);
+        this.emit(r);
+        return;
+      }
       const bound = await this.bindHostServer(r);
       if (!bound.ok) {
         r.status = "ended";
         this.append(r, {
           kind: "system",
-          text: `重启后自动恢复开房失败：${bound.error}。房间已标记为结束，可重新创建`,
+          text: `重启后自动恢复群聊失败：${bound.error}。群聊已标记为结束，可重新创建`,
           authorLabel: "系统",
         });
         this.persistNow(r);
@@ -1005,7 +1053,7 @@ export function activate(ctx) {
       r.status = "open";
       this.append(r, {
         kind: "system",
-        text: `已从上次退出恢复开房 · 监听 0.0.0.0:${r.port}（原邀请码仍有效）`,
+        text: `已从上次退出恢复群聊 · 监听 0.0.0.0:${r.port}（原邀请码仍有效）`,
         authorLabel: "系统",
       });
       // publicWss is a stable external endpoint — nothing to re-establish;
@@ -1033,31 +1081,7 @@ export function activate(ctx) {
         } else {
           this.append(r, {
             kind: "system",
-            text: `Cloudflare 隧道不可用：${t.error}（房间仍可通过局域网加入）`,
-            authorLabel: "系统",
-          });
-        }
-      }
-      if (r.relayAddr && r.relayRoomId) {
-        // Re-register the same room id → the relay join URL is unchanged, so
-        // old invites keep working. Relay failure degrades to LAN.
-        const res = await startRoomRelay({
-          relay: r.relayAddr,
-          ...(r.relayToken ? { token: r.relayToken } : {}),
-          roomId: r.relayRoomId,
-          localPort: r.port,
-        });
-        if (res.ok) {
-          r.relay = { url: res.url, kill: res.kill };
-          this.append(r, {
-            kind: "system",
-            text: `中继服务器已连接：${res.url}`,
-            authorLabel: "系统",
-          });
-        } else {
-          this.append(r, {
-            kind: "system",
-            text: `中继不可用：${res.error}（房间仍可通过局域网加入）`,
+            text: `Cloudflare 隧道不可用：${t.error}（群聊仍可通过局域网加入）`,
             authorLabel: "系统",
           });
         }
@@ -1075,7 +1099,7 @@ export function activate(ctx) {
       r.server = null;
       this.append(r, {
         kind: "system",
-        text: `重启后自动恢复开房失败：${err instanceof Error ? err.message : String(err)}`,
+        text: `重启后自动恢复群聊失败：${err instanceof Error ? err.message : String(err)}`,
         authorLabel: "系统",
       });
       this.persistNow(r);
@@ -1090,7 +1114,7 @@ export function activate(ctx) {
         roomId: r.roomId,
         name: r.name,
         status: r.status,
-        role: r.localRole,
+        role: r.members.find(m => m.userId === r.localUserId)?.role ?? r.localRole,
         memberCount: r.members.length,
         onlineCount: countOnlineMembers(r.members),
         port: r.port,
@@ -1178,6 +1202,13 @@ export function activate(ctx) {
 
   invite(roomId: string) {
     const r = this.rooms.get(roomId);
+    if (r?.hosted && r.localRole === "member" && r.joinInfo) {
+      const info = r.joinInfo;
+      return { ok: true as const, host: info.host, hosts: [], port: info.port,
+        hostFingerprint: info.hostFingerprint, listening: !r.offline,
+        secret: encodeRoomInvite({ host: info.host, port: info.port, hostFingerprint: info.hostFingerprint ?? r.hostFingerprint,
+          roomName: r.name, wss: info.wss }) };
+    }
     if (!r || r.localRole !== "host") {
       return { ok: false as const, error: "只有群主可以邀请" };
     }
@@ -1323,7 +1354,7 @@ export function activate(ctx) {
     error?: string;
   }> {
     const r = this.rooms.get(roomId);
-    if (!r || r.localRole !== "host") {
+    if (!r || !this.isExtensionHost(r)) {
       return { ok: false, error: "只有群主可以启用模组" };
     }
     if (r.status !== "open") return { ok: false, error: "群聊不可用" };
@@ -1386,6 +1417,8 @@ export function activate(ctx) {
     }
     r.modOffer = this.buildOffer(r);
     this.pushState(r);
+    try { await this.syncHostedExtensions(r); }
+    catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
     return { ok: true, room: this.snapshot(r), offer: r.modOffer };
   }
 
@@ -1503,7 +1536,7 @@ export function activate(ctx) {
     }
     const seat = rec.seats.find((s) => s.id === seatId);
     if (!seat) return { ok: false, error: "请先选一个席位" };
-    if (rec.localRole !== "host") {
+    if (!this.isExtensionHost(rec)) {
       if (!this.canAct(seat, rec.localUserId)) {
         return { ok: false, error: "当前不能操作这个席位" };
       }
@@ -1537,7 +1570,7 @@ export function activate(ctx) {
     if (r.modParticipationPending) return { ok: false, error: "正在更新活动参与状态" };
     const checksum = enabled ? r.modChecksum : "";
     if (enabled && !checksum) return { ok: false, error: "群聊未启用 Mod" };
-    if (enabled && r.localRole !== "host" && !this.hasMod(checksum).has) {
+    if (enabled && !r.hosted && r.localRole !== "host" && !this.hasMod(checksum).has) {
       if (!r.joinInfo) return { ok: false, error: "缺少 Mod 下载地址" };
       const fetched = await this.fetchMod({ ...r.joinInfo, checksum });
       if (!fetched.ok) {
@@ -1594,6 +1627,11 @@ export function activate(ctx) {
     member.modChecksum = checksum;
     this.pushState(r);
     await this.publishViews(r);
+    if (this.hostedTransport) {
+      const peer = this.findGuestWsByUserId(r, userId);
+      if (peer) this.sendModViewsTo(r, peer, userId);
+      void this.roomRpc(r, "extension.request", { action: "views" }, 12_000, this.extensionOwnerSocket(r));
+    }
     return { ok: true };
   }
 
@@ -1604,6 +1642,8 @@ export function activate(ctx) {
   }
 
   async create(opts: {
+    /** Used only by the trusted server provisioning endpoint. */
+    hostedOwnerFp?: string;
     name: string;
     password?: string;
     port?: number;
@@ -1625,11 +1665,7 @@ export function activate(ctx) {
      * degrade to a LAN-only room instead of failing create.
      */
     tunnel?: boolean;
-    /**
-     * Self-hosted relay (ws:// or wss://, scripts/room-relay-server.mjs on a
-     * VPS). The host dials out; the public join URL goes into the invite's u
-     * array; forces encryption on. Relay failures degrade to a LAN-only room.
-     */
+    /** Server-owned room endpoint; provisioning failure must not fall back to LAN. */
     relay?: string;
     /** Optional auth token matching the relay's --token. */
     relayToken?: string;
@@ -1645,6 +1681,33 @@ export function activate(ctx) {
       return { ok: false, error: "中继地址须以 ws:// 或 wss:// 开头" };
     }
     const relayToken = (opts.relayToken ?? "").trim();
+    if (relay && !this.hostedTransport) {
+      try {
+        const endpoint = new URL(relay);
+        if (endpoint.protocol === "ws:" && !["localhost", "127.0.0.1", "[::1]"].includes(endpoint.hostname)) {
+          return { ok: false, error: "服务器托管须使用 wss://（仅本机测试允许 ws://），以保护建群凭证" };
+        }
+        endpoint.protocol = endpoint.protocol === "wss:" ? "https:" : "http:";
+        endpoint.pathname = endpoint.pathname.replace(/\/$/, "") + "/api/rooms";
+        endpoint.search = "";
+        const response = await fetch(endpoint, {
+          method: "POST", redirect: "error", signal: AbortSignal.timeout(15_000),
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${relayToken}` },
+          body: JSON.stringify({ name, password: opts.password ?? "", autoApprove: !!opts.autoApprove, ownerFp: this.deviceFp }),
+        });
+        const result = await response.json() as { ok: boolean; error?: string; url?: string; fingerprint?: string };
+        if (!response.ok || !result.ok || !result.url || !result.fingerprint) return { ok: false, error: result.error ?? "服务器建群失败" };
+        const target = new URL(result.url);
+        const expectedWsOrigin = endpoint.origin.replace(/^http/, "ws");
+        if (target.origin !== expectedWsOrigin || target.username || target.password || !/^[a-f0-9]{64}$/.test(result.fingerprint)) {
+          return { ok: false, error: "服务器返回了不匹配的群聊地址或指纹，请检查 public-url 配置" };
+        }
+        return await this.join({ host: target.hostname, port: Number(target.port) || (target.protocol === "wss:" ? 443 : 80),
+          password: opts.password?.trim(), wss: [result.url], hostFingerprint: result.fingerprint });
+      } catch (err) {
+        return { ok: false, error: `服务器建群失败：${err instanceof Error ? err.message : String(err)}` };
+      }
+    }
     const port = opts.port && opts.port > 0 ? opts.port : ROOM_DEFAULT_PORT;
     // Relayed (public) rooms must never go plaintext.
     const encrypt =
@@ -1660,7 +1723,7 @@ export function activate(ctx) {
         existing.status === "open" &&
         existing.localRole === "host" &&
         existing.port === port &&
-        existing.server
+        existing.server && !this.hostedTransport
       ) {
         return {
           ok: false,
@@ -1671,10 +1734,12 @@ export function activate(ctx) {
 
     const roomId = randomUUID();
     const hostUserId = randomUUID();
-    const hostName = displayName();
+    const hostName = this.hostedTransport ? "群聊服务器" : displayName();
     const ips = lanAddresses();
 
     const rec: RoomRecord = {
+      hosted: !!this.hostedTransport,
+      hostedOwnerFp: this.hostedTransport ? opts.hostedOwnerFp : undefined,
       roomId,
       name,
       password: (opts.password ?? "").trim(),
@@ -1696,7 +1761,7 @@ export function activate(ctx) {
       hostLabel: hostName,
       localUserId: hostUserId,
       localRole: "host",
-      members: [
+      members: this.hostedTransport ? [] : [
         {
           userId: hostUserId,
           name: hostName,
@@ -1705,7 +1770,7 @@ export function activate(ctx) {
           projectPath: this.settings.get().lastProjectPath ?? null,
         },
       ],
-      seats: [
+      seats: this.hostedTransport ? [] : [
         {
           id: randomUUID(),
           kind: "human",
@@ -1722,7 +1787,7 @@ export function activate(ctx) {
           id: randomUUID(),
           at: Date.now(),
           seatId: "",
-          authorUserId: hostUserId,
+          authorUserId: this.hostedTransport ? null : hostUserId,
           authorLabel: "系统",
           kind: "system",
           text: `群聊「${name}」已创建 · 监听 0.0.0.0:${port}`,
@@ -1757,45 +1822,21 @@ export function activate(ctx) {
       } else {
         this.append(rec, {
           kind: "system",
-          text: `Cloudflare 隧道不可用：${t.error}（房间仍可通过局域网加入）`,
-          authorLabel: "系统",
-        });
-      }
-    }
-
-    if (relay) {
-      // Self-hosted relay: the host dials out, guests join via the relay URL.
-      // Failures degrade to a LAN-only room — create never fails on this.
-      // The relay address/token/roomId persist with the room so a restart
-      // re-registers the same id and the old invite URL keeps working.
-      const relayRoomId = randomBytes(6).toString("hex");
-      rec.relayAddr = relay;
-      if (relayToken) rec.relayToken = relayToken;
-      rec.relayRoomId = relayRoomId;
-      const res = await startRoomRelay({
-        relay,
-        ...(relayToken ? { token: relayToken } : {}),
-        roomId: relayRoomId,
-        localPort: port,
-      });
-      if (res.ok) {
-        rec.relay = { url: res.url, kill: res.kill };
-        this.append(rec, {
-          kind: "system",
-          text: `中继服务器已连接：${res.url}`,
-          authorLabel: "系统",
-        });
-      } else {
-        this.append(rec, {
-          kind: "system",
-          text: `中继不可用：${res.error}（房间仍可通过局域网加入）`,
+          text: `Cloudflare 隧道不可用：${t.error}（群聊仍可通过局域网加入）`,
           authorLabel: "系统",
         });
       }
     }
 
     this.rooms.set(roomId, rec);
-    this.persist(rec);
+    if (this.hostedTransport) {
+      try { this.persistNow(rec, true); }
+      catch {
+        this.rooms.delete(roomId);
+        rec.server?.close();
+        return { ok: false, error: "服务器无法保存群聊，请检查数据目录与磁盘空间" };
+      }
+    } else this.persist(rec);
     this.emit(rec);
     return { ok: true, room: this.snapshot(rec) };
   }
@@ -1808,6 +1849,11 @@ export function activate(ctx) {
   private async bindHostServer(
     r: RoomRecord,
   ): Promise<{ ok: boolean; error?: string }> {
+    if (this.hostedTransport) {
+      r.hosted = true;
+      r.server = this.hostedTransport(r.roomId, (ws) => this.onGuest(r, ws));
+      return { ok: true };
+    }
     const port = r.port;
     let wss: WebSocketServer;
     try {
@@ -1903,7 +1949,7 @@ export function activate(ctx) {
     hostFingerprint?: string;
     /** Rejoin: reuse the previous member identity so the host keeps seats */
     userId?: string;
-  }): Promise<{ ok: boolean; room?: RoomSnapshot; error?: string }> {
+  }, reuseRecord?: RoomRecord): Promise<{ ok: boolean; room?: RoomSnapshot; error?: string }> {
     let host = opts.host.trim();
     // Strip accidental scheme / path / brackets
     host = host
@@ -1927,7 +1973,7 @@ export function activate(ctx) {
       return { ok: false, error: "端口无效" };
     }
 
-    const userId = opts.userId ?? randomUUID();
+    let userId = opts.userId ?? randomUUID();
     const name = (opts.name ?? displayName()).trim() || displayName();
     const checksum = (opts.modChecksum ?? "").trim();
     // Race every candidate (LAN ws:// + wss://) in parallel; the first
@@ -1988,6 +2034,7 @@ export function activate(ctx) {
             done({ ok: false, error: hs.error });
             return;
           }
+          userId = hs.userId ?? userId;
           // Guard the post-handshake join → welcome phase.
           timer = setTimeout(() => {
             try {
@@ -1995,7 +2042,7 @@ export function activate(ctx) {
             } catch {
               // ignore
             }
-            done({ ok: false, error: "加入超时：主机未返回房间快照" });
+            done({ ok: false, error: "加入超时：主机未返回群聊快照" });
           }, 12_000);
           const conn = hs.conn;
           conn.onFrame((frame) => {
@@ -2018,6 +2065,7 @@ export function activate(ctx) {
               if (!rec) {
                 clearTimeout(timer);
                 rec = {
+                  hosted: snap.hosted,
                   roomId: snap.roomId,
                   name: snap.name,
                   password: opts.password ?? "",
@@ -2061,6 +2109,11 @@ export function activate(ctx) {
                     path: winPath,
                   },
                 };
+                if (reuseRecord?.roomId === snap.roomId && reuseRecord.hosted && this.isExtensionHost(reuseRecord)) {
+                  // Keep desktop runtime callbacks bound to the same record across reconnects.
+                  rec = Object.assign(reuseRecord, rec, { closing: false, offline: undefined, reconnecting: false });
+                  if (rec.modLoaded) rec.modChecksum = rec.modLoaded.checksum;
+                }
                 this.rooms.set(snap.roomId, rec);
                 this.bindGuestSocket(rec, ws);
                 this.persist(rec);
@@ -2257,10 +2310,11 @@ export function activate(ctx) {
     r.reconnecting = true;
     const gen = r.reconnectGen ?? 0;
     const info = r.joinInfo;
-    const candidates = [
-      info.host,
-      ...(info.hosts ?? []).filter((h) => h && h !== info.host),
-    ];
+    const publicUrls = info.wss ?? [];
+    const candidates = [...new Set([
+      ...publicUrls,
+      ...(r.hosted ? [] : [info.host, ...(info.hosts ?? [])]),
+    ])].filter(Boolean);
 
     for (let attempt = 1; attempt <= RECONNECT_BACKOFF_MS.length; attempt++) {
       if (r.closing || (r.reconnectGen ?? 0) !== gen) {
@@ -2301,6 +2355,7 @@ export function activate(ctx) {
           continue;
         }
         r.reconnecting = false;
+        r.offline = undefined;
         this.append(r, {
           kind: "system",
           text: "已重新连接主机",
@@ -2344,7 +2399,10 @@ export function activate(ctx) {
       };
       let ws: WebSocket;
       try {
-        ws = new WebSocket(`ws://${host}:${port}`, { handshakeTimeout: 10_000 });
+        const url = /^wss?:\/\//i.test(host) ? host : `ws://${host}:${port}`;
+        ws = new WebSocket(url, { handshakeTimeout: 10_000,
+          ...(url.startsWith("wss:") && this.wssRejectUnauthorized === false ? { rejectUnauthorized: false } : {}),
+        });
       } catch {
         done(false);
         return;
@@ -2364,6 +2422,7 @@ export function activate(ctx) {
         /* wait for close */
       });
       ws.on("open", () => {
+        if (r.closing) { clearTimeout(timer); ws.close(); done(false); return; }
         void this.handshakeAsGuest(ws, {
           password: password ?? "",
           name: displayName(),
@@ -2372,7 +2431,7 @@ export function activate(ctx) {
           userId: r.localUserId || undefined,
         }).then((hs) => {
           if (settled) return;
-          if (!hs.ok) {
+          if (r.closing || !hs.ok) {
             clearTimeout(timer);
             try {
               ws.close();
@@ -2385,6 +2444,7 @@ export function activate(ctx) {
           const conn = hs.conn;
           conn.onFrame((frame) => {
             if (settled) return;
+            if (r.closing) { clearTimeout(timer); ws.close(); done(false); return; }
             if (frame.type === "room.closed") {
               clearTimeout(timer);
               this.dismissGuest(
@@ -2500,6 +2560,7 @@ export function activate(ctx) {
     }
     const info = old.joinInfo;
     const userId = old.localUserId || undefined;
+    this.cancelGuestReconnect(old);
     // Archive 保留；主机快照会把完整历史带回来
     this.cancelPersist(roomId);
     this.rooms.delete(roomId);
@@ -2512,7 +2573,7 @@ export function activate(ctx) {
       hostFingerprint: info.hostFingerprint,
       wss: info.wss,
       userId,
-    });
+    }, old);
     if (!res.ok) {
       // 重连失败：恢复旧记录，本地历史不丢
       this.rooms.set(roomId, old);
@@ -2529,6 +2590,10 @@ export function activate(ctx) {
     this.cancelGuestReconnect(r);
     // 断线不是解散：保持可重连。真正退出走 leave() → deleteLocal。
     if (!opts?.offline) r.status = "ended";
+    if (!opts?.offline) {
+      this.disposeModHost(r);
+      this.disposeKernel(r, false);
+    }
     this.disposeExecTurns(r);
     try {
       r.client?.close();
@@ -2550,8 +2615,21 @@ export function activate(ctx) {
 
   /** Ongoing guest socket after join / successful reconnect. */
   private bindGuestSocket(r: RoomRecord, ws: WebSocket): void {
+    queueMicrotask(() => this.queueExtensionSync(r));
     const handle = (frame: RoomFrame) => {
       if (r.closing || r.client !== ws) return;
+      if (frame.type === "extension.request") {
+        void this.handleExtensionRequest(r, ws, frame.payload); return;
+      }
+      if (frame.type === "extension.result") {
+        this.finishExtensionRpc(r, frame.payload); return;
+      }
+      if (frame.type === "host.pending") {
+        const pending = (frame.payload as { pending?: Array<{ fp: string; name: string }> }).pending ?? [];
+        r.remotePending = pending;
+        this.safeSend(IPC.roomEvent, { roomId: r.roomId, pending });
+        return;
+      }
       if (frame.type === "attachment.get" || frame.type === "attachment.chunk") {
         if (this.isAttachmentPeerActive(r, ws)) this.attachmentTransfer.handle(this.attachmentPeer(r, ws), frame.type, frame.payload);
         return;
@@ -2598,6 +2676,7 @@ export function activate(ctx) {
         return;
       }
       if (frame.type === "mod.patch") {
+        if (r.hosted && r.modHost && this.isExtensionHost(r)) return;
         const p = frame.payload as { seq?: number; publicView?: unknown };
         r.modSeq = p.seq ?? r.modSeq;
         r.modPublicView = p.publicView;
@@ -2605,6 +2684,7 @@ export function activate(ctx) {
         return;
       }
       if (frame.type === "mod.priv") {
+        if (r.hosted && r.modHost && this.isExtensionHost(r)) return;
         if (!isRoomModParticipant(r, r.localUserId)) return;
         const p = frame.payload as {
           seq?: number;
@@ -2631,6 +2711,7 @@ export function activate(ctx) {
         return;
       }
       if (frame.type === "mod.offer") {
+        if (r.hosted && r.modHost && this.isExtensionHost(r)) return;
         r.modOffer = frame.payload as ModOfferPayload;
         this.emit(r);
         return;
@@ -2728,6 +2809,7 @@ export function activate(ctx) {
    */
   end(roomId: string, opts?: { delete?: boolean }) {
     const r = this.rooms.get(roomId);
+    if (r?.hosted && r.localRole === "member") return this.hostedControl(r, "end");
     if (!r) return { ok: false, error: "群聊不存在" };
     if (r.localRole !== "host") {
       return { ok: false, error: "只有群主可以结束群聊" };
@@ -2805,7 +2887,10 @@ export function activate(ctx) {
     } catch {
       // ignore
     }
-    if (r) this.disposeKernel(r, true);
+    if (r) {
+      this.disposeModHost(r);
+      this.disposeKernel(r, true);
+    }
     this.cancelPersist(roomId);
     this.rooms.delete(roomId);
     this.archive?.removeRoom(roomId);
@@ -2908,6 +2993,7 @@ export function activate(ctx) {
       aiUserId?: string;
       workspaceUserId?: string;
     },
+    actorUserId?: string,
   ) {
     const rec0 = this.rooms.get(roomId);
     if (!rec0 || rec0.status !== "open") {
@@ -2923,7 +3009,7 @@ export function activate(ctx) {
       } satisfies RoomSeatUpdatePayload);
       return { ok: true };
     }
-    if (!canManageSeats(this.memberRole(rec0, rec0.localUserId))) {
+    if (!canManageSeats(this.memberRole(rec0, actorUserId ?? rec0.localUserId))) {
       return { ok: false, error: "没有权限改席位" };
     }
     const rec = rec0;
@@ -3095,7 +3181,7 @@ export function activate(ctx) {
   ): { ok: boolean; room?: RoomSnapshot; error?: string } {
     const r = this.rooms.get(roomId);
     if (!r || r.status !== "open") return { ok: false, error: "群聊不可用" };
-    if (r.localRole !== "host") return { ok: false, error: "只有群主可以启用扩展" };
+    if (!this.isExtensionHost(r)) return { ok: false, error: "只有群主电脑可以启用扩展" };
     if (peekHostApi(packDir) === 1) {
       return { ok: false, error: "这是玩法模组，请用玩法入口启用" };
     }
@@ -3132,7 +3218,7 @@ export function activate(ctx) {
   ): { ok: boolean; entries?: Array<{ key: string; value: string }>; error?: string } {
     const r = this.rooms.get(roomId);
     if (!r || r.status !== "open") return { ok: false, error: "群聊不可用" };
-    if (r.localRole !== "host") return { ok: false, error: "只有群主可以查看共享记忆" };
+    if (!this.isExtensionHost(r)) return { ok: false, error: "只有群主可以查看共享记忆" };
     if (!this.hasMemoryProvide(r) || !r.kernelStore) {
       return { ok: true, entries: [] };
     }
@@ -3146,7 +3232,7 @@ export function activate(ctx) {
   ): { ok: boolean; error?: string } {
     const r = this.rooms.get(roomId);
     if (!r || r.status !== "open") return { ok: false, error: "群聊不可用" };
-    if (r.localRole !== "host") return { ok: false, error: "只有群主可以改共享记忆" };
+    if (!this.isExtensionHost(r)) return { ok: false, error: "只有群主可以改共享记忆" };
     if (!this.hasMemoryProvide(r) || !r.kernelStore) {
       return { ok: false, error: "未启用共享记忆" };
     }
@@ -3160,7 +3246,7 @@ export function activate(ctx) {
   ): { ok: boolean; error?: string } {
     const r = this.rooms.get(roomId);
     if (!r || r.status !== "open") return { ok: false, error: "群聊不可用" };
-    if (r.localRole !== "host") return { ok: false, error: "只有群主可以改共享记忆" };
+    if (!this.isExtensionHost(r)) return { ok: false, error: "只有群主可以改共享记忆" };
     if (!this.hasMemoryProvide(r) || !r.kernelStore) {
       return { ok: false, error: "未启用共享记忆" };
     }
@@ -3174,7 +3260,7 @@ export function activate(ctx) {
   ): { ok: boolean; room?: RoomSnapshot; error?: string } {
     const r = this.rooms.get(roomId);
     if (!r || r.status !== "open") return { ok: false, error: "群聊不可用" };
-    if (r.localRole !== "host") return { ok: false, error: "只有群主可以卸载扩展" };
+    if (!this.isExtensionHost(r)) return { ok: false, error: "只有群主可以卸载扩展" };
     const packs = (r.kernelPacks ?? []).filter((p) => p.manifest.id !== id);
     if (packs.length === (r.kernelPacks ?? []).length) {
       return { ok: false, error: "未找到该扩展" };
@@ -3360,7 +3446,7 @@ export function activate(ctx) {
   ): { ok: true; room: RoomRecord; store: KernelImproveStore } | { ok: false; error: string } {
     const room = this.rooms.get(roomId);
     if (!room || room.status !== "open") return { ok: false, error: "群聊不可用" };
-    if (room.localRole !== "host") return { ok: false, error: "只有群主可以管理扩展改善" };
+    if (!this.isExtensionHost(room)) return { ok: false, error: "只有群主可以管理扩展改善" };
     if (!room.kernelImprove) {
       room.kernelImprove = new KernelImproveStore(getKernelImprovePath(this.pathEnv(), roomId));
     }
@@ -3421,7 +3507,7 @@ export function activate(ctx) {
   ): { ok: boolean; error?: string } {
     const r = this.rooms.get(roomId);
     if (!r || r.status !== "open") return { ok: false, error: "群聊不可用" };
-    if (r.localRole !== "host") return { ok: false, error: "只有群主可以启用扩展" };
+    if (!this.isExtensionHost(r)) return { ok: false, error: "只有群主电脑可以启用扩展" };
     if (!r.kernelStore) {
       r.kernelStore = new HostRoomKv(
         getKernelStorePath(this.pathEnv(), r.roomId),
@@ -3444,7 +3530,7 @@ export function activate(ctx) {
   ): Promise<{ ok: boolean; error?: string }> {
     const r = this.rooms.get(roomId);
     if (!r || r.status !== "open") return { ok: false, error: "群聊不可用" };
-    if (r.localRole !== "host") return { ok: false, error: "只有群主可以触发调度" };
+    if (!this.isExtensionHost(r)) return { ok: false, error: "只有群主可以触发调度" };
     await this.runKernelScheduleJobs(r);
     return { ok: true };
   }
@@ -3776,8 +3862,9 @@ export function activate(ctx) {
     return { ok: false, error: "无效任务操作" };
   }
 
-  private roomRpc(r: RoomRecord, type: "task.control" | "agent.message", payload: Record<string, unknown>, timeout = 12_000): Promise<{ ok: boolean; error?: string; value?: unknown }> {
-    if (r.status !== "open" || !r.client || r.client.readyState !== WebSocket.OPEN) return Promise.resolve({ ok: false, error: "未连接群聊" });
+  private roomRpc(r: RoomRecord, type: "task.control" | "agent.message" | "extension.request", payload: Record<string, unknown>, timeout = 12_000, target = r.client): Promise<{ ok: boolean; error?: string; value?: unknown }> {
+    if (r.status !== "open" || !target || target.readyState !== WebSocket.OPEN) return Promise.resolve({ ok: false, error: type === "extension.request" ? "执行扩展的群主电脑未连接，普通群聊仍可使用" : "未连接群聊" });
+    if (type === "extension.request" && Buffer.byteLength(JSON.stringify(payload)) > 60 * 1024) return Promise.resolve({ ok: false, error: "扩展状态超过 60 KB 上限" });
     const waits = r.taskWaits ??= new Map();
     if (waits.size >= 64) return Promise.resolve({ ok: false, error: "待处理请求过多" });
     const rpcId = randomUUID();
@@ -3788,7 +3875,7 @@ export function activate(ctx) {
       }, timeout);
       timer.unref?.();
       waits.set(rpcId, { finish: resolve, timer });
-      this.sendClient(r, type, { ...payload, rpcId });
+      this.reply(target, r, type, { ...payload, rpcId });
     });
   }
 
@@ -3862,14 +3949,12 @@ export function activate(ctx) {
     return lines.join("\n");
   }
 
-  /**
-   * 路径守卫提示：群聊驱动的会话一律被 hook 圈在 cwd 内，这里先把规则讲清楚，
-   * 免得 AI 撞墙后换招绕过（skill 里有完整规则，首条提示点名它）。
-   */
+  /** Inline workspace rules for each new seat session; no skill read required. */
   private pathGuardPrefix(cwd: string): string {
     return [
-      `路径守卫：你只能读写 ${cwd} 之内的文件；Bash 命令也不允许访问该目录之外的路径（越界会被直接拒绝，被拒绝后不要换工具或拼路径绕过）。`,
-      `完整规则见 skill「${BUILTIN_PATH_GUARD_SKILL}」，首轮请先阅读它。`,
+      `路径守卫：所有文件操作、命令及其启动的脚本和子进程都必须遵守工作区 ${cwd} 的读写边界。`,
+      "被拒绝后不得换工具、拼路径或通过 Python/Node 等脚本绕过；确需访问目录外内容时，说明理由和具体路径，交由工作区主人决定。",
+      "以上已包含本会话的路径规则，无需为此加载或重复读取 skill。",
     ].join("\n");
   }
 
@@ -3942,11 +4027,13 @@ export function activate(ctx) {
   ) {
     // 远程执行：席位绑定了其他成员的机器 → 派发过去，不在房主本机跑。
     // Only immutable references cross the wire; the executor resolves its own cache.
+    this.assertDesktopExecutor(r, seat);
     if (this.refuseDeniedWorkspace(r, seat, requesterUserId ?? null)) throw new Error("工作区禁止执行此任务");
     if (this.seatExecutor(r, seat)) {
       await this.dispatchRemoteTurn(r, seat, text, requesterUserId ?? null, task, attachments);
       return;
     }
+    if (this.hostedTransport) throw new Error("托管服务器禁止执行 Agent");
     const cwd = this.settings.get().lastProjectPath;
     if (!cwd) {
       this.append(r, {
@@ -4087,6 +4174,142 @@ export function activate(ctx) {
     return e;
   }
 
+  private isExtensionHost(r: RoomRecord): boolean {
+    return !this.hostedTransport && (r.localRole === "host" ||
+      (r.hosted === true && this.memberRole(r, r.localUserId) === "host"));
+  }
+
+  private extensionOwnerSocket(r: RoomRecord): WebSocket | null {
+    const owner = r.members.find(m => m.role === "host");
+    return owner ? this.findGuestWsByUserId(r, owner.userId) : null;
+  }
+
+  private async syncHostedExtensions(r: RoomRecord): Promise<void> {
+    if (!r.hosted || !this.isExtensionHost(r) || r.status !== "open") return;
+    const state = {
+      offer: this.buildOffer(r), started: !!r.modStarted, ended: !!r.modEnded,
+      seq: r.modSeq ?? 0, publicView: r.modPublicView,
+      seatViews: r.modSeatViews ?? {}, actions: r.modActionsBySeat ?? {},
+      fail: r.modFail, kernel: this.kernelProjection(r),
+    };
+    const work = (r.extensionSyncChain ?? Promise.resolve()).then(async () => {
+      const result = await this.roomRpc(r, "extension.request", { action: "sync", state });
+      if (!result.ok) throw new Error(result.error ?? "扩展同步失败");
+    });
+    r.extensionSyncChain = work.catch(() => undefined);
+    return work;
+  }
+
+  private queueExtensionSync(r: RoomRecord): void {
+    void this.syncHostedExtensions(r).catch(error => {
+      this.safeSend(IPC.roomEvent, { roomId: r.roomId, error: true, message: String(error) });
+    });
+  }
+
+  private finishExtensionRpc(r: RoomRecord, payload: unknown): void {
+    const p = payload as { rpcId?: string; ok?: boolean; error?: string; value?: unknown };
+    if (!p || typeof p.rpcId !== "string" || typeof p.ok !== "boolean") return;
+    const pending = r.taskWaits?.get(p.rpcId);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    r.taskWaits!.delete(p.rpcId);
+    pending.finish({ ok: p.ok, error: p.error, value: p.value });
+  }
+
+  /** Fixed data operations only. The server never loads extension JavaScript. */
+  private async handleExtensionRequest(r: RoomRecord, ws: WebSocket, payload: unknown): Promise<void> {
+    const p = payload as { rpcId?: string; action?: string; state?: Record<string, unknown>; env?: ChatInEnvelope; seatId?: string; name?: string; actorUserId?: string; payload?: unknown; text?: string; checksum?: string; toAgent?: boolean };
+    if (!p || typeof p.rpcId !== "string" || p.rpcId.length > 128) return;
+    const reply = (result: { ok: boolean; error?: string; value?: unknown }) => {
+      if (Buffer.byteLength(JSON.stringify(result)) > 60 * 1024) result = { ok: false, error: "扩展返回数据超过 60 KB 上限" };
+      return this.reply(ws, r, "extension.result", { rpcId: p.rpcId, ...result });
+    };
+    try {
+      if (this.hostedTransport) {
+        const actor = (ws as GuestWs).userId;
+        if (!actor || this.memberRole(r, actor) !== "host" || r.connections.get(ws)?.peerFp !== r.hostedOwnerFp) {
+          reply({ ok: false, error: "只有经过设备验证的群主可以同步扩展" }); return;
+        }
+        if (p.action === "sync") {
+          const s = p.state;
+          const offer = s?.offer as ModOfferPayload | undefined;
+          if (!s || !offer || typeof offer.checksum !== "string" ||
+              (offer.checksum !== "" && !MOD_CHECKSUM_RE.test(offer.checksum)) ||
+              typeof offer.id !== "string" || typeof offer.name !== "string" || typeof offer.version !== "string" ||
+              typeof offer.size !== "number" || offer.size < 0 || offer.size > MOD_BUNDLE_MAX_BYTES ||
+              !Number.isSafeInteger(s.seq) || typeof s.started !== "boolean" || typeof s.ended !== "boolean") {
+            reply({ ok: false, error: "扩展状态无效" }); return;
+          }
+          const kernel = s.kernel as RoomSnapshot["kernel"];
+          if (kernel && (!Array.isArray(kernel.mods) || kernel.mods.length > 64 || kernel.mods.some(m => !m || typeof m.id !== "string" || typeof m.name !== "string" || typeof m.version !== "string" || !["active", "pending", "failed"].includes(m.state)))) {
+            reply({ ok: false, error: "扩展列表无效" }); return;
+          }
+          if (r.modChecksum !== offer.checksum) {
+            for (const member of r.members) member.modChecksum = member.userId === actor ? offer.checksum : "";
+          }
+          r.modChecksum = offer.checksum;
+          r.modOffer = offer;
+          r.modStarted = s.started;
+          r.modEnded = s.ended;
+          r.modSeq = s.seq as number;
+          r.modPublicView = s.publicView;
+          // Only current seats can receive a private view or actions.
+          const seatViews = s.seatViews as Record<string, unknown> | undefined;
+          const actions = s.actions as RoomRecord["modActionsBySeat"];
+          r.modSeatViews = Object.fromEntries(r.seats.filter(seat => seatViews && Object.hasOwn(seatViews, seat.id)).map(seat => [seat.id, seatViews![seat.id]]));
+          r.modActionsBySeat = Object.fromEntries(r.seats.filter(seat => actions && Object.hasOwn(actions, seat.id)).map(seat => [seat.id, actions![seat.id]]));
+          r.modFail = typeof s.fail === "string" ? s.fail.slice(0, 2000) : undefined;
+          r.kernelProjection = kernel;
+          this.pushState(r);
+          this.broadcast(r, "mod.offer", offer);
+          this.broadcast(r, "mod.patch", { seq: r.modSeq, publicView: r.modPublicView });
+          for (const g of r.guests) this.sendModViewsTo(r, g, (g as GuestWs).userId ?? "");
+          if (r.modFail) this.broadcast(r, "mod.fail", { message: r.modFail });
+          reply({ ok: true }); return;
+        }
+        if (p.action === "agent" && p.checksum === r.modChecksum && r.modStarted && !r.modEnded) {
+          const seat = r.seats.find(s => s.id === p.seatId && s.kind === "agent");
+          if (!seat || seat.running || typeof p.text !== "string" || !p.text.trim() || p.text.length > 16000) {
+            reply({ ok: false, error: "Agent 席位忙或请求无效" }); return;
+          }
+          const answer = await this.dispatchRemoteTurn(r, seat, p.text, actor);
+          reply({ ok: true, value: answer }); return;
+        }
+        if (p.action === "announce" && typeof p.text === "string" && p.text.length <= 8000) {
+          this.append(r, { kind: "system", source: "kernel", text: p.text, authorLabel: "系统" });
+          this.pushState(r);
+          const seat = p.toAgent ? r.seats.find(s => s.kind === "agent") : undefined;
+          if (seat) void this.runAgentSeat(r, seat, p.text, actor);
+          reply({ ok: true }); return;
+        }
+      } else if (r.hosted && ws === r.client && this.isExtensionHost(r)) {
+        if (p.action === "hook" && p.env && typeof p.env.text === "string") {
+          reply({ ok: true, value: r.kernel ? await r.kernel.runChatIn(p.env) : { action: "continue" } }); return;
+        }
+        if (p.action === "views") {
+          await this.publishViews(r); reply({ ok: true }); return;
+        }
+        if (p.action === "intent" && p.checksum === r.modChecksum && typeof p.seatId === "string" && typeof p.name === "string" && typeof p.actorUserId === "string") {
+          if (!r.modStarted || r.modEnded || r.modFail) { reply({ ok: false, error: r.modFail ?? "玩法未开始" }); return; }
+          const seat = r.seats.find(s => s.id === p.seatId);
+          if (!seat || !this.canAct(seat, p.actorUserId)) { reply({ ok: false, error: "无权操作席位" }); return; }
+          reply(await this.enqueueIntent(r, () => this.dispatchMod(r, { seatId: seat.id, name: p.name!, payload: p.payload, actorUserId: p.actorUserId! }))); return;
+        }
+      }
+      reply({ ok: false, error: "无效扩展请求" });
+    } catch (error) {
+      reply({ ok: false, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  private assertDesktopExecutor(r: RoomRecord, seat: RoomSeat): void {
+    if (!this.hostedTransport) return;
+    const executor = resolveWorkspaceUserId(seat, r.hostUserId);
+    if (!executor || executor === r.localUserId || !r.members.some(m => m.userId === executor)) {
+      throw new Error("托管群 Agent 必须绑定成员电脑，不能使用服务器工作区");
+    }
+  }
+
   private memberRole(r: RoomRecord, userId: string): RoomRole {
     return r.members.find((m) => m.userId === userId)?.role ?? "member";
   }
@@ -4133,15 +4356,31 @@ export function activate(ctx) {
   ): { ok: boolean; error?: string } {
     const r = this.rooms.get(roomId);
     if (!r || r.status !== "open") return { ok: false, error: "群聊不可用" };
-    if (r.localRole !== "host") {
-      return { ok: false, error: "只有群主可以设置管理员" };
-    }
     if (!canSetMemberRole(this.memberRole(r, r.localUserId))) {
       return { ok: false, error: "只有群主可以设置管理员" };
     }
-    if (userId === r.hostUserId) return { ok: false, error: "不能改群主角色" };
+    if (role !== "admin" && role !== "member") return { ok: false, error: "无效的成员角色" };
+    const target = r.members.find(m => m.userId === userId);
+    if (!target) return { ok: false, error: "成员不在群聊" };
+    if (target.role === "host") return { ok: false, error: "不能改群主角色" };
+    if (r.localRole !== "host") {
+      if (r.client?.readyState !== WebSocket.OPEN) return { ok: false, error: "服务器连接已断开" };
+      this.sendClient(r, "member.role", { userId, role } satisfies RoomMemberRolePayload);
+      return { ok: true };
+    }
+    return this.setMemberRoleOnHost(r, r.localUserId, userId, role);
+  }
+
+  private setMemberRoleOnHost(
+    r: RoomRecord, actorUserId: string, userId: string, role: "admin" | "member",
+  ): { ok: boolean; error?: string } {
+    if (!canSetMemberRole(this.memberRole(r, actorUserId))) {
+      return { ok: false, error: "只有群主可以设置管理员" };
+    }
+    if (role !== "admin" && role !== "member") return { ok: false, error: "无效的成员角色" };
     const m = r.members.find((mm) => mm.userId === userId);
-    if (!m) return { ok: false, error: "成员不在房间" };
+    if (!m) return { ok: false, error: "成员不在群聊" };
+    if (m.role === "host") return { ok: false, error: "不能改群主角色" };
     m.role = role;
     this.append(r, {
       kind: "system",
@@ -4225,7 +4464,7 @@ export function activate(ctx) {
   ): { ok: boolean; error?: string } {
     if (targetUserId === fromUserId) return { ok: true };
     const target = r.members.find((m) => m.userId === targetUserId);
-    if (!target) return { ok: false, error: "对方不在房间" };
+    if (!target) return { ok: false, error: "对方不在群聊" };
     if (target.aiShare === "on") return { ok: true };
     target.aiShare = "pending";
     target.aiAskBy = fromUserId;
@@ -4520,6 +4759,12 @@ export function activate(ctx) {
     p: RoomAiHttpPayload,
   ): void {
     if (!p || typeof p.requestId !== "string") return;
+    if (this.hostedTransport) {
+      // The server only routes between authenticated members, never to its own CPA.
+      if (!r.members.some(m => m.userId === p.targetUserId) ||
+          !r.members.some(m => m.userId === p.sourceUserId) ||
+          (p.dir === "req" ? p.sourceUserId : p.targetUserId) !== fromUserId) return;
+    }
     if (p.dir === "req") {
       if (p.targetUserId === r.localUserId) {
         this.assembleAiHttpReq(r, p);
@@ -4732,8 +4977,9 @@ export function activate(ctx) {
     requesterUserId: string | null,
     task?: RoomTask,
     attachments?: RoomAttachmentRef[],
-  ): Promise<void> {
-    const executor = seat.executorUserId!;
+  ): Promise<string> {
+    this.assertDesktopExecutor(r, seat);
+    const executor = resolveWorkspaceUserId(seat, r.hostUserId);
     const nodeName = this.memberName(r, executor);
     const ws = this.findGuestWsByUserId(r, executor);
     if (!ws) {
@@ -4748,9 +4994,9 @@ export function activate(ctx) {
     }
     const turnId = randomUUID();
     let finish!: (error?: string, unconfirmed?: boolean) => void;
-    const completion = new Promise<void>((resolve, reject) => {
+    const completion = new Promise<string>((resolve, reject) => {
       finish = (message, unconfirmed) => {
-        if (!message) { resolve(); return; }
+        if (!message) { resolve(turn.resultText ?? ""); return; }
         const error = new Error(message);
         if (unconfirmed) error.name = "RoomStopUnconfirmedError";
         reject(error);
@@ -4948,7 +5194,7 @@ export function activate(ctx) {
         if (ws) {
           this.reply(ws, r, "exec.abort", {
             turnId: p.turnId,
-            reason: "房主侧无此任务",
+            reason: "群主侧无此任务",
           } satisfies RoomExecAbortPayload);
         }
         this.execLog(r, {
@@ -5009,6 +5255,7 @@ export function activate(ctx) {
     const seat = r.seats.find((s) => s.id === turn.seatId);
     const nodeName = this.memberName(r, userId);
     if (p.ok && typeof p.text === "string" && p.text.trim()) {
+      turn.resultText = p.text.trim();
       this.append(r, {
         kind: "assistant",
         seatId: turn.seatId,
@@ -5067,6 +5314,7 @@ export function activate(ctx) {
 
   /** 节点收到房主的 exec.run：幂等接收，本机起会话执行。 */
   private onExecRun(r: RoomRecord, p: RoomExecRunPayload): void {
+    if (this.hostedTransport) return;
     if (!p || typeof p.turnId !== "string" || typeof p.seatId !== "string") {
       return;
     }
@@ -5185,6 +5433,7 @@ export function activate(ctx) {
     cwd: string,
   ): Promise<void> {
     if (nt.cancelled || r.nodeTurns?.get(nt.turnId) !== nt || r.status !== "open") return;
+    if (this.hostedTransport) throw new Error("托管服务器禁止执行 Agent");
     const seatSessions = (r.nodeSeatSessions ??= new Map());
     const prevSession = seatSessions.get(nt.seatId);
     // 席位模型在节点本机校验：未配置则回落本机默认，回复里注明。
@@ -5479,7 +5728,7 @@ export function activate(ctx) {
     }
     for (const [id, wait] of this.aiHttpWait) {
       clearTimeout(wait.timer);
-      wait.reject(new Error("房间已关闭"));
+      wait.reject(new Error("群聊已关闭"));
       this.aiHttpWait.delete(id);
     }
   }
@@ -5706,6 +5955,11 @@ export function activate(ctx) {
       state.guestName = String(p.name ?? "guest");
       state.guestPub = guestPub;
       state.userId = String(p.userId ?? "") || undefined;
+      if (r.hostedOwnerFp === fp) {
+        // The creating device keeps one room identity even when its local
+        // room entry was removed and it joins again from an invitation.
+        state.userId = r.knownDevices.get(fp)?.userId ?? state.userId;
+      }
       // TOFU: a known userId showing up with a different fingerprint must be
       // re-approved by the host, even on autoApprove rooms.
       state.fpChanged = false;
@@ -5763,7 +6017,7 @@ export function activate(ctx) {
       }
       const fp = state.guestFp;
       if (!r.knownDevices.has(fp) || state.fpChanged) {
-        if (!r.autoApprove || state.fpChanged) {
+        if ((!r.autoApprove || state.fpChanged) && fp !== r.hostedOwnerFp) {
           // New device (or fingerprint change): hold for host approval.
           // The handshake socket stays open until approve / deny / 60s.
           ctl.cancelWatchdog();
@@ -5833,7 +6087,7 @@ export function activate(ctx) {
       conn.onFrame((frame) => this.handleGuestFrame(r, ws, frame));
       this.metrics.record({ type: "handshake", reason: "ok" });
       ws.send(
-        JSON.stringify(makeHandshake("ok", { kid, encrypt: r.encrypt })),
+        JSON.stringify(makeHandshake("ok", { kid, encrypt: r.encrypt, userId: state.userId })),
       );
       ctl.upgrade();
       return;
@@ -5845,6 +6099,8 @@ export function activate(ctx) {
     roomId: string,
     fingerprint: string,
   ): { ok: boolean; error?: string } {
+    const remote = this.rooms.get(roomId);
+    if (remote?.hosted && remote.localRole === "member") return this.hostedControl(remote, "approve", fingerprint);
     const r = this.hostRoom(roomId);
     if (!r.ok) return r;
     const rec = r.room;
@@ -5914,6 +6170,8 @@ export function activate(ctx) {
     roomId: string,
     fingerprint: string,
   ): { ok: boolean; error?: string } {
+    const remote = this.rooms.get(roomId);
+    if (remote?.hosted && remote.localRole === "member") return this.hostedControl(remote, "deny", fingerprint);
     const r = this.hostRoom(roomId);
     if (!r.ok) return r;
     const rec = r.room;
@@ -6036,6 +6294,8 @@ export function activate(ctx) {
     roomId: string,
     name: string,
   ): { ok: boolean; room?: RoomSnapshot; error?: string } {
+    const remote = this.rooms.get(roomId);
+    if (remote?.hosted && remote.localRole === "member") return this.hostedControl(remote, "rename", name);
     const r = this.hostRoom(roomId);
     if (!r.ok) return r;
     const rec = r.room;
@@ -6064,7 +6324,7 @@ export function activate(ctx) {
     if (!item) return { ok: false, error: "消息不存在" };
     if (item.recalled) return { ok: true };
     if (r.localRole !== "host") {
-      if (item.authorUserId !== r.localUserId) {
+      if (item.authorUserId !== r.localUserId && this.memberRole(r, r.localUserId) !== "host") {
         return { ok: false, error: "只能撤回自己的消息" };
       }
       if (!r.client || r.client.readyState !== WebSocket.OPEN) {
@@ -6143,7 +6403,7 @@ export function activate(ctx) {
     const sessionId = taskId ? run?.sessionId : seat?.sessionId;
     if (remote) {
       this.abortRemoteTurnsForSeat(r, seatId, "任务收到中断请求", taskId);
-    } else if (sessionId) {
+    } else if (sessionId && !this.hostedTransport) {
       try {
         this.sessions.abort(sessionId);
       } catch {
@@ -6166,6 +6426,11 @@ export function activate(ctx) {
     ok: boolean;
     pending: Array<{ fp: string; name: string }>;
   } {
+    const remote = this.rooms.get(roomId);
+    if (remote?.hosted && remote.localRole === "member") {
+      this.hostedControl(remote, "pending");
+      return { ok: true, pending: remote.remotePending ?? [] };
+    }
     const r = this.hostRoom(roomId);
     if (!r.ok) return { ok: false, pending: [] };
     return {
@@ -6180,6 +6445,13 @@ export function activate(ctx) {
   /** Push the approval queue to the renderer (host side only). */
   private emitPending(r: RoomRecord, fingerprintChanged?: boolean): void {
     if (r.localRole !== "host") return;
+    if (r.hosted) {
+      for (const ws of r.guests) {
+        if (this.memberRole(r, (ws as GuestWs).userId ?? "") === "host" && r.connections.get(ws)?.peerFp === r.hostedOwnerFp) {
+          this.reply(ws, r, "host.pending", { pending: [...r.pendingByFp.entries()].map(([fp, e]) => ({ fp, name: e.name })) });
+        }
+      }
+    }
     this.safeSend(IPC.roomEvent, {
       roomId: r.roomId,
       pending: [...r.pendingByFp.entries()].map(([fp, e]) => ({
@@ -6188,6 +6460,13 @@ export function activate(ctx) {
       })),
       ...(fingerprintChanged ? { fingerprintChanged: true } : {}),
     });
+  }
+
+  private hostedControl(r: RoomRecord, action: string, value?: string): { ok: boolean; error?: string } {
+    if (this.memberRole(r, r.localUserId) !== "host") return { ok: false, error: "只有群主可执行此操作" };
+    if (r.client?.readyState !== WebSocket.OPEN) return { ok: false, error: "服务器连接已断开" };
+    this.sendClient(r, "host.control", { action, value });
+    return { ok: true };
   }
 
   /** Reject and close every pending handshake socket (room end / dispose). */
@@ -6222,7 +6501,7 @@ export function activate(ctx) {
     ws: WebSocket,
     opts: { password: string; name: string; hostFingerprint?: string; userId?: string },
   ): Promise<
-    | { ok: true; conn: RoomConnection; hostFp: string; encrypt: boolean }
+    | { ok: true; conn: RoomConnection; hostFp: string; encrypt: boolean; userId?: string }
     | { ok: false; error: string }
   > {
     return new Promise((resolve) => {
@@ -6231,7 +6510,7 @@ export function activate(ctx) {
       const stopHeartbeat = startWsHeartbeat(ws);
       const finish = (
         v:
-          | { ok: true; conn: RoomConnection; hostFp: string; encrypt: boolean }
+          | { ok: true; conn: RoomConnection; hostFp: string; encrypt: boolean; userId?: string }
           | { ok: false; error: string },
       ) => {
         if (settled) return;
@@ -6307,7 +6586,7 @@ export function activate(ctx) {
           return;
         }
         if (hs.type === "ok") {
-          const p = hs.payload as { kid?: string; encrypt?: boolean };
+          const p = hs.payload as { kid?: string; encrypt?: boolean; userId?: string };
           if (!pending || !p.kid) {
             finish({ ok: false, error: "握手时序错误" });
             return;
@@ -6326,6 +6605,7 @@ export function activate(ctx) {
             conn,
             hostFp: pending.hostFp,
             encrypt: p.encrypt !== false,
+            ...(typeof p.userId === "string" && p.userId ? { userId: p.userId } : {}),
           });
           return;
         }
@@ -6377,6 +6657,10 @@ export function activate(ctx) {
     // without touching room state.
     if (!KNOWN_ROOM_FRAME_TYPES.has(frame.type)) {
       chargeAbuse((ws as GuestWs).guard);
+      return;
+    }
+    if (this.hostedTransport && ["exec.run", "exec.abort"].includes(frame.type)) {
+      this.reply(ws, r, "error", { message: "托管服务器禁止执行 Agent，任务只能派发给成员电脑" });
       return;
     }
     // join / hello / mod.fetch legitimately carry roomId "pending" before the
@@ -6431,6 +6715,11 @@ export function activate(ctx) {
           ? p.projectPath
           : null;
       const existing = r.members.find((m) => m.userId === userId);
+      const isHostedOwner = !!r.hostedOwnerFp && r.connections.get(ws)?.peerFp === r.hostedOwnerFp;
+      if (r.hosted && existing?.role === "host" && !isHostedOwner) {
+        this.reply(ws, r, "error", { message: "群主身份需要创建群聊的设备验证" });
+        return;
+      }
       if (existing && peer.authenticatedUserId !== userId && peer.userId !== userId) {
         this.reply(ws, r, "error", { message: "恢复已有成员身份需要设备验证" });
         return;
@@ -6441,11 +6730,12 @@ export function activate(ctx) {
         existing.name = name || existing.name;
         existing.online = true;
         existing.modChecksum = acceptedMod;
+        if (isHostedOwner) existing.role = "host";
       } else {
         r.members.push({
           userId,
           name,
-          role: "member",
+          role: isHostedOwner ? "host" : "member",
           online: true,
           projectPath,
           modChecksum: acceptedMod,
@@ -6485,6 +6775,7 @@ export function activate(ctx) {
       this.reply(ws, r, "welcome", this.snapshot(r));
       this.sendModViewsTo(r, ws, userId);
       this.pushState(r);
+      if (r.hosted) this.emitPending(r);
       if (r.modHost && r.modStarted && !r.modEnded) {
         void this.publishViews(r);
       }
@@ -6497,6 +6788,14 @@ export function activate(ctx) {
       return;
     }
 
+    if (frame.type === "extension.request") {
+      void this.handleExtensionRequest(r, ws, frame.payload); return;
+    }
+    if (frame.type === "extension.result") {
+      if (this.hostedTransport && this.memberRole(r, userId) === "host" && r.connections.get(ws)?.peerFp === r.hostedOwnerFp) this.finishExtensionRpc(r, frame.payload);
+      return;
+    }
+
     if (frame.type === "leave") {
       this.removeGuestMember(r, userId);
       try {
@@ -6504,6 +6803,22 @@ export function activate(ctx) {
       } catch {
         // ignore
       }
+      return;
+    }
+
+    if (frame.type === "host.control") {
+      if (!r.hosted || this.memberRole(r, userId) !== "host" || r.connections.get(ws)?.peerFp !== r.hostedOwnerFp) {
+        this.reply(ws, r, "error", { message: "无权管理服务器群聊" });
+        return;
+      }
+      const p = frame.payload as { action?: string; value?: string };
+      let result: { ok: boolean; error?: string } = { ok: false, error: "未知管理操作" };
+      if (p?.action === "pending") { this.emitPending(r); return; }
+      if (p?.action === "approve" && typeof p.value === "string") result = this.approveDevice(r.roomId, p.value);
+      if (p?.action === "deny" && typeof p.value === "string") result = this.denyDevice(r.roomId, p.value);
+      if (p?.action === "rename" && typeof p.value === "string") result = this.rename(r.roomId, p.value);
+      if (p?.action === "end") result = this.end(r.roomId);
+      if (!result.ok) this.reply(ws, r, "error", { message: result.error });
       return;
     }
 
@@ -6560,6 +6875,15 @@ export function activate(ctx) {
         this.reply(ws, r, "error", { message: "当前不能操作这个席位" });
         return;
       }
+      if (this.hostedTransport) {
+        if (!r.modStarted || r.modEnded || r.modFail) {
+          this.reply(ws, r, "error", { message: r.modFail ?? "玩法未开始" }); return;
+        }
+        void this.roomRpc(r, "extension.request", { action: "intent", checksum: r.modChecksum, seatId: seat.id, name: intentName, payload: p.payload, actorUserId: userId }, 12_000, this.extensionOwnerSocket(r)).then(result => {
+          if (!result.ok) this.reply(ws, r, "error", { message: result.error });
+        });
+        return;
+      }
       if (!r.modHost || !r.modStarted || r.modEnded) {
         this.reply(ws, r, "error", { message: "玩法未开始" });
         return;
@@ -6614,10 +6938,10 @@ export function activate(ctx) {
       const p = frame.payload as RoomChatRecallPayload | undefined;
       const itemId = typeof p?.itemId === "string" ? p.itemId : "";
       if (!itemId) return;
-      // 客人只能撤回自己的消息（房主可撤任何人的，走本地 recall()）
+      // A hosted owner is a remote peer; role is assigned by verified device identity.
       const item = r.items.find((i) => i.id === itemId);
       if (!item || item.recalled) return;
-      if (item.authorUserId !== userId) {
+      if (item.authorUserId !== userId && this.memberRole(r, userId) !== "host") {
         this.reply(ws, r, "error", { message: "只能撤回自己的消息" });
         return;
       }
@@ -6687,7 +7011,10 @@ export function activate(ctx) {
         aiUserId?: string;
         workspaceUserId?: string;
       };
-      if (!p.userId) return;
+      if (!p.userId || p.userId !== userId) {
+        this.reply(ws, r, "error", { message: "不能冒充其他成员添加席位" });
+        return;
+      }
       this.addSeatForMember(
         r,
         p.userId,
@@ -6718,7 +7045,18 @@ export function activate(ctx) {
       }
       const p = frame.payload as RoomSeatUpdatePayload;
       if (!p?.seatId) return;
-      this.updateSeat(r.roomId, p.seatId, p);
+      this.updateSeat(r.roomId, p.seatId, p, userId);
+      return;
+    }
+
+    if (frame.type === "member.role") {
+      const p = frame.payload as RoomMemberRolePayload | undefined;
+      if (typeof p?.userId !== "string" || (p.role !== "admin" && p.role !== "member")) {
+        this.reply(ws, r, "error", { message: "无效的成员角色" });
+        return;
+      }
+      const result = this.setMemberRoleOnHost(r, userId, p.userId, p.role);
+      if (!result.ok) this.reply(ws, r, "error", { message: result.error });
       return;
     }
 
@@ -6890,6 +7228,8 @@ export function activate(ctx) {
     this.cancelPersist(r.roomId);
     try {
       const stored: StoredRoom = {
+        hosted: r.hosted,
+        hostedOwnerFp: r.hostedOwnerFp,
         roomId: r.roomId,
         name: r.name,
         status: r.status,
@@ -6975,7 +7315,7 @@ export function activate(ctx) {
   private markMemberOffline(r: RoomRecord, userId?: string): void {
     if (!userId) return;
     const m = r.members.find((mm) => mm.userId === userId);
-    if (!m || m.role === "host") return;
+    if (!m || userId === r.localUserId) return;
     const wasOnline = m.online !== false;
     m.online = false;
     if (wasOnline) {
@@ -6990,7 +7330,11 @@ export function activate(ctx) {
 
   private removeGuestMember(r: RoomRecord, userId: string): void {
     const m = r.members.find((mm) => mm.userId === userId);
-    if (!m || m.role === "host") return;
+    if (!m || userId === r.localUserId) return;
+    if (r.hosted && m.role === "host") {
+      this.markMemberOffline(r, userId);
+      return;
+    }
     const name = m.name;
     r.members = r.members.filter((mm) => mm.userId !== userId);
     r.seats = r.seats.filter(
@@ -7026,11 +7370,12 @@ export function activate(ctx) {
     const activeTasks = tasks.filter(t => !isFinished(t));
     const visibleTasks = [...activeTasks, ...tasks.filter(isFinished).slice(-(64 - activeTasks.length))];
     return {
+      hosted: r.hosted,
       roomId: r.roomId,
       name: r.name,
       status: r.status,
       port: r.port,
-      hostLabel: r.hostLabel,
+      hostLabel: r.hosted ? r.members.find(m => m.role === "host")?.name ?? r.hostLabel : r.hostLabel,
       inviteHost: lanAddress(),
       memberCount: r.members.length,
       onlineCount: countOnlineMembers(r.members),
@@ -7051,7 +7396,7 @@ export function activate(ctx) {
         ? { remoteChanges: r.remoteChanges }
         : {}),
       localUserId: r.localUserId || undefined,
-      kernel: r.localRole === "host" ? this.kernelProjection(r) : r.kernelProjection,
+      kernel: r.kernel ? this.kernelProjection(r) : r.kernelProjection,
     };
   }
 
@@ -7071,6 +7416,7 @@ export function activate(ctx) {
   }
 
   private pushState(r: RoomRecord) {
+    this.queueExtensionSync(r);
     this.persist(r);
     this.broadcast(r, "state.snapshot", this.snapshot(r));
     this.emit(r);
@@ -7239,11 +7585,12 @@ export function activate(ctx) {
   ): { ok: true; room: RoomRecord } | { ok: false; error: string } {
     const r = this.rooms.get(roomId);
     if (!r || r.status !== "open") return { ok: false, error: "群聊不可用" };
-    if (r.localRole !== "host") return { ok: false, error: "只有群主可以操作" };
+    if (r.localRole !== "host" && !this.isExtensionHost(r)) return { ok: false, error: "只有群主可以操作" };
     return { ok: true, room: r };
   }
 
   private buildOffer(r: RoomRecord): ModOfferPayload {
+    if (this.hostedTransport && r.modOffer) return r.modOffer;
     if (!r.modLoaded || !r.modChecksum) {
       return { id: "", name: "", version: "", checksum: "", size: 0 };
     }
@@ -7459,6 +7806,11 @@ export function activate(ctx) {
       }
     }
     r.modActionsBySeat = actionsBySeat;
+    if (r.hosted && this.isExtensionHost(r)) {
+      await this.syncHostedExtensions(r);
+      this.emit(r);
+      return;
+    }
     this.broadcast(r, "mod.patch", {
       seq: views.seq,
       publicView: views.publicView,
@@ -7540,13 +7892,15 @@ export function activate(ctx) {
   }
 
   private applyGuestSnapshot(r: RoomRecord, snap: RoomSnapshot): void {
+    const localExtensions = this.isExtensionHost(r) && (r.modHost || r.kernel);
+    r.hosted = snap.hosted;
     r.name = snap.name;
     r.members = snap.members;
     r.taskProjection = snap.tasks ?? [];
     r.seats = snap.seats.map((seat) => ({ ...seat, takenOverBy: null }));
     r.items = snap.items;
     r.status = snap.status;
-    r.modChecksum = snap.modChecksum;
+    if (!localExtensions) r.modChecksum = snap.modChecksum;
     r.requireMods = snap.requireMods;
     // 二期：实时进度与远端改动随快照覆盖
     r.liveExec = snap.liveExec?.length
@@ -7554,11 +7908,11 @@ export function activate(ctx) {
       : undefined;
     r.remoteChanges = snap.remoteChanges;
     if (r.joinInfo) r.joinInfo.modChecksum = snap.members.find((m) => m.userId === r.localUserId)?.modChecksum ?? "";
-    if (!isRoomModParticipant(r, r.localUserId)) {
+    if (!localExtensions && !isRoomModParticipant(r, r.localUserId)) {
       r.modSeatViews = undefined;
       r.modActionsBySeat = undefined;
     }
-    if (!snap.modChecksum) {
+    if (!localExtensions && !snap.modChecksum) {
       r.modPublicView = undefined;
       r.modSeatViews = undefined;
       r.modActionsBySeat = undefined;
@@ -7587,6 +7941,7 @@ export function activate(ctx) {
   private onModFail(r: RoomRecord, message: string): void {
     if (r.modEnded) return;
     r.modFail = message;
+    this.queueExtensionSync(r);
     this.broadcast(r, "mod.fail", { message });
     this.emit(r);
   }
@@ -7636,8 +7991,20 @@ export function activate(ctx) {
     const targetIds = new Set(explicit.map(m => m.seatId));
     const mentioned = r.seats.filter(s => targetIds.has(s.id));
     let current = env;
-    if (r.kernel) {
-      const result = await r.kernel.runChatIn(env);
+    let hookResult: Awaited<ReturnType<ModKernel["runChatIn"]>> | undefined;
+    if (r.kernel) hookResult = await r.kernel.runChatIn(env);
+    else if (this.hostedTransport && r.kernelProjection?.mods.some(m => m.state === "active")) {
+      const owner = this.extensionOwnerSocket(r);
+      // Desktop extensions pause while their owner is offline; chat remains available.
+      if (owner) {
+        const result = await this.roomRpc(r, "extension.request", { action: "hook", env }, 5000, owner);
+        if (!result.ok) throw new Error(result.error ?? "群主电脑上的扩展未响应");
+        const value = result.value as Awaited<ReturnType<ModKernel["runChatIn"]>> | undefined;
+        if (value?.action === "drop" || value?.action === "continue" || value?.value) hookResult = value;
+      }
+    }
+    if (hookResult) {
+      const result = hookResult;
       if (result.action === "drop") {
         kernelLog("hook", {
           name: "room.chat.in",
@@ -7655,7 +8022,8 @@ export function activate(ctx) {
         this.pushState(r);
         throw new Error(result.reason ? `消息被模组丢弃：${result.reason}` : "消息被模组丢弃");
       }
-      if (result.value) current = result.value;
+      // Extensions may transform content, never the authenticated sender or target.
+      if (result.value && typeof result.value.text === "string") current = { ...env, text: result.value.text };
     }
     if (next.active && !next.active()) throw new Error("消息来源已断开");
     const previousItems = next.clientMessageId ? r.items.slice() : undefined;
@@ -7720,7 +8088,7 @@ export function activate(ctx) {
       agentName: null,
     });
     for (const seat of r.seats) {
-      if (seat.sessionId) this.sessions.syncExtras(seat.sessionId, leftover);
+      if (seat.sessionId && !this.hostedTransport) this.sessions.syncExtras(seat.sessionId, leftover);
     }
     this.stopKernelSchedule(r);
     const kernel = r.kernel;
@@ -7744,7 +8112,14 @@ export function activate(ctx) {
       }
       if (!turn) continue;
       if (seat.takenOverBy || seat.running || r.agentRuns?.has(seat.id) || r.modHost !== source || !r.modStarted || r.modEnded || r.status !== "open") continue;
-      await this.injectAgentTurn(r, seat, turn);
+      try { await this.injectAgentTurn(r, seat, turn); }
+      catch (error) {
+        // Closing a desktop during an in-flight Mod action pauses the loop.
+        if (!this.disposed && r.status === "open" && !r.closing && (!r.hosted || r.client?.readyState === WebSocket.OPEN)) {
+          this.onModFail(r, error instanceof Error ? error.message : String(error));
+        }
+        return;
+      }
     }
   }
 
@@ -7755,8 +8130,9 @@ export function activate(ctx) {
   }
 
   private syncKernelExtras(r: RoomRecord): void {
+    this.queueExtensionSync(r);
     for (const seat of r.seats) {
-      if (seat.sessionId) this.sessions.syncExtras(seat.sessionId, this.seatToolOpts(r, seat));
+      if (seat.sessionId && !this.hostedTransport) this.sessions.syncExtras(seat.sessionId, this.seatToolOpts(r, seat));
     }
   }
 
@@ -7779,6 +8155,7 @@ export function activate(ctx) {
   }
 
   private async runKernelScheduleJobs(r: RoomRecord): Promise<void> {
+    if (r.hosted && (!r.client || r.offline || r.closing || r.status !== "open")) return;
     const jobs = r.kernel?.listScheduleJobs() ?? [];
     let wrote = false;
     for (const job of jobs) {
@@ -7808,6 +8185,10 @@ export function activate(ctx) {
         tick && typeof tick.text === "string" ? tick.text.trim() : "";
       if (!text) continue;
       kernelLog("schedule.tick", { roomId: r.roomId, action: "announce" });
+      if (r.hosted && this.isExtensionHost(r)) {
+        await this.roomRpc(r, "extension.request", { action: "announce", text, toAgent: !!(tick && tick.toAgent) });
+        continue;
+      }
       this.append(r, {
         kind: "system",
         source: "kernel",
@@ -7956,6 +8337,21 @@ export function activate(ctx) {
     turn: { should: boolean; view: unknown; prompt: string; actions: unknown },
   ): Promise<void> {
     if (seat.takenOverBy) return;
+    if (this.hostedTransport) return;
+    if (r.hosted) {
+      const pending = r.extensionAgentSeats ??= new Set();
+      if (pending.has(seat.id)) return;
+      pending.add(seat.id);
+      const source = r.modHost;
+      try {
+        const result = await this.roomRpc(r, "extension.request", { action: "agent", checksum: r.modChecksum, seatId: seat.id, text: formatRoomModPrompt(turn) }, EXEC_TOTAL_TIMEOUT_MS + 10_000);
+        if (result.ok && typeof result.value === "string" && r.modHost === source && r.modStarted && !r.modEnded) {
+          const act = parseRoomModAct(result.value);
+          if (act) await this.dispatchAgentAct(r, seat, act, turn.actions);
+        }
+      } finally { pending.delete(seat.id); }
+      return;
+    }
     const cwd = this.settings.get().lastProjectPath;
     if (!cwd) return;
     const text = formatRoomModPrompt(turn);

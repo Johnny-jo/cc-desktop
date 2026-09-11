@@ -206,6 +206,7 @@ export function ThemeToggle({
       aria-label={isLight ? "切换到夜间模式" : "切换到日间模式"}
       onClick={onToggle}
     >
+      <span className="theme-icon-motion" key={String(isLight)}>
       {isLight ? (
         <svg width="17" height="17" viewBox="0 0 17 17" fill="none" aria-hidden>
           <circle cx="8.5" cy="8.5" r="3.2" stroke="currentColor" strokeWidth="1.3" />
@@ -226,6 +227,7 @@ export function ThemeToggle({
           />
         </svg>
       )}
+      </span>
     </button>
   );
 }

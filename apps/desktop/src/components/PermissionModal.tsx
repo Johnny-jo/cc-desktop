@@ -2,16 +2,7 @@ import React, { useState } from "react";
 import type { PermissionDecision, PermissionRequest } from "@claude-desktop/shared";
 import { clearPermissionRequest, useAppStore } from "../state/store";
 import { useI18n } from "../i18n/useI18n";
-
-function previewJson(value: unknown, maxLen = 600): string {
-  try {
-    const text = JSON.stringify(value, null, 2);
-    if (text.length <= maxLen) return text;
-    return text.slice(0, maxLen) + "\n…";
-  } catch {
-    return String(value);
-  }
-}
+import { PermissionDetails, permissionAction } from "./PermissionDetails";
 
 type AskQuestion = {
   question: string;
@@ -207,14 +198,11 @@ export function PermissionModal() {
               <path d="m4.5 6 2 2-2 2M8.2 10h3.2" />
             </svg>
           </span>
-          <span>{request.toolName}</span>
+          <span>{permissionAction(request.toolName, t.prompts)}</span>
         </div>
 
         <div className="agent-prompt-content">
-          <p className="agent-prompt-title">{request.summary}</p>
-          <pre className="agent-prompt-preview">
-            {previewJson(request.inputPreview)}
-          </pre>
+          <PermissionDetails request={request} t={t.prompts} />
         </div>
 
         <div className="agent-prompt-actions">
@@ -231,7 +219,7 @@ export function PermissionModal() {
               className="btn agent-prompt-primary permission-allow-once"
               onClick={() => respond({ behavior: "allow", scope: "once" })}
             >
-              {t.prompts.allowOnce}
+              {request.toolName === "Edit" ? t.prompts.allowEditOnce : request.toolName === "Write" ? t.prompts.allowWriteOnce : t.prompts.allowOnce}
             </button>
             <details className="permission-scope-menu">
               <summary aria-label={t.prompts.moreAllowOptions}>

@@ -12,6 +12,7 @@ import type {
   ChatItem,
   ModelQuotaInfo,
   TurnUsage,
+  TurnOutcome,
 } from "@claude-desktop/shared";
 import { MarkdownBody } from "./MarkdownBody";
 import { AttachmentChips } from "./AttachmentChips";
@@ -30,7 +31,7 @@ import {
   buildConversationAnchors,
   type ConversationAnchor,
 } from "../lib/conversation-navigation";
-import { buildConversationBlocks } from "../lib/conversation-blocks";
+import { buildConversationBlocks, preserveActivityBlockIds, type ConversationBlock } from "../lib/conversation-blocks";
 import { contentEndScrollTopForMetrics } from "../lib/chat-scroll";
 import { createChatScrollController } from "../lib/chat-scroll-controller";
 import "./ChatProgressLayout.css";
@@ -478,10 +479,12 @@ function lastItemStreaming(items: ChatItem[]): boolean {
 const SCROLL_LOAD_PX = 80;
 const SHOW_JUMP_BOTTOM_PX = 160;
 
-function itemTop(list: HTMLElement, id: string): number | null {
-  const node = list.querySelector(`[data-item-id="${CSS.escape(id)}"]`);
-  if (!(node instanceof HTMLElement)) return null;
-  return node.getBoundingClientRect().top;
+function visibleReadingAnchors(list: HTMLElement): Array<{ id: string; top: number }> {
+  const bounds = list.getBoundingClientRect();
+  return Array.from(list.querySelectorAll<HTMLElement>("[data-item-id]"))
+    .filter(node => !node.querySelector("[data-item-id]"))
+    .filter(node => { const rect = node.getBoundingClientRect(); return rect.bottom > bounds.top && rect.top < bounds.bottom; })
+    .map(node => ({ id: node.dataset.itemId!, top: node.getBoundingClientRect().top - bounds.top }));
 }
 
 function reservedTurnSpace(list: HTMLElement): number {
@@ -644,7 +647,11 @@ export function MessageList({
   const [activeAnchorId, setActiveAnchorId] = useState<string | null>(null);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
   const anchors = useMemo(() => buildConversationAnchors(items), [items]);
-  const blocks = useMemo(() => buildConversationBlocks(items), [items]);
+  const previousBlocks = useRef<{ sessionId: string | null; blocks: ConversationBlock[] }>({ sessionId: null, blocks: [] });
+  const blocks = useMemo(() => preserveActivityBlockIds(buildConversationBlocks(items, hasNewer ? false : Boolean(running)),
+    previousBlocks.current.sessionId === sessionId ? previousBlocks.current.blocks : []), [items, sessionId, running, hasNewer]);
+  useLayoutEffect(() => { previousBlocks.current = { sessionId, blocks }; }, [sessionId, blocks]);
+  const readingAnchor = useRef<{ sessionId: string; anchors: Array<{ id: string; top: number }> } | null>(null);
 
   // The turn status row belongs to the latest user turn: rendered right below
   // the user message, above that turn's activity group and answer text.
@@ -661,12 +668,12 @@ export function MessageList({
   // Completion data per user turn: a turn owns everything up to the next user
   // message. Drives the per-turn "done" marker, history turns included.
   const turnInfoByUserId = useMemo(() => {
-    const map = new Map<string, { done: boolean; durationMs?: number }>();
+    const map = new Map<string, { done: boolean; durationMs?: number; outcome?: TurnOutcome }>();
     let current: string | null = null;
     for (const item of items) {
       if (item.kind === "text" && item.role === "user") {
         current = item.id;
-        map.set(current, { done: false });
+        map.set(current, { done: Boolean(item.turnOutcome), outcome: item.turnOutcome });
         continue;
       }
       if (!current) continue;
@@ -711,6 +718,21 @@ export function MessageList({
     });
   }, [sessionId, items, anchors, running, hasNewer]);
 
+  // Correct the committed DOM before paint, including when pagination removes
+  // the load button or trims the other edge of the bounded history window.
+  useLayoutEffect(() => {
+    const saved = readingAnchor.current;
+    const list = listRef.current;
+    if (!saved || !list || saved.sessionId !== sessionId) { readingAnchor.current = null; return; }
+    for (const anchor of saved.anchors) {
+      const node = list.querySelector<HTMLElement>(`[data-item-id="${CSS.escape(anchor.id)}"]`);
+      if (!node) continue;
+      list.scrollTop += node.getBoundingClientRect().top - list.getBoundingClientRect().top - anchor.top;
+      break;
+    }
+    if (!loadingOlder && !loadingNewer) readingAnchor.current = null;
+  }, [items, sessionId, loadingOlder, loadingNewer, hasMore, hasNewer]);
+
   const updateScrollUi = useCallback(() => {
     const list = listRef.current;
     if (!list) return;
@@ -742,22 +764,11 @@ export function MessageList({
     return () => cancelAnimationFrame(frame);
   }, [pinKey, sessionId, updateScrollUi]);
 
-  const restoreAnchor = (anchorId: string, prevTop: number) => {
-    requestAnimationFrame(() => {
-      const el = listRef.current;
-      if (!el) return;
-      const nextTop = itemTop(el, anchorId);
-      if (nextTop == null) return;
-      el.scrollTop += nextTop - prevTop;
-    });
-  };
-
   const onLoadOlder = async () => {
     if (!hasMore || !sessionId || loadingRef.current) return;
     scrollControllerRef.current?.pause();
     const list = listRef.current;
-    const anchorId = items[0]?.id;
-    const prevTop = list && anchorId ? itemTop(list, anchorId) : null;
+    readingAnchor.current = list ? { sessionId, anchors: visibleReadingAnchors(list) } : null;
     loadingRef.current = true;
     setLoadingOlder(true);
     try {
@@ -766,15 +777,13 @@ export function MessageList({
       loadingRef.current = false;
       setLoadingOlder(false);
     }
-    if (anchorId && prevTop != null) restoreAnchor(anchorId, prevTop);
   };
 
   const onLoadNewer = async () => {
     if (!hasNewer || !sessionId || loadingRef.current) return;
     scrollControllerRef.current?.pause();
     const list = listRef.current;
-    const anchorId = items[items.length - 1]?.id;
-    const prevTop = list && anchorId ? itemTop(list, anchorId) : null;
+    readingAnchor.current = list ? { sessionId, anchors: visibleReadingAnchors(list) } : null;
     loadingRef.current = true;
     setLoadingNewer(true);
     try {
@@ -783,7 +792,6 @@ export function MessageList({
       loadingRef.current = false;
       setLoadingNewer(false);
     }
-    if (anchorId && prevTop != null) restoreAnchor(anchorId, prevTop);
   };
 
   useEffect(() => {
@@ -791,7 +799,10 @@ export function MessageList({
     if (!list) return;
     const onScroll = () => {
       updateScrollUi();
-      if (loadingRef.current) return;
+      if (loadingRef.current) {
+        if (readingAnchor.current?.sessionId === sessionId) readingAnchor.current.anchors = visibleReadingAnchors(list);
+        return;
+      }
       // Don't auto-page when the window fits on screen (opening a short tail
       // would otherwise fire both edges at scrollTop 0).
       if (list.scrollHeight <= list.clientHeight + SCROLL_LOAD_PX) return;
@@ -905,6 +916,7 @@ export function MessageList({
                   id={block.id}
                   entries={block.entries}
                   durationMs={block.usage?.durationMs}
+                  outcome={block.outcome}
                 />
               ) : block.kind === "live-activity" ? (
                 <ChatActivity id={block.id} entries={block.entries} live />
@@ -923,7 +935,7 @@ export function MessageList({
               )}
               {userItem ? (
                 index === lastUserBlockIndex ? (
-                  running ? (
+                  running && !hasNewer ? (
                     <div
                       className="current-turn-status"
                       data-current-turn-status
@@ -934,6 +946,7 @@ export function MessageList({
                         items={items}
                         done={Boolean(turnInfo?.done)}
                         doneDurationMs={turnInfo?.durationMs}
+                        outcome={turnInfo?.outcome}
                       />
                     </div>
                   ) : (
@@ -943,10 +956,11 @@ export function MessageList({
                       items={items}
                       done={Boolean(turnInfo?.done)}
                       doneDurationMs={turnInfo?.durationMs}
+                      outcome={turnInfo?.outcome}
                     />
                   )
                 ) : turnInfo?.done ? (
-                  <TurnDoneRow durationMs={turnInfo.durationMs} />
+                  <TurnDoneRow durationMs={turnInfo.durationMs} outcome={turnInfo.outcome} />
                 ) : null
               ) : null}
             </Fragment>

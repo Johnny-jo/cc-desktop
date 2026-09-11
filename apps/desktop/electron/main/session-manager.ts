@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { fileEditRecovery } from "./file-edit-recovery";
+import { roomSandboxSettings } from "./room-sandbox";
 import type {
   ChatItem,
   FileChange,
@@ -37,6 +39,7 @@ import {
   shouldPersistTranscript,
   rebuildSessionProgress,
   restoreSessionProgress,
+  taskListsEqual,
   updateSessionProgress,
   summarizeTurnFiles,
   type TranscriptState,
@@ -76,6 +79,7 @@ export type SessionRunOpts = {
   /**
    * 路径围栏（绝对路径）：设置后，文件类工具和 Bash 里的绝对路径 / `..` /
    * 重定向 / cd 都不能越出这个目录，越界直接拒绝，不进权限弹窗。
+   * 同时为执行查询启用官方 Bash 沙箱；沙箱不可用时禁止无隔离回退。
    */
   pathJail?: string;
   /** Room turns only: enforce read-only tools in PreToolUse, regardless of SDK mode. */
@@ -219,6 +223,8 @@ type RoomAbortTurn = {
 type QueryExtras = {
   servers: Record<string, unknown>;
   allowedTools: string[];
+  /** Root bound when the CLI was started; sandbox options cannot change live. */
+  pathJail?: string;
 };
 
 type SessionEntry = {
@@ -438,6 +444,7 @@ function isSdkMcpServer(
 
 function snapshotQueryExtras(entry: SessionEntry): QueryExtras {
   return {
+    pathJail: entry.pathJail,
     servers: Object.fromEntries(
       Object.entries(entry.extraMcpServers ?? {}).map(([name, server]) => {
         // Transport configs are data, but SDK instances contain live task closures.
@@ -638,6 +645,7 @@ export class SessionManager {
             ...(stored.hiddenFromList ? { hiddenFromList: true } : {}),
             ...(stored.pinned ? { pinned: true } : {}),
             ...(stored.progress ? { progress: stored.progress } : {}),
+            ...(stored.taskPlan ? { taskPlan: stored.taskPlan } : {}),
           },
           abortController: null,
           sdkSessionId: stored.sdkSessionId,
@@ -684,6 +692,23 @@ export class SessionManager {
     entry.summary = next;
     this.persistSummary(entry);
     if (!entry.summary.hiddenFromList) this.emitSession({ ...entry.summary });
+    return { ...entry.summary };
+  }
+
+  /** Close the displayed plan without changing execution or SDK task states. */
+  setTaskPlanClosed(sessionId: string, closed: boolean): SessionSummary | undefined {
+    const entry = this.sessions.get(sessionId);
+    if (!entry || entry.summary.hiddenFromList) return undefined;
+    this.restoreProgress(entry);
+    if (Boolean(entry.summary.taskPlan) === closed) return { ...entry.summary };
+    const previous = entry.summary;
+    const next = { ...previous };
+    if (closed) next.taskPlan = { closedAt: Date.now(), changedSinceClose: false };
+    else delete next.taskPlan;
+    entry.summary = next;
+    try { this.persistSummary(entry); }
+    catch (error) { entry.summary = previous; throw error; }
+    this.emitSession({ ...entry.summary });
     return { ...entry.summary };
   }
 
@@ -1058,6 +1083,8 @@ export class SessionManager {
     if (!this.archive) return;
     const stored: StoredSession = {
       ...entry.summary,
+      // Legacy JSON archives merge summaries; explicitly clear a reopened plan.
+      taskPlan: entry.summary.taskPlan,
       progressBaseline: entry.progressBaseline,
       ...(entry.sdkSessionId ? { sdkSessionId: entry.sdkSessionId } : {}),
     };
@@ -1070,12 +1097,16 @@ export class SessionManager {
     const progress = items
       ? restoreSessionProgress(rebuildSessionProgress(items, entry.progressBaseline))
       : this.archive?.loadProgress(entry.summary.id, entry.progressBaseline);
-    this.setProgress(entry, progress ?? { tasks: [], agents: [] });
+    this.setProgress(entry, progress ?? { tasks: [], agents: [] }, false);
   }
 
   /** Progress is session-wide, independent of the renderer's transcript page. */
-  private setProgress(entry: SessionEntry, progress: SessionProgress | undefined): void {
+  private setProgress(entry: SessionEntry, progress: SessionProgress | undefined, trackChanges = true): void {
     if (entry.summary.hiddenFromList || progress === entry.summary.progress) return;
+    if (trackChanges && entry.summary.taskPlan && !entry.summary.taskPlan.changedSinceClose &&
+        !taskListsEqual(entry.summary.progress?.tasks, progress?.tasks)) {
+      entry.summary = { ...entry.summary, taskPlan: { ...entry.summary.taskPlan, changedSinceClose: true } };
+    }
     entry.summary = { ...entry.summary, progress };
     this.persistSummary(entry);
     this.emitSession({ ...entry.summary });
@@ -1691,7 +1722,15 @@ export class SessionManager {
           i.sdkMsgId === userMessageId,
       );
       if (itemIdx >= 0) {
-        this.replaceTranscript(entry, entry.items.slice(0, itemIdx + 1), {
+        const { taskPlan: _closedPlan, ...openSummary } = entry.summary;
+        entry.summary = openSummary;
+        const retained = entry.items.slice(0, itemIdx + 1);
+        const target = retained[itemIdx];
+        if (target.kind === "text") {
+          const { turnOutcome: _discardedOutcome, ...pendingUser } = target;
+          retained[itemIdx] = pendingUser;
+        }
+        this.replaceTranscript(entry, retained, {
           persist: true,
           replace: true,
         });
@@ -1759,6 +1798,7 @@ export class SessionManager {
   abort(sessionId: string): void {
     const entry = this.sessions.get(sessionId);
     if (!entry) return;
+    const wasRunning = entry.turnActive || entry.summary.status === "running";
     this.settleLiveAgents(entry, "stopped");
     if (entry.roomAbortTurn) {
       entry.roomAbortTurn.cancelled = true;
@@ -1784,10 +1824,13 @@ export class SessionManager {
     const resultEvent: SdkNormalizedEvent = {
       type: "result",
       sessionId,
-      ok: true,
+      ok: false,
+      outcome: "interrupted",
     };
-    this.applyAndMaybePersist(entry, resultEvent);
-    this.emit(resultEvent);
+    if (wasRunning) {
+      this.applyAndMaybePersist(entry, resultEvent);
+      this.emit(resultEvent);
+    }
 
     try {
       void entry.query?.interrupt?.();
@@ -2116,7 +2159,7 @@ export class SessionManager {
 
     // Compare with the query's binding, not a previous attempt's staged extras:
     // CPA preparation can fail after entry was updated, leaving the old query live.
-    reopenForExtras ||= extrasChanged(
+    reopenForExtras ||= entry.queryExtras?.pathJail !== entry.pathJail || extrasChanged(
       entry.queryExtras?.servers,
       entry.queryExtras?.allowedTools,
       entry.extraMcpServers ?? {},
@@ -2253,7 +2296,9 @@ export class SessionManager {
       });
 
     return {
-      cwd: entry.summary.cwd,
+      // The official sandbox derives its default writable workspace from cwd.
+      cwd: queryExtras.pathJail ?? entry.summary.cwd,
+      ...(queryExtras.pathJail ? { sandbox: roomSandboxSettings() } : {}),
       includePartialMessages: true,
       permissionMode: entry.permissionMode ?? settings.permissionMode,
       model: entry.model || settings.defaultModel,
@@ -2337,6 +2382,7 @@ export class SessionManager {
       // Surface SDK Notification events (permission needed, idle, task done)
       // for desktop notifications.
       hooks: {
+        PostToolUseFailure: [{ hooks: [fileEditRecovery] }],
         // 路径围栏必须挂在 PreToolUse：canUseTool 只管需要授权的工具，
         // Read/Glob/Grep 等只读工具在多数权限模式下根本不进 canUseTool，
         // 而 PreToolUse 对每一次工具调用都会触发（含只读、含 bypass 模式）。
@@ -2605,6 +2651,9 @@ export class SessionManager {
     event: SdkNormalizedEvent,
     model: string,
   ): void {
+    if (event.type === "result" && !event.ok && event.error) {
+      event = { ...event, error: humanizeAgentError(event.error, model) };
+    }
     this.applyAndMaybePersist(entry, event);
     this.emit(event);
     if (event.type !== "result") return;
@@ -2998,6 +3047,12 @@ export class SessionManager {
  * DeepSeek (and some OpenAI-compat proxies) reject Anthropic image blocks.
  */
 export function humanizeAgentError(raw: string, model: string): string {
+  if (/sandbox (?:required but unavailable|enabled but .*not available)/i.test(raw)) {
+    return "官方内置沙箱不可用，已停止执行，不会回退到无沙箱模式。" +
+      (/windows/i.test(raw)
+        ? "当前 Windows 会话未启用官方沙箱；请在支持官方沙箱的执行环境中重试。"
+        : "请检查执行环境是否支持官方沙箱，并安装所需依赖后重试。");
+  }
   if (
     /unknown variant\s*`?image_url`?/i.test(raw) ||
     /image_url.*expected\s*`?text`?/i.test(raw)

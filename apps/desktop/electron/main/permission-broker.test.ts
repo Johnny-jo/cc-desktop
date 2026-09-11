@@ -3,6 +3,31 @@ import type { PermissionDecision, PermissionRequest } from "@claude-desktop/shar
 import { PermissionBroker } from "./permission-broker";
 
 describe("PermissionBroker", () => {
+  it.each(["allow", "deny"] as const)("notifies all request viewers once on %s", async (behavior) => {
+    const requestFromUi = vi.fn();
+    const onResolved = vi.fn();
+    const broker = new PermissionBroker({ getMode: () => "default", requestFromUi, onResolved });
+    const pending = broker.canUseTool("Edit", { file_path: "a.ts" }, "session-a");
+    const request = requestFromUi.mock.calls[0][0] as PermissionRequest;
+    const decision: PermissionDecision = behavior === "allow" ? { behavior, scope: "once" } : { behavior };
+    expect(broker.respond(request.requestId, decision)).toBe(true);
+    expect(broker.respond(request.requestId, decision)).toBe(false);
+    expect((await pending).behavior).toBe(behavior);
+    expect(onResolved).toHaveBeenCalledExactlyOnceWith(request.requestId, "session-a");
+  });
+
+  it("clears all viewers when an approval times out", async () => {
+    vi.useFakeTimers();
+    try {
+      const onResolved = vi.fn();
+      const requestFromUi = vi.fn();
+      const broker = new PermissionBroker({ getMode: () => "default", requestFromUi, onResolved, timeoutMs: 100 });
+      const pending = broker.canUseTool("Edit", {}, "s");
+      await vi.advanceTimersByTimeAsync(100);
+      expect((await pending).behavior).toBe("deny");
+      expect(onResolved).toHaveBeenCalledExactlyOnceWith(requestFromUi.mock.calls[0][0].requestId, "s");
+    } finally { vi.useRealTimers(); }
+  });
   it("auto-allows Edit in acceptEdits mode", async () => {
     const broker = new PermissionBroker({
       getMode: () => "acceptEdits",

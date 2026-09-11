@@ -15,12 +15,12 @@ import "./RoomTimeline.css";
 
 export const ROOM_TIMELINE_RENDER_LIMIT = 80;
 const EMPTY_LIVE_EXEC: readonly RoomLiveExecEntry[] = [];
-const ROOM_RECOVERY_NOTICE_RE = /重新连接|已重连|恢复(?:开房|连接|群聊)|自动恢复/;
-const ROOM_PRESENCE_NOISE_RE = /加入了群聊|退出了群聊|中继服务器已连接|已连接主机|连接成功|接管了|交还了|已交还 Agent/;
+const ROOM_RECOVERY_NOTICE_RE = /恢复(?:开房|连接|群聊)|自动恢复/;
+const ROOM_PRESENCE_NOISE_RE = /加入了群聊|退出了群聊|已离线|已上线|已在线|重新连接|已重连|中继服务器已连接|已连接主机|连接成功|接管了|交还了|已交还 Agent/;
 
 /**
  * Presence events remain in the archive, but do not need to occupy chat rows.
- * Keep only the newest recovery result so a reconnect is still visible once.
+ * Keep only the newest room recovery result; online/offline notices stay hidden.
  */
 export function compactRoomTimelineItems(
   items: readonly RoomTimelineItem[],
@@ -33,10 +33,11 @@ export function compactRoomTimelineItems(
   });
   return items.filter((item, index) => {
     if (item.kind !== "system") return true;
+    if (ROOM_PRESENCE_NOISE_RE.test(item.text)) return false;
     if (ROOM_RECOVERY_NOTICE_RE.test(item.text)) {
       return index === newestRecoveryIndex;
     }
-    return !ROOM_PRESENCE_NOISE_RE.test(item.text);
+    return true;
   });
 }
 

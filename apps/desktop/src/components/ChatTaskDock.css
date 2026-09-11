@@ -7,6 +7,7 @@
 .chat-task-dock .chat-task-dock-triggers { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 .chat-task-dock .chat-task-dock-trigger {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.5rem;
   max-width: 100%;
@@ -30,6 +31,12 @@
 .chat-task-dock .chat-task-dock-trigger svg { width: 1rem; height: 1rem; flex: none; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
 .chat-task-dock .chat-task-dock-count { font-size: 0.8rem; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .chat-task-dock .chat-task-dock-failure { font-size: 0.8rem; color: var(--danger); }
+.chat-task-dock .chat-task-dock-plan { padding: 0.5rem 1rem; }
+.chat-task-dock .chat-task-dock-plan:empty { display: none; }
+.chat-task-dock .chat-task-dock-plan p { margin: 0.375rem 0; font-size: 0.8rem; color: var(--text-muted); overflow-wrap: anywhere; }
+.chat-task-dock .chat-task-dock-plan p[role="alert"] { color: var(--danger); }
+.chat-task-dock .chat-task-dock-plan button { padding: 0.375rem 0.625rem; border: 1px solid var(--border); border-radius: 0.375rem; background: var(--bg-hover); color: var(--text); font: inherit; cursor: pointer; }
+.chat-task-dock .chat-task-dock-plan button:disabled { opacity: 0.6; cursor: wait; }
 .chat-task-dock .chat-task-dock-panel {
   position: absolute;
   bottom: calc(100% + 0.5rem);

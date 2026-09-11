@@ -38,6 +38,7 @@ import { RoomInviteModal } from "./RoomInviteModal";
 import { RoomPendingBanner } from "./RoomPendingBanner";
 import { RoomRemoteChanges } from "./RoomRemoteChanges";
 import { RoomSettingsModal } from "./RoomSettingsModal";
+import { useMotionPresence } from "../hooks/useMotionPresence";
 import { RoomTimeline, SeatAvatar, resolveRoomMessageAuthorSeat } from "./RoomTimeline";
 import { RoomTaskPanel, summarizeRoomTasks } from "./RoomTaskPanel";
 import { RoomCollaborationSidebar, type RoomCollaborationTab } from "./RoomCollaborationSidebar";
@@ -76,10 +77,12 @@ export function RoomStage() {
     port?: number;
     listening: boolean;
   } | null>(null);
+  const [inviting, setInviting] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [editSeat, setEditSeat] = useState<SeatDraft | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const settingsMounted = useMotionPresence(settingsOpen, 220);
   const settingsEpochRef = useRef(0);
   const [sideOpen, setSideOpen] = useState(() => typeof window === "undefined" || window.innerWidth > 960);
   const [sideTab, setSideTab] = useState<RoomCollaborationTab>("tasks");
@@ -200,7 +203,8 @@ export function RoomStage() {
     );
   }
 
-  const myRole = rooms.find((r) => r.roomId === room.roomId)?.role ?? "member";
+  const myRole = room.members.find(m => m.userId === room.localUserId)?.role
+    ?? rooms.find((r) => r.roomId === room.roomId)?.role ?? "member";
   const offline = Boolean(
     rooms.find((r) => r.roomId === room.roomId)?.offline,
   );
@@ -446,6 +450,23 @@ export function RoomStage() {
           </div>
         </div>
         <div className="room-stage-actions">
+          {canHost ? <button type="button" className="room-head-icon-btn" title="邀请成员" aria-label="邀请成员"
+            disabled={offline || room.status !== "open" || inviting}
+            onClick={async () => {
+              setInviting(true);
+              setErr(null);
+              try {
+                const result = await onInvite();
+                if (!result.ok && roomGenerationRef.current === roomGeneration) setErr(result.error ?? "生成邀请码失败，请重试");
+              } catch (error) {
+                if (roomGenerationRef.current === roomGeneration) setErr(error instanceof Error ? error.message : "生成邀请码失败，请重试");
+              } finally { setInviting(false); }
+            }}>
+            <svg width="17" height="17" viewBox="0 0 18 18" fill="none" aria-hidden>
+              <circle cx="6.5" cy="5.5" r="2.7" stroke="currentColor" strokeWidth="1.35" />
+              <path d="M1.7 15c.2-3 1.9-4.6 4.8-4.6 1.4 0 2.6.4 3.4 1.2M13.5 5.5v6M10.5 8.5h6" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" />
+            </svg>
+          </button> : null}
           <button ref={sideToggleRef} type="button" className="room-head-icon-btn room-collaboration-toggle"
             title={`${sideOpen ? "收起协作侧栏" : "展开协作侧栏"}${taskSummary.approvals ? ` · ${taskSummary.approvals} 项待我确认` : ""}`}
             aria-label={sideOpen ? "收起协作侧栏" : "展开协作侧栏"}
@@ -534,13 +555,13 @@ export function RoomStage() {
           )
         : null}
 
-      {settingsOpen ? (
+      {settingsMounted ? (
         <RoomSettingsModal
+          exiting={!settingsOpen}
           room={room}
           canHost={canHost}
           canAdmin={canManage}
           offline={offline}
-          onInvite={onInvite}
           suspended={Boolean(invite)}
           onClose={() => { settingsEpochRef.current += 1; setSettingsOpen(false); }}
         />

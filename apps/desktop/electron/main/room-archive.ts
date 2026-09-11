@@ -10,6 +10,8 @@ import type {
 import { AppDatabase } from "./app-database";
 
 export type StoredRoom = {
+  hosted?: boolean;
+  hostedOwnerFp?: string;
   roomId: string;
   name: string;
   status: "open" | "ended";
@@ -137,7 +139,7 @@ export class RoomArchive {
       roomId: room.roomId,
       name: room.name,
       status: room.status,
-      role: room.role,
+      role: room.members?.find(member => member.userId === room.localUserId)?.role ?? room.role,
       memberCount: room.memberCount,
       port: room.port,
       inviteHost: room.inviteHost,
@@ -212,6 +214,9 @@ export class RoomArchive {
   private normalize(room: StoredRoom): StoredRoom {
     return {
       roomId: String(room.roomId),
+      ...(typeof room.hosted === "boolean" ? { hosted: room.hosted } : {}),
+      ...(typeof room.hostedOwnerFp === "string" && /^[a-f0-9]{64}$/.test(room.hostedOwnerFp)
+        ? { hostedOwnerFp: room.hostedOwnerFp } : {}),
       name: String(room.name ?? "群聊"),
       status: room.status === "open" ? "open" : "ended",
       role: room.role === "host" ? "host" : "member",

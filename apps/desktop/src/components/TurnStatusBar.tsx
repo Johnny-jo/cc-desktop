@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import type { ChatItem } from "@claude-desktop/shared";
+import type { ChatItem, TurnOutcome } from "@claude-desktop/shared";
 import type { Messages } from "../i18n";
 import { useI18n } from "../i18n/useI18n";
 
@@ -20,11 +20,21 @@ function formatElapsed(totalSeconds: number, chat: Messages["chat"]): string {
 }
 
 /** Static completion marker for a finished turn (history turns included). */
-export function TurnDoneRow({ durationMs }: { durationMs?: number }) {
-  const { t } = useI18n();
+export function TurnDoneRow({ durationMs, outcome }: { durationMs?: number; outcome?: TurnOutcome }) {
+  const { t, locale } = useI18n();
+  const label = outcome === "interrupted" ? (locale === "zh" ? "已中断" : "Interrupted")
+    : outcome === "cancelled" ? (locale === "zh" ? "已取消" : "Cancelled")
+    : outcome === "failed" ? (locale === "zh" ? "执行失败" : "Failed")
+    : outcome === "completed" ? t.chat.turnStatusDone : (locale === "zh" ? "已结束" : "Ended");
   return (
-    <div className="turn-status turn-status-done" role="status">
-      <span className="turn-status-label">{t.chat.turnStatusDone}</span>
+    <div className={`turn-status turn-status-terminal turn-status-${outcome ?? "done"}`} role="status">
+      <svg className="turn-status-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
+        <circle cx="10" cy="10" r="8" />
+        {outcome === "completed" ? <path d="m6 10 2.5 2.5L14 7" />
+          : outcome === "failed" ? <path d="M10 5.5v5M10 13v1" />
+          : <rect x="7" y="7" width="6" height="6" rx="1" fill="currentColor" stroke="none" />}
+      </svg>
+      <span className="turn-status-label">{label}</span>
       {durationMs != null ? (
         <span className="turn-status-time">
           {formatElapsed(Math.max(0, Math.round(durationMs / 1000)), t.chat)}
@@ -62,6 +72,7 @@ export function TurnStatusBar({
   items,
   done,
   doneDurationMs,
+  outcome,
 }: {
   sessionId: string | null;
   running: boolean;
@@ -70,6 +81,7 @@ export function TurnStatusBar({
   done?: boolean;
   /** SDK-measured turn duration for the persisted completion marker. */
   doneDurationMs?: number;
+  outcome?: TurnOutcome;
 }) {
   const { t } = useI18n();
   const timingRef = useRef<TurnTiming | null>(null);
@@ -98,8 +110,8 @@ export function TurnStatusBar({
     }
   }, [sessionId, running]);
 
-  if (!sessionId || !timing || timing.sessionId !== sessionId) {
-    return done ? <TurnDoneRow durationMs={doneDurationMs} /> : null;
+  if (!running || !sessionId || !timing || timing.sessionId !== sessionId) {
+    return done || outcome ? <TurnDoneRow durationMs={doneDurationMs} outcome={outcome} /> : null;
   }
 
   const phase = running

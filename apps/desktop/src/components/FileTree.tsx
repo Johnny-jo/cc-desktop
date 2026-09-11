@@ -5,6 +5,8 @@ import {
   FILE_TREE_REFRESH_MS,
 } from "../lib/debounce-latest";
 import { useAppStore } from "../state/store";
+import { FileTypeIcon } from "./FileTypeIcon";
+import "./FileTree.css";
 
 type DirEntry = { name: string; rel: string; kind: "dir" | "file" };
 
@@ -64,35 +66,43 @@ function TreeNode({
     return (
       <div
         className={`ft-node ft-file${selected === entry.rel ? " selected" : ""}`}
-        style={{ paddingLeft: 10 + depth * 14 }}
+        style={{ paddingLeft: 12 + depth * 16 }}
+        tabIndex={0}
+        role="treeitem"
+        aria-selected={selected === entry.rel}
+        onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); onOpen(entry.rel); } }}
         title={entry.rel}
         onClick={() => onSelect(entry.rel)}
         onDoubleClick={() => onOpen(entry.rel)}
       >
-        <span className="ft-icon" aria-hidden>
-          📄
-        </span>
+        <FileTypeIcon name={entry.name} />
         <span className="ft-name">{entry.name}</span>
       </div>
     );
   }
 
   return (
-    <div>
+    <div className="ft-branch">
       <div
         className="ft-node ft-dir"
-        style={{ paddingLeft: 10 + depth * 14 }}
+        style={{ paddingLeft: 12 + depth * 16 }}
+        tabIndex={0}
+        role="treeitem"
+        aria-expanded={expanded}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
+          if (e.key === "ArrowRight") { e.preventDefault(); setExpanded(true); }
+          if (e.key === "ArrowLeft") { e.preventDefault(); setExpanded(false); }
+        }}
         onClick={() => void toggle()}
         title={entry.rel}
       >
         <span className={`ft-chevron${expanded ? " open" : ""}`} aria-hidden>
-          ▸
-        </span>
-        <span className="ft-icon" aria-hidden>
-          {expanded ? "📂" : "📁"}
+          <svg viewBox="0 0 16 16" fill="none"><path d="m6 3 5 5-5 5" /></svg>
         </span>
         <span className="ft-name">{entry.name}</span>
       </div>
+      <div className="ft-children" style={{ "--ft-guide-left": `${19 + depth * 16}px` } as React.CSSProperties}>
       {expanded
         ? (children ?? []).map((c) => (
             <TreeNode
@@ -115,6 +125,7 @@ function TreeNode({
           空目录
         </div>
       ) : null}
+      </div>
     </div>
   );
 }
@@ -136,6 +147,8 @@ export function FileTree({
   const projectPath = useAppStore((s) => s.projectPath);
   // Any diff push means the agent likely touched the filesystem.
   const refreshKey = useAppStore((s) => s.fsChangeTick);
+  const [manualRefresh, setManualRefresh] = useState(0);
+  const [collapseEpoch, setCollapseEpoch] = useState(0);
   const [roots, setRoots] = useState<DirEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const loaderRef = useRef(
@@ -168,10 +181,10 @@ export function FileTree({
   }, [projectPath]);
 
   useEffect(() => {
-    if (refreshKey === 0) return;
+    if (refreshKey === 0 && manualRefresh === 0) return;
     load(FILE_TREE_REFRESH_MS);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [refreshKey]);
+  }, [refreshKey, manualRefresh]);
 
   if (!projectPath) {
     return <p className="ft-hint">先打开项目</p>;
@@ -193,19 +206,37 @@ export function FileTree({
     return <p className="ft-hint">空目录</p>;
   }
   return (
-    <div className="ft-tree" role="tree">
+    <div className="ft-explorer">
+      <div className="ft-project-head">
+        <span className="ft-project-name" title={projectPath}>{projectPath.split(/[/\\]/).filter(Boolean).pop()}</span>
+        <button type="button" className="ft-action" title="刷新文件树" aria-label="刷新文件树" onClick={() => setManualRefresh((n) => n + 1)}>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M20 4v6h-6M4 20v-6h6" />
+            <path d="M4.7 9a8 8 0 0 1 13.2-3L20 10M4 14l2.1 4A8 8 0 0 0 19.3 15" />
+          </svg>
+        </button>
+        <button type="button" className="ft-action" title="全部折叠" aria-label="全部折叠" onClick={() => setCollapseEpoch((n) => n + 1)}>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M8 4h12v12" />
+            <rect x="4" y="8" width="12" height="12" rx="1" />
+            <path d="M7.5 14h5" />
+          </svg>
+        </button>
+      </div>
+    <div className="ft-tree" role="tree" aria-label="项目文件">
       {roots.map((e) => (
         <TreeNode
-          key={e.rel}
+          key={`${projectPath}:${collapseEpoch}:${e.rel}`}
           cwd={projectPath}
           entry={e}
           depth={0}
           selected={selected}
           onSelect={onSelectFile}
           onOpen={onOpenFile}
-          refreshKey={refreshKey}
+          refreshKey={refreshKey + manualRefresh}
         />
       ))}
+    </div>
     </div>
   );
 }

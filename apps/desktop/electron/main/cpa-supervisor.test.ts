@@ -2,7 +2,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { CpaSupervisor, preferUnprefixedModels } from "./cpa-supervisor";
+import {
+  CpaSupervisor,
+  isTransientCpaStartupError,
+  preferUnprefixedModels,
+} from "./cpa-supervisor";
 
 function touchCpaFiles(): { cpaExePath: string; cpaConfigPath: string } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cpa-sup-"));
@@ -132,6 +136,97 @@ describe("CpaSupervisor", () => {
     if (status.state === "error") {
       expect(status.message).toMatch(/立即退出|exit 1/);
     }
+  });
+
+  it("includes fatal stdout when CPA exits immediately with code 0", async () => {
+    const paths = touchCpaFiles();
+    const child = {
+      kill: vi.fn(() => true),
+      on: (event: string, listener: (...args: unknown[]) => void) => {
+        if (event === "exit") queueMicrotask(() => listener(0, null));
+      },
+      stdout: {
+        on: (event: string, listener: (...args: unknown[]) => void) => {
+          if (event === "data") listener("fatal: config cannot be loaded");
+        },
+      },
+      stderr: { on: vi.fn() },
+    };
+    const cpa = new CpaSupervisor({
+      getSettings: () => ({ ...baseSettings, ...paths }),
+      getToken: () => "tok",
+      probePort: async () => false,
+      spawnProcess: vi.fn().mockReturnValue(child),
+      pollIntervalMs: 10,
+      readyTimeoutMs: 80,
+    });
+
+    const status = await cpa.ensureReady();
+    expect(status).toMatchObject({ state: "error" });
+    if (status.state === "error") {
+      expect(status.message).toContain("exit 0");
+      expect(status.message).toContain("fatal: config cannot be loaded");
+    }
+  });
+
+  it("recognizes only transient rolling-log startup failures", () => {
+    expect(isTransientCpaStartupError({
+      state: "error",
+      message: "Failed to write to log, can't rename log file: Access is denied.",
+    })).toBe(true);
+    expect(isTransientCpaStartupError({
+      state: "error",
+      message: "failed to parse config.yaml",
+    })).toBe(false);
+    expect(isTransientCpaStartupError({ state: "stopped" })).toBe(false);
+  });
+
+  it("retries once when an upgrade briefly leaves the CPA log locked", async () => {
+    const paths = touchCpaFiles();
+    const firstChild = {
+      kill: vi.fn(() => true),
+      on: (event: string, listener: (...args: unknown[]) => void) => {
+        if (event === "exit") queueMicrotask(() => listener(0, null));
+      },
+      stdout: {
+        on: (event: string, listener: (...args: unknown[]) => void) => {
+          if (event === "data") {
+            listener("Failed to write to log, can't rename log file: Access is denied.");
+          }
+        },
+      },
+      stderr: { on: vi.fn() },
+    };
+    const secondChild = {
+      kill: vi.fn(() => true),
+      on: vi.fn(),
+      stdout: { on: vi.fn() },
+      stderr: { on: vi.fn() },
+    };
+    const spawnProcess = vi.fn()
+      .mockReturnValueOnce(firstChild)
+      .mockReturnValueOnce(secondChild);
+    let spawned = 0;
+    spawnProcess.mockImplementationOnce(() => {
+      spawned = 1;
+      return firstChild;
+    }).mockImplementationOnce(() => {
+      spawned = 2;
+      return secondChild;
+    });
+    const cpa = new CpaSupervisor({
+      getSettings: () => ({ ...baseSettings, ...paths }),
+      getToken: () => "tok",
+      probePort: async () => spawned === 2,
+      spawnProcess,
+      pollIntervalMs: 1,
+      readyTimeoutMs: 40,
+      startupRetryDelayMs: 0,
+    });
+
+    const status = await cpa.ensureReady();
+    expect(spawnProcess).toHaveBeenCalledTimes(2);
+    expect(status).toMatchObject({ state: "ready", port: 8317 });
   });
 
   it("preferUnprefixedModels drops provider/path duplicates", () => {

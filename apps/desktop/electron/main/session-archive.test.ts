@@ -12,10 +12,16 @@ import {
 } from "@claude-desktop/shared";
 import {
   SessionArchive,
+  mergeTranscriptItems,
   TRANSCRIPT_CHUNK_ITEMS,
 } from "./session-archive";
 
 describe("SessionArchive", () => {
+  it("does not erase a persisted turn outcome with a stale renderer page", () => {
+    const user = { kind: "text" as const, id: "u", role: "user" as const, text: "Work" };
+    expect(mergeTranscriptItems([{ ...user, turnOutcome: "interrupted" }], [user])[0])
+      .toMatchObject({ turnOutcome: "interrupted" });
+  });
   const dirs: string[] = [];
 
   afterEach(() => {

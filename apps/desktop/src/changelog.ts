@@ -7,6 +7,32 @@ export type ChangelogEntry = {
 
 /** Newest first. Shown in the title-bar changelog panel. */
 export const CHANGELOG: ChangelogEntry[] = [
+    {
+      version: "0.3.14",
+      date: "2026-09-08",
+      title: "更新变动 @Johnny",
+      items: [
+        "修复若干已知问题",
+      ],
+    },
+    {
+      version: "0.3.13",
+      date: "2026-09-08",
+      title: "更新机制变动 @Johnny",
+      items: [
+        "新增若干UI设计动效",
+        "修复若干已知问题",
+      ],
+    },
+    {
+    version: "0.3.12",
+    date: "2026-09-08",
+    title: "更新机制变动 @Johnny",
+    items: [
+      "现中继服务已挂载服务器节点，群主离线依然维持会话内容",
+      "修复若干已知问题",
+    ],
+  },
   {
     version: "0.3.11",
     date: "2026-09-04",

@@ -10,7 +10,7 @@ import type { SettingsStore } from "./settings-store";
 
 /**
  * 远程执行（docs/room-remote-exec-design.md）一期端到端：
- * 席位绑定执行节点 → 房主派发 exec.run → 节点本机执行 → exec.result 回传。
+ * 席位绑定执行节点 → 群主派发 exec.run → 节点本机执行 → exec.result 回传。
  */
 const dirs: string[] = [];
 const services: RoomService[] = [];
@@ -464,19 +464,19 @@ describe("room remote exec", () => {
     const hostSeat = host
       .get(roomId)!
       .seats.find((s) => s.kind === "human" && s.occupantUserId !== guestUserId)!;
-    const sentByHost = await host.send(roomId, hostSeat.id, "房主的话");
+    const sentByHost = await host.send(roomId, hostSeat.id, "群主的话");
     expect(sentByHost.ok).toBe(true);
     await vi.waitFor(() => {
       expect(
-        host.get(roomId)!.items.some((i) => i.text === "房主的话"),
+        host.get(roomId)!.items.some((i) => i.text === "群主的话"),
       ).toBe(true);
     });
     const hostItemId = host
       .get(roomId)!
-      .items.find((i) => i.text === "房主的话")!.id;
+      .items.find((i) => i.text === "群主的话")!.id;
     expect(guest.recall(roomId, hostItemId).ok).toBe(false);
 
-    // 房主可以撤客人的消息
+    // 群主可以撤客人的消息
     await guest.send(roomId, guestSeat.id, "再发一条");
     await vi.waitFor(() => {
       expect(

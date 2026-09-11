@@ -40,7 +40,7 @@ import {
   writeCpaConfigWithApiKey,
   type RuntimePathEnv,
 } from "./runtime-paths";
-import { ensureBuiltinSkills, userSkillsDir } from "./skill-store";
+import { retireBuiltinPathGuardSkill, userSkillsDir } from "./skill-store";
 import { TerminalHost } from "./terminal-host";
 import { AppAutoUpdater } from "./auto-updater";
 import { RoomService } from "./room-service";
@@ -60,8 +60,6 @@ import {
 const APP_BG = "#141414";
 /** Light theme chrome (`--bg-app` for light). */
 const APP_BG_LIGHT = "#f7f7f8";
-const TITLE_SYMBOL_DARK = "#e8e8e8";
-const TITLE_SYMBOL_LIGHT = "#1c1c1e";
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
@@ -76,19 +74,14 @@ const rendererScopes = new Map<number, RendererScope>();
 let terminalHost: TerminalHost | null = null;
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
-/** Sync frameless window chrome (titleBarOverlay) with the UI theme. */
-function applyWindowTheme(theme: "dark" | "light"): void {
+/** Sync only the backing surface; caption controls belong to the renderer. */
+function applyWindowTheme(theme: "dark" | "light", senderId: number): void {
   for (const win of BrowserWindow.getAllWindows()) {
-    if (win.isDestroyed()) continue;
+    if (win.isDestroyed() || win.webContents.id !== senderId) continue;
     try {
-      win.setTitleBarOverlay({
-        color: theme === "light" ? APP_BG_LIGHT : APP_BG,
-        symbolColor: theme === "light" ? TITLE_SYMBOL_LIGHT : TITLE_SYMBOL_DARK,
-        height: 40,
-      });
       win.setBackgroundColor(theme === "light" ? APP_BG_LIGHT : APP_BG);
     } catch {
-      // older Electron without setTitleBarOverlay — ignore
+      // The window may have closed during the notification.
     }
   }
 }
@@ -293,13 +286,8 @@ function buildWindow(
     ...(fs.existsSync(WINDOW_ICON) ? { icon: WINDOW_ICON } : {}),
     // No File/Edit/View menu bar — this is a desktop chat app, not an editor.
     autoHideMenuBar: true,
-    // Hide OS title (icon + app name); keep only dark min/max/close.
-    titleBarStyle: "hidden",
-    titleBarOverlay: {
-      color: APP_BG,
-      symbolColor: "#e8e8e8",
-      height: 40,
-    },
+    // Caption controls are rendered with the page so theme reveals include them.
+    frame: false,
     webPreferences: {
       preload: path.join(__dirname, "../preload/index.js"),
       contextIsolation: true,
@@ -438,8 +426,8 @@ function bootstrap() {
   } catch {
     // ignore — non-fatal
   }
-  // 内置 skill（路径守卫说明等）随启动覆盖更新。
-  ensureBuiltinSkills();
+  // Retire the old auto-triggering skill; room prompts carry the rules inline.
+  retireBuiltinPathGuardSkill();
 
   const archive = new SessionArchive(userDataDir, database);
 
@@ -494,6 +482,9 @@ function bootstrap() {
   };
 
   const permissions = new PermissionBroker({
+    onResolved: (requestId, sessionId) => {
+      sendToSessionRenderers(sessionId, IPC.permissionResolved, { requestId }, rooms?.roomIdForSession(sessionId));
+    },
     getMode: () => settings.get().permissionMode,
     getAllowRules: () => settings.get().permissionAllow ?? [],
     getDenyRules: () => settings.get().permissionDeny ?? [],

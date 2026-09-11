@@ -856,8 +856,8 @@ export function SessionList({
             fill="currentColor"
           />
         </svg>
-        <span className="brand-mark">CC</span>
-        <span className="brand-sub">Desktop</span>
+        <span className="brand-mark">Agent</span>
+        <span className="brand-sub">OS</span>
       </div>
 
       {railMode === "rooms" ? (

@@ -245,7 +245,10 @@ describe("real room attachments", () => {
     await vi.waitFor(() => expect(guest.sessions.start).toHaveBeenCalledTimes(1));
     const prompt = guest.sessions.start.mock.calls[0][0] as UserPrompt;
     expect(prompt.attachments).toHaveLength(2);
-    expect(prompt.attachments.every(a => a.path.startsWith(guest.dir))).toBe(true);
+    const cacheRoot = fs.realpathSync.native(guest.dir) + path.sep;
+    expect(prompt.attachments.map(a => fs.realpathSync.native(a.path))).toEqual([
+      expect.stringContaining(cacheRoot), expect.stringContaining(cacheRoot),
+    ]);
     const content = buildUserContent(prompt);
     expect(content.errors).toEqual([]);
     expect(content.content).toEqual(expect.arrayContaining([expect.objectContaining({ type: "image", source: expect.objectContaining({ data: png.toString("base64") }) }), expect.objectContaining({ type: "text", text: expect.stringContaining("这是真实正文") })]));

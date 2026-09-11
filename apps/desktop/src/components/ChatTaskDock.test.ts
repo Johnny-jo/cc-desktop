@@ -6,9 +6,9 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
-import type { SessionProgress } from "@claude-desktop/shared";
+import type { ChatItem, SessionProgress, TaskPlan } from "@claude-desktop/shared";
 
-type DockProps = { sessionId: string; progress?: SessionProgress };
+type DockProps = { sessionId: string; progress?: SessionProgress; taskPlan?: TaskPlan; onSetPlanClosed?: (closed: boolean) => Promise<void> };
 declare global {
   interface Window {
     dockFixture: {
@@ -16,6 +16,8 @@ declare global {
       renderMany: (props: DockProps[]) => void;
       reset: () => void;
       mountScroll: () => void;
+      mountHistory: () => void;
+      renderTurn: (items: ChatItem[]) => void;
       errors: string[];
     };
     scrollFixture?: { panel: HTMLElement; list: HTMLElement; body: HTMLElement; spacer: HTMLElement; composer: HTMLElement; controller: ReturnType<typeof import("../lib/chat-scroll-controller")["createChatScrollController"]> };
@@ -57,6 +59,8 @@ async function startBrowser(): Promise<void> {
           import { createRoot } from "react-dom/client";
           import { flushSync } from "react-dom";
           import { ChatTaskDock } from "./ChatTaskDock";
+          import { MessageList } from "./MessageList";
+          import { useAppStore, __resetStoreForTests, __upsertSessionForTests, __applySessionEventForTests } from "../state/store";
           import { createChatScrollController } from "../lib/chat-scroll-controller";
           import "./ChatProgressLayout.css";
           const host = document.getElementById("root");
@@ -65,6 +69,25 @@ async function startBrowser(): Promise<void> {
           console.error = (...args) => errors.push(args.map(String).join(" "));
           window.dockFixture = {
             errors,
+            renderTurn(items) {
+              flushSync(() => root.render(<div className="chat-panel"><MessageList items={items} sessionId="outcome" running={false} /></div>));
+            },
+            mountHistory() {
+              __resetStoreForTests();
+              __upsertSessionForTests({ id: "history", title: "History", cwd: "D:/project", updatedAt: 1, status: "running" });
+              const items = [
+                { kind: "tool", id: "hidden-tool", tool: { id: "hidden-tool", name: "Read", summary: "Previous work", status: "done" } },
+                ...Array.from({ length: 16 }, (_, index) => ({ kind: "text", id: "user-" + index, role: "user", text: "History message " + index }))
+              ];
+              __applySessionEventForTests({ type: "items_replaced", sessionId: "history", items });
+              window.desktop = { loadOlderMessages: async () => ({ items: Array.from({ length: 8 }, (_, index) => ({ kind: "tool", id: "older-" + index, tool: { id: "older-" + index, name: "Read", summary: "Earlier tool " + index, status: "done" } })), hasMore: false }) };
+              function History() {
+                const items = useAppStore(state => state.itemsBySession.history || []);
+                return <div className="chat-panel" style={{ height: "520px" }}><MessageList items={items} sessionId="history" hasMore={items[0]?.id === "hidden-tool"} /></div>;
+              }
+              document.getElementById("root").closest("main").style.cssText = "position:fixed;top:0;left:1rem;right:1rem;height:520px";
+              flushSync(() => root.render(<History />));
+            },
             render(props, locale = "en") {
               Object.defineProperty(navigator, "language", { configurable: true, value: locale });
               flushSync(() => root.render(React.createElement(ChatTaskDock, props)));
@@ -258,7 +281,7 @@ describe("ChatTaskDock real React/DOM rendering", () => {
     await render({ tasks, agents: [] });
     const state = await visible();
     expect(state.buttons).toHaveLength(1);
-    expect(state.buttons[0]).toMatchObject({ text: "TaskList3/10", expanded: "false" });
+    expect(state.buttons[0]).toMatchObject({ text: "TaskList3/10 · In progress", expanded: "false" });
     expect(state.buttons[0].title).toBeTruthy();
     expect(state.buttons[0].label).toContain("3/10");
     expect(state.buttons[0].controls).toBeTruthy();
@@ -270,10 +293,54 @@ describe("ChatTaskDock real React/DOM rendering", () => {
     const state = await visible();
     expect(state.buttons).toHaveLength(1);
     expect(state.buttons[0].text).toContain("SubAgent");
+    for (const label of ["3/7 ended", "1 failed", "1 stopped", "1 paused", "1 unknown"]) expect(state.buttons[0].text).toContain(label);
     for (const label of ["2 running", "1 completed", "1 failed", "1 stopped", "1 paused", "1 unknown"]) {
       expect(state.buttons[0].title).toContain(label);
     }
     expect(state.panels).toBe(0);
+  });
+
+  it("closes and reopens the plan without changing task states", async () => {
+    await evaluate(progress => {
+      const props: DockProps = { sessionId: "plan", progress };
+      props.onSetPlanClosed = async closed => {
+        props.taskPlan = closed ? { closedAt: 100, changedSinceClose: false } : undefined;
+        window.dockFixture.render(props);
+      };
+      window.dockFixture.render(props);
+    }, { tasks, agents: [] });
+    await click("TaskList");
+    await evaluate(() => document.querySelector<HTMLButtonElement>(".chat-task-dock-plan button")!.click());
+    expect((await visible()).buttons[0].text).toContain("3/10 · Closed");
+    expect((await visible()).text).toContain("7 unfinished tasks");
+    expect((await visible()).text).toContain("Running tasks will continue");
+    await evaluate(() => document.querySelector<HTMLButtonElement>(".chat-task-dock-plan button")!.click());
+    expect((await visible()).buttons[0].text).toContain("3/10 · In progress");
+  });
+
+  it("keeps an empty closed plan accessible and flags updates after closure", async () => {
+    await evaluate(() => window.dockFixture.render({ sessionId: "closed", progress: { tasks: [], agents: [] },
+      taskPlan: { closedAt: 100, changedSinceClose: true } }));
+    expect((await visible()).buttons[0].text).toContain("Closed · No tasks");
+    expect((await visible()).buttons[0].text).toContain("Updated since closure");
+    await click("TaskList");
+    expect((await visible()).panels).toBe(1);
+  });
+
+  it("disables duplicate submissions and keeps the plan open if persistence fails", async () => {
+    await evaluate(progress => {
+      const props: DockProps = { sessionId: "failed", progress, onSetPlanClosed: () => new Promise((_resolve, reject) => {
+        (window as any).rejectPlan = () => reject(new Error("Disk unavailable"));
+      }) };
+      window.dockFixture.render(props);
+    }, { tasks, agents: [] });
+    await click("TaskList");
+    await evaluate(() => document.querySelector<HTMLButtonElement>(".chat-task-dock-plan button")!.click());
+    expect(await evaluate(() => document.querySelector<HTMLButtonElement>(".chat-task-dock-plan button")!.disabled)).toBe(true);
+    await evaluate(() => (window as any).rejectPlan());
+    expect((await visible()).buttons[0].text).not.toContain("Closed");
+    expect(await evaluate(() => document.querySelector('[role="alert"]')?.textContent)).toContain("Disk unavailable");
+    expect(await evaluate(() => document.querySelector<HTMLButtonElement>(".chat-task-dock-plan button")!.disabled)).toBe(false);
   });
 
   it("shows task statuses, completion history and structured task context", async () => {
@@ -530,6 +597,30 @@ describe("ChatTaskDock real React/DOM rendering", () => {
 });
 
 describe("main transcript real Electron layout", () => {
+  it.each(["cancelled", "interrupted", "failed", "completed"] as const)("shows the persisted %s outcome after remounting", async outcome => {
+    await evaluate(items => window.dockFixture.renderTurn(items), [
+      { kind: "text" as const, id: "u", role: "user" as const, text: "Work", turnOutcome: outcome },
+      ...(outcome === "cancelled" ? [] : [{ kind: "tool" as const, id: "done-tool", tool: { id: "done-tool", name: "Read", summary: "Read", status: "done" as const } }]),
+    ]);
+    const expected = { cancelled: "Cancelled", interrupted: "Interrupted", failed: "Failed", completed: "Done" }[outcome];
+    expect(await evaluate(() => document.querySelector(".turn-status-label")?.textContent)).toBe(expected);
+    if (outcome === "interrupted") expect(await evaluate(() => document.querySelector(".activity-group-status")?.textContent)).toBe("Interrupted");
+  });
+  it("preserves the visible message while prepending history whose first item is a collapsed tool", async () => {
+    await evaluate(() => window.dockFixture.mountHistory());
+    await evaluate(() => document.querySelector<HTMLButtonElement>(".activity-group-toggle")!.click());
+    const before = await evaluate(() => {
+      const list = document.querySelector<HTMLElement>(".main-chat-message-list")!;
+      list.dispatchEvent(new WheelEvent("wheel", { deltaY: -1 }));
+      list.scrollTop = 100;
+      const top = document.querySelector('[data-item-id="user-0"]')!.getBoundingClientRect().top;
+      document.querySelector<HTMLButtonElement>(".message-load-older")!.click();
+      return top;
+    });
+    const after = await evaluate(() => document.querySelector('[data-item-id="user-0"]')!.getBoundingClientRect().top);
+    expect(await evaluate(() => document.querySelector(".activity-group-toggle")?.getAttribute("aria-expanded"))).toBe("true");
+    expect(Math.abs(after - before)).toBeLessThan(2);
+  });
   it("places a new response at 55% of the area above the composer and remeasures resize", async () => {
     await evaluate(() => window.dockFixture.mountScroll());
     const ratio = () => evaluate(() => {

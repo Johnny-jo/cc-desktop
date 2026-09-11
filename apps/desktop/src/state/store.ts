@@ -308,6 +308,15 @@ function finishSessionTurn(sessionId: string): SessionSummary[] {
 
 function applySessionEvent(event: SdkNormalizedEvent): void {
   const { sessionId } = event;
+  // Also reconcile on completion when a renderer missed permission:resolved.
+  if (event.type === "result") {
+    if (state.permissionRequest?.sessionId === sessionId) setState({ permissionRequest: null });
+    if (state.userPromptRequest?.sessionId === sessionId) setState({ userPromptRequest: null });
+  }
+  if (event.type === "result" && (event.outcome === "interrupted" || event.outcome === "cancelled") &&
+      sessionId === state.activeSessionId && state.queuedPrompts.length) {
+    setState({ queuedPrompts: [] });
+  }
 
   // CLI mode: keep running/queue state alive, but do not accumulate chat items.
   if (state.cliMode) {
@@ -316,7 +325,7 @@ function applySessionEvent(event: SdkNormalizedEvent): void {
       setState({
         sessions,
         running: sessions.some((s) => s.status === "running"),
-        lastError: event.ok ? state.lastError : (event.error ?? "Turn failed"),
+        lastError: event.ok || event.outcome === "interrupted" || event.outcome === "cancelled" ? state.lastError : (event.error ?? "Turn failed"),
       });
       if (!state.running && state.queuedPrompts.length > 0) {
         const summary = state.sessions.find((s) => s.id === sessionId);
@@ -334,7 +343,7 @@ function applySessionEvent(event: SdkNormalizedEvent): void {
       setState({
         sessions,
         running: sessions.some((s) => s.status === "running"),
-        lastError: event.ok ? state.lastError : (event.error ?? "Turn failed"),
+        lastError: event.ok || event.outcome === "interrupted" || event.outcome === "cancelled" ? state.lastError : (event.error ?? "Turn failed"),
       });
       if (!state.running && state.queuedPrompts.length > 0) {
         const summary = state.sessions.find((s) => s.id === sessionId);
@@ -370,7 +379,7 @@ function applySessionEvent(event: SdkNormalizedEvent): void {
     setState({
       sessions,
       running: sessions.some((s) => s.status === "running"),
-      lastError: event.ok ? state.lastError : (event.error ?? "Turn failed"),
+      lastError: event.ok || event.outcome === "interrupted" || event.outcome === "cancelled" ? state.lastError : (event.error ?? "Turn failed"),
     });
     if (!state.running && state.queuedPrompts.length > 0) {
       const summary = state.sessions.find((s) => s.id === sessionId);
@@ -488,6 +497,12 @@ function subscribeDesktopEvents(): void {
   unsubs.push(
     desktop.on(IPC.permissionRequest, (payload) => {
       setState({ permissionRequest: payload as PermissionRequest });
+    }),
+    desktop.on(IPC.permissionResolved, (payload) => {
+      const { requestId } = payload as { requestId: string };
+      if (state.permissionRequest?.requestId === requestId) {
+        setState({ permissionRequest: null });
+      }
     }),
   );
 
@@ -951,15 +966,17 @@ export async function loadOlderMessages(
   }
   try {
     const page = await getDesktop().loadOlderMessages(sessionId, beforeId);
+    const current = getItems(sessionId);
+    if (current[0]?.id !== beforeId) return { ok: false };
     if (!page.items.length) {
       setState({
         hasMoreBySession: { ...state.hasMoreBySession, [sessionId]: false },
       });
       return { ok: true };
     }
-    const seen = new Set(items.map((i) => i.id));
+    const seen = new Set(current.map((i) => i.id));
     const older = page.items.filter((i) => !seen.has(i.id));
-    const merged = bindSdkUserMsgIds(sessionId, [...older, ...items]);
+    const merged = bindSdkUserMsgIds(sessionId, [...older, ...current]);
     const pruned = merged.length > RENDERER_TRANSCRIPT_CAP;
     const next = pruned ? merged.slice(0, RENDERER_TRANSCRIPT_CAP) : merged;
     setState({
@@ -993,15 +1010,17 @@ export async function loadNewerMessages(
   }
   try {
     const page = await getDesktop().loadNewerMessages(sessionId, afterId);
+    const current = getItems(sessionId);
+    if (current[current.length - 1]?.id !== afterId) return { ok: false };
     if (!page.items.length) {
       setState({
         hasNewerBySession: { ...state.hasNewerBySession, [sessionId]: false },
       });
       return { ok: true };
     }
-    const seen = new Set(items.map((i) => i.id));
+    const seen = new Set(current.map((i) => i.id));
     const newer = page.items.filter((i) => !seen.has(i.id));
-    const merged = bindSdkUserMsgIds(sessionId, [...items, ...newer]);
+    const merged = bindSdkUserMsgIds(sessionId, [...current, ...newer]);
     const pruned = merged.length > RENDERER_TRANSCRIPT_CAP;
     const next = pruned ? merged.slice(merged.length - RENDERER_TRANSCRIPT_CAP) : merged;
     setState({
@@ -1146,6 +1165,10 @@ export function sendMessage(text: string, attachments: Attachment[] = []): void 
 export function abortActiveSession(): void {
   const id = state.activeSessionId;
   if (!id) return;
+  if (!state.hasNewerBySession[id] && state.sessions.find(session => session.id === id)?.status === "running") {
+    const next = applySdkEvent(transcriptUi(id), { type: "result", sessionId: id, ok: false, outcome: "interrupted" }, { nextId });
+    writeTranscriptUi(id, next);
+  }
   // Stop means stop: drop queued messages too (Claude Code Esc semantics).
   // Optimistically clear running so the stop button flips back immediately;
   // main will also emit session:updated + result after tearing down the stream.

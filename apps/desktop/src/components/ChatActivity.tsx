@@ -1,4 +1,5 @@
 import React, { useLayoutEffect, useRef, useState } from "react";
+import type { TurnOutcome } from "@claude-desktop/shared";
 import {
   getToolActivityStatus,
   isLiveActivityEntry,
@@ -165,7 +166,7 @@ function ToolActivityStep({
   const activeSessionId = useAppStore((state) => state.activeSessionId);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const tool = entry.tool;
-  const status = getToolActivityStatus(tool);
+  const status = entry.displayStatus ?? getToolActivityStatus(tool);
   const hasDetails = Boolean(tool.resultPreview || tool.todos?.length);
   const isFileEdit = tool.name === "Write" || tool.name === "Edit";
 
@@ -325,11 +326,13 @@ export function ChatActivity({
   entries: allEntries,
   durationMs,
   live = false,
+  outcome,
 }: {
   id: string;
   entries: ActivityEntry[];
   durationMs?: number;
   live?: boolean;
+  outcome?: TurnOutcome;
 }) {
   const i18n = useI18n();
   const { t } = i18n;
@@ -340,11 +343,12 @@ export function ChatActivity({
 
   const statuses = entries
     .filter(entry => entry.kind === "tool")
-    .map(entry => getToolActivityStatus(entry.tool));
+    .map(entry => entry.displayStatus ?? getToolActivityStatus(entry.tool));
   const failureCount = statuses.filter(status => status === "error").length;
   const failed = failureCount > 0;
   const unresolved = statuses.find(status => status === "unknown" || status === "paused" || status === "stopped");
-  const status = live ? "running" : failed ? "error" : unresolved ?? "done";
+  const interrupted = outcome === "interrupted" || outcome === "cancelled";
+  const status = live ? "running" : interrupted ? "stopped" : outcome === "failed" || failed ? "error" : unresolved ?? "done";
   const thinkingCount = entries.filter(entry => entry.kind === "thinking").length;
   const toolCount = statuses.length;
   const hasCompaction = entries.some(entry => entry.kind === "compaction");
@@ -371,7 +375,7 @@ export function ChatActivity({
         </span>
       ) : null}
       <span className={`activity-group-status status-${status}`}>
-        {failed
+        {interrupted ? (i18n.locale === "zh" ? "已中断" : "Interrupted") : failed
           ? t.chat.activityFailedCount.replace("{count}", String(failureCount))
           : activityStatusLabel(status, i18n)}
       </span>

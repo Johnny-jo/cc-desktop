@@ -1,4 +1,4 @@
-import type { ChatItem, ToolCardState, TurnUsage } from "@claude-desktop/shared";
+import type { ChatItem, ToolCardState, TurnUsage, TurnOutcome } from "@claude-desktop/shared";
 
 type TextChatItem = Extract<ChatItem, { kind: "text" }>;
 
@@ -17,6 +17,7 @@ export type ActivityEntry =
       kind: "tool";
       id: string;
       tool: ToolCardState;
+      displayStatus?: ReturnType<typeof getToolActivityStatus>;
     };
 
 export type ConversationBlock =
@@ -26,6 +27,7 @@ export type ConversationBlock =
       id: string;
       entries: ActivityEntry[];
       usage?: TurnUsage;
+      outcome?: TurnOutcome;
     }
   | {
       kind: "live-activity";
@@ -62,7 +64,7 @@ export function getToolActivityStatus(
 
 export function isLiveActivityEntry(entry: ActivityEntry): boolean {
   if (entry.kind === "thinking") return entry.active;
-  return entry.kind === "tool" && getToolActivityStatus(entry.tool) === "running";
+  return entry.kind === "tool" && (entry.displayStatus ?? getToolActivityStatus(entry.tool)) === "running";
 }
 
 function isThinkingItem(
@@ -96,7 +98,7 @@ function withoutThinking(item: TextChatItem): TextChatItem {
   return answer;
 }
 
-function buildTurnBlocks(items: ChatItem[]): ConversationBlock[] {
+function buildTurnBlocks(items: ChatItem[], outcome?: TurnOutcome, ended = Boolean(outcome)): ConversationBlock[] {
   const entries: ActivityEntry[] = [];
 
   items.forEach((item) => {
@@ -105,7 +107,11 @@ function buildTurnBlocks(items: ChatItem[]): ConversationBlock[] {
       return;
     }
     if (item.kind === "tool") {
-      entries.push({ kind: "tool", id: item.id, tool: item.tool });
+      // Background agents have an independent lifecycle; ordinary calls do not.
+      const stale = ended && !item.tool.agent?.background && getToolActivityStatus(item.tool) === "running";
+      entries.push({ kind: "tool", id: item.id, tool: item.tool,
+        ...(stale ? { displayStatus: outcome === "interrupted" || outcome === "cancelled" ? "stopped" as const : "unknown" as const } : {}),
+      });
       return;
     }
     if (isThinkingItem(item)) {
@@ -113,7 +119,7 @@ function buildTurnBlocks(items: ChatItem[]): ConversationBlock[] {
         kind: "thinking",
         id: item.id,
         text: item.thinkingText ?? "",
-        active: Boolean(item.thinking && item.streaming && !item.text.trim()),
+        active: Boolean(!ended && item.thinking && item.streaming && !item.text.trim()),
       });
     }
   });
@@ -144,6 +150,7 @@ function buildTurnBlocks(items: ChatItem[]): ConversationBlock[] {
       kind: "activity",
       id: `activity-${firstActivityId}`,
       entries: archived,
+      ...(outcome ? { outcome } : {}),
       ...(usageItem ? { usage: usageItem.usage } : {}),
     });
   }
@@ -187,13 +194,14 @@ function buildTurnBlocks(items: ChatItem[]): ConversationBlock[] {
  * Build display-only blocks without changing the persisted flat transcript.
  * Process entries are grouped inside the user turn that owns them.
  */
-export function buildConversationBlocks(items: ChatItem[]): ConversationBlock[] {
+export function buildConversationBlocks(items: ChatItem[], running?: boolean): ConversationBlock[] {
   const blocks: ConversationBlock[] = [];
   let turn: ChatItem[] = [];
+  let outcome: TurnOutcome | undefined;
 
-  const flushTurn = () => {
+  const flushTurn = (ended = Boolean(outcome)) => {
     if (turn.length === 0) return;
-    blocks.push(...buildTurnBlocks(turn));
+    blocks.push(...buildTurnBlocks(turn, outcome, ended));
     turn = [];
   };
 
@@ -202,13 +210,31 @@ export function buildConversationBlocks(items: ChatItem[]): ConversationBlock[] 
     // implementation detail; the user-facing timeline gets one compact event.
     if (isContextSummaryItem(item)) continue;
     if (item.kind === "text" && item.role === "user") {
-      flushTurn();
+      flushTurn(true);
+      outcome = item.turnOutcome;
       blocks.push({ kind: "item", item });
       continue;
     }
     turn.push(item);
   }
-  flushTurn();
+  flushTurn(Boolean(outcome) || running === false);
 
   return blocks;
+}
+
+/** Prepending part of a turn must not remount its already expanded activity. */
+export function preserveActivityBlockIds(blocks: ConversationBlock[], previous: ConversationBlock[]): ConversationBlock[] {
+  const byEntry = new Map<string, string>();
+  for (const block of previous) {
+    if (block.kind !== "activity" && block.kind !== "live-activity") continue;
+    for (const entry of block.entries) byEntry.set(`${block.kind}:${entry.id}`, block.id);
+  }
+  const used = new Set<string>();
+  return blocks.map(block => {
+    if (block.kind !== "activity" && block.kind !== "live-activity") return block;
+    const oldId = block.entries.map(entry => byEntry.get(`${block.kind}:${entry.id}`)).find(id => id && !used.has(id));
+    const id = oldId ?? block.id;
+    used.add(id);
+    return id === block.id ? block : { ...block, id };
+  });
 }

@@ -50,6 +50,9 @@ function createDesktopBoundary() {
   >;
   return {
     desktop,
+    emitChannel(channel: string, payload: unknown) {
+      for (const listener of listeners.get(channel) ?? []) listener(payload);
+    },
     emit(payload: RoomPermAskPayload | {
       roomId: string;
       requestId: string;
@@ -103,6 +106,26 @@ afterEach(() => {
 });
 
 describe("room approval queue through desktop subscriptions", () => {
+  it("removes stale approval on its session result even if the resolved event was missed", () => {
+    const request = { requestId: "stale", sessionId: "s1", toolName: "Edit", summary: "a.ts", inputPreview: {} };
+    boundary.emitChannel(IPC.permissionRequest, request);
+    boundary.emitChannel(IPC.sessionEvent, { type: "result", sessionId: "other", ok: true });
+    expect(getState().permissionRequest).toEqual(request);
+    boundary.emitChannel(IPC.sessionEvent, { type: "result", sessionId: "s1", ok: true });
+    expect(getState().permissionRequest).toBeNull();
+  });
+  it("clears tool approval resolved by another window without clearing a newer request", () => {
+    const request = { requestId: "approval-a", sessionId: "session-a", toolName: "Edit", summary: "a.ts", inputPreview: {} };
+    boundary.emitChannel(IPC.permissionRequest, request);
+    boundary.emitChannel(IPC.permissionResolved, { requestId: "older-request" });
+    expect(getState().permissionRequest).toEqual(request);
+    boundary.emitChannel(IPC.permissionResolved, { requestId: request.requestId });
+    expect(getState().permissionRequest).toBeNull();
+    const next = { ...request, requestId: "approval-b" };
+    boundary.emitChannel(IPC.permissionRequest, next);
+    boundary.emitChannel(IPC.permissionResolved, { requestId: request.requestId });
+    expect(getState().permissionRequest).toEqual(next);
+  });
   it("starts with no pending approval", () => {
     expectPending();
   });

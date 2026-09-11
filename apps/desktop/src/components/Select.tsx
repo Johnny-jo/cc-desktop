@@ -25,7 +25,9 @@ export function ThemedSelect({
   onChange,
   disabled,
   title,
+  ariaLabel,
   className,
+  variant = "default",
   menuMaxHeight = 280,
   align = "left",
   stretchOnOpen = false,
@@ -35,7 +37,9 @@ export function ThemedSelect({
   onChange: (value: string) => void;
   disabled?: boolean;
   title?: string;
+  ariaLabel?: string;
   className?: string;
+  variant?: "default" | "field";
   menuMaxHeight?: number;
   /** Which edge of the button the menu aligns with. */
   align?: "left" | "right";
@@ -66,6 +70,8 @@ export function ThemedSelect({
   const current = options[currentIdx];
 
   const close = useCallback(() => setOpen(false), []);
+
+  useEffect(() => { if (disabled) close(); }, [disabled, close]);
 
   // Decide drop direction and fixed position from the button's viewport rect.
   useLayoutEffect(() => {
@@ -176,13 +182,14 @@ export function ThemedSelect({
   return (
     <div
       ref={rootRef}
-      className={`themed-select${open ? " open" : ""}${className ? ` ${className}` : ""}`}
+      className={`themed-select${variant === "field" ? " themed-select-field" : ""}${open ? " open" : ""}${className ? ` ${className}` : ""}`}
     >
       <button
         type="button"
         className="themed-select-btn"
         disabled={disabled}
         title={title}
+        aria-label={ariaLabel}
         aria-haspopup="listbox"
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
@@ -217,8 +224,10 @@ export function ThemedSelect({
         ? createPortal(
             <ul
               ref={menuRef}
-              className={`themed-select-menu${dropUp ? " drop-up" : ""}${open ? "" : " closing"}`}
+              className={`themed-select-menu${variant === "field" ? " themed-select-field-menu" : ""}${dropUp ? " drop-up" : ""}${open ? "" : " closing"}`}
               role="listbox"
+              aria-label={ariaLabel}
+              inert={!open || disabled}
               style={{ ...menuPos, maxHeight: menuMaxHeight }}
               tabIndex={-1}
             >

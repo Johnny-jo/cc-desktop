@@ -70,6 +70,7 @@ export type TurnChangesItem = {
 };
 
 export type ChatRole = "user" | "assistant" | "system";
+export type TurnOutcome = "completed" | "interrupted" | "cancelled" | "failed";
 
 export type TodoItem = {
   content: string;
@@ -101,6 +102,9 @@ export type ProgressAgent = {
 
 export type SessionProgress = { tasks: ProgressTask[]; agents: ProgressAgent[] };
 
+/** User-managed closure, independent of SDK task execution. Missing means open. */
+export type TaskPlan = { closedAt: number; changedSinceClose: boolean };
+
 export type ToolTaskUpdate = {
   operation: "create" | "update" | "list" | "replace";
   /** Local application sequence, assigned by the transcript reducer at tool_end. */
@@ -118,7 +122,7 @@ export type ToolCardState = {
   id: string;
   name: string;
   summary: string;
-  status: "running" | "done" | "error";
+  status: "running" | "done" | "error" | "stopped";
   resultPreview?: string;
   /** Elapsed seconds while running (from tool_progress heartbeats) */
   elapsedSeconds?: number;
@@ -247,6 +251,8 @@ export type ChatItem =
       role: ChatRole;
       text: string;
       streaming?: boolean;
+      /** Persisted on the user message that owns this turn. */
+      turnOutcome?: TurnOutcome;
       /** True while the model is producing a thinking/reasoning block (not answer text). */
       thinking?: boolean;
       /**
@@ -310,6 +316,7 @@ export type SessionSummary = {
   contextUsage?: ContextUsage;
   /** Structured progress for the complete retained session, independent of paging. */
   progress?: SessionProgress;
+  taskPlan?: TaskPlan;
   /** Room-mod / seat sessions — omitted from the main session list */
   hiddenFromList?: boolean;
   /** Pinned to the top of the sidebar list */
@@ -378,6 +385,8 @@ export type AppSettings = {
   modelEfforts?: Record<string, ReasoningEffort>;
   /** UI theme: dark / light / follow system (omit = system). */
   theme?: "dark" | "light" | "system";
+  /** Animate the welcome-page S into a galaxy in dark mode (omit = enabled). */
+  galaxyEffectsEnabled?: boolean;
   /** UI language: zh / en / follow system (omit = system). */
   locale?: "zh" | "en" | "system";
   /**
@@ -452,6 +461,7 @@ export type SdkNormalizedEvent =
       type: "result";
       sessionId: string;
       ok: boolean;
+      outcome?: TurnOutcome;
       costUsd?: number;
       error?: string;
       usage?: TurnUsage;
