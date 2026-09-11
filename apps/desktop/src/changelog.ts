@@ -8,6 +8,14 @@ export type ChangelogEntry = {
 /** Newest first. Shown in the title-bar changelog panel. */
 export const CHANGELOG: ChangelogEntry[] = [
     {
+      version: "0.3.14",
+      date: "2026-09-08",
+      title: "更新变动 @Johnny",
+      items: [
+        "修复若干已知问题",
+      ],
+    },
+    {
       version: "0.3.13",
       date: "2026-09-08",
       title: "更新机制变动 @Johnny",

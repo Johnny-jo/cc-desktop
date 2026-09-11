@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { fileEditRecovery } from "./file-edit-recovery";
+import { roomSandboxSettings } from "./room-sandbox";
 import type {
   ChatItem,
   FileChange,
@@ -78,6 +79,7 @@ export type SessionRunOpts = {
   /**
    * 路径围栏（绝对路径）：设置后，文件类工具和 Bash 里的绝对路径 / `..` /
    * 重定向 / cd 都不能越出这个目录，越界直接拒绝，不进权限弹窗。
+   * 同时为执行查询启用官方 Bash 沙箱；沙箱不可用时禁止无隔离回退。
    */
   pathJail?: string;
   /** Room turns only: enforce read-only tools in PreToolUse, regardless of SDK mode. */
@@ -221,6 +223,8 @@ type RoomAbortTurn = {
 type QueryExtras = {
   servers: Record<string, unknown>;
   allowedTools: string[];
+  /** Root bound when the CLI was started; sandbox options cannot change live. */
+  pathJail?: string;
 };
 
 type SessionEntry = {
@@ -440,6 +444,7 @@ function isSdkMcpServer(
 
 function snapshotQueryExtras(entry: SessionEntry): QueryExtras {
   return {
+    pathJail: entry.pathJail,
     servers: Object.fromEntries(
       Object.entries(entry.extraMcpServers ?? {}).map(([name, server]) => {
         // Transport configs are data, but SDK instances contain live task closures.
@@ -2154,7 +2159,7 @@ export class SessionManager {
 
     // Compare with the query's binding, not a previous attempt's staged extras:
     // CPA preparation can fail after entry was updated, leaving the old query live.
-    reopenForExtras ||= extrasChanged(
+    reopenForExtras ||= entry.queryExtras?.pathJail !== entry.pathJail || extrasChanged(
       entry.queryExtras?.servers,
       entry.queryExtras?.allowedTools,
       entry.extraMcpServers ?? {},
@@ -2291,7 +2296,9 @@ export class SessionManager {
       });
 
     return {
-      cwd: entry.summary.cwd,
+      // The official sandbox derives its default writable workspace from cwd.
+      cwd: queryExtras.pathJail ?? entry.summary.cwd,
+      ...(queryExtras.pathJail ? { sandbox: roomSandboxSettings() } : {}),
       includePartialMessages: true,
       permissionMode: entry.permissionMode ?? settings.permissionMode,
       model: entry.model || settings.defaultModel,
@@ -2644,6 +2651,9 @@ export class SessionManager {
     event: SdkNormalizedEvent,
     model: string,
   ): void {
+    if (event.type === "result" && !event.ok && event.error) {
+      event = { ...event, error: humanizeAgentError(event.error, model) };
+    }
     this.applyAndMaybePersist(entry, event);
     this.emit(event);
     if (event.type !== "result") return;
@@ -3037,6 +3047,12 @@ export class SessionManager {
  * DeepSeek (and some OpenAI-compat proxies) reject Anthropic image blocks.
  */
 export function humanizeAgentError(raw: string, model: string): string {
+  if (/sandbox (?:required but unavailable|enabled but .*not available)/i.test(raw)) {
+    return "官方内置沙箱不可用，已停止执行，不会回退到无沙箱模式。" +
+      (/windows/i.test(raw)
+        ? "当前 Windows 会话未启用官方沙箱；请在支持官方沙箱的执行环境中重试。"
+        : "请检查执行环境是否支持官方沙箱，并安装所需依赖后重试。");
+  }
   if (
     /unknown variant\s*`?image_url`?/i.test(raw) ||
     /image_url.*expected\s*`?text`?/i.test(raw)

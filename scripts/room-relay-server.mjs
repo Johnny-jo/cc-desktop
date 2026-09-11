@@ -5228,23 +5228,6 @@ function createRoomChatMcp(handlers) {
   }
 }
 
-// apps/desktop/electron/main/skill-store.ts
-var BUILTIN_PATH_GUARD_SKILL = "room-workspace-guard";
-var PATH_GUARD_SKILL_MD = `---
-name: ${BUILTIN_PATH_GUARD_SKILL}
-description: \u7FA4\u804A/\u8FDC\u7A0B\u6267\u884C\u65F6\u7684\u5DE5\u4F5C\u533A\u8DEF\u5F84\u5B88\u536B\u89C4\u5219\u3002\u5F53\u4EFB\u52A1\u6765\u81EA\u7FA4\u804A\u623F\u95F4\u3001\u6216\u63D0\u793A\u8BCD\u63D0\u5230"\u8DEF\u5F84\u5B88\u536B"\u65F6\u5FC5\u8BFB\u3002
----
-
-# \u5DE5\u4F5C\u533A\u8DEF\u5F84\u5B88\u536B
-
-\u4F60\u5728\u7FA4\u804A\u623F\u95F4\u91CC\u88AB\u6D3E\u4EFB\u52A1\u65F6\uFF0C\u5DE5\u4F5C\u533A\u4E3B\u4EBA\u542F\u7528\u4E86\u8DEF\u5F84\u5B88\u536B\uFF1A
-
-1. \u6240\u6709\u6587\u4EF6\u64CD\u4F5C\uFF08Read/Write/Edit/MultiEdit/Glob/Grep/LS\uFF09\u5FC5\u987B\u9650\u5236\u5728\u4E3B\u4EBA\u6253\u5F00\u7684\u9879\u76EE\u76EE\u5F55\u5185\uFF0C\u8D8A\u754C\u4F1A\u88AB\u76F4\u63A5\u62D2\u7EDD\u3002
-2. Bash \u547D\u4EE4\u540C\u6837\u53D7\u9650\uFF1A\u547D\u4EE4\u4E2D\u51FA\u73B0\u76EE\u5F55\u5916\u7684\u7EDD\u5BF9\u8DEF\u5F84\u3001\`..\` \u9003\u9038\u3001\`~\` \u6216 \`$HOME\` \u4E3B\u76EE\u5F55\u3001\`cd\`/\`pushd\` \u5230\u76EE\u5F55\u5916\uFF0C\u90FD\u4F1A\u88AB\u76F4\u63A5\u62D2\u7EDD\u3002
-3. \u88AB\u62D2\u7EDD\u540E\u4E0D\u8981\u6362\u62DB\u7ED5\u8FC7\uFF08\u6362\u5DE5\u5177\u3001\u62FC\u76F8\u5BF9\u8DEF\u5F84\u3001\u5148\u5199\u4E34\u65F6\u76EE\u5F55\u518D\u79FB\u52A8\u3001\u7528 python/node \u5199\u6587\u4EF6\uFF0C\u90FD\u7B97\u8FDD\u89C4\u4E14\u540C\u6837\u4F1A\u88AB\u62E6\uFF09\u3002
-4. \u6B63\u786E\u505A\u6CD5\uFF1A\u5728\u5141\u8BB8\u7684\u9879\u76EE\u76EE\u5F55\u5185\u5B8C\u6210\u4EFB\u52A1\uFF1B\u786E\u9700\u8BBF\u95EE\u76EE\u5F55\u5916\u5185\u5BB9\u65F6\uFF0C\u5728\u56DE\u590D\u91CC\u5411\u5DE5\u4F5C\u533A\u4E3B\u4EBA\u8BF4\u660E\u7406\u7531\u548C\u5177\u4F53\u8DEF\u5F84\uFF0C\u7531\u4E3B\u4EBA\u51B3\u5B9A\u3002
-`;
-
 // apps/desktop/electron/main/room-ai-proxy.ts
 import http from "node:http";
 var AI_HTTP_CHUNK = 48 * 1024;
@@ -14317,6 +14300,8 @@ var ROOM_CONN_RATE_PER_SEC = 30;
 var ROOM_CONN_BURST = 60;
 var ROOM_OVERSIZED_MAX_STREAK = 5;
 var KNOWN_ROOM_FRAME_TYPES = /* @__PURE__ */ new Set([
+  "extension.request",
+  "extension.result",
   "host.control",
   "host.pending",
   "hello",
@@ -15057,7 +15042,7 @@ export function activate(ctx) {
   }
   async enableMod(roomId, packDir) {
     const r = this.rooms.get(roomId);
-    if (!r || r.localRole !== "host") {
+    if (!r || !this.isExtensionHost(r)) {
       return { ok: false, error: "\u53EA\u6709\u7FA4\u4E3B\u53EF\u4EE5\u542F\u7528\u6A21\u7EC4" };
     }
     if (r.status !== "open") return { ok: false, error: "\u7FA4\u804A\u4E0D\u53EF\u7528" };
@@ -15118,6 +15103,11 @@ export function activate(ctx) {
     }
     r.modOffer = this.buildOffer(r);
     this.pushState(r);
+    try {
+      await this.syncHostedExtensions(r);
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
     return { ok: true, room: this.snapshot(r), offer: r.modOffer };
   }
   async startMod(roomId) {
@@ -15226,7 +15216,7 @@ export function activate(ctx) {
     }
     const seat = rec.seats.find((s) => s.id === seatId);
     if (!seat) return { ok: false, error: "\u8BF7\u5148\u9009\u4E00\u4E2A\u5E2D\u4F4D" };
-    if (rec.localRole !== "host") {
+    if (!this.isExtensionHost(rec)) {
       if (!this.canAct(seat, rec.localUserId)) {
         return { ok: false, error: "\u5F53\u524D\u4E0D\u80FD\u64CD\u4F5C\u8FD9\u4E2A\u5E2D\u4F4D" };
       }
@@ -15257,7 +15247,7 @@ export function activate(ctx) {
     if (r.modParticipationPending) return { ok: false, error: "\u6B63\u5728\u66F4\u65B0\u6D3B\u52A8\u53C2\u4E0E\u72B6\u6001" };
     const checksum = enabled ? r.modChecksum : "";
     if (enabled && !checksum) return { ok: false, error: "\u7FA4\u804A\u672A\u542F\u7528 Mod" };
-    if (enabled && r.localRole !== "host" && !this.hasMod(checksum).has) {
+    if (enabled && !r.hosted && r.localRole !== "host" && !this.hasMod(checksum).has) {
       if (!r.joinInfo) return { ok: false, error: "\u7F3A\u5C11 Mod \u4E0B\u8F7D\u5730\u5740" };
       const fetched = await this.fetchMod({ ...r.joinInfo, checksum });
       if (!fetched.ok) {
@@ -15311,6 +15301,11 @@ export function activate(ctx) {
     member.modChecksum = checksum;
     this.pushState(r);
     await this.publishViews(r);
+    if (this.hostedTransport) {
+      const peer = this.findGuestWsByUserId(r, userId);
+      if (peer) this.sendModViewsTo(r, peer, userId);
+      void this.roomRpc(r, "extension.request", { action: "views" }, 12e3, this.extensionOwnerSocket(r));
+    }
     return { ok: true };
   }
   modSeats(r) {
@@ -15559,7 +15554,7 @@ export function activate(ctx) {
       });
     });
   }
-  async join(opts) {
+  async join(opts, reuseRecord) {
     let host = opts.host.trim();
     host = host.replace(/^wss?:\/\//i, "").replace(/^https?:\/\//i, "").replace(/\/.*$/, "").replace(/^\[|\]$/g, "");
     if (host.includes(":") && !host.includes("::")) {
@@ -15691,6 +15686,10 @@ export function activate(ctx) {
                     path: winPath
                   }
                 };
+                if (reuseRecord?.roomId === snap.roomId && reuseRecord.hosted && this.isExtensionHost(reuseRecord)) {
+                  rec = Object.assign(reuseRecord, rec, { closing: false, offline: void 0, reconnecting: false });
+                  if (rec.modLoaded) rec.modChecksum = rec.modLoaded.checksum;
+                }
                 this.rooms.set(snap.roomId, rec);
                 this.bindGuestSocket(rec, ws);
                 this.persist(rec);
@@ -16096,7 +16095,7 @@ export function activate(ctx) {
       hostFingerprint: info.hostFingerprint,
       wss: info.wss,
       userId
-    });
+    }, old);
     if (!res.ok) {
       this.rooms.set(roomId, old);
     }
@@ -16106,6 +16105,10 @@ export function activate(ctx) {
     if (!this.rooms.has(r.roomId)) return;
     this.cancelGuestReconnect(r);
     if (!opts?.offline) r.status = "ended";
+    if (!opts?.offline) {
+      this.disposeModHost(r);
+      this.disposeKernel(r, false);
+    }
     this.disposeExecTurns(r);
     try {
       r.client?.close();
@@ -16124,8 +16127,17 @@ export function activate(ctx) {
   }
   /** Ongoing guest socket after join / successful reconnect. */
   bindGuestSocket(r, ws) {
+    queueMicrotask(() => this.queueExtensionSync(r));
     const handle = (frame) => {
       if (r.closing || r.client !== ws) return;
+      if (frame.type === "extension.request") {
+        void this.handleExtensionRequest(r, ws, frame.payload);
+        return;
+      }
+      if (frame.type === "extension.result") {
+        this.finishExtensionRpc(r, frame.payload);
+        return;
+      }
       if (frame.type === "host.pending") {
         const pending = frame.payload.pending ?? [];
         r.remotePending = pending;
@@ -16174,6 +16186,7 @@ export function activate(ctx) {
         return;
       }
       if (frame.type === "mod.patch") {
+        if (r.hosted && r.modHost && this.isExtensionHost(r)) return;
         const p = frame.payload;
         r.modSeq = p.seq ?? r.modSeq;
         r.modPublicView = p.publicView;
@@ -16181,6 +16194,7 @@ export function activate(ctx) {
         return;
       }
       if (frame.type === "mod.priv") {
+        if (r.hosted && r.modHost && this.isExtensionHost(r)) return;
         if (!isRoomModParticipant(r, r.localUserId)) return;
         const p = frame.payload;
         r.modSeq = p.seq ?? r.modSeq;
@@ -16202,6 +16216,7 @@ export function activate(ctx) {
         return;
       }
       if (frame.type === "mod.offer") {
+        if (r.hosted && r.modHost && this.isExtensionHost(r)) return;
         r.modOffer = frame.payload;
         this.emit(r);
         return;
@@ -16357,7 +16372,10 @@ export function activate(ctx) {
       r?.client?.close();
     } catch {
     }
-    if (r) this.disposeKernel(r, true);
+    if (r) {
+      this.disposeModHost(r);
+      this.disposeKernel(r, true);
+    }
     this.cancelPersist(roomId);
     this.rooms.delete(roomId);
     this.archive?.removeRoom(roomId);
@@ -16411,7 +16429,7 @@ export function activate(ctx) {
     this.pushState(r);
     return { ok: true, room: this.snapshot(r) };
   }
-  updateSeat(roomId, seatId, patch) {
+  updateSeat(roomId, seatId, patch, actorUserId) {
     const rec0 = this.rooms.get(roomId);
     if (!rec0 || rec0.status !== "open") {
       return { ok: false, error: "\u7FA4\u804A\u4E0D\u53EF\u7528" };
@@ -16426,7 +16444,7 @@ export function activate(ctx) {
       });
       return { ok: true };
     }
-    if (!canManageSeats(this.memberRole(rec0, rec0.localUserId))) {
+    if (!canManageSeats(this.memberRole(rec0, actorUserId ?? rec0.localUserId))) {
       return { ok: false, error: "\u6CA1\u6709\u6743\u9650\u6539\u5E2D\u4F4D" };
     }
     const rec = rec0;
@@ -16564,7 +16582,7 @@ export function activate(ctx) {
   enableKernelMod(roomId, packDir) {
     const r = this.rooms.get(roomId);
     if (!r || r.status !== "open") return { ok: false, error: "\u7FA4\u804A\u4E0D\u53EF\u7528" };
-    if (r.localRole !== "host") return { ok: false, error: "\u53EA\u6709\u7FA4\u4E3B\u53EF\u4EE5\u542F\u7528\u6269\u5C55" };
+    if (!this.isExtensionHost(r)) return { ok: false, error: "\u53EA\u6709\u7FA4\u4E3B\u7535\u8111\u53EF\u4EE5\u542F\u7528\u6269\u5C55" };
     if (peekHostApi(packDir) === 1) {
       return { ok: false, error: "\u8FD9\u662F\u73A9\u6CD5\u6A21\u7EC4\uFF0C\u8BF7\u7528\u73A9\u6CD5\u5165\u53E3\u542F\u7528" };
     }
@@ -16597,7 +16615,7 @@ export function activate(ctx) {
   listKernelMemory(roomId) {
     const r = this.rooms.get(roomId);
     if (!r || r.status !== "open") return { ok: false, error: "\u7FA4\u804A\u4E0D\u53EF\u7528" };
-    if (r.localRole !== "host") return { ok: false, error: "\u53EA\u6709\u7FA4\u4E3B\u53EF\u4EE5\u67E5\u770B\u5171\u4EAB\u8BB0\u5FC6" };
+    if (!this.isExtensionHost(r)) return { ok: false, error: "\u53EA\u6709\u7FA4\u4E3B\u53EF\u4EE5\u67E5\u770B\u5171\u4EAB\u8BB0\u5FC6" };
     if (!this.hasMemoryProvide(r) || !r.kernelStore) {
       return { ok: true, entries: [] };
     }
@@ -16606,7 +16624,7 @@ export function activate(ctx) {
   setKernelMemory(roomId, key, value) {
     const r = this.rooms.get(roomId);
     if (!r || r.status !== "open") return { ok: false, error: "\u7FA4\u804A\u4E0D\u53EF\u7528" };
-    if (r.localRole !== "host") return { ok: false, error: "\u53EA\u6709\u7FA4\u4E3B\u53EF\u4EE5\u6539\u5171\u4EAB\u8BB0\u5FC6" };
+    if (!this.isExtensionHost(r)) return { ok: false, error: "\u53EA\u6709\u7FA4\u4E3B\u53EF\u4EE5\u6539\u5171\u4EAB\u8BB0\u5FC6" };
     if (!this.hasMemoryProvide(r) || !r.kernelStore) {
       return { ok: false, error: "\u672A\u542F\u7528\u5171\u4EAB\u8BB0\u5FC6" };
     }
@@ -16616,7 +16634,7 @@ export function activate(ctx) {
   deleteKernelMemory(roomId, key) {
     const r = this.rooms.get(roomId);
     if (!r || r.status !== "open") return { ok: false, error: "\u7FA4\u804A\u4E0D\u53EF\u7528" };
-    if (r.localRole !== "host") return { ok: false, error: "\u53EA\u6709\u7FA4\u4E3B\u53EF\u4EE5\u6539\u5171\u4EAB\u8BB0\u5FC6" };
+    if (!this.isExtensionHost(r)) return { ok: false, error: "\u53EA\u6709\u7FA4\u4E3B\u53EF\u4EE5\u6539\u5171\u4EAB\u8BB0\u5FC6" };
     if (!this.hasMemoryProvide(r) || !r.kernelStore) {
       return { ok: false, error: "\u672A\u542F\u7528\u5171\u4EAB\u8BB0\u5FC6" };
     }
@@ -16626,7 +16644,7 @@ export function activate(ctx) {
   disableKernelMod(roomId, id) {
     const r = this.rooms.get(roomId);
     if (!r || r.status !== "open") return { ok: false, error: "\u7FA4\u804A\u4E0D\u53EF\u7528" };
-    if (r.localRole !== "host") return { ok: false, error: "\u53EA\u6709\u7FA4\u4E3B\u53EF\u4EE5\u5378\u8F7D\u6269\u5C55" };
+    if (!this.isExtensionHost(r)) return { ok: false, error: "\u53EA\u6709\u7FA4\u4E3B\u53EF\u4EE5\u5378\u8F7D\u6269\u5C55" };
     const packs = (r.kernelPacks ?? []).filter((p) => p.manifest.id !== id);
     if (packs.length === (r.kernelPacks ?? []).length) {
       return { ok: false, error: "\u672A\u627E\u5230\u8BE5\u6269\u5C55" };
@@ -16777,7 +16795,7 @@ export function activate(ctx) {
   hostKernelRoom(roomId) {
     const room = this.rooms.get(roomId);
     if (!room || room.status !== "open") return { ok: false, error: "\u7FA4\u804A\u4E0D\u53EF\u7528" };
-    if (room.localRole !== "host") return { ok: false, error: "\u53EA\u6709\u7FA4\u4E3B\u53EF\u4EE5\u7BA1\u7406\u6269\u5C55\u6539\u5584" };
+    if (!this.isExtensionHost(room)) return { ok: false, error: "\u53EA\u6709\u7FA4\u4E3B\u53EF\u4EE5\u7BA1\u7406\u6269\u5C55\u6539\u5584" };
     if (!room.kernelImprove) {
       room.kernelImprove = new KernelImproveStore(getKernelImprovePath(this.pathEnv(), roomId));
     }
@@ -16825,7 +16843,7 @@ export function activate(ctx) {
   startKernel(roomId, packs) {
     const r = this.rooms.get(roomId);
     if (!r || r.status !== "open") return { ok: false, error: "\u7FA4\u804A\u4E0D\u53EF\u7528" };
-    if (r.localRole !== "host") return { ok: false, error: "\u53EA\u6709\u7FA4\u4E3B\u53EF\u4EE5\u542F\u7528\u6269\u5C55" };
+    if (!this.isExtensionHost(r)) return { ok: false, error: "\u53EA\u6709\u7FA4\u4E3B\u7535\u8111\u53EF\u4EE5\u542F\u7528\u6269\u5C55" };
     if (!r.kernelStore) {
       r.kernelStore = new HostRoomKv(
         getKernelStorePath(this.pathEnv(), r.roomId),
@@ -16845,7 +16863,7 @@ export function activate(ctx) {
   async tickKernelSchedule(roomId) {
     const r = this.rooms.get(roomId);
     if (!r || r.status !== "open") return { ok: false, error: "\u7FA4\u804A\u4E0D\u53EF\u7528" };
-    if (r.localRole !== "host") return { ok: false, error: "\u53EA\u6709\u7FA4\u4E3B\u53EF\u4EE5\u89E6\u53D1\u8C03\u5EA6" };
+    if (!this.isExtensionHost(r)) return { ok: false, error: "\u53EA\u6709\u7FA4\u4E3B\u53EF\u4EE5\u89E6\u53D1\u8C03\u5EA6" };
     await this.runKernelScheduleJobs(r);
     return { ok: true };
   }
@@ -16853,7 +16871,6 @@ export function activate(ctx) {
     const r = this.rooms.get(roomId);
     if (!r || r.status !== "open") return { ok: false, error: "\u7FA4\u804A\u4E0D\u53EF\u7528" };
     if (typeof text !== "string" || !text.trim() && !attachments?.length) return { ok: false, error: "\u6D88\u606F\u4E3A\u7A7A" };
-    if (r.hosted && attachments?.length) return { ok: false, error: "\u6258\u7BA1\u7FA4\u76EE\u524D\u4EC5\u652F\u6301\u6587\u5B57\u6D88\u606F\uFF0C\u5C1A\u672A\u5F00\u653E\u9644\u4EF6\u4F20\u8F93" };
     if (roomMessageTime(clientMessageId) === null) return { ok: false, error: "\u6D88\u606F\u6807\u8BC6\u65E0\u6548" };
     if (r.chatWaits?.has(clientMessageId)) return { ok: false, error: "\u6D88\u606F\u6B63\u5728\u53D1\u9001\uFF0C\u8BF7\u7B49\u5F85\u786E\u8BA4" };
     const seat = r.seats.find((s) => s.id === seatId);
@@ -16935,7 +16952,6 @@ export function activate(ctx) {
     });
   }
   async acceptChat(r, userId, message, ws) {
-    if (r.hosted && message.attachments.length) return { ok: false, error: "\u6258\u7BA1\u7FA4\u76EE\u524D\u4EC5\u652F\u6301\u6587\u5B57\u6D88\u606F\uFF0C\u5C1A\u672A\u5F00\u653E\u9644\u4EF6\u4F20\u8F93" };
     const createdAt = roomMessageTime(message.clientMessageId);
     if (createdAt === null || createdAt < Math.max(r.minMessageTime ?? 0, Date.now() - ROOM_MESSAGE_RETRY_WINDOW_MS)) return { ok: false, error: "\u6D88\u606F\u5DF2\u8D85\u51FA\u91CD\u8BD5\u7A97\u53E3\u3002\u8BF7\u5148\u6838\u5BF9\u804A\u5929\u8BB0\u5F55\uFF1B\u5982\u9700\u518D\u6B21\u6267\u884C\uFF0C\u8BF7\u7F16\u8F91\u6D88\u606F\u540E\u91CD\u65B0\u53D1\u9001\u3002" };
     if (createdAt > Date.now() + 3e5) return { ok: false, error: "\u8BBE\u5907\u65F6\u949F\u76F8\u5DEE\u8F83\u5927\uFF0C\u8BF7\u540C\u6B65\u7CFB\u7EDF\u65F6\u95F4\u540E\u53D1\u9001" };
@@ -17148,8 +17164,9 @@ export function activate(ctx) {
     }
     return { ok: false, error: "\u65E0\u6548\u4EFB\u52A1\u64CD\u4F5C" };
   }
-  roomRpc(r, type, payload, timeout = 12e3) {
-    if (r.status !== "open" || !r.client || r.client.readyState !== import_websocket.default.OPEN) return Promise.resolve({ ok: false, error: "\u672A\u8FDE\u63A5\u7FA4\u804A" });
+  roomRpc(r, type, payload, timeout = 12e3, target = r.client) {
+    if (r.status !== "open" || !target || target.readyState !== import_websocket.default.OPEN) return Promise.resolve({ ok: false, error: type === "extension.request" ? "\u6267\u884C\u6269\u5C55\u7684\u7FA4\u4E3B\u7535\u8111\u672A\u8FDE\u63A5\uFF0C\u666E\u901A\u7FA4\u804A\u4ECD\u53EF\u4F7F\u7528" : "\u672A\u8FDE\u63A5\u7FA4\u804A" });
+    if (type === "extension.request" && Buffer.byteLength(JSON.stringify(payload)) > 60 * 1024) return Promise.resolve({ ok: false, error: "\u6269\u5C55\u72B6\u6001\u8D85\u8FC7 60 KB \u4E0A\u9650" });
     const waits = r.taskWaits ??= /* @__PURE__ */ new Map();
     if (waits.size >= 64) return Promise.resolve({ ok: false, error: "\u5F85\u5904\u7406\u8BF7\u6C42\u8FC7\u591A" });
     const rpcId = randomUUID6();
@@ -17160,7 +17177,7 @@ export function activate(ctx) {
       }, timeout);
       timer.unref?.();
       waits.set(rpcId, { finish: resolve, timer });
-      this.sendClient(r, type, { ...payload, rpcId });
+      this.reply(target, r, type, { ...payload, rpcId });
     });
   }
   chatToolOpts(r, seat, taskId, nodeTurn) {
@@ -17235,14 +17252,12 @@ export function activate(ctx) {
     }
     return lines.join("\n");
   }
-  /**
-   * 路径守卫提示：群聊驱动的会话一律被 hook 圈在 cwd 内，这里先把规则讲清楚，
-   * 免得 AI 撞墙后换招绕过（skill 里有完整规则，首条提示点名它）。
-   */
+  /** Inline workspace rules for each new seat session; no skill read required. */
   pathGuardPrefix(cwd) {
     return [
-      `\u8DEF\u5F84\u5B88\u536B\uFF1A\u4F60\u53EA\u80FD\u8BFB\u5199 ${cwd} \u4E4B\u5185\u7684\u6587\u4EF6\uFF1BBash \u547D\u4EE4\u4E5F\u4E0D\u5141\u8BB8\u8BBF\u95EE\u8BE5\u76EE\u5F55\u4E4B\u5916\u7684\u8DEF\u5F84\uFF08\u8D8A\u754C\u4F1A\u88AB\u76F4\u63A5\u62D2\u7EDD\uFF0C\u88AB\u62D2\u7EDD\u540E\u4E0D\u8981\u6362\u5DE5\u5177\u6216\u62FC\u8DEF\u5F84\u7ED5\u8FC7\uFF09\u3002`,
-      `\u5B8C\u6574\u89C4\u5219\u89C1 skill\u300C${BUILTIN_PATH_GUARD_SKILL}\u300D\uFF0C\u9996\u8F6E\u8BF7\u5148\u9605\u8BFB\u5B83\u3002`
+      `\u8DEF\u5F84\u5B88\u536B\uFF1A\u6240\u6709\u6587\u4EF6\u64CD\u4F5C\u3001\u547D\u4EE4\u53CA\u5176\u542F\u52A8\u7684\u811A\u672C\u548C\u5B50\u8FDB\u7A0B\u90FD\u5FC5\u987B\u9075\u5B88\u5DE5\u4F5C\u533A ${cwd} \u7684\u8BFB\u5199\u8FB9\u754C\u3002`,
+      "\u88AB\u62D2\u7EDD\u540E\u4E0D\u5F97\u6362\u5DE5\u5177\u3001\u62FC\u8DEF\u5F84\u6216\u901A\u8FC7 Python/Node \u7B49\u811A\u672C\u7ED5\u8FC7\uFF1B\u786E\u9700\u8BBF\u95EE\u76EE\u5F55\u5916\u5185\u5BB9\u65F6\uFF0C\u8BF4\u660E\u7406\u7531\u548C\u5177\u4F53\u8DEF\u5F84\uFF0C\u4EA4\u7531\u5DE5\u4F5C\u533A\u4E3B\u4EBA\u51B3\u5B9A\u3002",
+      "\u4EE5\u4E0A\u5DF2\u5305\u542B\u672C\u4F1A\u8BDD\u7684\u8DEF\u5F84\u89C4\u5219\uFF0C\u65E0\u9700\u4E3A\u6B64\u52A0\u8F7D\u6216\u91CD\u590D\u8BFB\u53D6 skill\u3002"
     ].join("\n");
   }
   async runAgentSeat(r, seat, text, requesterUserId, attachments) {
@@ -17298,11 +17313,13 @@ export function activate(ctx) {
     });
   }
   async executeAgentSeat(r, seat, text, run, requesterUserId, attachments, task, context) {
+    this.assertDesktopExecutor(r, seat);
     if (this.refuseDeniedWorkspace(r, seat, requesterUserId ?? null)) throw new Error("\u5DE5\u4F5C\u533A\u7981\u6B62\u6267\u884C\u6B64\u4EFB\u52A1");
     if (this.seatExecutor(r, seat)) {
       await this.dispatchRemoteTurn(r, seat, text, requesterUserId ?? null, task, attachments);
       return;
     }
+    if (this.hostedTransport) throw new Error("\u6258\u7BA1\u670D\u52A1\u5668\u7981\u6B62\u6267\u884C Agent");
     const cwd = this.settings.get().lastProjectPath;
     if (!cwd) {
       this.append(r, {
@@ -17428,6 +17445,151 @@ ${text}` : text,
     const e = resolveWorkspaceUserId(seat, r.hostUserId);
     if (!e || e === r.localUserId) return null;
     return e;
+  }
+  isExtensionHost(r) {
+    return !this.hostedTransport && (r.localRole === "host" || r.hosted === true && this.memberRole(r, r.localUserId) === "host");
+  }
+  extensionOwnerSocket(r) {
+    const owner = r.members.find((m) => m.role === "host");
+    return owner ? this.findGuestWsByUserId(r, owner.userId) : null;
+  }
+  async syncHostedExtensions(r) {
+    if (!r.hosted || !this.isExtensionHost(r) || r.status !== "open") return;
+    const state = {
+      offer: this.buildOffer(r),
+      started: !!r.modStarted,
+      ended: !!r.modEnded,
+      seq: r.modSeq ?? 0,
+      publicView: r.modPublicView,
+      seatViews: r.modSeatViews ?? {},
+      actions: r.modActionsBySeat ?? {},
+      fail: r.modFail,
+      kernel: this.kernelProjection(r)
+    };
+    const work = (r.extensionSyncChain ?? Promise.resolve()).then(async () => {
+      const result = await this.roomRpc(r, "extension.request", { action: "sync", state });
+      if (!result.ok) throw new Error(result.error ?? "\u6269\u5C55\u540C\u6B65\u5931\u8D25");
+    });
+    r.extensionSyncChain = work.catch(() => void 0);
+    return work;
+  }
+  queueExtensionSync(r) {
+    void this.syncHostedExtensions(r).catch((error) => {
+      this.safeSend(IPC.roomEvent, { roomId: r.roomId, error: true, message: String(error) });
+    });
+  }
+  finishExtensionRpc(r, payload) {
+    const p = payload;
+    if (!p || typeof p.rpcId !== "string" || typeof p.ok !== "boolean") return;
+    const pending = r.taskWaits?.get(p.rpcId);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    r.taskWaits.delete(p.rpcId);
+    pending.finish({ ok: p.ok, error: p.error, value: p.value });
+  }
+  /** Fixed data operations only. The server never loads extension JavaScript. */
+  async handleExtensionRequest(r, ws, payload) {
+    const p = payload;
+    if (!p || typeof p.rpcId !== "string" || p.rpcId.length > 128) return;
+    const reply = (result) => {
+      if (Buffer.byteLength(JSON.stringify(result)) > 60 * 1024) result = { ok: false, error: "\u6269\u5C55\u8FD4\u56DE\u6570\u636E\u8D85\u8FC7 60 KB \u4E0A\u9650" };
+      return this.reply(ws, r, "extension.result", { rpcId: p.rpcId, ...result });
+    };
+    try {
+      if (this.hostedTransport) {
+        const actor = ws.userId;
+        if (!actor || this.memberRole(r, actor) !== "host" || r.connections.get(ws)?.peerFp !== r.hostedOwnerFp) {
+          reply({ ok: false, error: "\u53EA\u6709\u7ECF\u8FC7\u8BBE\u5907\u9A8C\u8BC1\u7684\u7FA4\u4E3B\u53EF\u4EE5\u540C\u6B65\u6269\u5C55" });
+          return;
+        }
+        if (p.action === "sync") {
+          const s = p.state;
+          const offer = s?.offer;
+          if (!s || !offer || typeof offer.checksum !== "string" || offer.checksum !== "" && !MOD_CHECKSUM_RE2.test(offer.checksum) || typeof offer.id !== "string" || typeof offer.name !== "string" || typeof offer.version !== "string" || typeof offer.size !== "number" || offer.size < 0 || offer.size > MOD_BUNDLE_MAX_BYTES || !Number.isSafeInteger(s.seq) || typeof s.started !== "boolean" || typeof s.ended !== "boolean") {
+            reply({ ok: false, error: "\u6269\u5C55\u72B6\u6001\u65E0\u6548" });
+            return;
+          }
+          const kernel = s.kernel;
+          if (kernel && (!Array.isArray(kernel.mods) || kernel.mods.length > 64 || kernel.mods.some((m) => !m || typeof m.id !== "string" || typeof m.name !== "string" || typeof m.version !== "string" || !["active", "pending", "failed"].includes(m.state)))) {
+            reply({ ok: false, error: "\u6269\u5C55\u5217\u8868\u65E0\u6548" });
+            return;
+          }
+          if (r.modChecksum !== offer.checksum) {
+            for (const member of r.members) member.modChecksum = member.userId === actor ? offer.checksum : "";
+          }
+          r.modChecksum = offer.checksum;
+          r.modOffer = offer;
+          r.modStarted = s.started;
+          r.modEnded = s.ended;
+          r.modSeq = s.seq;
+          r.modPublicView = s.publicView;
+          const seatViews = s.seatViews;
+          const actions = s.actions;
+          r.modSeatViews = Object.fromEntries(r.seats.filter((seat) => seatViews && Object.hasOwn(seatViews, seat.id)).map((seat) => [seat.id, seatViews[seat.id]]));
+          r.modActionsBySeat = Object.fromEntries(r.seats.filter((seat) => actions && Object.hasOwn(actions, seat.id)).map((seat) => [seat.id, actions[seat.id]]));
+          r.modFail = typeof s.fail === "string" ? s.fail.slice(0, 2e3) : void 0;
+          r.kernelProjection = kernel;
+          this.pushState(r);
+          this.broadcast(r, "mod.offer", offer);
+          this.broadcast(r, "mod.patch", { seq: r.modSeq, publicView: r.modPublicView });
+          for (const g of r.guests) this.sendModViewsTo(r, g, g.userId ?? "");
+          if (r.modFail) this.broadcast(r, "mod.fail", { message: r.modFail });
+          reply({ ok: true });
+          return;
+        }
+        if (p.action === "agent" && p.checksum === r.modChecksum && r.modStarted && !r.modEnded) {
+          const seat = r.seats.find((s) => s.id === p.seatId && s.kind === "agent");
+          if (!seat || seat.running || typeof p.text !== "string" || !p.text.trim() || p.text.length > 16e3) {
+            reply({ ok: false, error: "Agent \u5E2D\u4F4D\u5FD9\u6216\u8BF7\u6C42\u65E0\u6548" });
+            return;
+          }
+          const answer = await this.dispatchRemoteTurn(r, seat, p.text, actor);
+          reply({ ok: true, value: answer });
+          return;
+        }
+        if (p.action === "announce" && typeof p.text === "string" && p.text.length <= 8e3) {
+          this.append(r, { kind: "system", source: "kernel", text: p.text, authorLabel: "\u7CFB\u7EDF" });
+          this.pushState(r);
+          const seat = p.toAgent ? r.seats.find((s) => s.kind === "agent") : void 0;
+          if (seat) void this.runAgentSeat(r, seat, p.text, actor);
+          reply({ ok: true });
+          return;
+        }
+      } else if (r.hosted && ws === r.client && this.isExtensionHost(r)) {
+        if (p.action === "hook" && p.env && typeof p.env.text === "string") {
+          reply({ ok: true, value: r.kernel ? await r.kernel.runChatIn(p.env) : { action: "continue" } });
+          return;
+        }
+        if (p.action === "views") {
+          await this.publishViews(r);
+          reply({ ok: true });
+          return;
+        }
+        if (p.action === "intent" && p.checksum === r.modChecksum && typeof p.seatId === "string" && typeof p.name === "string" && typeof p.actorUserId === "string") {
+          if (!r.modStarted || r.modEnded || r.modFail) {
+            reply({ ok: false, error: r.modFail ?? "\u73A9\u6CD5\u672A\u5F00\u59CB" });
+            return;
+          }
+          const seat = r.seats.find((s) => s.id === p.seatId);
+          if (!seat || !this.canAct(seat, p.actorUserId)) {
+            reply({ ok: false, error: "\u65E0\u6743\u64CD\u4F5C\u5E2D\u4F4D" });
+            return;
+          }
+          reply(await this.enqueueIntent(r, () => this.dispatchMod(r, { seatId: seat.id, name: p.name, payload: p.payload, actorUserId: p.actorUserId })));
+          return;
+        }
+      }
+      reply({ ok: false, error: "\u65E0\u6548\u6269\u5C55\u8BF7\u6C42" });
+    } catch (error) {
+      reply({ ok: false, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  assertDesktopExecutor(r, seat) {
+    if (!this.hostedTransport) return;
+    const executor = resolveWorkspaceUserId(seat, r.hostUserId);
+    if (!executor || executor === r.localUserId || !r.members.some((m) => m.userId === executor)) {
+      throw new Error("\u6258\u7BA1\u7FA4 Agent \u5FC5\u987B\u7ED1\u5B9A\u6210\u5458\u7535\u8111\uFF0C\u4E0D\u80FD\u4F7F\u7528\u670D\u52A1\u5668\u5DE5\u4F5C\u533A");
+    }
   }
   memberRole(r, userId) {
     return r.members.find((m) => m.userId === userId)?.role ?? "member";
@@ -17771,6 +17933,9 @@ ${text}` : text,
   }
   onAiHttp(r, fromUserId, p) {
     if (!p || typeof p.requestId !== "string") return;
+    if (this.hostedTransport) {
+      if (!r.members.some((m) => m.userId === p.targetUserId) || !r.members.some((m) => m.userId === p.sourceUserId) || (p.dir === "req" ? p.sourceUserId : p.targetUserId) !== fromUserId) return;
+    }
     if (p.dir === "req") {
       if (p.targetUserId === r.localUserId) {
         this.assembleAiHttpReq(r, p);
@@ -17937,7 +18102,8 @@ ${text}` : text,
   }
   /** 房主：把一个席位轮次派发给它的执行节点。 */
   dispatchRemoteTurn(r, seat, text, requesterUserId, task, attachments) {
-    const executor = seat.executorUserId;
+    this.assertDesktopExecutor(r, seat);
+    const executor = resolveWorkspaceUserId(seat, r.hostUserId);
     const nodeName = this.memberName(r, executor);
     const ws = this.findGuestWsByUserId(r, executor);
     if (!ws) {
@@ -17955,7 +18121,7 @@ ${text}` : text,
     const completion = new Promise((resolve, reject) => {
       finish = (message, unconfirmed) => {
         if (!message) {
-          resolve();
+          resolve(turn.resultText ?? "");
           return;
         }
         const error = new Error(message);
@@ -18189,6 +18355,7 @@ ${text}` : text,
     const seat = r.seats.find((s) => s.id === turn.seatId);
     const nodeName = this.memberName(r, userId);
     if (p.ok && typeof p.text === "string" && p.text.trim()) {
+      turn.resultText = p.text.trim();
       this.append(r, {
         kind: "assistant",
         seatId: turn.seatId,
@@ -18234,6 +18401,7 @@ ${text}` : text,
   }
   /** 节点收到房主的 exec.run：幂等接收，本机起会话执行。 */
   onExecRun(r, p) {
+    if (this.hostedTransport) return;
     if (!p || typeof p.turnId !== "string" || typeof p.seatId !== "string") {
       return;
     }
@@ -18343,6 +18511,7 @@ ${text}` : text,
   }
   async runNodeTurn(r, nt, seat, text, cwd) {
     if (nt.cancelled || r.nodeTurns?.get(nt.turnId) !== nt || r.status !== "open") return;
+    if (this.hostedTransport) throw new Error("\u6258\u7BA1\u670D\u52A1\u5668\u7981\u6B62\u6267\u884C Agent");
     const seatSessions = r.nodeSeatSessions ??= /* @__PURE__ */ new Map();
     const prevSession = seatSessions.get(nt.seatId);
     const borrowing = resolveAiUserId(seat, r.hostUserId) !== r.localUserId;
@@ -19192,7 +19361,7 @@ ${text}`,
     const sessionId = taskId ? run?.sessionId : seat?.sessionId;
     if (remote) {
       this.abortRemoteTurnsForSeat(r, seatId, "\u4EFB\u52A1\u6536\u5230\u4E2D\u65AD\u8BF7\u6C42", taskId);
-    } else if (sessionId) {
+    } else if (sessionId && !this.hostedTransport) {
       try {
         this.sessions.abort(sessionId);
       } catch {
@@ -19409,8 +19578,8 @@ ${text}`,
       chargeAbuse(ws.guard);
       return;
     }
-    if (this.hostedTransport && !["hello", "join", "leave", "host.control", "chat.user", "chat.recall", "node.info", "member.kick", "member.role"].includes(frame.type)) {
-      this.reply(ws, r, "error", { message: "\u670D\u52A1\u5668\u6258\u7BA1\u623F\u95F4\u76EE\u524D\u4EC5\u652F\u6301\u6587\u5B57\u804A\u5929\u4E0E\u6210\u5458\u7BA1\u7406\uFF0C\u4E0D\u652F\u6301 Agent\u3001\u9644\u4EF6\u6216 Mod" });
+    if (this.hostedTransport && ["exec.run", "exec.abort"].includes(frame.type)) {
+      this.reply(ws, r, "error", { message: "\u6258\u7BA1\u670D\u52A1\u5668\u7981\u6B62\u6267\u884C Agent\uFF0C\u4EFB\u52A1\u53EA\u80FD\u6D3E\u53D1\u7ED9\u6210\u5458\u7535\u8111" });
       return;
     }
     if (frame.type !== "join" && frame.type !== "hello" && frame.type !== "mod.fetch" && frame.roomId !== r.roomId) {
@@ -19515,6 +19684,14 @@ ${text}`,
       this.reply(ws, r, "error", { message: "\u8BF7\u5148\u52A0\u5165" });
       return;
     }
+    if (frame.type === "extension.request") {
+      void this.handleExtensionRequest(r, ws, frame.payload);
+      return;
+    }
+    if (frame.type === "extension.result") {
+      if (this.hostedTransport && this.memberRole(r, userId) === "host" && r.connections.get(ws)?.peerFp === r.hostedOwnerFp) this.finishExtensionRpc(r, frame.payload);
+      return;
+    }
     if (frame.type === "leave") {
       this.removeGuestMember(r, userId);
       try {
@@ -19582,6 +19759,16 @@ ${text}`,
       }
       if (!this.canAct(seat, userId)) {
         this.reply(ws, r, "error", { message: "\u5F53\u524D\u4E0D\u80FD\u64CD\u4F5C\u8FD9\u4E2A\u5E2D\u4F4D" });
+        return;
+      }
+      if (this.hostedTransport) {
+        if (!r.modStarted || r.modEnded || r.modFail) {
+          this.reply(ws, r, "error", { message: r.modFail ?? "\u73A9\u6CD5\u672A\u5F00\u59CB" });
+          return;
+        }
+        void this.roomRpc(r, "extension.request", { action: "intent", checksum: r.modChecksum, seatId: seat.id, name: intentName, payload: p.payload, actorUserId: userId }, 12e3, this.extensionOwnerSocket(r)).then((result) => {
+          if (!result.ok) this.reply(ws, r, "error", { message: result.error });
+        });
         return;
       }
       if (!r.modHost || !r.modStarted || r.modEnded) {
@@ -19687,7 +19874,10 @@ ${text}`,
     }
     if (frame.type === "seat.add") {
       const p = frame.payload;
-      if (!p.userId) return;
+      if (!p.userId || p.userId !== userId) {
+        this.reply(ws, r, "error", { message: "\u4E0D\u80FD\u5192\u5145\u5176\u4ED6\u6210\u5458\u6DFB\u52A0\u5E2D\u4F4D" });
+        return;
+      }
       this.addSeatForMember(
         r,
         p.userId,
@@ -19712,7 +19902,7 @@ ${text}`,
       }
       const p = frame.payload;
       if (!p?.seatId) return;
-      this.updateSeat(r.roomId, p.seatId, p);
+      this.updateSeat(r.roomId, p.seatId, p, userId);
       return;
     }
     if (frame.type === "member.role") {
@@ -20010,7 +20200,7 @@ ${text}`,
       ...r.liveExec?.size ? { liveExec: [...r.liveExec.values()] } : {},
       ...r.remoteChanges && Object.keys(r.remoteChanges).length ? { remoteChanges: r.remoteChanges } : {},
       localUserId: r.localUserId || void 0,
-      kernel: r.localRole === "host" ? this.kernelProjection(r) : r.kernelProjection
+      kernel: r.kernel ? this.kernelProjection(r) : r.kernelProjection
     };
   }
   kernelProjection(r) {
@@ -20028,6 +20218,7 @@ ${text}`,
     return { mods };
   }
   pushState(r) {
+    this.queueExtensionSync(r);
     this.persist(r);
     this.broadcast(r, "state.snapshot", this.snapshot(r));
     this.emit(r);
@@ -20152,10 +20343,11 @@ ${text}`,
   hostRoom(roomId) {
     const r = this.rooms.get(roomId);
     if (!r || r.status !== "open") return { ok: false, error: "\u7FA4\u804A\u4E0D\u53EF\u7528" };
-    if (r.localRole !== "host") return { ok: false, error: "\u53EA\u6709\u7FA4\u4E3B\u53EF\u4EE5\u64CD\u4F5C" };
+    if (r.localRole !== "host" && !this.isExtensionHost(r)) return { ok: false, error: "\u53EA\u6709\u7FA4\u4E3B\u53EF\u4EE5\u64CD\u4F5C" };
     return { ok: true, room: r };
   }
   buildOffer(r) {
+    if (this.hostedTransport && r.modOffer) return r.modOffer;
     if (!r.modLoaded || !r.modChecksum) {
       return { id: "", name: "", version: "", checksum: "", size: 0 };
     }
@@ -20323,6 +20515,11 @@ ${text}`,
       }
     }
     r.modActionsBySeat = actionsBySeat;
+    if (r.hosted && this.isExtensionHost(r)) {
+      await this.syncHostedExtensions(r);
+      this.emit(r);
+      return;
+    }
     this.broadcast(r, "mod.patch", {
       seq: views.seq,
       publicView: views.publicView
@@ -20387,6 +20584,7 @@ ${text}`,
     return ids[0];
   }
   applyGuestSnapshot(r, snap) {
+    const localExtensions = this.isExtensionHost(r) && (r.modHost || r.kernel);
     r.hosted = snap.hosted;
     r.name = snap.name;
     r.members = snap.members;
@@ -20394,16 +20592,16 @@ ${text}`,
     r.seats = snap.seats.map((seat) => ({ ...seat, takenOverBy: null }));
     r.items = snap.items;
     r.status = snap.status;
-    r.modChecksum = snap.modChecksum;
+    if (!localExtensions) r.modChecksum = snap.modChecksum;
     r.requireMods = snap.requireMods;
     r.liveExec = snap.liveExec?.length ? new Map(snap.liveExec.map((e) => [e.turnId, e])) : void 0;
     r.remoteChanges = snap.remoteChanges;
     if (r.joinInfo) r.joinInfo.modChecksum = snap.members.find((m) => m.userId === r.localUserId)?.modChecksum ?? "";
-    if (!isRoomModParticipant(r, r.localUserId)) {
+    if (!localExtensions && !isRoomModParticipant(r, r.localUserId)) {
       r.modSeatViews = void 0;
       r.modActionsBySeat = void 0;
     }
-    if (!snap.modChecksum) {
+    if (!localExtensions && !snap.modChecksum) {
       r.modPublicView = void 0;
       r.modSeatViews = void 0;
       r.modActionsBySeat = void 0;
@@ -20424,6 +20622,7 @@ ${text}`,
   onModFail(r, message) {
     if (r.modEnded) return;
     r.modFail = message;
+    this.queueExtensionSync(r);
     this.broadcast(r, "mod.fail", { message });
     this.emit(r);
   }
@@ -20463,8 +20662,19 @@ ${text}`,
     const targetIds = new Set(explicit.map((m) => m.seatId));
     const mentioned = r.seats.filter((s) => targetIds.has(s.id));
     let current2 = env;
-    if (r.kernel) {
-      const result = await r.kernel.runChatIn(env);
+    let hookResult;
+    if (r.kernel) hookResult = await r.kernel.runChatIn(env);
+    else if (this.hostedTransport && r.kernelProjection?.mods.some((m) => m.state === "active")) {
+      const owner = this.extensionOwnerSocket(r);
+      if (owner) {
+        const result = await this.roomRpc(r, "extension.request", { action: "hook", env }, 5e3, owner);
+        if (!result.ok) throw new Error(result.error ?? "\u7FA4\u4E3B\u7535\u8111\u4E0A\u7684\u6269\u5C55\u672A\u54CD\u5E94");
+        const value = result.value;
+        if (value?.action === "drop" || value?.action === "continue" || value?.value) hookResult = value;
+      }
+    }
+    if (hookResult) {
+      const result = hookResult;
       if (result.action === "drop") {
         kernelLog("hook", {
           name: "room.chat.in",
@@ -20480,7 +20690,7 @@ ${text}`,
         this.pushState(r);
         throw new Error(result.reason ? `\u6D88\u606F\u88AB\u6A21\u7EC4\u4E22\u5F03\uFF1A${result.reason}` : "\u6D88\u606F\u88AB\u6A21\u7EC4\u4E22\u5F03");
       }
-      if (result.value) current2 = result.value;
+      if (result.value && typeof result.value.text === "string") current2 = { ...env, text: result.value.text };
     }
     if (next.active && !next.active()) throw new Error("\u6D88\u606F\u6765\u6E90\u5DF2\u65AD\u5F00");
     const previousItems = next.clientMessageId ? r.items.slice() : void 0;
@@ -20545,7 +20755,7 @@ ${text}`,
       agentName: null
     });
     for (const seat of r.seats) {
-      if (seat.sessionId) this.sessions.syncExtras(seat.sessionId, leftover);
+      if (seat.sessionId && !this.hostedTransport) this.sessions.syncExtras(seat.sessionId, leftover);
     }
     this.stopKernelSchedule(r);
     const kernel = r.kernel;
@@ -20568,7 +20778,14 @@ ${text}`,
       }
       if (!turn) continue;
       if (seat.takenOverBy || seat.running || r.agentRuns?.has(seat.id) || r.modHost !== source || !r.modStarted || r.modEnded || r.status !== "open") continue;
-      await this.injectAgentTurn(r, seat, turn);
+      try {
+        await this.injectAgentTurn(r, seat, turn);
+      } catch (error) {
+        if (!this.disposed && r.status === "open" && !r.closing && (!r.hosted || r.client?.readyState === import_websocket.default.OPEN)) {
+          this.onModFail(r, error instanceof Error ? error.message : String(error));
+        }
+        return;
+      }
     }
   }
   hasMemoryProvide(r) {
@@ -20577,8 +20794,9 @@ ${text}`,
     );
   }
   syncKernelExtras(r) {
+    this.queueExtensionSync(r);
     for (const seat of r.seats) {
-      if (seat.sessionId) this.sessions.syncExtras(seat.sessionId, this.seatToolOpts(r, seat));
+      if (seat.sessionId && !this.hostedTransport) this.sessions.syncExtras(seat.sessionId, this.seatToolOpts(r, seat));
     }
   }
   bindKernelSchedule(r) {
@@ -20598,6 +20816,7 @@ ${text}`,
     r.kernelTimers = void 0;
   }
   async runKernelScheduleJobs(r) {
+    if (r.hosted && (!r.client || r.offline || r.closing || r.status !== "open")) return;
     const jobs = r.kernel?.listScheduleJobs() ?? [];
     let wrote = false;
     for (const job of jobs) {
@@ -20622,6 +20841,10 @@ ${text}`,
       const text = tick && typeof tick.text === "string" ? tick.text.trim() : "";
       if (!text) continue;
       kernelLog("schedule.tick", { roomId: r.roomId, action: "announce" });
+      if (r.hosted && this.isExtensionHost(r)) {
+        await this.roomRpc(r, "extension.request", { action: "announce", text, toAgent: !!(tick && tick.toAgent) });
+        continue;
+      }
       this.append(r, {
         kind: "system",
         source: "kernel",
@@ -20736,6 +20959,23 @@ ${text}`,
   }
   async injectAgentTurn(r, seat, turn) {
     if (seat.takenOverBy) return;
+    if (this.hostedTransport) return;
+    if (r.hosted) {
+      const pending = r.extensionAgentSeats ??= /* @__PURE__ */ new Set();
+      if (pending.has(seat.id)) return;
+      pending.add(seat.id);
+      const source = r.modHost;
+      try {
+        const result = await this.roomRpc(r, "extension.request", { action: "agent", checksum: r.modChecksum, seatId: seat.id, text: formatRoomModPrompt(turn) }, EXEC_TOTAL_TIMEOUT_MS + 1e4);
+        if (result.ok && typeof result.value === "string" && r.modHost === source && r.modStarted && !r.modEnded) {
+          const act = parseRoomModAct(result.value);
+          if (act) await this.dispatchAgentAct(r, seat, act, turn.actions);
+        }
+      } finally {
+        pending.delete(seat.id);
+      }
+      return;
+    }
     const cwd = this.settings.get().lastProjectPath;
     if (!cwd) return;
     const text = formatRoomModPrompt(turn);
@@ -21641,6 +21881,7 @@ async function main() {
   server.requestTimeout = 15e3;
   server.headersTimeout = 1e4;
   server.on("upgrade", (req, socket, head) => {
+    socket.on("error", () => socket.destroy());
     const match = /^\/r\/([a-f0-9-]{36})$/.exec(req.url ?? "");
     const wss = match ? routes.get(match[1]) : void 0;
     if (closing || !wss || wss.clients.size >= 128) {

@@ -74,8 +74,11 @@
 .agent-wordmark.is-idle-looking .agent-eye-open { animation: agent-idle-blink 2400ms linear; transform-box: fill-box; transform-origin: center; }
 .agent-wordmark.is-idle-blinking .agent-eye-open { animation: agent-soft-blink 850ms ease-in-out; transform-box: fill-box; transform-origin: center; }
 .agent-wordmark.is-idle-double-blinking .agent-eye-open { animation: agent-double-blink 1100ms ease-in-out; transform-box: fill-box; transform-origin: center; }
-.agent-expression.is-active .agent-eye-spiral { animation: agent-dizzy 1100ms ease-in-out infinite alternate; }
-@keyframes agent-dizzy { from { transform: rotate(-12deg); } to { transform: rotate(12deg); } }
+.agent-expression.is-active .agent-eye-spiral {
+  transform-origin: 0px 0px;
+  animation: agent-dizzy 1100ms linear infinite;
+}
+@keyframes agent-dizzy { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 @keyframes agent-soft-blink {
   0%, 20%, 65%, 100% { transform: scaleY(1); }
   38%, 43% { transform: scaleY(0.12); }

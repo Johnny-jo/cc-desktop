@@ -195,6 +195,100 @@ function makeDeps(overrides: {
   };
 }
 
+describe("official room sandbox", () => {
+  it("enables strict sandboxing only for room queries and uses their workspace", async () => {
+    const options: Record<string, unknown>[] = [];
+    const queryFn: QueryFn = async function* (args) {
+      options.push(args.options);
+      await takeFirstUserText(args.prompt);
+      yield { type: "result", subtype: "success", total_cost_usd: 0 };
+    };
+    const { manager } = makeDeps({ queryFn });
+    await manager.start({ text: "personal", attachments: [] }, "D:/personal");
+    await manager.start({ text: "room", attachments: [] }, "D:/personal", {
+      pathJail: "D:/room", permissionMode: "auto",
+    });
+    expect(options[0]?.sandbox).toBeUndefined();
+    expect(options[0]?.cwd).toBe("D:/personal");
+    expect(options[1]).toMatchObject({
+      cwd: "D:/room",
+      permissionMode: "auto",
+      sandbox: {
+        enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false,
+        autoAllowBashIfSandboxed: false, excludedCommands: [],
+        filesystem: { disabled: false },
+      },
+    });
+    // Sandboxing must not replace the existing approval/hook layers.
+    expect(options[1]?.canUseTool).toBeTypeOf("function");
+    expect(options[1]?.hooks).toHaveProperty("PreToolUse");
+  });
+
+  it("reopens a live personal query when adding a jail, and on root changes", async () => {
+    const options: Record<string, unknown>[] = [];
+    const queryFn: QueryFn = async function* (args) {
+      options.push(args.options);
+      for await (const _message of args.prompt as AsyncIterable<unknown>) {
+        yield { type: "result", subtype: "success", total_cost_usd: 0, session_id: "sdk-room" };
+      }
+    };
+    const { manager } = makeDeps({ queryFn });
+    const prompt = { text: "hi", attachments: [] };
+    const id = await manager.start(prompt, "D:/personal");
+    try {
+      await manager.continue(id, prompt, { pathJail: "D:/room" });
+      expect(options).toHaveLength(2);
+      expect(options[1]).toMatchObject({ cwd: "D:/room", resume: "sdk-room", sandbox: { enabled: true } });
+      await manager.continue(id, prompt, { pathJail: "D:/room" });
+      expect(options).toHaveLength(2);
+      await manager.continue(id, prompt, { pathJail: "D:/another-room" });
+      expect(options).toHaveLength(3);
+      expect(options[2]).toMatchObject({ cwd: "D:/another-room", sandbox: { enabled: true } });
+    } finally {
+      manager.abort(id);
+    }
+  });
+
+  it("still reopens after preparation fails with a staged jail", async () => {
+    const options: Record<string, unknown>[] = [];
+    const queryFn: QueryFn = async function* (args) {
+      options.push(args.options);
+      for await (const _message of args.prompt as AsyncIterable<unknown>) {
+        yield { type: "result", subtype: "success", total_cost_usd: 0 };
+      }
+    };
+    const ctx = makeDeps({ queryFn });
+    const prompt = { text: "hi", attachments: [] };
+    const id = await ctx.manager.start(prompt, "D:/personal");
+    try {
+      (ctx.ensureReady as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("CPA unavailable"));
+      await expect(ctx.manager.continue(id, prompt, { pathJail: "D:/room" })).rejects.toThrow("CPA unavailable");
+      expect(options).toHaveLength(1);
+      await ctx.manager.continue(id, prompt, { pathJail: "D:/room" });
+      expect(options).toHaveLength(2);
+      expect(options[1]?.sandbox).toMatchObject({ enabled: true });
+    } finally {
+      ctx.manager.abort(id);
+    }
+  });
+
+  it.each(["throw", "result"])("surfaces sandbox startup failure (%s) without an unsandboxed retry", async (kind) => {
+    const queryFn = vi.fn(async function* (args: Parameters<QueryFn>[0]) {
+      await takeFirstUserText(args.prompt);
+      const error = "Sandbox required but unavailable: the Windows sandbox is not active (feature gate off). Set sandbox.failIfUnavailable=false to allow unsandboxed execution.";
+      if (kind === "throw") throw new Error(error);
+      yield { type: "result", subtype: "error_during_execution", is_error: true, errors: [error] };
+    });
+    const ctx = makeDeps({ queryFn });
+    const id = await ctx.manager.start({ text: "hi", attachments: [] }, "D:/room", { pathJail: "D:/room" });
+    expect(queryFn).toHaveBeenCalledTimes(1);
+    const errors = ctx.emitted.filter(event => event.type === "result" && !event.ok).map(event => event.type === "result" ? event.error : "");
+    expect(errors.some(error => error?.includes("官方内置沙箱不可用"))).toBe(true);
+    expect(errors.join("\n")).not.toContain("failIfUnavailable=false");
+    expect(ctx.manager.list().find(session => session.id === id)?.status).toBe("error");
+  });
+});
+
 describe("SessionManager progress snapshots", () => {
   const agentStart = { type: "system", subtype: "task_started", task_id: "agent-a", task_type: "local_agent", tool_use_id: "call-a", description: "Inspect code" };
   const warmAgentQuery: QueryFn = async function* (args) {

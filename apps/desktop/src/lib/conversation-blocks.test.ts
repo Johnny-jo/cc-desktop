@@ -28,6 +28,27 @@ const user: ChatItem = { kind: "text", id: "u1", role: "user", text: "Work" };
 const answer: ChatItem = { kind: "text", id: "a1", role: "assistant", text: "Answer", streaming: true };
 
 describe("buildConversationBlocks", () => {
+  it.each(["completed", "interrupted", "cancelled", "failed"] as const)("settles stale foreground activity after %s", outcome => {
+    const pending = toolItem("pending", "running");
+    const blocks = buildConversationBlocks([
+      { ...user, turnOutcome: outcome }, pending,
+      { kind: "text", id: "thinking", role: "assistant", text: "", thinking: true, thinkingText: "Working", streaming: true },
+    ]);
+    expect(blocks.some(block => block.kind === "live-activity")).toBe(false);
+    const archive = blocks.find(block => block.kind === "activity");
+    expect(archive).toMatchObject({ entries: [
+      { displayStatus: outcome === "interrupted" || outcome === "cancelled" ? "stopped" : "unknown" },
+      { active: false },
+    ] });
+    expect(pending.tool.status).toBe("running");
+  });
+
+  it("settles legacy idle calls but preserves independently running background agents", () => {
+    const blocks = buildConversationBlocks([user, toolItem("pending", "running"), toolItem("background", "done", "running")], false);
+    expect(blocks.find(block => block.kind === "activity")).toMatchObject({ entries: [{ id: "pending", displayStatus: "unknown" }] });
+    expect(blocks.find(block => block.kind === "live-activity")).toMatchObject({ entries: [{ id: "background" }] });
+  });
+
   it("groups thinking and tools inside one user turn", () => {
     const items: ChatItem[] = [
       { kind: "text", id: "u1", role: "user", text: "Fix it" },

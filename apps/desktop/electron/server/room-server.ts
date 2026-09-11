@@ -55,7 +55,7 @@ async function main() {
     const expected = Buffer.from(`Bearer ${token}`);
     if (supplied.length !== expected.length || !crypto.timingSafeEqual(supplied, expected)) return reply(401, { ok: false, error: "建群令牌无效" });
     if (closing || creating) return reply(503, { ok: false, error: "服务器忙，请稍后重试" });
-    if (rooms.list().length >= 40) return reply(409, { ok: false, error: "服务器已达到 40 个房间上限" });
+    if (rooms.list().length >= 40) return reply(409, { ok: false, error: "服务器已达到 40 个群聊上限" });
     creating = true;
     try {
       const chunks: Buffer[] = [];
@@ -74,7 +74,7 @@ async function main() {
       if (input.autoApprove && input.password.trim().length < 8) return reply(400, { ok: false, error: "自动放行的托管群必须设置至少 8 位密码" });
       const result = await rooms.create({ name: input.name, password: input.password,
         autoApprove: input.autoApprove, encrypt: true, hostedOwnerFp: input.ownerFp });
-      if (!result.ok || !result.room) return reply(500, { ok: false, error: "房间创建失败" });
+      if (!result.ok || !result.room) return reply(500, { ok: false, error: "群聊创建失败" });
       reply(201, { ok: true, roomId: result.room.roomId,
         url: `${publicUrl.origin}/r/${result.room.roomId}`, fingerprint: result.room.hostFingerprint });
     } catch {
@@ -84,6 +84,9 @@ async function main() {
   server.requestTimeout = 15_000;
   server.headersTimeout = 10_000;
   server.on("upgrade", (req, socket, head) => {
+    // Rejected/raced upgrades can be reset by the client before socket.end drains.
+    // HTTP no longer owns upgrade sockets, so an unhandled reset would kill every room.
+    socket.on("error", () => socket.destroy());
     const match = /^\/r\/([a-f0-9-]{36})$/.exec(req.url ?? "");
     const wss = match ? routes.get(match[1]) : undefined;
     if (closing || !wss || wss.clients.size >= 128) { socket.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n"); return; }

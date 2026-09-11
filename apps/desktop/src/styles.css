@@ -3520,6 +3520,22 @@ body.session-detaching {
   font-variant-numeric: tabular-nums;
 }
 
+.turn-status-terminal {
+  align-items: center;
+  padding-top: var(--space-2);
+  font-weight: 500;
+}
+
+.turn-status-icon {
+  width: 18px;
+  height: 18px;
+  flex: none;
+}
+
+.turn-status-failed {
+  color: var(--danger, #e57373);
+}
+
 .current-turn-status {
   flex: none;
   width: 100%;

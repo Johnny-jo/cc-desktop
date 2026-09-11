@@ -70,13 +70,12 @@ export function ensureSkillsDir(scope: "user" | "project", cwd?: string | null):
 }
 
 /**
- * 内置 skill：群聊/远程执行的工作区路径守卫说明。由应用托管——每次启动
- * 覆盖写入，用户改不动（内容更新随版本下发）。房间驱动的会话提示词会
- * 点名让 AI 读它。
+ * Retired app-generated skill. Keep the exact old content for migration only:
+ * workspace rules now live inline in the room session prompt.
  */
 export const BUILTIN_PATH_GUARD_SKILL = "room-workspace-guard";
 
-const PATH_GUARD_SKILL_MD = `---
+export const LEGACY_PATH_GUARD_SKILL_MD = `---
 name: ${BUILTIN_PATH_GUARD_SKILL}
 description: 群聊/远程执行时的工作区路径守卫规则。当任务来自群聊房间、或提示词提到"路径守卫"时必读。
 ---
@@ -91,13 +90,20 @@ description: 群聊/远程执行时的工作区路径守卫规则。当任务来
 4. 正确做法：在允许的项目目录内完成任务；确需访问目录外内容时，在回复里向工作区主人说明理由和具体路径，由主人决定。
 `;
 
-export function ensureBuiltinSkills(): void {
+export function retireBuiltinPathGuardSkill(): void {
   try {
     const dir = path.join(userSkillsDir(), BUILTIN_PATH_GUARD_SKILL);
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, "SKILL.md"), PATH_GUARD_SKILL_MD, "utf8");
-  } catch {
-    // non-fatal — 守卫靠 hook 强制执行，skill 只是告知
+    const file = path.join(dir, "SKILL.md");
+    // Never follow a linked directory/file or remove user-customized content.
+    if (fs.lstatSync(dir).isSymbolicLink() || !fs.lstatSync(file).isFile()) return;
+    const content = fs.readFileSync(file, "utf8").replace(/\r\n/g, "\n");
+    if (content !== LEGACY_PATH_GUARD_SKILL_MD) return;
+    // Only remove the known generated entry point; preserve sibling files.
+    fs.unlinkSync(file);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      console.warn("Could not retire built-in workspace guard skill:", err);
+    }
   }
 }
 

@@ -496,7 +496,7 @@ describe("RoomTimeline", () => {
     },
   );
 
-  it("hides join and leave noise and keeps only the newest recovery status", () => {
+  it("hides presence notices and keeps only the newest room recovery status", () => {
     const systemItem = (id: string, text: string): RoomTimelineItem => ({
       id,
       at: Number(id.replace(/\D/g, "")) || 0,
@@ -512,11 +512,20 @@ describe("RoomTimeline", () => {
       systemItem("system-3", "群聊名称已修改"),
       systemItem("system-4", "Bob 退出了群聊"),
       systemItem("system-5", "已重新连接主机"),
+      systemItem("system-6", "Alice 已离线"),
+      systemItem("system-7", "Alice 已上线"),
+      systemItem("system-8", "Alice 已离线"),
+      systemItem("system-9", "已从上次退出恢复开房"),
+      systemItem("system-10", "自动恢复开房失败"),
+      { ...systemItem("user-11", "Alice 已离线"), kind: "user" as const },
+      { ...systemItem("assistant-12", "已重新连接主机"), kind: "assistant" as const },
     ];
 
     expect(compactRoomTimelineItems(items).map((item) => item.id)).toEqual([
       "system-3",
-      "system-5",
+      "system-10",
+      "user-11",
+      "assistant-12",
     ]);
   });
 

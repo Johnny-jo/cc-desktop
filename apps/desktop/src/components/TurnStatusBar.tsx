@@ -27,7 +27,13 @@ export function TurnDoneRow({ durationMs, outcome }: { durationMs?: number; outc
     : outcome === "failed" ? (locale === "zh" ? "执行失败" : "Failed")
     : outcome === "completed" ? t.chat.turnStatusDone : (locale === "zh" ? "已结束" : "Ended");
   return (
-    <div className={`turn-status turn-status-${outcome ?? "done"}`} role="status">
+    <div className={`turn-status turn-status-terminal turn-status-${outcome ?? "done"}`} role="status">
+      <svg className="turn-status-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
+        <circle cx="10" cy="10" r="8" />
+        {outcome === "completed" ? <path d="m6 10 2.5 2.5L14 7" />
+          : outcome === "failed" ? <path d="M10 5.5v5M10 13v1" />
+          : <rect x="7" y="7" width="6" height="6" rx="1" fill="currentColor" stroke="none" />}
+      </svg>
       <span className="turn-status-label">{label}</span>
       {durationMs != null ? (
         <span className="turn-status-time">

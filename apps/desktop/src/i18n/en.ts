@@ -218,7 +218,7 @@ export const en = {
     settingsRollback: "Roll back",
     settingsNoPending: "No pending proposals.",
     settingsGuestHint: "Only the host can change the play pack, extensions, memory, and improve proposals.",
-    settingsHostedExtensionsHint: "Server-hosted rooms do not support mods, extension improvement or shared memory yet. The owner can still manage permissions in member settings.",
+    settingsHostedExtensionsHint: "Mods, extension improvement and shared memory run on the owner's desktop and pause while it is offline. Chat remains available. Agents run only on their assigned member desktops; the server executes neither Agent nor Mod code.",
     packNone: "None",
     packCached: "cached",
     needMod: "Optional activity pack (checksum {checksum}); you can join chat without it",

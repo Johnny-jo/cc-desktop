@@ -1,12 +1,16 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { deleteSkill, listSkills } from "./skill-store";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  BUILTIN_PATH_GUARD_SKILL, LEGACY_PATH_GUARD_SKILL_MD,
+  deleteSkill, listSkills, retireBuiltinPathGuardSkill,
+} from "./skill-store";
 
 const dirs: string[] = [];
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const d of dirs) {
     try {
       fs.rmSync(d, { recursive: true, force: true });
@@ -24,6 +28,40 @@ function tmp(): string {
 }
 
 describe("skill-store", () => {
+  it.each(["\n", "\r\n"])("retires the generated guard (%j), preserving sibling files", (newline) => {
+    const home = tmp();
+    vi.spyOn(os, "homedir").mockReturnValue(home);
+    const dir = path.join(home, ".claude", "skills", BUILTIN_PATH_GUARD_SKILL);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "SKILL.md"), LEGACY_PATH_GUARD_SKILL_MD.replace(/\n/g, newline));
+    fs.writeFileSync(path.join(dir, "notes.txt"), "user notes");
+
+    retireBuiltinPathGuardSkill();
+    retireBuiltinPathGuardSkill();
+
+    expect(listSkills(null).skills).toEqual([]);
+    expect(fs.existsSync(path.join(dir, "SKILL.md"))).toBe(false);
+    expect(fs.readFileSync(path.join(dir, "notes.txt"), "utf8")).toBe("user notes");
+  });
+
+  it("does not install a guard on a fresh profile", () => {
+    const home = tmp();
+    vi.spyOn(os, "homedir").mockReturnValue(home);
+    retireBuiltinPathGuardSkill();
+    expect(fs.existsSync(path.join(home, ".claude"))).toBe(false);
+  });
+
+  it("preserves a user-customized guard", () => {
+    const home = tmp();
+    vi.spyOn(os, "homedir").mockReturnValue(home);
+    const dir = path.join(home, ".claude", "skills", BUILTIN_PATH_GUARD_SKILL);
+    fs.mkdirSync(dir, { recursive: true });
+    const content = LEGACY_PATH_GUARD_SKILL_MD + "\nCustom rules\n";
+    fs.writeFileSync(path.join(dir, "SKILL.md"), content);
+    retireBuiltinPathGuardSkill();
+    expect(fs.readFileSync(path.join(dir, "SKILL.md"), "utf8")).toBe(content);
+  });
+
   it("lists project skills with SKILL.md only", () => {
     const cwd = tmp();
     const skillsRoot = path.join(cwd, ".claude", "skills");

@@ -197,10 +197,12 @@ describe("room turn ask (filePolicy = ask)", () => {
       .calls[0];
     const extras = startArgs[2] as Record<string, unknown>;
     expect(extras.pathJail).toBe(host.dir);
-    // 首条 prompt 带路径守卫提示并点名内置 skill
+    // Rules are self-contained; no separate guard skill load is requested.
     const promptText = (startArgs[0] as { text: string }).text;
     expect(promptText).toContain("路径守卫");
-    expect(promptText).toContain("room-workspace-guard");
+    expect(promptText).toContain("脚本和子进程");
+    expect(promptText).not.toContain("room-workspace-guard");
+    expect(promptText).not.toContain("首轮请先阅读");
     // 作答后广播 resolved，便于关掉其他窗口的弹窗。
     await vi.waitFor(() =>
       expect(
@@ -315,6 +317,10 @@ describe("room turn ask (filePolicy = ask)", () => {
     const extras = (guest.sessions.start as ReturnType<typeof vi.fn>).mock
       .calls[0][2] as Record<string, unknown>;
     expect(extras.pathJail).toBe(guest.dir);
+    const promptText = (guest.sessions.start as ReturnType<typeof vi.fn>).mock.calls[0][0].text;
+    expect(promptText).toContain(guest.dir);
+    expect(promptText).toContain("脚本和子进程");
+    expect(promptText).not.toContain("room-workspace-guard");
   });
 });
 
@@ -563,7 +569,7 @@ describe("seat stop 与本机流式", () => {
     });
   });
 
-  it("远程席位：房主 stopSeat → 节点 abort 本机会话", async () => {
+  it("远程席位：群主 stopSeat → 节点 abort 本机会话", async () => {
     const host = makeService();
     const { roomId, port, hostFingerprint } = await createHost(host.svc);
     const { start, resolve } = pendingStart("sess-remote");

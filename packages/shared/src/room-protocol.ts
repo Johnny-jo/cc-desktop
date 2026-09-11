@@ -60,6 +60,8 @@ export type RoomAiShare = "off" | "pending" | "on";
 export type RoomPath = "T0" | "T1" | "T2";
 
 export type RoomFrameType =
+  | "extension.request"
+  | "extension.result"
   | "host.control"
   | "host.pending"
   | "hello"
@@ -709,7 +711,7 @@ export function encodeRoomInvite(payload: RoomInvitePayload): string {
  */
 export function decodeRoomInvite(secret: string): RoomInvitePayload {
   if (extractInviteLine(secret, LEGACY_INVITE_PREFIX)) {
-    throw new Error("该邀请码由旧版本生成，安全性不足，请让房主重新生成");
+    throw new Error("该邀请码由旧版本生成，安全性不足，请让群主重新生成");
   }
   const line = extractInviteLine(secret, INVITE_PREFIX);
   if (!line) {

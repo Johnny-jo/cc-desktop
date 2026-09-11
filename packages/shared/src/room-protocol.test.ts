@@ -52,7 +52,7 @@ describe("room invite secret key", () => {
       port: 18765,
       hostFingerprint: "cd".repeat(32),
     });
-    const pasted = `房间邀请\n${secret}\n防火墙放行`;
+    const pasted = `群聊邀请\n${secret}\n防火墙放行`;
     const inv = decodeRoomInvite(pasted);
     expect(inv.host).toBe("127.0.0.1");
     expect(inv.port).toBe(18765);

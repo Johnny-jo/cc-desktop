@@ -483,7 +483,7 @@ describe("RoomService resume hosting", () => {
           expect(
             snap!.items.some(
               (i) =>
-                i.kind === "system" && i.text.includes("自动恢复开房失败"),
+                i.kind === "system" && i.text.includes("自动恢复群聊失败"),
             ),
           ).toBe(true);
         },

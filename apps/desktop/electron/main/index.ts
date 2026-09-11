@@ -40,7 +40,7 @@ import {
   writeCpaConfigWithApiKey,
   type RuntimePathEnv,
 } from "./runtime-paths";
-import { ensureBuiltinSkills, userSkillsDir } from "./skill-store";
+import { retireBuiltinPathGuardSkill, userSkillsDir } from "./skill-store";
 import { TerminalHost } from "./terminal-host";
 import { AppAutoUpdater } from "./auto-updater";
 import { RoomService } from "./room-service";
@@ -426,8 +426,8 @@ function bootstrap() {
   } catch {
     // ignore — non-fatal
   }
-  // 内置 skill（路径守卫说明等）随启动覆盖更新。
-  ensureBuiltinSkills();
+  // Retire the old auto-triggering skill; room prompts carry the rules inline.
+  retireBuiltinPathGuardSkill();
 
   const archive = new SessionArchive(userDataDir, database);
 

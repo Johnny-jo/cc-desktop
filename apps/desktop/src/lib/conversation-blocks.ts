@@ -17,6 +17,7 @@ export type ActivityEntry =
       kind: "tool";
       id: string;
       tool: ToolCardState;
+      displayStatus?: ReturnType<typeof getToolActivityStatus>;
     };
 
 export type ConversationBlock =
@@ -63,7 +64,7 @@ export function getToolActivityStatus(
 
 export function isLiveActivityEntry(entry: ActivityEntry): boolean {
   if (entry.kind === "thinking") return entry.active;
-  return entry.kind === "tool" && getToolActivityStatus(entry.tool) === "running";
+  return entry.kind === "tool" && (entry.displayStatus ?? getToolActivityStatus(entry.tool)) === "running";
 }
 
 function isThinkingItem(
@@ -97,7 +98,7 @@ function withoutThinking(item: TextChatItem): TextChatItem {
   return answer;
 }
 
-function buildTurnBlocks(items: ChatItem[], outcome?: TurnOutcome): ConversationBlock[] {
+function buildTurnBlocks(items: ChatItem[], outcome?: TurnOutcome, ended = Boolean(outcome)): ConversationBlock[] {
   const entries: ActivityEntry[] = [];
 
   items.forEach((item) => {
@@ -106,7 +107,11 @@ function buildTurnBlocks(items: ChatItem[], outcome?: TurnOutcome): Conversation
       return;
     }
     if (item.kind === "tool") {
-      entries.push({ kind: "tool", id: item.id, tool: item.tool });
+      // Background agents have an independent lifecycle; ordinary calls do not.
+      const stale = ended && !item.tool.agent?.background && getToolActivityStatus(item.tool) === "running";
+      entries.push({ kind: "tool", id: item.id, tool: item.tool,
+        ...(stale ? { displayStatus: outcome === "interrupted" || outcome === "cancelled" ? "stopped" as const : "unknown" as const } : {}),
+      });
       return;
     }
     if (isThinkingItem(item)) {
@@ -114,7 +119,7 @@ function buildTurnBlocks(items: ChatItem[], outcome?: TurnOutcome): Conversation
         kind: "thinking",
         id: item.id,
         text: item.thinkingText ?? "",
-        active: Boolean(item.thinking && item.streaming && !item.text.trim()),
+        active: Boolean(!ended && item.thinking && item.streaming && !item.text.trim()),
       });
     }
   });
@@ -189,14 +194,14 @@ function buildTurnBlocks(items: ChatItem[], outcome?: TurnOutcome): Conversation
  * Build display-only blocks without changing the persisted flat transcript.
  * Process entries are grouped inside the user turn that owns them.
  */
-export function buildConversationBlocks(items: ChatItem[]): ConversationBlock[] {
+export function buildConversationBlocks(items: ChatItem[], running?: boolean): ConversationBlock[] {
   const blocks: ConversationBlock[] = [];
   let turn: ChatItem[] = [];
   let outcome: TurnOutcome | undefined;
 
-  const flushTurn = () => {
+  const flushTurn = (ended = Boolean(outcome)) => {
     if (turn.length === 0) return;
-    blocks.push(...buildTurnBlocks(turn, outcome));
+    blocks.push(...buildTurnBlocks(turn, outcome, ended));
     turn = [];
   };
 
@@ -205,14 +210,14 @@ export function buildConversationBlocks(items: ChatItem[]): ConversationBlock[] 
     // implementation detail; the user-facing timeline gets one compact event.
     if (isContextSummaryItem(item)) continue;
     if (item.kind === "text" && item.role === "user") {
-      flushTurn();
+      flushTurn(true);
       outcome = item.turnOutcome;
       blocks.push({ kind: "item", item });
       continue;
     }
     turn.push(item);
   }
-  flushTurn();
+  flushTurn(Boolean(outcome) || running === false);
 
   return blocks;
 }

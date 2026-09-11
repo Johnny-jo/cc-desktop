@@ -39,7 +39,7 @@ This repository only claims rights in **original client source written for this 
 | `@codemirror/*` / `@lezer/highlight` | 文件编辑器 | MIT |
 | `@xterm/xterm` / `@xterm/addon-fit` | 终端与 CLI 模式 TUI 承载 | MIT |
 | `node-pty` | PTY | MIT |
-| `ws` | 协作房间 WebSocket | MIT |
+| `ws` | 协作群聊 WebSocket | MIT |
 | `iconv-lite` | 文本编码 | MIT |
 | `vitest` / `typescript` / `vite` | 开发与测试 | MIT |
 

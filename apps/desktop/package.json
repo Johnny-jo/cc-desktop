@@ -1,6 +1,6 @@
 {
   "name": "@claude-desktop/desktop",
-  "version": "0.3.13",
+  "version": "0.3.14",
   "private": true,
   "description": "CC Desktop — unofficial desktop UI for Claude Code + local CPA",
   "author": "cc-desktop",

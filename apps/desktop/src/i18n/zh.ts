@@ -219,7 +219,7 @@ export const zh: Messages = {
     settingsRollback: "回滚上一版",
     settingsNoPending: "没有待批提案。",
     settingsGuestHint: "只有群主可以改模组、扩展、共享记忆和改善提案。",
-    settingsHostedExtensionsHint: "服务器托管群目前不支持模组、扩展改善和共享记忆。群主仍可在成员设置中管理权限。",
+    settingsHostedExtensionsHint: "托管群的 Mod、扩展改善和共享记忆在群主电脑运行；群主离线时扩展暂停，普通聊天仍可使用。Agent 仅在绑定的成员电脑执行，服务器不执行 Agent 或 Mod 代码。",
     packNone: "不使用模组",
     packCached: "缓存",
     needMod: "此群有可选 Mod 活动（校验 {checksum}），不加载也能加入聊天",

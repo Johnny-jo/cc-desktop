@@ -115,7 +115,7 @@ export function RoomSettingsModal({
   // 消息免打扰：本机偏好（localStorage），普通消息不弹通知，@ 仍弹
   const [muted, setMutedState] = useState(() => isRoomMuted(room.roomId));
   const [tab, setTab] = useState<RoomSettingsTab>("overview");
-  const canManageExtensions = canHost && !room.hosted;
+  const canManageExtensions = canHost;
   const nameValid = Boolean(nameDraft.trim());
   const nameDirty = Boolean(
     canHost &&
@@ -635,6 +635,7 @@ export function RoomSettingsModal({
 
           {tab === "mods" ? (
             <div className="room-mods-page">
+              {room.hosted && canHost ? <p className="settings-hint">{t.room.settingsHostedExtensionsHint}</p> : null}
               {!canManageExtensions ? <p className="settings-hint">{room.hosted ? t.room.settingsHostedExtensionsHint : t.room.settingsGuestHint}</p> : null}
               {playPacks.length === 0 && kernelPacks.length === 0 ? (
                 <p className="settings-hint">{t.room.settingsMemoryEmpty}</p>

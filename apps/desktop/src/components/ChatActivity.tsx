@@ -166,7 +166,7 @@ function ToolActivityStep({
   const activeSessionId = useAppStore((state) => state.activeSessionId);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const tool = entry.tool;
-  const status = getToolActivityStatus(tool);
+  const status = entry.displayStatus ?? getToolActivityStatus(tool);
   const hasDetails = Boolean(tool.resultPreview || tool.todos?.length);
   const isFileEdit = tool.name === "Write" || tool.name === "Edit";
 
@@ -343,7 +343,7 @@ export function ChatActivity({
 
   const statuses = entries
     .filter(entry => entry.kind === "tool")
-    .map(entry => getToolActivityStatus(entry.tool));
+    .map(entry => entry.displayStatus ?? getToolActivityStatus(entry.tool));
   const failureCount = statuses.filter(status => status === "error").length;
   const failed = failureCount > 0;
   const unresolved = statuses.find(status => status === "unknown" || status === "paused" || status === "stopped");

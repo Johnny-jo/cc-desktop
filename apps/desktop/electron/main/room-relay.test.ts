@@ -3,7 +3,7 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { decodeRoomInvite } from "@claude-desktop/shared";
 import { RoomArchive } from "./room-archive";
 import { RoomService } from "./room-service";
@@ -14,13 +14,14 @@ const children: ChildProcess[] = [];
 const services: RoomService[] = [];
 const dirs: string[] = [];
 const archives: RoomArchive[] = [];
+const serverLogs = new Map<string, () => string>();
 function temp() { const dir = fs.mkdtempSync(path.join(os.tmpdir(), "room-hosted-test-")); dirs.push(dir); return dir; }
-function client(userDataDir = temp(), persistent = false) {
+function client(userDataDir = temp(), persistent = false, sessions = {} as SessionManager, projectPath: string | null = null) {
   const archive = persistent ? new RoomArchive(userDataDir) : undefined;
   if (archive) archives.push(archive);
   const service = new RoomService({ getWindow: () => null, userDataDir,
     ...(archive ? { archive } : {}),
-    sessions: {} as SessionManager, settings: { get: () => ({ lastProjectPath: null }) } as SettingsStore });
+    sessions, settings: { get: () => ({ lastProjectPath: projectPath }) } as SettingsStore });
   services.push(service); return service;
 }
 async function stop(proc: ChildProcess) {
@@ -32,6 +33,7 @@ afterEach(async () => {
   await Promise.all(children.splice(0).map(stop));
   for (const archive of archives.splice(0)) archive.database?.close();
   for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+  serverLogs.clear();
 });
 async function freePort() {
   const server = net.createServer();
@@ -48,8 +50,9 @@ async function start(port = 0, data = temp()) {
     env: { ...process.env, ROOM_SERVER_TOKEN: token }, stdio: ["ignore", "pipe", "pipe"],
   });
   children.push(proc);
+  let output = "";
+  serverLogs.set(`ws://127.0.0.1:${port}`, () => output);
   await new Promise<void>((resolve, reject) => {
-    let output = "";
     const timer = setTimeout(() => reject(new Error(output || "startup timeout")), 10000);
     proc.stderr!.on("data", c => { output += String(c); });
     proc.stdout!.on("data", c => { output += String(c); if (output.includes("listening")) { clearTimeout(timer); resolve(); } });
@@ -59,7 +62,7 @@ async function start(port = 0, data = temp()) {
 }
 async function create(owner: RoomService, url: string, autoApprove = true) {
   const result = await owner.create({ name: "托管群", relay: url, relayToken: token, password: "password123", autoApprove });
-  expect(result.ok, result.error).toBe(true); return result.room!;
+  expect(result.ok, `${result.error ?? ""}\n${serverLogs.get(url)?.() ?? ""}`).toBe(true); return result.room!;
 }
 function join(service: RoomService, owner: RoomService, id: string) {
   const invite = owner.invite(id); expect(invite.ok).toBe(true);
@@ -71,6 +74,148 @@ async function send(service: RoomService, id: string, text: string) {
   const result = await service.send(id, seat.id, text); expect(result.ok, result.error).toBe(true);
 }
 describe("server-owned rooms (real deployment bundle)", () => {
+  it("rejects server execution frames, impersonated seats and unauthorized extension control", async () => {
+    const server = await start(), owner = client(), member = client();
+    const room = await create(owner, server.url);
+    expect((await join(member, owner, room.roomId)).ok).toBe(true);
+    const wire = (service: RoomService) => service as unknown as {
+      rooms: Map<string, unknown>;
+      sendClient: (r: unknown, type: string, p: unknown) => void;
+      roomRpc: (r: unknown, type: string, p: unknown) => Promise<{ ok: boolean; error?: string }>;
+      safeSend: (channel: string, p: unknown) => void;
+    };
+    const m = wire(member), o = wire(owner), record = m.rooms.get(room.roomId);
+    const errors = vi.spyOn(m, "safeSend");
+    m.sendClient(record, "exec.run", { turnId: "forged", seatId: "server", text: "run on server" });
+    m.sendClient(record, "seat.add", { userId: room.localUserId, kind: "agent", name: "Forged" });
+    await send(member, room.roomId, "攻击帧之后的正常消息");
+    expect(errors.mock.calls.some(([, p]) => (p as { message?: string }).message?.includes("托管服务器禁止执行 Agent"))).toBe(true);
+    expect(owner.get(room.roomId)?.seats.some(s => s.name === "Forged")).toBe(false);
+    expect((await m.roomRpc(record, "extension.request", { action: "sync", state: {} })).ok).toBe(false);
+    expect((await o.roomRpc(o.rooms.get(room.roomId), "extension.request", { action: "execute", code: "process.exit(1)" })).ok).toBe(false);
+    expect((await fetch(`http://127.0.0.1:${server.port}/healthz`)).ok).toBe(true);
+    errors.mockRestore();
+  }, 15000);
+
+  it("runs Agent tasks and resolves attachments on a member desktop, never on the server", async () => {
+    const server = await start(), owner = client(), dir = temp();
+    const sessions = { start: vi.fn().mockResolvedValue("desktop-session"), continue: vi.fn(), getTranscript: vi.fn().mockReturnValue([{ kind: "text", role: "assistant", text: "成员电脑执行完成" }]), getChangesForSelect: vi.fn().mockReturnValue([]), abort: vi.fn(), syncExtras: vi.fn() };
+    const member = client(dir, false, sessions as unknown as SessionManager, dir);
+    const room = await create(owner, server.url);
+    expect((await join(member, owner, room.roomId)).ok).toBe(true);
+    const memberId = member.get(room.roomId)!.localUserId!;
+    expect(member.addSeat(room.roomId, "agent", "Desktop Agent").ok).toBe(true);
+    await expect.poll(() => member.get(room.roomId)?.seats.some(s => s.kind === "agent")).toBe(true);
+    const agent = member.get(room.roomId)!.seats.find(s => s.kind === "agent")!;
+    expect(agent.workspaceUserId).toBe(memberId);
+    const human = member.get(room.roomId)!.seats.find(s => s.occupantUserId === memberId)!;
+    const attachmentPath = path.join(dir, "input.txt");
+    fs.writeFileSync(attachmentPath, "来自成员电脑的附件");
+    const label = "@" + agent.name;
+    const result = await member.send(room.roomId, human.id, label + " 读取附件", undefined,
+      [{ path: attachmentPath, name: "input.txt", kind: "text", mimeType: "text/plain", size: fs.statSync(attachmentPath).size }],
+      [{ seatId: agent.id, start: 0, end: label.length }]);
+    expect(result.ok, result.error).toBe(true);
+    await expect.poll(() => sessions.start.mock.calls.length).toBe(1);
+    expect(sessions.start.mock.calls[0][1]).toBe(dir);
+    expect(sessions.start.mock.calls[0][2]).toMatchObject({ pathJail: dir });
+    await expect.poll(() => owner.get(room.roomId)?.items.some(i => i.text === "成员电脑执行完成")).toBe(true);
+    const item = owner.get(room.roomId)!.items.find(i => i.attachments?.length)!;
+    member.disposeAll();
+    const fetched = await owner.getAttachment(room.roomId, item.id, item.attachments![0].id);
+    expect(fetched.ok).toBe(true);
+    expect(fs.readFileSync(fetched.attachment!.path, "utf8")).toBe("来自成员电脑的附件");
+    expect(owner.updateSeat(room.roomId, agent.id, { name: "Renamed Agent" }).ok).toBe(true);
+    await expect.poll(() => owner.get(room.roomId)?.seats.find(s => s.id === agent.id)?.name).toBe("Renamed Agent");
+    const ownHuman = owner.get(room.roomId)!.seats.find(s => s.occupantUserId === room.localUserId)!;
+    const mention = "@Renamed Agent";
+    await owner.send(room.roomId, ownHuman.id, mention + " 再执行", undefined, undefined, [{ seatId: agent.id, start: 0, end: mention.length }]);
+    await expect.poll(() => owner.get(room.roomId)?.items.some(i => i.text.includes("对方不在线"))).toBe(true);
+    const rejoined = await client(dir).join({ ...decodeRoomInvite(owner.invite(room.roomId).secret!), password: "password123", userId: memberId });
+    expect(rejoined.ok).toBe(true);
+    expect(rejoined.room?.localUserId).toBe(memberId);
+    const ownerErrors = vi.spyOn(owner as unknown as { safeSend: (channel: string, data: unknown) => void }, "safeSend");
+    expect(owner.kick(room.roomId, memberId).ok).toBe(true);
+    await send(owner, room.roomId, "踢人后的确认消息");
+    expect(ownerErrors.mock.calls.map(([, data]) => data).filter(data => (data as { error?: boolean }).error)).toEqual([]);
+    ownerErrors.mockRestore();
+    await expect.poll(() => owner.get(room.roomId)?.members.some(m => m.userId === memberId)).toBe(false);
+    await owner.send(room.roomId, ownHuman.id, mention + " 节点已移除", undefined, undefined, [{ seatId: agent.id, start: 0, end: mention.length }]);
+    await expect.poll(() => owner.get(room.roomId)?.tasks?.some(t => t.error?.includes("不能使用服务器工作区"))).toBe(true);
+    await send(owner, room.roomId, "服务器仍然可用");
+  }, 20000);
+
+  it("executes Mod and kernel code only on the owner's desktop and relays member actions", async () => {
+    const server = await start(), owner = client(), member = client();
+    const room = await create(owner, server.url);
+    expect((await join(member, owner, room.roomId)).ok).toBe(true);
+    const modDir = temp();
+    fs.writeFileSync(path.join(modDir, "manifest.json"), JSON.stringify({ id: "hosted-counter", name: "Counter", version: "1.0.0", hostApi: 1, permissions: [], seats: { min: 2, max: 4, roles: [] }, agent: false }));
+    fs.writeFileSync(path.join(modDir, "host.js"), `export function createGame() { return {
+      initialState() { return { n: 0 }; }, reduce(s, i) { return { n: i.name === "inc" ? s.n + 1 : s.n }; },
+      getPublicView(s) { return s; }, getSeatView(s, id) { return { n: s.n, secret: id }; },
+      getActions() { return [{ name: "inc" }]; }, getPrompt() { return ""; }, shouldPromptAgent() { return false; }
+    }; }`);
+    const enabled = await owner.enableMod(room.roomId, modDir);
+    expect(enabled.ok, enabled.error).toBe(true);
+    await expect.poll(() => member.get(room.roomId)?.modChecksum).toBe(enabled.offer!.checksum);
+    expect((await member.setModParticipation(room.roomId, true)).ok).toBe(true);
+    await expect.poll(() => owner.get(room.roomId)?.members.every(m => m.modChecksum === enabled.offer!.checksum)).toBe(true);
+    expect((await owner.startMod(room.roomId)).ok).toBe(true);
+    const internals = (service: RoomService) => service as unknown as { rooms: Map<string, { modPublicView?: { n: number }; modSeatViews?: Record<string, unknown> }> };
+    await expect.poll(() => internals(member).rooms.get(room.roomId)?.modPublicView?.n).toBe(0);
+    const memberSeat = member.get(room.roomId)!.seats.find(s => s.occupantUserId === member.get(room.roomId)!.localUserId)!;
+    expect((await member.modIntent(room.roomId, memberSeat.id, "inc", {})).ok).toBe(true);
+    await expect.poll(() => internals(member).rooms.get(room.roomId)?.modPublicView?.n).toBe(1);
+    expect(Object.keys(internals(member).rooms.get(room.roomId)!.modSeatViews!)).toEqual([memberSeat.id]);
+    const kernelDir = temp();
+    fs.writeFileSync(path.join(kernelDir, "manifest.json"), JSON.stringify({ id: "hosted-prefix", name: "Prefix", version: "1.0.0", hostApi: 2, inject: [], provides: [], permissions: [], hooks: ["room.chat.in"] }));
+    fs.writeFileSync(path.join(kernelDir, "mod.js"), `export function activate(ctx) { ctx.hooks.on("room.chat.in", env => ({ action: "replace", value: { ...env, text: "desktop:" + env.text } })); }`);
+    expect(owner.enableKernelMod(room.roomId, kernelDir).ok).toBe(true);
+    await expect.poll(() => member.get(room.roomId)?.kernel?.mods[0]?.id).toBe("hosted-prefix");
+    await send(member, room.roomId, "有扩展");
+    await expect.poll(() => owner.get(room.roomId)?.items.some(i => i.text === "desktop:有扩展")).toBe(true);
+    // No executable bundle ever reaches the headless server's data directory.
+    const serverFiles = fs.readdirSync(server.data, { recursive: true }).map(String);
+    expect(serverFiles.some(f => /(?:host|mod)\.js$/.test(f))).toBe(false);
+    await stop(server.proc);
+    await start(server.port, server.data);
+    expect((await owner.rejoin(room.roomId)).ok).toBe(true);
+    expect((await member.rejoin(room.roomId)).ok).toBe(true);
+    await expect.poll(() => member.get(room.roomId)?.kernel?.mods[0]?.id).toBe("hosted-prefix");
+    await send(member, room.roomId, "重连后的扩展");
+    await expect.poll(() => member.get(room.roomId)?.items.some(i => i.text === "desktop:重连后的扩展")).toBe(true);
+    owner.disposeAll();
+    await expect.poll(() => member.get(room.roomId)?.members.find(m => m.role === "host")?.online).toBe(false);
+    await send(member, room.roomId, "群主离线后普通聊天");
+    expect(member.get(room.roomId)?.items.some(i => i.text === "群主离线后普通聊天")).toBe(true);
+  }, 20000);
+
+  it("dispatches a Mod Agent turn to its member computer and applies only its returned action", async () => {
+    const server = await start(), owner = client(), dir = temp();
+    const sessions = { start: vi.fn().mockResolvedValue("mod-desktop-session"), continue: vi.fn(), getTranscript: vi.fn().mockReturnValue([{ kind: "text", role: "assistant", text: '{"tool":"room_mod_act","action":"inc","payload":{}}' }]), getChangesForSelect: vi.fn().mockReturnValue([]), abort: vi.fn(), syncExtras: vi.fn() };
+    const member = client(dir, false, sessions as unknown as SessionManager, dir);
+    const room = await create(owner, server.url);
+    expect((await join(member, owner, room.roomId)).ok).toBe(true);
+    member.setFilePolicy(room.roomId, "allow");
+    member.addSeat(room.roomId, "agent", "Mod Agent");
+    await expect.poll(() => owner.get(room.roomId)?.seats.some(s => s.kind === "agent")).toBe(true);
+    const modDir = temp();
+    fs.writeFileSync(path.join(modDir, "manifest.json"), JSON.stringify({ id: "hosted-agent", name: "Agent counter", version: "1.0.0", hostApi: 1, permissions: [], seats: { min: 2, max: 4, roles: [] }, agent: true }));
+    fs.writeFileSync(path.join(modDir, "host.js"), `export function createGame() { return {
+      initialState() { return { n: 0 }; }, reduce(s, i) { return { n: i.name === "inc" ? s.n + 1 : s.n }; },
+      getPublicView(s) { return s; }, getSeatView(s) { return s; }, getActions() { return [{ name: "inc" }]; },
+      getPrompt() { return "increment once"; }, shouldPromptAgent(s) { return s.n === 0; }
+    }; }`);
+    expect((await owner.enableMod(room.roomId, modDir)).ok).toBe(true);
+    expect((await owner.startMod(room.roomId)).ok).toBe(true);
+    const state = member as unknown as { rooms: Map<string, { modPublicView?: { n: number } }> };
+    await expect.poll(() => state.rooms.get(room.roomId)?.modPublicView?.n).toBe(1);
+    expect(sessions.start).toHaveBeenCalledTimes(1);
+    expect(sessions.start.mock.calls[0][1]).toBe(dir);
+    expect(sessions.start.mock.calls[0][2]).toMatchObject({ pathJail: dir });
+  }, 15000);
+
   it("does not auto-rejoin a dismissed room after restarting the desktop", async () => {
     const server = await start(), memberDir = temp();
     const owner = client(), member = client(memberDir, true);
@@ -228,6 +373,16 @@ describe("server-owned rooms (real deployment bundle)", () => {
   }, 20000);
   it("rejects missing token, unsafe admission and removed legacy endpoints", async () => {
     const server = await start(); const base = `http://127.0.0.1:${server.port}`;
+    for (let i = 0; i < 10; i++) {
+      await new Promise<void>((resolve, reject) => {
+        const socket = net.createConnection(server.port, "127.0.0.1");
+        socket.on("error", reject);
+        socket.on("connect", () => socket.write("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n"));
+        socket.on("data", () => socket.resetAndDestroy());
+        socket.on("close", () => resolve());
+      });
+    }
+    expect((await fetch(`${base}/healthz`)).ok).toBe(true);
     expect((await fetch(`${base}/api/rooms`, { method: "POST" })).status).toBe(401);
     expect((await fetch(`${base}/ctl?id=0123456789ab`)).status).toBe(404);
     const result = await client().create({ name: "unsafe", relay: server.url, relayToken: token, autoApprove: true });

@@ -648,8 +648,8 @@ export function MessageList({
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
   const anchors = useMemo(() => buildConversationAnchors(items), [items]);
   const previousBlocks = useRef<{ sessionId: string | null; blocks: ConversationBlock[] }>({ sessionId: null, blocks: [] });
-  const blocks = useMemo(() => preserveActivityBlockIds(buildConversationBlocks(items),
-    previousBlocks.current.sessionId === sessionId ? previousBlocks.current.blocks : []), [items, sessionId]);
+  const blocks = useMemo(() => preserveActivityBlockIds(buildConversationBlocks(items, hasNewer ? false : Boolean(running)),
+    previousBlocks.current.sessionId === sessionId ? previousBlocks.current.blocks : []), [items, sessionId, running, hasNewer]);
   useLayoutEffect(() => { previousBlocks.current = { sessionId, blocks }; }, [sessionId, blocks]);
   const readingAnchor = useRef<{ sessionId: string; anchors: Array<{ id: string; top: number }> } | null>(null);
 
