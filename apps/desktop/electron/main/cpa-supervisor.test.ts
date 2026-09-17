@@ -203,11 +203,10 @@ describe("CpaSupervisor", () => {
       stdout: { on: vi.fn() },
       stderr: { on: vi.fn() },
     };
-    const spawnProcess = vi.fn()
-      .mockReturnValueOnce(firstChild)
-      .mockReturnValueOnce(secondChild);
     let spawned = 0;
-    spawnProcess.mockImplementationOnce(() => {
+    // Queue each spawn once; returnValueOnce and implementationOnce share
+    // the same queue, so duplicating them skips these state transitions.
+    const spawnProcess = vi.fn().mockImplementationOnce(() => {
       spawned = 1;
       return firstChild;
     }).mockImplementationOnce(() => {

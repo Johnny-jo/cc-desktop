@@ -51,7 +51,9 @@ describe("RoomAttachmentCache", () => {
   let root: string;
 
   beforeEach(async () => {
-    fixture = await fs.mkdtemp(path.join(os.tmpdir(), "room-attachment-cache-test-"));
+    // Windows TEMP may use an 8.3 alias (e.g. ZHANGJ~1). The cache resolves
+    // its root before I/O, so assertions and fault-injection paths must too.
+    fixture = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "room-attachment-cache-test-")));
     root = path.join(fixture, "cache");
   });
 

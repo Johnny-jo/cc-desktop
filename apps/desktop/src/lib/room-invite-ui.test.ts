@@ -27,7 +27,7 @@ describe("joinErrorForInvite", () => {
     });
     expect(legacy.startsWith("CDR1.")).toBe(true);
     expect(joinErrorForInvite(legacy)).toBe(
-      "该邀请码由旧版本生成，安全性不足，请让房主重新生成",
+      "该邀请码由旧版本生成，安全性不足，请让群主重新生成",
     );
   });
 
