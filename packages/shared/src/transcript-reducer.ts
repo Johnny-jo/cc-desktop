@@ -21,6 +21,17 @@ export function emptyTranscript(): TranscriptState {
   return { items: [], optimisticUserTexts: [] };
 }
 
+/** The user turn owning the first row of a truncated page. Kept outside its cursors. */
+export function leadingTurnUser(items: ChatItem[], start: number, previous?: ChatItem): ChatItem | undefined {
+  const first = items[start];
+  if (!first || (first.kind === "text" && first.role === "user")) return undefined;
+  for (let i = start - 1; i >= 0; i--) {
+    const row = items[i];
+    if (row.kind === "text" && row.role === "user") return row;
+  }
+  return previous;
+}
+
 export function createIdFactory(now: () => number = Date.now): (prefix: string) => string {
   let counter = 0;
   return (prefix: string) => {
@@ -121,6 +132,21 @@ export function applySdkEvent(
   switch (event.type) {
     case "user_message": {
       const afterOpt = consumeOptimistic(state, event.text);
+      const submitted = event.submittedItem;
+      if (submitted) {
+        if (items.some(row => row.id === submitted.id)) return afterOpt ?? state;
+        if (afterOpt) {
+          for (let i = items.length - 1; i >= 0; i--) {
+            const row = items[i];
+            if (row.kind === "text" && row.role === "user" && row.text === submitted.text) {
+              items[i] = submitted;
+              return { ...afterOpt, items };
+            }
+          }
+        }
+        items.push(submitted);
+        return { ...(afterOpt ?? state), items };
+      }
       if (afterOpt) return afterOpt;
       if (
         event.text.startsWith(

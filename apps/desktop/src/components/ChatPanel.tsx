@@ -1,8 +1,9 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChatItem, ModelQuotaInfo } from "@claude-desktop/shared";
 import { MessageList } from "./MessageList";
 import { Composer } from "./Composer";
 import { AgentWelcome } from "./AgentWelcome";
+import { PhotoFlow } from "./PhotoFlow";
 import { ChatTaskDock } from "./ChatTaskDock";
 import { useAppStore } from "../state/store";
 import { useI18n } from "../i18n/useI18n";
@@ -24,9 +25,11 @@ export type ChatPanelProps = {
 export function ChatPanel({ onOpenSettings, onOpenFile }: ChatPanelProps) {
   const { t } = useI18n();
   const activeSessionId = useAppStore((s) => s.activeSessionId);
-  const items = useAppStore((s) =>
+  const windowItems = useAppStore((s) =>
     s.activeSessionId ? (s.itemsBySession[s.activeSessionId] ?? EMPTY_ITEMS) : EMPTY_ITEMS,
   );
+  const leading = useAppStore(s => s.activeSessionId ? s.leadingUserBySession[s.activeSessionId] : undefined);
+  const items = useMemo(() => leading ? [leading, ...windowItems] : windowItems, [leading, windowItems]);
   const hasMore = useAppStore((s) =>
     s.activeSessionId ? Boolean(s.hasMoreBySession[s.activeSessionId]) : false,
   );
@@ -120,6 +123,7 @@ export function ChatPanel({ onOpenSettings, onOpenFile }: ChatPanelProps) {
       className={activeSessionId ? "chat-panel" : "chat-panel hero"}
       ref={panelRef}
     >
+      {!activeSessionId && settings?.photoFlowEnabled !== false ? <PhotoFlow english={t.common.ok === "OK"} /> : null}
       <div className="chat-body">
         <div className="chat-inner">
           {showBanner && ctx ? (

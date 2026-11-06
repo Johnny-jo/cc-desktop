@@ -1,0 +1,3 @@
+model_set=PP-OCRv5_mobile
+prepared_at=2026-10-19T07:43:49.633Z
+files=PP-OCRv5_mobile_det_infer.onnx,PP-OCRv5_mobile_rec_infer.onnx,ppocrv5_dict.txt

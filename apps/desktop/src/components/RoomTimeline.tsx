@@ -302,7 +302,7 @@ export const RoomMessageRow = memo(function RoomMessageRow({
                 <span>{item.text}</span>
               </div>
             ) : !item.text ? null : item.kind === "assistant" ? (
-              <div className="room-msg-text md room-agent-prose">
+              <div className="room-msg-text bubble bubble-assistant md room-agent-prose">
                 {mentions.length ? (
                   <div className="md-body"><ReactMarkdown
                     remarkPlugins={[remarkGfm, mentionMarkdownPlugin(item.text, mentions, mySeatId)]}
@@ -311,7 +311,7 @@ export const RoomMessageRow = memo(function RoomMessageRow({
                 ) : <MarkdownBody text={item.text} />}
               </div>
             ) : (
-              <div className={`room-msg-text${isAgent ? " room-agent-prose" : ""}`}>
+              <div className={`room-msg-text${isAgent ? " bubble bubble-assistant room-agent-prose" : isHuman ? " bubble bubble-user" : ""}`}>
                 {renderMentions(item.text, mentions, mySeatId)}
               </div>
             )}
@@ -394,7 +394,7 @@ const RoomLiveRows = memo(function RoomLiveRows({
               </details>
             ) : null}
             {entry.text ? (
-              <div className="room-msg-text md room-agent-prose room-live-text">
+              <div className="room-msg-text bubble bubble-assistant md room-agent-prose room-live-text">
                 <MarkdownBody text={entry.text} streaming />
               </div>
             ) : null}

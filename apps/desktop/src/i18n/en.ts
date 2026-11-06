@@ -47,6 +47,8 @@ export const en = {
     themeLight: "Light",
     themeSystem: "Follow system",
     galaxyEffects: "Galaxy particle effect",
+    photoFlow: "Daytime photo flow",
+    photoFlowHint: "Flowing photos in light mode, refreshed and cached daily. Saves immediately; turn off to hide photos and stop updates.",
     galaxyEffectsHint: "In dark mode, a rotating galaxy replaces S. The camera approaches from afar and drifts among its stars. Saves immediately; turn off to keep the plain S.",
     save: "Save",
     saving: "Saving…",

@@ -1,0 +1,8 @@
+{
+  "model": "PP-OCRv5_mobile",
+  "files": {
+    "PP-OCRv5_mobile_det_infer.onnx": "4d97c44a20d30a81aad087d6a396b08f786c4635742afc391f6621f5c6ae78ae",
+    "PP-OCRv5_mobile_rec_infer.onnx": "86b1f8bffa31748e0d6364a98af983bbd33b92523141d4a02fa587b4b66b54af",
+    "ppocrv5_dict.txt": "7680a8a77c6617aba27bc9c52d320f451ae7871613a43b5358ac4a68c88d87c0"
+  }
+}

@@ -83,6 +83,7 @@ const desktop = {
       sessionId: string;
       cwd: string;
       items: ChatItem[];
+      leadingUser?: ChatItem;
       total: number;
       hasMore: boolean;
       hasNewer: boolean;
@@ -96,6 +97,7 @@ const desktop = {
       limit,
     }) as Promise<{
       items: ChatItem[];
+      leadingUser?: ChatItem;
       total: number;
       hasMore: boolean;
       hasNewer: boolean;
@@ -108,6 +110,7 @@ const desktop = {
       limit,
     }) as Promise<{
       items: ChatItem[];
+      leadingUser?: ChatItem;
       total: number;
       hasMore: boolean;
       hasNewer: boolean;
@@ -331,6 +334,12 @@ const desktop = {
     }) as Promise<{ ok: boolean }>,
 
   getSettings: () => ipcRenderer.invoke(IPC.settingsGet),
+  getPhotoFlowImages: () => ipcRenderer.invoke(IPC.photoFlowGet) as Promise<import("@claude-desktop/shared").PhotoFlowImage[]>,
+  onPhotoFlowUpdated: (callback: () => void) => {
+    const listener = () => callback();
+    ipcRenderer.on(IPC.photoFlowUpdated, listener);
+    return () => { ipcRenderer.removeListener(IPC.photoFlowUpdated, listener); };
+  },
 
   setSettings: (patch: Partial<AppSettings> & { token?: string }) =>
     ipcRenderer.invoke(IPC.settingsSet, patch),

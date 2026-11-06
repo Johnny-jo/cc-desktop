@@ -3,6 +3,7 @@ import path from "node:path";
 import {
   DIFF_MAX_EVENTS_PER_FILE,
   compactFileChange,
+  leadingTurnUser,
   rebuildSessionProgress,
   restoreSessionProgress,
   restoreTaskPlan,
@@ -54,6 +55,7 @@ export const TRANSCRIPT_CHUNK_ITEMS = 64;
 
 export type TranscriptPage = {
   items: ChatItem[];
+  leadingUser?: ChatItem;
   total: number;
   /** Older rows exist before this page. */
   hasMore: boolean;
@@ -78,6 +80,7 @@ export function pageTranscriptItems(
     const end = Math.min(total, start + limit);
     return {
       items: all.slice(start, end),
+      leadingUser: leadingTurnUser(all, start),
       total,
       hasMore: start > 0,
       hasNewer: end < total,
@@ -95,6 +98,7 @@ export function pageTranscriptItems(
   const start = Math.max(0, end - limit);
   return {
     items: all.slice(start, end),
+    leadingUser: leadingTurnUser(all, start),
     total,
     hasMore: start > 0,
     hasNewer: end < total,
@@ -402,8 +406,19 @@ export class SessionArchive {
     }
 
     const items = this.readItemRange(sessionId, manifest, start, end) ?? [];
+    let leadingUser: ChatItem | undefined;
+    const first = items[0];
+    if (first && !(first.kind === "text" && first.role === "user")) {
+      for (let stop = start; stop > 0 && !leadingUser;) {
+        const from = Math.floor((stop - 1) / manifest.chunkSize) * manifest.chunkSize;
+        const chunk = this.readItemRange(sessionId, manifest, from, stop) ?? [];
+        leadingUser = chunk.reverse().find(row => row.kind === "text" && row.role === "user");
+        stop = from;
+      }
+    }
     return {
       items,
+      leadingUser,
       total,
       hasMore: start > 0,
       hasNewer: end < total,

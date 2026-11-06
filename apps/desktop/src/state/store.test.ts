@@ -297,6 +297,23 @@ function textItem(id: string, text: string): {
 }
 
 describe("sliding transcript window", () => {
+  it("keeps the first prompt and its outcome while paging by persisted row IDs", async () => {
+    runningSession("s1");
+    const user = { kind: "text" as const, role: "user" as const, id: "persisted-user", text: "first question" };
+    __applySessionEventForTests({ type: "user_message", text: user.text, submittedItem: user, sessionId: "s1" });
+    for (let i = 0; i < RENDERER_TRANSCRIPT_CAP + 4; i++) {
+      __applySessionEventForTests({ type: "text_done", text: "step " + i, sessionId: "s1", transcriptIds: ["persisted-" + i] });
+    }
+    __applySessionEventForTests({ type: "result", ok: true, sessionId: "s1" });
+    const tail = getState().itemsBySession.s1;
+    expect(tail).toHaveLength(RENDERER_TRANSCRIPT_CAP);
+    expect(getState().leadingUserBySession.s1).toMatchObject({ ...user, turnOutcome: "completed" });
+    desktop.loadOlderMessages.mockResolvedValue({ items: [user], hasMore: false });
+    await loadOlderMessages("s1");
+    expect(desktop.loadOlderMessages).toHaveBeenCalledWith("s1", "persisted-4");
+    expect(getState().itemsBySession.s1.filter(row => row.id === user.id)).toHaveLength(1);
+    expect(getState().leadingUserBySession.s1).toBeUndefined();
+  });
   let desktop: {
     loadOlderMessages: ReturnType<typeof vi.fn>;
     loadNewerMessages: ReturnType<typeof vi.fn>;

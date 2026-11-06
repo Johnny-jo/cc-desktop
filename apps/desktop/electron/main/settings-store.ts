@@ -103,6 +103,7 @@ const DEFAULTS: AppSettings = {
   projects: [],
   hiddenProjects: [],
   galaxyEffectsEnabled: true,
+  photoFlowEnabled: true,
   uiFontSize: 13,
   editorFontSize: 12.5,
   updateFeedUrl: "",
@@ -221,6 +222,9 @@ export class SettingsStore {
     if (typeof publicPatch.galaxyEffectsEnabled !== "boolean") {
       delete publicPatch.galaxyEffectsEnabled;
     }
+    if (typeof publicPatch.photoFlowEnabled !== "boolean") {
+      delete publicPatch.photoFlowEnabled;
+    }
     if (publicPatch.uiFontSize !== undefined) {
       const n = Number(publicPatch.uiFontSize);
       if (!Number.isFinite(n)) delete publicPatch.uiFontSize;
@@ -316,6 +320,8 @@ export class SettingsStore {
         hiddenProjects: sanitizePluginPaths(rest.hiddenProjects) ?? [],
         galaxyEffectsEnabled:
           typeof rest.galaxyEffectsEnabled === "boolean" ? rest.galaxyEffectsEnabled : true,
+        photoFlowEnabled:
+          typeof rest.photoFlowEnabled === "boolean" ? rest.photoFlowEnabled : true,
         uiFontSize: clampFont(rest.uiFontSize, 11, 20, DEFAULTS.uiFontSize ?? 13),
         editorFontSize: clampFont(
           rest.editorFontSize,

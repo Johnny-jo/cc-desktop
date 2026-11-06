@@ -1,5 +1,9 @@
 .galaxy-letter { position: relative; }
 .galaxy-letter-base { display: inline-block; }
+[data-theme="light"] .galaxy-letter { display: none; }
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]):not([data-theme="light"]) .galaxy-letter { display: none; }
+}
 .galaxy-letter[data-galaxy-active="true"] .galaxy-letter-base {
   opacity: var(--galaxy-letter-opacity, 1);
 }

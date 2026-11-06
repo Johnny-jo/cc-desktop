@@ -1,4 +1,4 @@
-import type { AppSettings, ChatItem } from "@claude-desktop/shared";
+import { leadingTurnUser, type AppSettings, type ChatItem } from "@claude-desktop/shared";
 
 export type CompressorDeps = {
   /** Calls a lightweight model to summarize the provided transcript text. */
@@ -132,8 +132,11 @@ export async function compressContext(
     role: "system",
     text: `Context compressed (${summarizable.length} items summarized). Earlier conversation summary:\n\n${summaryText}`,
   };
+  const turnUser = leadingTurnUser(items, summarizable.length);
   return {
-    items: [summaryItem, ...kept],
+    items: turnUser?.kind === "text"
+      ? [summaryItem, { ...turnUser, sdkMsgId: undefined }, ...kept]
+      : [summaryItem, ...kept],
     summaryText,
     compressedCount: summarizable.length,
   };

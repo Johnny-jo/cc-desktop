@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { Attachment, RoomQuoteRef, RoomSeat, RoomTimelineItem } from "@claude-desktop/shared";
-import { formatFileSize, validateRoomMentions } from "@claude-desktop/shared";
+import { validateRoomMentions } from "@claude-desktop/shared";
 import { useAppStore } from "../state/store";
 import {
   askRoomAiShare,
@@ -42,6 +42,7 @@ import { useMotionPresence } from "../hooks/useMotionPresence";
 import { RoomTimeline, SeatAvatar, resolveRoomMessageAuthorSeat } from "./RoomTimeline";
 import { RoomTaskPanel, summarizeRoomTasks } from "./RoomTaskPanel";
 import { RoomCollaborationSidebar, type RoomCollaborationTab } from "./RoomCollaborationSidebar";
+import { AttachmentFileCard } from "./AttachmentFileCard";
 import "./RoomWorkspace.css";
 
 const MAX_ROOM_COMPOSER_FILES = 5;
@@ -106,6 +107,7 @@ export function RoomStage() {
   const [mentionIndex, setMentionIndex] = useState(0);
   const [mentionClosed, setMentionClosed] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const timelineRef = useRef<HTMLDivElement | null>(null);
   const lastItem = room?.items[room.items.length - 1];
   const runningCount = room?.seats.filter((s) => s.running).length ?? 0;
@@ -123,6 +125,13 @@ export function RoomStage() {
     },
     [],
   );
+
+  useEffect(() => {
+    const input = inputRef.current;
+    if (!input) return;
+    input.style.height = "auto";
+    input.style.height = `${Math.min(input.scrollHeight, 180)}px`;
+  }, [draft, room?.roomId]);
 
   useEffect(() => {
     const el = timelineRef.current;
@@ -656,6 +665,7 @@ export function RoomStage() {
           if (files.length) { e.preventDefault(); void addFiles(files); }
         }}
       >
+        <div className="chat-inner room-composer-inner">
         {mentionOpen ? (
           <ul id={mentionListId} className="slash-menu at-menu" role="listbox" aria-label="提及席位">
             {mentionMatches.map((s, i) => (
@@ -679,7 +689,7 @@ export function RoomStage() {
             ))}
           </ul>
         ) : null}
-        <div className={dragging ? "room-composer-box dragging" : "room-composer-box"}>
+        <div className={dragging ? "composer room-composer-box dragging" : "composer room-composer-box"}>
           {quote ? (
             <div className="room-quote-bar">
               <span className="room-quote-bar-author">{quote.authorLabel}</span>
@@ -699,25 +709,8 @@ export function RoomStage() {
           {attachments.length > 0 ? (
             <div className="composer-attachments">
               {attachments.map((a) => (
-                <div key={a.path} className="composer-attachment">
-                  <span className="composer-attachment-name" title={a.path}>
-                    {a.name}
-                  </span>
-                  <span className="composer-attachment-meta">
-                    {formatFileSize(a.size)} · {a.kind}
-                  </span>
-                  <button
-                    type="button"
-                    className="composer-attachment-remove"
-                    onClick={() =>
-                      setAttachments(attachments.filter((x) => x.path !== a.path))
-                    }
-                    title="移除"
-                    aria-label={`移除 ${a.name}`}
-                  >
-                    ×
-                  </button>
-                </div>
+                <AttachmentFileCard key={a.path} attachment={a}
+                  onRemove={() => setAttachments(current => current.filter(x => x.path !== a.path))} />
               ))}
             </div>
           ) : null}
@@ -726,13 +719,13 @@ export function RoomStage() {
           {submitting ? <div className="room-attachment-progress" role="status" aria-live="polite">正在发送并等待确认</div> : null}
           <textarea
             ref={inputRef}
-            className="room-input"
+            className="composer-input room-input"
             aria-label="群聊消息"
             aria-autocomplete="list"
             aria-controls={mentionOpen ? mentionListId : undefined}
             aria-activedescendant={mentionOpen ? `${mentionListId}-${mentionMatches[mentionSel].id}` : undefined}
             rows={2}
-            placeholder="发送消息，从 @ 候选中选择成员或 Agent；/stop 停止，Enter 发送"
+            placeholder="发送消息，@ 提及成员或 Agent…"
             value={draft}
             disabled={room.status !== "open" || offline}
             onSelect={event => setCaret(event.currentTarget.selectionStart)}
@@ -795,7 +788,36 @@ export function RoomStage() {
               }
             }}
           />
-          <div className="room-composer-bar">
+          <div className="composer-bar room-composer-bar">
+            <div className="composer-left">
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                className="composer-file-input"
+                aria-label="选择群聊附件"
+                disabled={room.status !== "open" || offline || submitting || preparingAttachments}
+                onChange={async event => {
+                  const files = Array.from(event.currentTarget.files ?? []);
+                  event.currentTarget.value = "";
+                  if (files.length) await addFiles(files);
+                }}
+              />
+              <button
+                type="button"
+                className="composer-plus-btn"
+                title="添加附件"
+                aria-label="添加附件"
+                disabled={room.status !== "open" || offline || submitting || preparingAttachments}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden>
+                  <path d="M7 2.5v9M2.5 7h9" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                </svg>
+              </button>
+              <span className="room-composer-hint">@ 提及 · Enter 发送</span>
+            </div>
+            <div className="composer-actions">
             <button
               type="button"
               className="sendstop-btn sendstop-send"
@@ -821,9 +843,10 @@ export function RoomStage() {
                 />
               </svg>
             </button>
+            </div>
           </div>
         </div>
-        {/* <div className="room-composer-foot">Enter 发送 · Shift + Enter 换行 · 可粘贴截图或拖入文件</div> */}
+        </div>
       </div>
         </div>
 

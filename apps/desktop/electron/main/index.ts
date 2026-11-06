@@ -6,6 +6,7 @@ import {
   ipcMain,
   Menu,
   nativeTheme,
+  nativeImage,
   Notification,
   safeStorage,
   Tray,
@@ -22,6 +23,8 @@ import type {
   UserPromptRequest,
 } from "@claude-desktop/shared";
 import { SettingsStore } from "./settings-store";
+import { PhotoFlowService } from "./photo-flow-service";
+import { fetchPhotoFlow } from "./photo-flow-fetch";
 import { DiffTracker } from "./diff-tracker";
 import { SnapshotStore } from "./snapshot-store";
 import { PermissionBroker } from "./permission-broker";
@@ -30,6 +33,7 @@ import { CpaSupervisor } from "./cpa-supervisor";
 import { applyCpaModelCatalog } from "./cpa-model-sync";
 import { SessionArchive } from "./session-archive";
 import { SessionManager, type QueryFn } from "./session-manager";
+import { PdfCompatibilityProxy } from "./pdf-compatibility-proxy";
 import { createContextCompressor } from "./context-compressor";
 import { registerIpcHandlers } from "./ipc-handlers";
 import {
@@ -577,6 +581,7 @@ function bootstrap() {
   };
 
   const sessions = new SessionManager({
+    pdfCompatibility: new PdfCompatibilityProxy(),
     queryFn: realQueryFn,
     permissionBroker: permissions,
     userPromptBroker: userPrompts,
@@ -680,7 +685,20 @@ function bootstrap() {
     sendToRenderer(IPC.settingsUpdated, settings.getPublic());
   };
 
+  const photoFlow = new PhotoFlowService({
+    userDataDir,
+    fetch: fetchPhotoFlow,
+    validateImage: bytes => {
+      const image = nativeImage.createFromBuffer(bytes);
+      const size = image.getSize();
+      return !image.isEmpty() && size.width <= 600 && size.height <= 600;
+    },
+    onChanged: () => sendToRenderer(IPC.photoFlowUpdated, null),
+  });
+  photoFlow.setEnabled(settings.get().photoFlowEnabled !== false);
+
   registerIpcHandlers({
+    photoFlow,
     window: getMainWindow,
     sessions,
     permissions,
@@ -741,6 +759,7 @@ function bootstrap() {
 
   app.on("before-quit", () => {
     isQuitting = true;
+    photoFlow.dispose();
     if (cpaModelSyncTimer) clearTimeout(cpaModelSyncTimer);
     stopClaudeSettingsWatch();
     // stopIfManaged is a no-op unless this app spawned CPA.

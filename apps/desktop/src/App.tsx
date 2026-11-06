@@ -886,9 +886,9 @@ export function App() {
               ) : null}
               </EditorPresence>
 
-              {editorOpen && editorFull ? null : (
                 <div
                   className="chat-col"
+                  hidden={editorOpen && editorFull}
                   style={{ flex: "1 1 0", minWidth: 0 }}
                 >
                   {effectiveMode === "rooms" ? (
@@ -902,7 +902,6 @@ export function App() {
                     />
                   )}
                 </div>
-              )}
             </div>
             )}
           </main>

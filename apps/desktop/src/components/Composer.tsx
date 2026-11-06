@@ -14,7 +14,7 @@ import type {
   ReasoningEffort,
   SessionMcpServerStatus,
 } from "@claude-desktop/shared";
-import { formatFileSize, IMAGE_MIME_TYPES } from "@claude-desktop/shared";
+import { IMAGE_MIME_TYPES, MODEL_ATTACHMENT_LIMITS, modelAttachmentError } from "@claude-desktop/shared";
 import { getDesktop } from "../lib/desktop-api";
 import {
   abortActiveSession,
@@ -40,6 +40,7 @@ import {
 } from "../lib/slash-commands";
 import { parseTrailingAt } from "../lib/at-mention";
 import { Lightbox, useImageDataUrl } from "./AttachmentChips";
+import { AttachmentFileCard } from "./AttachmentFileCard";
 import { ContextRing } from "./ContextRing";
 import { ThemedSelect } from "./Select";
 import { PermissionModal } from "./PermissionModal";
@@ -62,9 +63,7 @@ export type ComposerProps = {
   onOpenSettings?: () => void;
 };
 
-const MAX_ATTACHMENTS = 5;
-const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
-const MAX_TEXT_SIZE = 5 * 1024 * 1024;
+const MAX_ATTACHMENTS = MODEL_ATTACHMENT_LIMITS.count;
 
 const PERMISSION_CYCLE: PermissionMode[] = [
   "default",
@@ -98,19 +97,6 @@ function getDesktopOrNull() {
   }
 }
 
-function validateAttachment(a: Attachment): string | null {
-  if (a.kind === "image" && a.size > MAX_IMAGE_SIZE) {
-    return `${a.name} exceeds ${formatFileSize(MAX_IMAGE_SIZE)}`;
-  }
-  if (a.kind === "text" && a.size > MAX_TEXT_SIZE) {
-    return `${a.name} exceeds ${formatFileSize(MAX_TEXT_SIZE)}`;
-  }
-  if (a.kind === "binary") {
-    return `${a.name} is not a supported text/image file`;
-  }
-  return null;
-}
-
 /** Image attachment in the composer: thumbnail, click to enlarge, × to remove. */
 function ComposerImageThumb({
   att,
@@ -124,25 +110,7 @@ function ComposerImageThumb({
   const url = useImageDataUrl(att.path);
   if (!url) {
     // 读不到内容时退化为普通文件 chip
-    return (
-      <div className="composer-attachment">
-        <span className="composer-attachment-name" title={att.path}>
-          {att.name}
-        </span>
-        <span className="composer-attachment-meta">
-          {formatFileSize(att.size)} · {att.kind}
-        </span>
-        <button
-          type="button"
-          className="composer-attachment-remove"
-          onClick={onRemove}
-          title="Remove file"
-          aria-label={`Remove ${att.name}`}
-        >
-          ×
-        </button>
-      </div>
-    );
+    return <AttachmentFileCard attachment={att} onRemove={onRemove} />;
   }
   return (
     <div className="composer-attachment-thumb">
@@ -195,7 +163,7 @@ async function buildMcpNote(): Promise<string> {
     const target =
       cfg && (cfg.type === "sse" || cfg.type === "http")
         ? cfg.url
-        : (cfg as { command?: string } | undefined)?.command ?? "";
+        : cfg?.type === "playwright" ? cfg.browser : cfg?.command ?? "";
     const type = cfg?.type ?? "stdio";
     const liveInfo = liveByName.get(name);
     const statusPart = liveInfo
@@ -236,7 +204,6 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
   } | null>(null);
   // The panel stays mounted briefly after close so the exit animation plays.
   const [modelMenuPanelMounted, setModelMenuPanelMounted] = useState(false);
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const modelMenuRef = useRef<HTMLDivElement | null>(null);
   const modelMenuPanelRef = useRef<HTMLDivElement | null>(null);
@@ -261,6 +228,7 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
   );
 
   const canSend = Boolean(text.trim()) || attachments.length > 0;
+  const invalidAttachments = attachments.some(attachment => modelAttachmentError(attachment) !== null);
 
   const models = settings?.models?.length
     ? settings.models
@@ -478,19 +446,18 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
     };
   }, [atOpen, atQuery, projectPath]);
 
-  const validateAndSetAttachments = useCallback((next: Attachment[]) => {
-    setAttachmentError(null);
+  const validateAndSetAttachments = useCallback((next: Attachment[], errors: string[] = []) => {
+    // Dragging the same file again should not create duplicate cards or React keys.
+    next = [...new Map(next.map(file => [file.path.replace(/\\/g, "/").toLowerCase(), file])).values()];
     if (next.length > MAX_ATTACHMENTS) {
-      setAttachmentError(`At most ${MAX_ATTACHMENTS} files allowed`);
+      errors.push(`最多添加 ${MAX_ATTACHMENTS} 个附件`);
       next = next.slice(0, MAX_ATTACHMENTS);
     }
     for (const a of next) {
-      const err = validateAttachment(a);
-      if (err) {
-        setAttachmentError(err);
-        break;
-      }
+      const err = modelAttachmentError(a);
+      if (err) errors.push(err);
     }
+    setAttachmentError(errors.length ? errors.join("；") : null);
     setAttachments(next);
   }, []);
 
@@ -499,6 +466,7 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
       const desktop = getDesktopOrNull();
       if (!desktop) return;
       const added: Attachment[] = [];
+      const errors: string[] = [];
       for (const file of files) {
         try {
           const path = desktop.getPathForFile(file);
@@ -506,10 +474,10 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
           added.push(attachment);
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
-          setAttachmentError(message);
+          errors.push(message);
         }
       }
-      validateAndSetAttachments([...attachments, ...added]);
+      validateAndSetAttachments([...attachments, ...added], errors);
     },
     [attachments, validateAndSetAttachments],
   );
@@ -697,11 +665,15 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
             skill?.sendAsPrompt ||
             !APP_SLASH_COMMANDS.some((c) => c.name === name)
           ) {
+            const errors = attachments.map(modelAttachmentError).filter(Boolean);
+            if (errors.length) { setAttachmentError(errors.join("；")); return; }
             sendMessage(text.startsWith("/") ? text : `/${name}`, attachments);
             setText("");
             setAttachments([]);
             return;
           }
+          const errors = attachments.map(modelAttachmentError).filter(Boolean);
+          if (errors.length) { setAttachmentError(errors.join("；")); return; }
           sendMessage(text, attachments);
           setText("");
           setAttachments([]);
@@ -720,6 +692,8 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
 
   const onSend = useCallback(() => {
     if (!text.trim() && attachments.length === 0) return;
+    const errors = attachments.map(modelAttachmentError).filter((error): error is string => Boolean(error));
+    if (errors.length) { setAttachmentError(errors.join("；")); return; }
     const parsed = parseLeadingSlash(text.trim());
     if (parsed && parsed.name) {
       const known = allSlashCommands.some((c) => c.name === parsed.name);
@@ -735,14 +709,6 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
     sendMessage(prompt, attachments);
     setAttachments([]);
   }, [allSlashCommands, attachments, runSlash, text]);
-
-  // Auto-grow the input with content (height capped by CSS max-height).
-  useEffect(() => {
-    const el = textareaRef.current;
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, 180)}px`;
-  }, [text]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // @-mention menu takes priority over slash (they are mutually exclusive:
@@ -908,29 +874,13 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
                   onRemove={() => removeAttachment(a.path)}
                 />
               ) : (
-                <div key={a.path} className="composer-attachment">
-                  <span className="composer-attachment-name" title={a.path}>
-                    {a.name}
-                  </span>
-                  <span className="composer-attachment-meta">
-                    {formatFileSize(a.size)} · {a.kind}
-                  </span>
-                  <button
-                    type="button"
-                    className="composer-attachment-remove"
-                    onClick={() => removeAttachment(a.path)}
-                    title="Remove file"
-                    aria-label={`Remove ${a.name}`}
-                  >
-                    ×
-                  </button>
-                </div>
+                <AttachmentFileCard key={a.path} attachment={a} error={modelAttachmentError(a)}
+                  onRemove={() => removeAttachment(a.path)} />
               ),
             )}
           </div>
         ) : null}
         <textarea
-          ref={textareaRef}
           className="composer-input"
           rows={2}
           placeholder={
@@ -1119,7 +1069,7 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
               className={
                 running ? "sendstop-btn sendstop-stop" : "sendstop-btn sendstop-send"
               }
-              disabled={!running && !canSend && !slashOpen}
+              disabled={!running && ((!canSend && !slashOpen) || invalidAttachments)}
               onClick={running ? () => abortActiveSession() : onSend}
               title={running ? "Stop" : "Send"}
               aria-label={running ? "Stop" : "Send"}

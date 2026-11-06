@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { guessMimeType, MODEL_ATTACHMENT_LIMITS, modelAttachmentError } from "@claude-desktop/shared";
 import type {
   Attachment,
   ReadAttachmentResult,
@@ -10,13 +11,13 @@ import type {
 export type { Attachment, UserPrompt, UserContentBlock };
 
 /** Maximum size for text attachments (bytes). */
-export const MAX_TEXT_ATTACHMENT_SIZE = 5 * 1024 * 1024;
+export const MAX_TEXT_ATTACHMENT_SIZE = MODEL_ATTACHMENT_LIMITS.textBytes;
 
 /** Maximum size for image attachments (bytes). */
-export const MAX_IMAGE_ATTACHMENT_SIZE = 5 * 1024 * 1024;
+export const MAX_IMAGE_ATTACHMENT_SIZE = MODEL_ATTACHMENT_LIMITS.imageBytes;
 
 /** Maximum size for PDF attachments (bytes). */
-export const MAX_PDF_ATTACHMENT_SIZE = 10 * 1024 * 1024;
+export const MAX_PDF_ATTACHMENT_SIZE = MODEL_ATTACHMENT_LIMITS.pdfBytes;
 
 function isImageMimeType(
   mime: string,
@@ -34,7 +35,12 @@ function readAsBase64(filePath: string): string {
 }
 
 function readAsText(filePath: string): string {
-  return fs.readFileSync(filePath, "utf8");
+  const bytes = fs.readFileSync(filePath);
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    if (text.includes("\u0000")) throw new Error("binary");
+    return text;
+  } catch { throw new Error("文件不是有效的 UTF-8 文本，请另存为 UTF-8 或转换为 PDF"); }
 }
 
 function truncatedFileName(name: string): string {
@@ -43,16 +49,17 @@ function truncatedFileName(name: string): string {
 }
 
 export function readAttachment(attachment: Attachment): ReadAttachmentResult {
-  if (!fs.existsSync(attachment.path)) {
-    return { ok: false, error: `File not found: ${attachment.path}` };
-  }
-  const stats = fs.statSync(attachment.path);
-  if (!stats.isFile()) {
-    return { ok: false, error: `Not a file: ${attachment.path}` };
-  }
-
   try {
-    if (attachment.kind === "image") {
+    if (!fs.existsSync(attachment.path)) return { ok: false, error: `File not found: ${attachment.path}` };
+    const stats = fs.statSync(attachment.path);
+    if (!stats.isFile()) return { ok: false, error: `Not a file: ${attachment.path}` };
+    const inferred = guessMimeType(attachment.name);
+    attachment = { ...attachment, size: stats.size,
+      mimeType: inferred === "application/octet-stream" ? attachment.mimeType : inferred };
+    const invalid = modelAttachmentError(attachment);
+    if (invalid) return { ok: false, error: invalid };
+
+    if (attachment.mimeType.startsWith("image/")) {
       if (attachment.size > MAX_IMAGE_ATTACHMENT_SIZE) {
         return {
           ok: false,
@@ -89,8 +96,8 @@ export function readAttachment(attachment: Attachment): ReadAttachmentResult {
       return { ok: true, block };
     }
 
-    // Text-like content (including unknown binaries we treat as text to let
-    // the model decide; too large binaries are rejected).
+    // Only supported text reaches this branch. Office/unknown binary formats
+    // must never be decoded as UTF-8 and sent to the model as garbage.
     if (attachment.size > MAX_TEXT_ATTACHMENT_SIZE) {
       return {
         ok: false,

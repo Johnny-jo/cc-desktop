@@ -390,7 +390,7 @@ export class CpaSupervisor {
     const origin = `http://127.0.0.1:${this.getSettings().cpaPort}`;
     const headers = { Authorization: `Bearer ${token}` };
     const response = await this.fetchQuotaUrl(
-      `${origin}/v0/management/auth-files`,
+      `${origin}/v8/management/credentials`,
       { headers },
     );
     if (!response.ok) throw new Error(`CPA quota credentials failed (${response.status})`);
@@ -492,7 +492,7 @@ export class CpaSupervisor {
     modelId: string,
   ): Promise<boolean> {
     const modelsResponse = await this.fetchQuotaUrl(
-      `${origin}/v0/management/auth-files/models?name=${encodeURIComponent(name)}`,
+      `${origin}/v8/management/credentials/models?name=${encodeURIComponent(name)}`,
       { headers },
     );
     if (!modelsResponse.ok) throw new Error(`CPA credential models failed (${modelsResponse.status})`);
@@ -594,7 +594,7 @@ export class CpaSupervisor {
     const name = nonEmptyString(entry.name ?? entry.id);
     if (!name) return null;
     const response = await this.fetchQuotaUrl(
-      `${origin}/v0/management/auth-files/download?name=${encodeURIComponent(name)}`,
+      `${origin}/v8/management/credentials/download?name=${encodeURIComponent(name)}`,
       { headers },
     );
     if (!response.ok) return null;
@@ -616,7 +616,7 @@ export class CpaSupervisor {
     header: Record<string, string>,
     data?: string,
   ): Promise<unknown> {
-    const response = await this.fetchQuotaUrl(`${origin}/v0/management/api-call`, {
+    const response = await this.fetchQuotaUrl(`${origin}/v8/management/requests/api-call`, {
       method: "POST",
       headers: {
         ...managementHeaders,

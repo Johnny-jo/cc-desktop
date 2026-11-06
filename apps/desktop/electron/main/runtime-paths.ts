@@ -1,7 +1,14 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
+import { applyCpaConfigDefaults, defaultCpaConfigYaml } from "./cpa-config";
+export {
+  applyCpaConfigDefaults,
+  defaultCpaConfigYaml,
+  repairCpaManagementConfig,
+  isPlaceholderCpaConfig,
+  type CpaConfigApplyMode,
+} from "./cpa-config";
 
 /**
  * Resolve bundled Claude Code CLI + CPA binaries for dev and packaged builds.
@@ -28,7 +35,7 @@ export type RuntimePathEnv = {
   cloudflaredPath?: string;
   /**
    * Dev-time CPA source dir (exe + optional config.yaml).
-   * Defaults to CLAUDE_DESKTOP_CPA_DIST or D:\gitrep\CC\CPA on Windows.
+   * Defaults to CLAUDE_DESKTOP_CPA_DIST; otherwise prepare vendor/ first.
    */
   cpaDistDir?: string;
 };
@@ -78,7 +85,10 @@ export function resolveSdkClaudeExecutable(
   const binary = claudeBinaryName(platform);
   try {
     const require = createRequire(__filename);
-    const pkgJson = require.resolve(`${pkg}/package.json`);
+    // pnpm keeps optional platform packages next to their owning SDK, not
+    // necessarily visible from the app's own node_modules.
+    const sdkRequire = createRequire(require.resolve("@anthropic-ai/claude-agent-sdk"));
+    const pkgJson = sdkRequire.resolve(`${pkg}/package.json`);
     const candidate = path.join(path.dirname(pkgJson), binary);
     if (fs.existsSync(candidate)) return candidate;
   } catch {
@@ -127,17 +137,15 @@ export function getCpaExecutablePath(env: RuntimePathEnv): string {
   const vendor = path.join(root, "vendor", "win-x64", "cpa", name);
   if (fs.existsSync(vendor)) return vendor;
 
-  const dist =
-    env.cpaDistDir ??
-    process.env.CLAUDE_DESKTOP_CPA_DIST ??
-    (platform === "win32" ? "D:\\gitrep\\CC\\CPA" : "");
+  const dist = env.cpaDistDir ?? process.env.CLAUDE_DESKTOP_CPA_DIST;
   if (dist) {
     const p = path.join(dist, name);
     if (fs.existsSync(p)) return p;
   }
 
-  // Last resort: keep legacy default so existing settings still make sense.
-  return LEGACY_CPA_DEFAULTS.exe;
+  // A missing prepared bundle should produce an actionable missing-file error,
+  // never silently launch an old CPA from a developer's previous checkout.
+  return vendor;
 }
 
 /**
@@ -239,16 +247,19 @@ export function getCpaManagementHtmlPath(env: RuntimePathEnv): string | null {
 }
 
 /**
- * Copy bundled management.html to userData/cpa/static/ if missing.
+ * Keep the managed panel in sync with the bundled CPA release.
  * CPA resolves static assets next to config.yaml (or MANAGEMENT_STATIC_PATH).
  * Without this file it tries GitHub on first start, which often hangs in CN networks.
  */
-export function materializeCpaManagementAsset(env: RuntimePathEnv): void {
-  const dest = path.join(env.userDataDir, "cpa", "static", "management.html");
+export function materializeCpaManagementAsset(
+  env: RuntimePathEnv,
+  configPath = getCpaUserConfigPath(env),
+): void {
+  const dest = path.join(path.dirname(configPath), "static", "management.html");
   try {
-    if (fs.existsSync(dest) && fs.statSync(dest).size > 0) return;
     const src = getCpaManagementHtmlPath(env);
     if (!src) return;
+    if (fs.existsSync(dest) && fs.readFileSync(dest).equals(fs.readFileSync(src))) return;
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.copyFileSync(src, dest);
   } catch {
@@ -325,7 +336,7 @@ export function materializeCpaConfig(
   env: RuntimePathEnv,
   opts?: {
     port?: number;
-    /** Gateway client key written into api-keys (optional) */
+    /** Gateway client key written into access.api-keys (optional) */
     apiKey?: string | null;
   },
 ): string {
@@ -347,7 +358,7 @@ export function materializeCpaConfig(
 
 /**
  * Create or overwrite userData CPA config with the given gateway api key.
- * Used by first-run onboarding so the client token matches CPA api-keys.
+ * Used by first-run onboarding so the client token matches CPA access.api-keys.
  */
 export function writeCpaConfigWithApiKey(
   env: RuntimePathEnv,
@@ -413,175 +424,8 @@ export function resolveEffectiveCpaPaths(
       ? settings.cpaConfigPath
       : userConfig;
 
+  materializeCpaManagementAsset(env, cpaConfigPath);
   return { cpaExePath, cpaConfigPath };
-}
-
-export type CpaConfigApplyMode =
-  /** First-time seed / onboarding: may write api-keys + secret-key. */
-  | "full"
-  /**
-   * Bootstrap repair only: enable management panel + fill EMPTY secret-key.
-   * NEVER overwrites non-empty api-keys / secret-key / provider blocks.
-   */
-  | "repair-panel";
-
-export function applyCpaConfigDefaults(
-  yaml: string,
-  opts: {
-    port: number;
-    apiKey?: string | null;
-    /** default "full" for onboarding/seed; use "repair-panel" on every boot */
-    mode?: CpaConfigApplyMode;
-  },
-): string {
-  const mode = opts.mode ?? "full";
-  let out = yaml;
-  // Force localhost binding for desktop embedding (safe; desktop must bind local).
-  out = out.replace(/^host:\s*.*$/m, 'host: "127.0.0.1"');
-  out = out.replace(/^port:\s*\d+\s*$/m, `port: ${opts.port}`);
-  // Prefer user home auth-dir so existing CPA logins are reused.
-  const authDir = path.join(os.homedir(), ".cli-proxy-api").replace(/\\/g, "\\\\");
-  if (/^auth-dir:\s*/m.test(out)) {
-    out = out.replace(/^auth-dir:\s*.*$/m, `auth-dir: "${authDir}"`);
-  } else {
-    out = `auth-dir: "${authDir}"\n` + out;
-  }
-  // Management panel must be enabled for /management.html.
-  if (/disable-control-panel:\s*/m.test(out)) {
-    out = out.replace(
-      /disable-control-panel:\s*.*$/m,
-      "disable-control-panel: false",
-    );
-  } else if (/^remote-management:\s*$/m.test(out) || /^remote-management:/m.test(out)) {
-    out = out.replace(
-      /^(remote-management:\s*\n)/m,
-      "$1  disable-control-panel: false\n",
-    );
-  }
-
-  if (mode === "repair-panel") {
-    // Only fill secret-key when missing/empty. Never touch api-keys or a
-    // non-empty secret-key (user may have set providers / hashed secret).
-    const secretEmpty =
-      !/secret-key:\s*/m.test(out) ||
-      /secret-key:\s*(""|''|)\s*$/m.test(out) ||
-      /secret-key:\s*$/m.test(out);
-    if (secretEmpty && opts.apiKey) {
-      if (/secret-key:\s*/m.test(out)) {
-        out = out.replace(
-          /secret-key:\s*.*$/m,
-          `secret-key: "${opts.apiKey}"`,
-        );
-      } else if (/^remote-management:/m.test(out)) {
-        out = out.replace(
-          /^(remote-management:\s*\n)/m,
-          `$1  secret-key: "${opts.apiKey}"\n`,
-        );
-      }
-    }
-    return out;
-  }
-
-  // mode === "full": onboarding / first materialize only
-  if (opts.apiKey) {
-    if (/^api-keys:\s*$/m.test(out) || /^api-keys:/m.test(out)) {
-      out = out.replace(
-        /api-keys:\s*\n(?:\s*-\s*.*\n)*/m,
-        `api-keys:\n  - ${opts.apiKey}\n`,
-      );
-    }
-    // CPA disables all /v0/management routes when secret-key is empty.
-    // Use the same gateway token so one password works for API + panel login.
-    if (/secret-key:\s*/m.test(out)) {
-      out = out.replace(
-        /secret-key:\s*.*$/m,
-        `secret-key: "${opts.apiKey}"`,
-      );
-    } else if (/^remote-management:/m.test(out)) {
-      out = out.replace(
-        /^(remote-management:\s*\n)/m,
-        `$1  secret-key: "${opts.apiKey}"\n`,
-      );
-    }
-  }
-  return out;
-}
-
-/**
- * Repair an existing userData CPA config so the management panel works:
- * - enable control panel
- * - fill secret-key ONLY when empty (never overwrite hashed/user keys)
- * - NEVER rewrite api-keys / provider credentials
- * Returns true if the file was modified.
- */
-export function repairCpaManagementConfig(
-  configPath: string,
-  opts?: { apiKey?: string | null; port?: number },
-): boolean {
-  if (!configPath || !fs.existsSync(configPath)) return false;
-  let body: string;
-  try {
-    body = fs.readFileSync(configPath, "utf8");
-  } catch {
-    return false;
-  }
-  const needsPanel =
-    /disable-control-panel:\s*true/i.test(body) ||
-    !/disable-control-panel:\s*/i.test(body);
-  const secretEmpty =
-    /secret-key:\s*(""|''|)\s*$/m.test(body) ||
-    /secret-key:\s*$/m.test(body) ||
-    !/secret-key:\s*/m.test(body);
-  if (!needsPanel && !secretEmpty) return false;
-
-  const next = applyCpaConfigDefaults(body, {
-    port: opts?.port ?? 8317,
-    // Only used when secret is empty — never clobbers existing keys.
-    apiKey: secretEmpty ? opts?.apiKey ?? extractFirstApiKey(body) : null,
-    mode: "repair-panel",
-  });
-  if (next === body) return false;
-  try {
-    fs.writeFileSync(configPath, next, "utf8");
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * True when the CPA config still looks like the virgin template
- * (placeholder change-me keys) and is safe to overwrite on first wizard.
- */
-export function isPlaceholderCpaConfig(yaml: string): boolean {
-  const hasChangeMe =
-    /secret-key:\s*["']?change-me["']?/i.test(yaml) ||
-    /api-keys:[\s\S]*?-\s*["']?change-me["']?/i.test(yaml);
-  // Hashed secret-key from CPA startup is never a placeholder.
-  const hashedSecret = /secret-key:\s*["']?\$2[aby]\$/i.test(yaml);
-  return hasChangeMe && !hashedSecret;
-}
-
-function extractFirstApiKey(yaml: string): string | null {
-  const m = yaml.match(/api-keys:\s*\n\s*-\s*["']?([^\s"'#]+)/);
-  return m?.[1] ?? null;
-}
-
-export function defaultCpaConfigYaml(): string {
-  return `# Generated by Claude Desktop — local CPA (CLIProxyAPI) config
-host: "127.0.0.1"
-port: 8317
-tls:
-  enable: false
-remote-management:
-  allow-remote: false
-  secret-key: "change-me"
-  disable-control-panel: false
-auth-dir: "~/.cli-proxy-api"
-api-keys:
-  - change-me
-debug: false
-`;
 }
 
 /** Walk up from this file to find monorepo root (pnpm-workspace / package.json name). */

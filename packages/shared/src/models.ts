@@ -387,6 +387,8 @@ export type AppSettings = {
   theme?: "dark" | "light" | "system";
   /** Animate the welcome-page S into a galaxy in dark mode (omit = enabled). */
   galaxyEffectsEnabled?: boolean;
+  /** Daytime photo backdrop and its scheduled online refresh; defaults to true. */
+  photoFlowEnabled?: boolean;
   /** UI language: zh / en / follow system (omit = system). */
   locale?: "zh" | "en" | "system";
   /**
@@ -442,7 +444,7 @@ export type PublicSettings = Omit<AppSettings, never> & {
   hasToken: boolean;
 };
 
-export type SdkNormalizedEvent =
+export type SdkNormalizedEvent = (
   | { type: "text_delta"; sessionId: string; text: string }
   | { type: "thinking_delta"; sessionId: string; text: string }
   | { type: "text_done"; sessionId: string; text: string }
@@ -456,7 +458,7 @@ export type SdkNormalizedEvent =
       toolName: string;
       elapsedSeconds: number;
     }
-  | { type: "user_message"; sessionId: string; text: string }
+  | { type: "user_message"; sessionId: string; text: string; submittedItem?: Extract<ChatItem, { kind: "text" }> }
   | {
       type: "result";
       sessionId: string;
@@ -474,4 +476,5 @@ export type SdkNormalizedEvent =
    * ordinal for message-level rewind.
    */
   | { type: "user_msg_ids"; sessionId: string; uuids: string[] }
-  | { type: "raw"; sessionId: string; payload: unknown };
+  | { type: "raw"; sessionId: string; payload: unknown }
+) & { transcriptIds?: string[] };

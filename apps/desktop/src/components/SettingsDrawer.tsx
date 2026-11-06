@@ -2,6 +2,7 @@ import React, { Suspense, lazy, useEffect, useRef, useState } from "react";
 import type {
   AppSettings,
   McpServersMap,
+  PlaywrightBrowser,
   ModelInfo,
   PublicSettings,
   SessionMcpServerStatus,
@@ -54,7 +55,8 @@ type McpServerDraft = {
   /** stable local key for React list rendering */
   id: string;
   name: string;
-  type: "stdio" | "sse" | "http";
+  type: "stdio" | "sse" | "http" | "playwright";
+  browser?: PlaywrightBrowser;
   command: string;
   /** space-separated args (stdio) */
   argsText: string;
@@ -110,6 +112,13 @@ type FormState = {
 };
 
 let mcpDraftSeq = 0;
+function nextBrowserName(rows: McpServerDraft[]): string {
+  const names = new Set(rows.map((row) => row.name.trim()));
+  let name = "browser";
+  for (let n = 2; names.has(name); n++) name = `browser-${n}`;
+  return name;
+}
+
 function newMcpDraftId(): string {
   mcpDraftSeq += 1;
   return `mcp-${Date.now()}-${mcpDraftSeq}`;
@@ -149,6 +158,10 @@ function kvTextToRecord(text: string): Record<string, string> | undefined {
 
 function mcpServersToDrafts(map?: McpServersMap): McpServerDraft[] {
   return Object.entries(map ?? {}).map(([name, cfg]) => {
+    if (cfg.type === "playwright") {
+      return { id: newMcpDraftId(), name, type: cfg.type, browser: cfg.browser,
+        command: "", argsText: "", url: "", envText: "", headersText: "" };
+    }
     if (cfg.type === "sse" || cfg.type === "http") {
       return {
         id: newMcpDraftId(),
@@ -185,7 +198,9 @@ function buildMcpServersPatch(
     if (!name) continue; // skip empty rows
     if (seen.has(name)) return { ok: false, error: `Duplicate MCP server name "${name}"` };
     seen.add(name);
-    if (d.type === "stdio") {
+    if (d.type === "playwright") {
+      map[name] = { type: "playwright", browser: d.browser ?? "msedge" };
+    } else if (d.type === "stdio") {
       map[name] = {
         type: "stdio",
         command: d.command.trim(),
@@ -338,6 +353,19 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   );
   const [closePending, setClosePending] = useState(false);
   const openedRef = useRef(false);
+
+  const [savingPhotoFlow, setSavingPhotoFlow] = useState(false);
+  async function onPhotoFlowChange(enabled: boolean) {
+    setLocalError(null);
+    setSavedNote(null);
+    setSavingPhotoFlow(true);
+    try {
+      await saveSettings({ photoFlowEnabled: enabled });
+      setSavedNote(t.settings.saved);
+    } catch (err) {
+      setLocalError(err instanceof Error ? err.message : String(err));
+    } finally { setSavingPhotoFlow(false); }
+  }
 
   async function onGalaxyEffectsChange(enabled: boolean) {
     setLocalError(null);
@@ -565,12 +593,10 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
       setMcpLive(
         Object.fromEntries(res.statuses.map((s) => [s.name, s])),
       );
-      const failed = res.statuses.filter((s) => s.status === "failed");
-      setMcpNote(
-        failed.length
-          ? `Probe: ${failed.length} server(s) failed`
-          : `Probe: ${res.statuses.length} server(s) connected`,
-      );
+      const expected = Object.keys(patchMcp.mcpServers);
+      const connected = expected.filter(name =>
+        res.statuses.some(server => server.name === name && server.status === "connected"));
+      setMcpNote(`已连接 ${connected.length} / ${expected.length} 个服务器`);
     } catch (err) {
       setMcpNote(err instanceof Error ? err.message : String(err));
     } finally {
@@ -758,7 +784,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
         ...prev.mcpServers,
         {
           id: newMcpDraftId(),
-          name: "",
+          name: type === "playwright" ? nextBrowserName(prev.mcpServers) : "",
           type,
           command: "",
           argsText: "",
@@ -1145,7 +1171,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
                   <span className="settings-config-index">{index + 1}</span>
                   <span>
                     <strong>{row.name.trim() || "未命名服务器"}</strong>
-                    <small>{row.type === "stdio" ? "本地命令" : `远程 ${row.type.toUpperCase()}`}</small>
+                    <small>{row.type === "playwright" ? "Playwright MCP" : row.type === "stdio" ? "本地命令" : `远程 ${row.type.toUpperCase()}`}</small>
                   </span>
                 </div>
                 <button
@@ -1180,11 +1206,22 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
                     }
                   >
                     <option value="stdio">本地命令 · stdio</option>
+                    <option value="playwright">内置浏览器 · Playwright MCP</option>
                     <option value="http">远程服务 · HTTP</option>
                     <option value="sse">远程服务 · SSE</option>
                   </select>
                 </label>
-                {row.type === "stdio" ? (
+                {row.type === "playwright" ? (
+                  <label className="settings-field settings-config-wide">
+                    <span>浏览器</span>
+                    <select className="select" value={row.browser ?? "msedge"}
+                      onChange={(e) => updateMcpRow(row.id, { browser: e.target.value as PlaywrightBrowser })}>
+                      <option value="msedge">Microsoft Edge</option>
+                      <option value="chrome">Google Chrome</option>
+                    </select>
+                    <small>使用本机已安装的浏览器，每个会话打开独立窗口。</small>
+                  </label>
+                ) : row.type === "stdio" ? (
                   <>
                     <label className="settings-field">
                       <span>启动命令</span>
@@ -1251,6 +1288,9 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
           ))
         )}
         <div className="settings-collection-actions">
+          <button type="button" className="btn" onClick={() => addMcpRow("playwright")}>
+            添加浏览器
+          </button>
           <button type="button" className="btn btn-primary" onClick={() => addMcpRow("stdio")}>
             添加本地服务器
           </button>
@@ -1638,6 +1678,18 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
             </select>
             <p className="settings-hint">界面语言（保存后生效）</p>
           </label>
+          <div className="settings-toggle-row">
+            <div>
+              <span>{t.settings.photoFlow}</span>
+              <small>{t.settings.photoFlowHint}</small>
+            </div>
+            <ToggleSwitch
+              checked={settings?.photoFlowEnabled !== false}
+              label={t.settings.photoFlow}
+              disabled={saving || savingPhotoFlow}
+              onCheckedChange={(enabled) => { void onPhotoFlowChange(enabled); }}
+            />
+          </div>
           <div className="settings-toggle-row">
             <div>
               <span>{t.settings.galaxyEffects}</span>

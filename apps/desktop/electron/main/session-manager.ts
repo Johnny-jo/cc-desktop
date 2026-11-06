@@ -55,6 +55,7 @@ import {
   type ContextCompressor,
 } from "./context-compressor";
 import { getClaudeExecutablePath } from "./runtime-paths";
+import { resolveMcpServers } from "./playwright-mcp";
 import path from "node:path";
 
 /**
@@ -110,6 +111,11 @@ export type SessionRunOpts = {
 };
 
 export type SessionManagerDeps = {
+  /** Normalize outbound PDFs, including SDK resume history, before provider translation. */
+  pdfCompatibility?: {
+    environment: (env: Record<string, string>) => Promise<Record<string, string>>;
+    dispose: () => void;
+  };
   queryFn: QueryFn;
   permissionBroker: PermissionBroker;
   userPromptBroker?: UserPromptBroker;
@@ -574,6 +580,7 @@ function isSdkPersistedUserTurn(msg: unknown): boolean {
 
 export class SessionManager {
   private readonly queryFn: QueryFn;
+  private readonly pdfCompatibility: SessionManagerDeps["pdfCompatibility"];
   private readonly permissionBroker: PermissionBroker;
   private readonly userPromptBroker: UserPromptBroker | undefined;
   private readonly diffTracker: DiffTracker;
@@ -611,6 +618,7 @@ export class SessionManager {
 
   constructor(deps: SessionManagerDeps) {
     this.queryFn = deps.queryFn;
+    this.pdfCompatibility = deps.pdfCompatibility;
     this.permissionBroker = deps.permissionBroker;
     this.userPromptBroker = deps.userPromptBroker;
     this.diffTracker = deps.diffTracker;
@@ -1056,6 +1064,7 @@ export class SessionManager {
   private applyAndMaybePersist(
     entry: SessionEntry,
     event: SdkNormalizedEvent,
+    nextId = entry.nextId,
   ): void {
     this.hydrateItems(entry);
     const toolId = event.type === "tool_start" || event.type === "tool_end"
@@ -1064,7 +1073,7 @@ export class SessionManager {
     const previousTool = toolId ? this.resolveTool(entry, toolId) : undefined;
     this.setProgress(entry, updateSessionProgress(entry.summary.progress, event, previousTool));
     const next = applySdkEvent(this.transcriptOf(entry), event, {
-      nextId: entry.nextId,
+      nextId,
     });
     if (event.type === "user_msg_ids") {
       const bound = bindSdkUserMsgIds(next.items, event.uuids);
@@ -1501,7 +1510,7 @@ export class SessionManager {
     }
     try {
       const result = await entry.query.setMcpServers(
-        servers as Record<string, unknown>,
+        resolveMcpServers(servers, this.isPackaged, !entry.pathJail && !entry.roomReadOnlyTurn),
       );
       this.settings.update({ mcpServers: servers });
       return {
@@ -1531,11 +1540,13 @@ export class SessionManager {
     if (!Object.keys(target).length) return [];
 
     const env = this.cpa.buildProcessEnv(settings.defaultModel);
+    const claudePath = this.resolveClaudePath();
     const q = this.queryFn({
       prompt: "Reply with exactly: ok",
       options: {
         cwd: process.cwd(),
         model: settings.defaultModel,
+        ...(claudePath ? { pathToClaudeCodeExecutable: claudePath } : {}),
         env,
         // Bypass tool permission prompts — the probe prompt needs no tools.
         permissionMode: "bypassPermissions",
@@ -1543,7 +1554,7 @@ export class SessionManager {
         maxTurns: 1,
         tools: [],
         strictMcpConfig: true,
-        mcpServers: target,
+        mcpServers: resolveMcpServers(target, this.isPackaged),
         // Don't load CLAUDE.md / project settings into the probe.
         settingSources: [],
       },
@@ -1564,7 +1575,10 @@ export class SessionManager {
           ...(s.scope ? { scope: s.scope } : {}),
           ...(Array.isArray(s.tools) ? { tools: s.tools } : {}),
         }));
-        const pending = statuses.some((s) => s.status === "pending");
+        const pending = Object.keys(target).some((name) => {
+          const server = statuses.find((s) => s.name === name);
+          return !server || server.status === "pending";
+        });
         if (!pending || Date.now() > deadline) break;
         await new Promise((r) => setTimeout(r, 500));
       }
@@ -1877,6 +1891,7 @@ export class SessionManager {
   disposeAll(): void {
     for (const entry of this.sessions.values()) this.parkSession(entry, true);
     this.flushPendingPersistence();
+    this.pdfCompatibility?.dispose();
   }
 
   /**
@@ -2043,12 +2058,7 @@ export class SessionManager {
 
     const { content, errors } = buildUserContent(prompt);
     if (errors.length) {
-      this.emit({
-        type: "result",
-        sessionId: "unknown",
-        ok: false,
-        error: errors.join("; "),
-      });
+      throw new Error(errors.join("; "));
     }
 
     const sessionId = randomUUID();
@@ -2090,17 +2100,10 @@ export class SessionManager {
     this.setRoomAbortSignal(entry, opts?.roomAbortSignal);
     opts?.onSessionId?.(sessionId);
     this.throwIfRoomTurnCancelled(entry);
-    if (!summary.hiddenFromList) this.emitSession({ ...summary });
     this.persistSummary(entry);
-    this.replaceTranscript(
-      entry,
-      appendUserItem(
-        { items: entry.items, optimisticUserTexts: [] },
-        opts?.persistText ?? displayPrompt(prompt),
-        { nextId: entry.nextId, attachments: prompt.attachments },
-      ).items,
-      { persist: true },
-    );
+    const first = this.recordUserPrompt(entry, prompt, opts?.persistText);
+    if (!summary.hiddenFromList) this.emitSession({ ...summary });
+    this.emit(first);
 
     await this.openStreamingSession(sessionId, content, { resume: false });
     return sessionId;
@@ -2174,21 +2177,12 @@ export class SessionManager {
 
     const { content, errors } = buildUserContent(prompt);
     if (errors.length) {
-      this.emit({
-        type: "result",
-        sessionId,
-        ok: false,
-        error: errors.join("; "),
-      });
+      this.emit({ type: "result", sessionId, ok: false, error: errors.join("; ") });
+      throw new Error(errors.join("; "));
     }
 
     this.hydrateItems(entry);
-    const next = appendUserItem(
-      { items: entry.items, optimisticUserTexts: [] },
-      opts?.persistText ?? displayPrompt(prompt),
-      { nextId: entry.nextId, attachments: prompt.attachments },
-    );
-    this.replaceTranscript(entry, next.items, { persist: true });
+    const submitted = this.recordUserPrompt(entry, prompt, opts?.persistText);
 
     entry.summary = {
       ...entry.summary,
@@ -2200,6 +2194,7 @@ export class SessionManager {
     this.persistSummary(entry);
 
     // Live streaming session: just push the next user message.
+    this.emit(submitted);
     // Skipped when a rewind anchor is pending — the conversation must be
     // re-opened truncated at the anchor, so force the resume path below.
     // Also skip if the stream was torn down by abort() (input closed / cleared).
@@ -2273,6 +2268,14 @@ export class SessionManager {
     throw new Error(`CPA: ${message}`);
   }
 
+  private resolveClaudePath() {
+    return this.claudeExecutablePath ?? getClaudeExecutablePath({
+      isPackaged: this.isPackaged,
+      resourcesPath: process.resourcesPath,
+      userDataDir: "",
+    });
+  }
+
   private buildOptions(
     sessionId: string,
     entry: SessionEntry,
@@ -2287,13 +2290,7 @@ export class SessionManager {
     };
     // Prefer the bundled / vendor Claude Code binary so the app does not
     // require a global `claude` on PATH (packaged installs ship claude.exe).
-    const claudePath =
-      this.claudeExecutablePath ??
-      getClaudeExecutablePath({
-        isPackaged: this.isPackaged,
-        resourcesPath: process.resourcesPath,
-        userDataDir: "",
-      });
+    const claudePath = this.resolveClaudePath();
 
     return {
       // The official sandbox derives its default writable workspace from cwd.
@@ -2338,7 +2335,7 @@ export class SessionManager {
       Object.keys(queryExtras.servers).length
         ? {
             mcpServers: {
-              ...(settings.mcpServers ?? {}),
+              ...resolveMcpServers(settings.mcpServers ?? {}, this.isPackaged, !entry.pathJail && !entry.roomReadOnlyTurn),
               ...queryExtras.servers,
             },
           }
@@ -2595,6 +2592,10 @@ export class SessionManager {
 
     try {
       this.throwIfRoomTurnCancelled(entry, roomTurn);
+      if (this.pdfCompatibility) {
+        options.env = await this.pdfCompatibility.environment(options.env as Record<string, string>);
+        this.throwIfRoomTurnCancelled(entry, roomTurn);
+      }
       const q = this.queryFn({
         prompt: input as AsyncIterable<unknown>,
         options,
@@ -2646,6 +2647,15 @@ export class SessionManager {
     }
   }
 
+  private recordUserPrompt(entry: SessionEntry, prompt: UserPrompt, persistText?: string): SdkNormalizedEvent {
+    const text = persistText ?? displayPrompt(prompt);
+    const next = appendUserItem(this.transcriptOf(entry), text, { nextId: entry.nextId, attachments: prompt.attachments });
+    this.replaceTranscript(entry, next.items, { persist: true });
+    const submittedItem = next.items[next.items.length - 1];
+    if (submittedItem.kind !== "text" || submittedItem.role !== "user") throw new Error("Missing submitted user message");
+    return { type: "user_message", sessionId: entry.summary.id, text, submittedItem };
+  }
+
   private dispatchNormalizedEvent(
     entry: SessionEntry,
     event: SdkNormalizedEvent,
@@ -2654,8 +2664,13 @@ export class SessionManager {
     if (event.type === "result" && !event.ok && event.error) {
       event = { ...event, error: humanizeAgentError(event.error, model) };
     }
-    this.applyAndMaybePersist(entry, event);
-    this.emit(event);
+    const transcriptIds: string[] = [];
+    this.applyAndMaybePersist(entry, event, prefix => {
+      const id = entry.nextId(prefix);
+      transcriptIds.push(id);
+      return id;
+    });
+    this.emit(transcriptIds.length ? { ...event, transcriptIds } : event);
     if (event.type !== "result") return;
 
     const settings = this.settings.get();

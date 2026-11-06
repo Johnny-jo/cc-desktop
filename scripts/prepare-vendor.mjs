@@ -10,21 +10,24 @@
  *   - Fails if forbidden filenames or secret-like strings appear in vendor/.
  *
  * Env / flags:
- *   CLAUDE_DESKTOP_CPA_DIST  — dir containing cli-proxy-api.exe (default D:\gitrep\CC\CPA)
+ *   CLAUDE_DESKTOP_CPA_DIST  — dir containing cli-proxy-api.exe (default pinned tools/cpa/<version>, prepared by pnpm download:cpa)
  *   SKIP_CLAUDE=1            — skip claude.exe (full prepare still wipes vendor first)
  *   SKIP_CPA=1               — skip CPA (full prepare still wipes vendor first)
  *   CPA_ONLY=1 / --cpa-only  — only refresh cli-proxy-api.exe + template;
  *                              keeps claude.exe; NEVER copies config.yaml
+ *   --claude-only            — only refresh the pinned SDK's claude.exe; keeps CPA
  */
 import fs from "node:fs";
 import path from "node:path";
-import { createRequire } from "node:module";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { resolveSdkClaudeBinary, claudeBinaryVersion, claudeRelease, verifyClaudeVendor } from "./claude-vendor.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
 const vendorRoot = path.join(root, "vendor", "win-x64");
-const require = createRequire(import.meta.url);
+const cpaRelease = JSON.parse(fs.readFileSync(path.join(__dirname, "cpa-release.json"), "utf8"));
+const cpaDist = process.env.CLAUDE_DESKTOP_CPA_DIST || path.join(root, "tools", "cpa", cpaRelease.backend);
 
 /** Only these basenames may appear under vendor/win-x64/cpa/ */
 const CPA_ALLOWLIST = new Set([
@@ -50,7 +53,11 @@ function ensureDir(p) {
 }
 
 function rmrf(p) {
-  fs.rmSync(p, { recursive: true, force: true });
+  const target = path.resolve(p);
+  if (target !== vendorRoot && !target.startsWith(vendorRoot + path.sep)) {
+    throw new Error(`Refusing to remove outside vendor directory: ${target}`);
+  }
+  fs.rmSync(target, { recursive: true, force: true });
 }
 
 function copyFile(src, dest) {
@@ -83,34 +90,6 @@ function copyFile(src, dest) {
   console.log(
     `  → ${dest} (${(fs.statSync(dest).size / 1024 / 1024).toFixed(1)} MB)`,
   );
-}
-
-function resolveSdkClaudeExe() {
-  try {
-    const pkgJson = require.resolve(
-      "@anthropic-ai/claude-agent-sdk-win32-x64/package.json",
-    );
-    const exe = path.join(path.dirname(pkgJson), "claude.exe");
-    if (fs.existsSync(exe)) return exe;
-  } catch {
-    // fall through
-  }
-  const pnpmDir = path.join(root, "node_modules", ".pnpm");
-  if (fs.existsSync(pnpmDir)) {
-    for (const name of fs.readdirSync(pnpmDir)) {
-      if (!name.startsWith("@anthropic-ai+claude-agent-sdk-win32-x64@")) continue;
-      const candidate = path.join(
-        pnpmDir,
-        name,
-        "node_modules",
-        "@anthropic-ai",
-        "claude-agent-sdk-win32-x64",
-        "claude.exe",
-      );
-      if (fs.existsSync(candidate)) return candidate;
-    }
-  }
-  return null;
 }
 
 /** Fail build if vendor contains unexpected files or secret-looking strings. */
@@ -174,10 +153,14 @@ function parseFlags() {
   const argv = new Set(process.argv.slice(2));
   const cpaOnly =
     argv.has("--cpa-only") || process.env.CPA_ONLY === "1";
+  const claudeOnly = argv.has("--claude-only");
+  if (claudeOnly && cpaOnly) throw new Error("Choose --claude-only or --cpa-only, not both.");
+  if (claudeOnly && process.env.SKIP_CLAUDE === "1") throw new Error("--claude-only conflicts with SKIP_CLAUDE.");
   return {
     cpaOnly,
+    claudeOnly,
     skipClaude: cpaOnly || process.env.SKIP_CLAUDE === "1",
-    skipCpa: process.env.SKIP_CPA === "1",
+    skipCpa: claudeOnly || process.env.SKIP_CPA === "1",
   };
 }
 
@@ -195,21 +178,35 @@ function sanitizeCpaVendorDir() {
       }
       for (const inner of fs.readdirSync(staticDir)) {
         if (inner === "management.html") continue;
-        fs.rmSync(path.join(staticDir, inner), { recursive: true, force: true });
+        rmrf(path.join(staticDir, inner));
         console.log(`Removed leftover from vendor cpa/static/: ${inner}`);
       }
       continue;
     }
     if (CPA_ALLOWLIST.has(name)) continue;
     const p = path.join(cpaDir, name);
-    fs.rmSync(p, { recursive: true, force: true });
+    rmrf(p);
     console.log(`Removed leftover from vendor cpa/: ${name}`);
   }
 }
 
+export function validateCpaSource(sourceDir = cpaDist) {
+  const exe = path.join(sourceDir, "cli-proxy-api.exe");
+  if (!fs.existsSync(exe)) throw new Error("CPA source missing. Run pnpm download:cpa first, or set CLAUDE_DESKTOP_CPA_DIST.");
+  const probe = spawnSync(exe, ["--help"], { encoding: "utf8", timeout: 10000, windowsHide: true });
+  const banner = `${probe.stdout ?? ""}\n${probe.stderr ?? ""}`;
+  const version = banner.match(/CLIProxyAPI Version:\s*v?(\d+\.\d+\.\d+)/)?.[1];
+  if (probe.error || !version || Number(version.split(".")[0]) < 8) {
+    throw new Error("CPA v8 or later is required; refusing to package a legacy/unknown backend.");
+  }
+  const panel = path.join(sourceDir, "static", "management.html");
+  if (!fs.existsSync(panel) || !fs.readFileSync(panel, "utf8").includes("/v8/management")) {
+    throw new Error("A v8-compatible management.html is required. Run pnpm download:cpa.");
+  }
+  return version;
+}
+
 function copyCpaBinary() {
-  const cpaDist =
-    process.env.CLAUDE_DESKTOP_CPA_DIST || "D:\\gitrep\\CC\\CPA";
   const cpaExe = path.join(cpaDist, "cli-proxy-api.exe");
   if (!fs.existsSync(cpaExe)) {
     console.error(
@@ -254,22 +251,30 @@ function copyCpaBinary() {
 }
 
 function main() {
-  const { cpaOnly, skipClaude, skipCpa } = parseFlags();
+  const { cpaOnly, claudeOnly, skipClaude, skipCpa } = parseFlags();
+  let previous = {};
+  try { previous = JSON.parse(fs.readFileSync(path.join(vendorRoot, "manifest.json"), "utf8")); } catch {}
+  const cpaVersion = skipCpa ? null : validateCpaSource();
+  const claudeSource = skipClaude ? null : resolveSdkClaudeBinary();
+  if (claudeSource && claudeBinaryVersion(claudeSource.exe) !== claudeRelease.cli) {
+    throw new Error("Installed Claude SDK binary does not match the pinned CLI version.");
+  }
   console.log("prepare-vendor →", vendorRoot);
   if (cpaOnly) console.log("mode: --cpa-only (refresh CPA exe, keep claude.exe)");
+  if (claudeOnly) console.log("mode: --claude-only (refresh Claude CLI, keep CPA)");
   console.log(
     "SECURITY: will NOT copy config.yaml / auth-dir / tokens from local CPA install.",
   );
 
-  if (cpaOnly) {
-    // Keep claude.exe / cloudflared; only refresh CPA binary + template.
+  if (cpaOnly || claudeOnly) {
+    // Preserve the other runtime and cloudflared during a targeted refresh.
     ensureDir(vendorRoot);
     ensureDir(path.join(vendorRoot, "cloudflared"));
-    sanitizeCpaVendorDir();
+    if (cpaOnly) sanitizeCpaVendorDir();
   } else {
     // Clean slate so leftover credential files cannot linger in vendor/.
     // SKIP_CLAUDE / SKIP_CPA still wipe then recopy the other binary —
-    // use --cpa-only when you only want to bump CPA without touching claude.
+    // use --cpa-only or --claude-only for a targeted runtime update.
     rmrf(vendorRoot);
     ensureDir(vendorRoot);
     // Reserve the (optional, possibly empty) cloudflared dir so the
@@ -278,15 +283,8 @@ function main() {
   }
 
   if (!skipClaude) {
-    const claudeSrc = resolveSdkClaudeExe();
-    if (!claudeSrc) {
-      console.error(
-        "ERROR: claude.exe not found. Install optional dep @anthropic-ai/claude-agent-sdk-win32-x64",
-      );
-      process.exit(1);
-    }
     console.log("Claude CLI (third-party, not part of this repo):");
-    copyFile(claudeSrc, path.join(vendorRoot, "claude", "claude.exe"));
+    copyFile(claudeSource.exe, path.join(vendorRoot, "claude", "claude.exe"));
   } else if (cpaOnly) {
     const existing = path.join(vendorRoot, "claude", "claude.exe");
     if (!fs.existsSync(existing)) {
@@ -314,6 +312,13 @@ function main() {
     platform: "win-x64",
     claude: fs.existsSync(path.join(vendorRoot, "claude", "claude.exe")),
     cpa: fs.existsSync(path.join(vendorRoot, "cpa", "cli-proxy-api.exe")),
+    cpaVersion: skipCpa ? previous.cpaVersion ?? null : cpaVersion,
+    panelVersion: skipCpa ? previous.panelVersion ?? null : process.env.CLAUDE_DESKTOP_CPA_DIST ? "custom" : cpaRelease.panel,
+    ...(!skipClaude ? verifyClaudeVendor() : {
+      claudeVersion: previous.claudeVersion ?? null,
+      claudeSdkVersion: previous.claudeSdkVersion ?? null,
+      claudeSha256: previous.claudeSha256 ?? null,
+    }),
     shipsLocalConfig: false,
     cpaAllowlist: [...CPA_ALLOWLIST],
   };
@@ -326,9 +331,11 @@ function main() {
   console.log("Done. No local credentials packed.");
 }
 
-try {
-  main();
-} catch (err) {
-  console.error(err instanceof Error ? err.message : err);
-  process.exit(1);
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    main();
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : err);
+    process.exit(1);
+  }
 }

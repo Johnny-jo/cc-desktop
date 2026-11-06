@@ -1,10 +1,12 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { parse } from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   applyCpaConfigDefaults,
   getClaudeExecutablePath,
+  getCpaExecutablePath,
   getCpaUserConfigPath,
   getBundledModsDir,
   getKernelImprovePath,
@@ -47,6 +49,42 @@ function env(partial: Partial<RuntimePathEnv> & { userDataDir: string }): Runtim
 }
 
 describe("runtime-paths", () => {
+  it("does not fall back to a legacy CPA when the prepared bundle is missing", () => {
+    const root = tmp();
+    expect(getCpaExecutablePath(env({ userDataDir: root, projectRoot: root, cpaDistDir: "" })))
+      .toBe(path.join(root, "vendor", "win-x64", "cpa", "cli-proxy-api.exe"));
+  });
+
+  it("repairs a v8 config using client keys without touching provider groups", () => {
+    const root = tmp();
+    const cfg = path.join(root, "config.yaml");
+    fs.writeFileSync(cfg, `config-version: 8
+server:
+  host: custom-host
+  port: 9999
+management:
+  secret-key: ""
+  disable-control-panel: true
+access:
+  api-keys: [existing-client]
+api-keys:
+  codex:
+    - keys:
+        - api-key: upstream-key
+oauth:
+  auth-dir: D:/custom-auth
+`);
+    expect(repairCpaManagementConfig(cfg)).toBe(true);
+    const body = fs.readFileSync(cfg, "utf8");
+    const config = parse(body);
+    expect(config.management["secret-key"]).toBe("existing-client");
+    expect(config.server).toEqual({ host: "custom-host", port: 9999 });
+    expect(config.oauth["auth-dir"]).toBe("D:/custom-auth");
+    expect(config["api-keys"].codex[0].keys[0]["api-key"]).toBe("upstream-key");
+    expect(repairCpaManagementConfig(cfg)).toBe(false);
+    expect(fs.readFileSync(cfg, "utf8")).toBe(body);
+  });
+
   it("materializeCpaConfig creates userData config from template", () => {
     const root = tmp();
     const resources = path.join(root, "apps", "desktop", "resources", "cpa");
@@ -68,7 +106,7 @@ describe("runtime-paths", () => {
     const dest = materializeCpaConfig(e, { port: 8317, apiKey: "secret-key" });
     expect(fs.existsSync(dest)).toBe(true);
     const body = fs.readFileSync(dest, "utf8");
-    expect(body).toContain('host: "127.0.0.1"');
+    expect(parse(body).host).toBe("127.0.0.1");
     expect(body).toContain("port: 8317");
     expect(body).toContain("secret-key");
     // Second call is idempotent (does not overwrite).
@@ -77,7 +115,7 @@ describe("runtime-paths", () => {
     expect(fs.readFileSync(dest, "utf8")).toBe("keep\n");
   });
 
-  it("materializeCpaConfig copies management.html beside userData config", () => {
+  it("materializeCpaConfig updates management.html with the bundled release", () => {
     const root = tmp();
     const vendorStatic = path.join(root, "vendor", "win-x64", "cpa", "static");
     fs.mkdirSync(vendorStatic, { recursive: true });
@@ -99,7 +137,7 @@ describe("runtime-paths", () => {
     expect(fs.readFileSync(panel, "utf8")).toBe("PANEL");
     fs.writeFileSync(panel, "KEEP", "utf8");
     materializeCpaConfig(e);
-    expect(fs.readFileSync(panel, "utf8")).toBe("KEEP");
+    expect(fs.readFileSync(panel, "utf8")).toBe("PANEL");
   });
 
   it("applyCpaConfigDefaults forces localhost, panel, and secret-key", () => {
@@ -107,12 +145,12 @@ describe("runtime-paths", () => {
       'host: ""\nport: 1\nauth-dir: "x"\nremote-management:\n  allow-remote: false\n  secret-key: ""\n  disable-control-panel: true\napi-keys:\n  - a\n',
       { port: 8317, apiKey: "k" },
     );
-    expect(out).toMatch(/host:\s*"127\.0\.0\.1"/);
+    expect(parse(out).host).toBe("127.0.0.1");
     expect(out).toMatch(/port:\s*8317/);
     expect(out).toContain("api-keys:");
     expect(out).toContain("- k");
     expect(out).toMatch(/disable-control-panel:\s*false/);
-    expect(out).toMatch(/secret-key:\s*"k"/);
+    expect(parse(out)["remote-management"]["secret-key"]).toBe("k");
   });
 
   it("repairCpaManagementConfig enables panel and secret-key on old configs", () => {
@@ -126,7 +164,7 @@ describe("runtime-paths", () => {
     expect(repairCpaManagementConfig(cfg, { apiKey: "tok123" })).toBe(true);
     const body = fs.readFileSync(cfg, "utf8");
     expect(body).toMatch(/disable-control-panel:\s*false/);
-    expect(body).toMatch(/secret-key:\s*"tok123"/);
+    expect(parse(body)["remote-management"]["secret-key"]).toBe("tok123");
     // Second pass is a no-op when already healthy.
     expect(repairCpaManagementConfig(cfg, { apiKey: "tok123" })).toBe(false);
   });
@@ -135,7 +173,7 @@ describe("runtime-paths", () => {
     const root = tmp();
     const cfg = path.join(root, "config.yaml");
     const original =
-      'host: "127.0.0.1"\nport: 8317\nremote-management:\n  allow-remote: false\n  secret-key: "$2a$10$hashedUserSecret"\n  disable-control-panel: false\napi-keys:\n  - user-token-abc\nproviders:\n  - name: keep-me\n';
+      'host: "127.0.0.1"\nport: 8317\nremote-management:\n  allow-remote: false\n  secret-key: "$2a$10$hashedUserSecret"\n  disable-control-panel: false\n  disable-auto-update-panel: true\napi-keys:\n  - user-token-abc\nproviders:\n  - name: keep-me\n';
     fs.writeFileSync(cfg, original, "utf8");
     // Healthy config → repair is a pure no-op (no rewrite at all).
     expect(

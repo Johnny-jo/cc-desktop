@@ -243,7 +243,7 @@ describe("CpaSupervisor", () => {
 
   it("returns only quota mapped to the requested model", async () => {
     const fetchMock = vi.fn(async (url: string) => {
-      if (url.endsWith("/v0/management/auth-files")) {
+      if (url.endsWith("/v8/management/credentials")) {
         return {
           ok: true,
           json: async () => ({
@@ -290,7 +290,7 @@ describe("CpaSupervisor", () => {
     let fail = false;
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       if (fail) return { ok: false, status: 503, json: async () => ({}) };
-      if (url.endsWith("/v0/management/auth-files")) {
+      if (url.endsWith("/v8/management/credentials")) {
         return {
           ok: true,
           status: 200,
@@ -299,9 +299,10 @@ describe("CpaSupervisor", () => {
           }),
         };
       }
-      if (url.includes("/auth-files/models?")) {
+      if (url.includes("/credentials/models?")) {
         return { ok: true, status: 200, json: async () => ({ models: [{ id: "kimi-k3" }] }) };
       }
+      expect(url).toBe("http://127.0.0.1:8317/v8/management/requests/api-call");
       const request = JSON.parse(String(init?.body)) as { url: string };
       expect(request.url).toBe("https://api.kimi.com/coding/v1/usages");
       return {
@@ -334,7 +335,7 @@ describe("CpaSupervisor", () => {
 
   it("actively refreshes xAI/Grok weekly billing", async () => {
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
-      if (url.endsWith("/v0/management/auth-files")) {
+      if (url.endsWith("/v8/management/credentials")) {
         return {
           ok: true,
           status: 200,
@@ -343,9 +344,10 @@ describe("CpaSupervisor", () => {
           }),
         };
       }
-      if (url.includes("/auth-files/models?")) {
+      if (url.includes("/credentials/models?")) {
         return { ok: true, status: 200, json: async () => ({ models: [{ id: "grok-4.5" }] }) };
       }
+      expect(url).toBe("http://127.0.0.1:8317/v8/management/requests/api-call");
       const request = JSON.parse(String(init?.body)) as { url: string };
       const weekly = request.url.includes("format=credits");
       return {
@@ -382,27 +384,31 @@ describe("CpaSupervisor", () => {
 
   it("actively refreshes Antigravity quota for Gemini models", async () => {
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
-      if (url.endsWith("/v0/management/auth-files")) {
+      if (url.endsWith("/v8/management/credentials")) {
         return {
           ok: true,
           status: 200,
           json: async () => ({
             files: [{
-              name: "antigravity.json",
+              name: "antigravity test.json",
               type: "antigravity",
               auth_index: "ag-1",
-              project_id: "project-1",
             }],
           }),
         };
       }
-      if (url.includes("/auth-files/models?")) {
+      if (url.includes("/credentials/models?")) {
         return {
           ok: true,
           status: 200,
           json: async () => ({ models: [{ id: "gemini-3-pro-high" }] }),
         };
       }
+      if (url.includes("/credentials/download?")) {
+        expect(url).toBe("http://127.0.0.1:8317/v8/management/credentials/download?name=antigravity%20test.json");
+        return { ok: true, status: 200, json: async () => ({ installed: { project_id: "project-1" } }) };
+      }
+      expect(url).toBe("http://127.0.0.1:8317/v8/management/requests/api-call");
       const request = JSON.parse(String(init?.body)) as { url: string; data: string };
       expect(request.url).toContain("retrieveUserQuotaSummary");
       expect(JSON.parse(request.data)).toEqual({ project: "project-1" });

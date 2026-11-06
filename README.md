@@ -76,6 +76,8 @@ CPA 的真实账号、API Key 和配置文件不会被提交到仓库，也不�
 ### 扩展与界面
 
 - MCP 服务器、Agents、Skills 和可安装 Mod 包
+- 浏览器自动化：在「设置 → MCP 服务器 → 添加浏览器」选择本机的 Chrome 或 Edge，保存后新建会话即可用当前 CPA 模型操作网页。Playwright MCP 随 Windows 包分发，每次会话使用独立浏览器资料。
+- 受控网页右上角显示「AgentOS 正在控制中」，虚拟光标会移动到 Agent 的点击位置。在任一受控标签页点击「取消控制」可中断当前浏览器操作，并停止此连接后续的操作。页面保留，可继续手动使用。
 - Mod Kernel 提供共享记忆、群词典、入站守卫、心跳等房间扩展
 - 中文、English、跟随系统
 - 浅色、深色、跟随系统主题
@@ -99,10 +101,11 @@ apps/desktop/release/    # 本地构建产物（不提交）
 ## 环境要求
 
 - Windows 10/11（当前安装包目标为 Windows x64）
-- Node.js `>=22.12.0`，推荐使用仓库 `.nvmrc` 中的版本
+- Node.js `>=22.13.0`，推荐使用仓库 `.nvmrc` 中的版本
 - pnpm `9.15.0`
 - Claude Code：开发时可使用本机 SDK/`claude.exe`；发布包需准备对应二进制
-- CPA：需要使用模型路由功能时安装并运行本机 CLIProxyAPI
+- 当前配套版本：Claude Code `2.1.318` / Agent SDK `0.3.318`，固定记录在 `scripts/claude-release.json`
+- CPA：使用 CLIProxyAPI v8；当前固定后端 8.0.43 / 管理页 1.26.7，升级说明见 [CPA v8 升级与验收](docs/cpa-v8-upgrade.md)
 
 ## 开发启动
 
@@ -110,6 +113,8 @@ apps/desktop/release/    # 本地构建产物（不提交）
 git clone <this-repo>
 cd claude-desktop
 pnpm install
+pnpm download:cpa
+pnpm prepare:vendor:cpa
 pnpm dev
 ```
 
@@ -124,6 +129,43 @@ pnpm --filter @claude-desktop/desktop dist:dir
 ```
 
 首次启动后，在设置或引导页配置 CPA 地址和网关 Token；默认端口是 `8317`。然后打开一个项目文件夹，并从设置中执行“从 CPA 同步模型”。不使用 CPA 时仍可使用本地 Claude Code 能力，但第三方模型目录和 CPA 配额不可用。
+
+单独更新项目内的 Claude 可执行文件（保留 CPA）：
+
+```powershell
+pnpm install --frozen-lockfile
+pnpm prepare:vendor:claude
+pnpm verify:vendor:claude
+```
+
+准备脚本只取当前 SDK 对应的 Windows 包，打包前核对 SDK/CLI 版本和二进制 SHA256，
+避免 pnpm 缓存中的旧版本被再次打入安装包。升级版本时同步修改 SDK 精确依赖、
+`scripts/claude-release.json` 和锁文件，随后重启桌面主进程。
+
+## PDF 本地 OCR 与图片缓存
+
+DeepSeek 的 PDF 兼容链路先提取原文字层，再对扫描页、损坏文字层或带图片的短文字页
+执行 PP-OCRv5 mobile 本地 CPU 识别。结果保留页码、OCR 来源和低置信度提示。
+模型和字典随应用打包，按需加载，解析子进程空闲 60 秒释放；无需 Python 或 GPU。
+单 PDF 限制 10 MiB、200 页、提取后 30 万字符，整份处理最长 5 分钟。
+图片附件和支持原生 PDF 的模型仍走各自原有通道；OCR 不等同于表格结构或图表理解。
+
+- 日间照片流缓存：`<userData>/photo-flow/`，JPG 与 `manifest.json`，上限 48 张 / 20 MiB。
+- 粘贴截图：`<temp>/cc-desktop-clipboard/`。
+- 群聊附件：`<userData>/room-attachments/`；单聊选择文件保留原路径引用。
+- OCR 渲染页面仅在内存中处理，不新增磁盘图片缓存。
+
+Windows 当前开发版 `userData` 为 `%APPDATA%/@claude-desktop/desktop`。
+修改 OCR/主进程代码后需要重启 `pnpm dev`。验证命令：
+
+```powershell
+pnpm --filter @claude-desktop/desktop build
+pnpm --filter @claude-desktop/desktop dist:dir
+node scripts/verify-pdf-runtime.mjs
+node scripts/verify-pdf-model.mjs
+```
+
+最后一条使用当前已配置的 CPA / DeepSeek，仅发送合成扫描 PDF。
 
 ## Windows 打包
 
@@ -145,7 +187,7 @@ pnpm package:win:cpa
 
 `pnpm --filter @claude-desktop/desktop package:win` 等价于 `package:win:app`：**不会**刷新 CPA。旧的 `vendor/win-x64/cpa/cli-proxy-api.exe` 会原样打进安装包。
 
-默认脚本从 `D:\gitrep\CC\CPA` 查找 CPA。若 CPA 位于其他目录，可指定：
+先执行 `pnpm download:cpa` 下载固定版本的后端和管理页；默认从 `tools/cpa/8.0.43` 准备。打包前会拒绝低于 v8 的程序或缺少 v8 管理页的目录。若使用其他 v8 发行目录，可指定：
 
 ```powershell
 $env:CLAUDE_DESKTOP_CPA_DIST = 'D:\path\to\CLIProxyAPI'
@@ -156,7 +198,7 @@ pnpm package:win:cpa
 
 换 CPA 二进制前请先退出 CC Desktop，并停掉正在跑的 `cli-proxy-api.exe`，否则 Windows 会锁住 exe，拷贝失败。
 
-准备脚本**只复制** `cli-proxy-api.exe` 和仓库里的 `config.template.yaml`，会主动拒绝复制本机 `config.yaml`、凭据、Token。安装/升级也不会改用户数据目录里的 `cpa/config.yaml`（首次启动才从模板生成一份）。请在目标机器上完成实际登录和配置，不要把本地 `vendor/`、用户数据或发布目录提交到 Git。
+准备脚本**只复制** `cli-proxy-api.exe`、仓库里的 `config.template.yaml` 和配套 `static/management.html`，拒绝复制本机 `config.yaml`、凭据、Token。首次启动生成 v8 配置；已有配置只修复管理页开关和空管理密钥，不覆盖非空密钥或供应商配置。管理页随应用同步，关闭独立自动更新。请在目标机器上完成实际登录和配置，不要把本地 `vendor/`、用户数据或发布目录提交到 Git。
 
 热更新默认关闭（安装包里不带 `app-update.yml`）。用户可在设置里填写更新源；若希望安装包开箱即检查更新，打包时设置：
 

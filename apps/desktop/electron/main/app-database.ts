@@ -282,6 +282,7 @@ export class AppDatabase {
     opts?: { beforeId?: string; afterId?: string; limit?: number },
   ): {
     items: ChatItem[];
+    leadingUser?: ChatItem;
     total: number;
     hasMore: boolean;
     hasNewer: boolean;
@@ -331,8 +332,19 @@ export class AppDatabase {
          ORDER BY ordinal`,
       )
       .all(sessionId, start, end) as unknown as SessionItemRow[];
+    const items = this.parseSessionItems(rows);
+    const first = items[0];
+    let leadingUser: ChatItem | undefined;
+    if (start > 0 && first && !(first.kind === "text" && first.role === "user")) {
+      const preceding = this.db.prepare(
+        `SELECT ordinal, item_json FROM session_transcript WHERE session_id = ? AND ordinal < ?
+         AND json_extract(item_json, '$.role') = 'user' ORDER BY ordinal DESC LIMIT 1`,
+      ).get(sessionId, start) as SessionItemRow | undefined;
+      if (preceding) [leadingUser] = this.parseSessionItems([preceding]);
+    }
     return {
-      items: this.parseSessionItems(rows),
+      items,
+      leadingUser,
       total,
       hasMore: start > 0,
       hasNewer: end < total,

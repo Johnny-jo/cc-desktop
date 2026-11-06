@@ -44,6 +44,7 @@ import { RoomTimeline } from "./RoomTimeline";
 import { ModPlayPanel } from "./ModPlayPanel";
 import { RoomSettingsModal } from "./RoomSettingsModal";
 import { RoomInviteModal } from "./RoomInviteModal";
+import { AttachmentFileCard } from "./AttachmentFileCard";
 
 const initialRoom = structuredClone(state.room);
 const savedImage: Attachment = { name: "clipboard.png", path: "D:/cache/clipboard.png", size: 3, mimeType: "image/png", kind: "image" };
@@ -65,6 +66,9 @@ function nodes(element: React.ReactNode): React.ReactElement<Record<string, unkn
     // The collaboration shell is stateless; exercise its real tabs with the Stage's state.
     if (typeof child.type === "function" && child.type.name === "RoomCollaborationSidebar") {
       return nodes((child.type as (props: Record<string, unknown>) => React.ReactNode)(child.props));
+    }
+    if (child.type === AttachmentFileCard) {
+      return nodes(AttachmentFileCard(child.props as React.ComponentProps<typeof AttachmentFileCard>));
     }
     return [child, ...nodes(child.props.children as React.ReactNode)];
   });
@@ -457,6 +461,24 @@ function attachmentError() { return textContent(render().find(node => node.props
 function attachmentCount() { return render().filter(node => node.props.className === "composer-attachment").length; }
 
 describe("RoomStage attachment preflight", () => {
+  it("adds files selected by the plus control through the existing attachment pipeline", async () => {
+    const chooser = render().find(node => node.type === "input" && node.props.type === "file")!;
+    const open = vi.fn();
+    (chooser.props.ref as React.RefObject<HTMLInputElement | null>).current = { click: open } as unknown as HTMLInputElement;
+    click(button("添加附件"));
+    expect(open).toHaveBeenCalledOnce();
+    desktop.getPathForFile.mockReturnValue("D:/files/design.pdf");
+    const target = { files: [fileWithSize("design.pdf", 42, "application/pdf")], value: "selected" };
+    await (chooser.props.onChange as (event: unknown) => Promise<void>)({ currentTarget: target });
+    expect(target.value).toBe("");
+    expect(desktop.readAttachment).toHaveBeenCalledWith("D:/files/design.pdf");
+    expect(attachmentCount()).toBe(1);
+  });
+  it("disables the attachment picker when the room is offline", () => {
+    state.offline = true;
+    expect(button("添加附件").props.disabled).toBe(true);
+    expect(render().find(node => node.type === "input" && node.props.type === "file")?.props.disabled).toBe(true);
+  });
   it.each([5 * MiB + 1, 50 * MiB])("rejects a %s-byte pathless screenshot before constructing FileReader", async size => {
     await pasteFiles([fileWithSize("large.png", size, "image/png")]);
     expect(fileReaderCreated).not.toHaveBeenCalled();

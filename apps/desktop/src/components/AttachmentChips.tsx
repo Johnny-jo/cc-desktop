@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import type { Attachment } from "@claude-desktop/shared";
+import { formatFileSize } from "@claude-desktop/shared";
+import { AttachmentFileIcon } from "./AttachmentFileCard";
 import { getDesktop, hasDesktopApi } from "../lib/desktop-api";
 import { hasLanguageForPath } from "../lib/editor-language";
 import { createLru } from "../lib/lru";
@@ -34,25 +36,6 @@ export function useImageDataUrl(path: string): string | null {
     };
   }, [path]);
   return url;
-}
-
-function fileExt(name: string): string {
-  const i = name.lastIndexOf(".");
-  return i >= 0 ? name.slice(i + 1).toUpperCase().slice(0, 5) : "FILE";
-}
-
-function FileIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
-      <path
-        d="M4 1.5h5L12.5 5v9.5h-8.5v-13Z"
-        stroke="currentColor"
-        strokeWidth="1.2"
-        strokeLinejoin="round"
-      />
-      <path d="M9 1.5V5h3.5" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
-    </svg>
-  );
 }
 
 /** Fullscreen image preview (click / Esc to close). */
@@ -117,10 +100,10 @@ export function AttachmentChips({
             onClick={() => openFile(a)}
           >
             <span className="attach-chip-icon" aria-hidden>
-              <FileIcon />
+              <AttachmentFileIcon name={a.name} mimeType={a.mimeType} />
             </span>
             <span className="attach-chip-name">{a.name}</span>
-            <span className="attach-chip-ext">{fileExt(a.name)}</span>
+            <span className="attach-chip-ext">{formatFileSize(a.size)}</span>
           </button>
         ),
       )}
@@ -153,10 +136,10 @@ function ImageChip({
         }}
       >
         <span className="attach-chip-icon" aria-hidden>
-          <FileIcon />
+          <AttachmentFileIcon name={att.name} mimeType={att.mimeType} />
         </span>
         <span className="attach-chip-name">{att.name}</span>
-        <span className="attach-chip-ext">{fileExt(att.name)}</span>
+        <span className="attach-chip-ext">{formatFileSize(att.size)}</span>
       </button>
     );
   }

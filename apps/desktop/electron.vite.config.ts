@@ -3,13 +3,14 @@ import { resolve } from "node:path";
 
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin({ exclude: ["@claude-desktop/shared"] })],
+    plugins: [externalizeDepsPlugin({ exclude: ["@claude-desktop/shared", "yaml"] })],
     build: {
       outDir: "out/main",
       rollupOptions: {
         input: {
           index: resolve("electron/main/index.ts"),
           "mod-host-worker": resolve("electron/main/mod-host-worker.ts"),
+          "pdf-text-worker": resolve("electron/main/pdf-text-worker.ts"),
         },
       },
     },

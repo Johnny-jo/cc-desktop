@@ -1,0 +1,29 @@
+/* Shared draft cards: bounded widths keep the name and remove button independent. */
+.composer .composer-attachments { gap: 8px; max-height: 176px; overflow-y: auto; padding: 2px; margin: -2px; }
+.composer .composer-attachment {
+  display: flex;
+  flex: 0 1 240px;
+  width: 240px;
+  min-width: 0;
+  max-width: 100%;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-elevated) 88%, transparent);
+}
+.composer .composer-attachment.has-error { border-color: var(--danger-border); }
+.composer .composer-attachment-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.composer .composer-attachment-name { display: block; min-width: 0; max-width: 100%; font-size: .923rem; line-height: 1.35; }
+.composer .composer-attachment-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .769rem; line-height: 1.3; }
+.composer .composer-attachment > .composer-attachment-remove { width: 22px; height: 22px; align-self: flex-start; margin: -2px -3px 0 0; border-radius: 6px; }
+.composer .composer-attachment-remove:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.composer-shell > .composer-attachment-error { overflow-wrap: anywhere; max-height: 100px; overflow-y: auto; }
+.attachment-file-icon { position: relative; display: inline-flex; flex: 0 0 30px; width: 30px; height: 36px; align-items: center; justify-content: center; color: var(--text-muted); }
+.attachment-file-icon svg { width: 28px; height: 32px; }
+.attachment-file-icon > span { position: absolute; left: 0; right: 0; bottom: 8px; text-align: center; font-size: 8px; line-height: 1; font-weight: 700; letter-spacing: -.15px; }
+.attachment-file-icon.is-pdf { color: #da5050; }
+.attachment-file-icon.is-word { color: #4381d5; }
+.attachment-file-icon.is-sheet { color: #339568; }
+.attachment-file-icon.is-code { color: #b88631; }
+.attachment-file-icon.is-image { color: #986ad0; }

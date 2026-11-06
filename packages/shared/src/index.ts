@@ -1,4 +1,5 @@
 export * from "./models";
+export * from "./photo-flow";
 export * from "./task-plan";
 export * from "./ipc";
 export * from "./diff";

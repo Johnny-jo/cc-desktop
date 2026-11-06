@@ -2,8 +2,8 @@
 .room-timeline > .room-msg {
   flex-shrink: 0;
   gap: 12px;
-  max-width: min(820px, 100%);
-  margin-block: 4px 12px;
+  max-width: 100%;
+  margin-block: 0;
 }
 
 /* Notices span the timeline so their center is independent of chat row widths. */
@@ -46,7 +46,7 @@
 .room-timeline .room-msg .room-msg-meta {
   flex-wrap: wrap;
   gap: 4px 8px;
-  margin-bottom: 7px;
+  margin-bottom: 5px;
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
@@ -66,31 +66,23 @@
   padding-inline: 5px;
 }
 
-/* Only human messages get a bubble. Own messages keep the existing right alignment. */
-.room-timeline .room-msg.is-human > .room-msg-body > .room-msg-text:not(.room-recalled) {
-  max-width: 100%;
-  padding: 10px 14px;
-  border: 1px solid var(--border-soft);
-  border-radius: 4px 14px 14px;
-  background: color-mix(in srgb, var(--bg-bubble-user) 70%, var(--bg-app));
-  color: var(--text);
-  line-height: 1.75;
-  box-shadow: none;
+/* Shared .bubble classes own typography and surfaces; group rules only account
+   for the avatar column and the opposite incoming-bubble corner. */
+.room-timeline > .room-msg.is-human {
+  max-width: min(602px, calc(72% + 42px));
 }
 
-.room-timeline .room-msg.is-human.is-me > .room-msg-body > .room-msg-text:not(.room-recalled) {
-  background: color-mix(in srgb, var(--accent) 7%, var(--bg-bubble-user));
-  border-color: color-mix(in srgb, var(--accent) 18%, var(--border-soft));
-  border-radius: 14px 4px 14px 14px;
+.room-timeline .room-msg.is-human > .room-msg-body > .room-msg-text:not(.room-recalled) {
+  max-width: 100%;
+}
+
+.room-timeline .room-msg.is-human:not(.is-me) > .room-msg-body > .room-msg-text:not(.room-recalled) {
+  border-radius: 18px 18px 18px 6px;
 }
 
 .room-timeline .room-msg.is-human.is-me > .room-msg-avatar {
   border-color: color-mix(in srgb, var(--accent) 25%, var(--border));
   color: var(--accent);
-}
-
-.room-timeline .room-msg.is-human.focus > .room-msg-body > .room-msg-text:not(.room-recalled) {
-  border-color: color-mix(in srgb, var(--accent) 45%, var(--border-soft));
 }
 
 .room-timeline .room-msg.is-agent > .room-msg-avatar {
@@ -108,7 +100,6 @@
    their own backgrounds, borders and padding from the shared readable styles. */
 .room-timeline .room-msg.is-agent,
 .room-timeline .room-msg.is-agent > .room-msg-body,
-.room-timeline .room-msg.is-agent > .room-msg-body > .room-agent-prose,
 .room-timeline .room-msg.is-agent .room-typing-dots {
   padding: 0;
   background: transparent;
@@ -120,12 +111,13 @@
 .room-timeline .room-msg.is-agent > .room-msg-body > .room-agent-prose {
   display: block;
   min-width: 0;
-  line-height: 1.75;
 }
 
-.room-timeline .room-agent-prose > .md-body {
-  font-size: 1rem;
-  line-height: 1.75;
+.room-timeline .room-msg-quote { max-height: 5.5em; overflow: auto; }
+
+@container room-chat (max-width: 480px) {
+  .room-timeline > .room-msg.is-human { max-width: 92%; }
+  .room-timeline > .room-msg { gap: 8px; }
 }
 
 .room-timeline .room-msg .room-live-thinking {

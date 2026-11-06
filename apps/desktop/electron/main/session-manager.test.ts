@@ -94,6 +94,7 @@ function defaultQueryFn(): QueryFn {
 }
 
 function makeDeps(overrides: {
+  pdfCompatibility?: SessionManagerDeps["pdfCompatibility"];
   queryFn?: QueryFn;
   ensureReady?: () => Promise<{ state: string; message?: string; port?: number; managedByApp?: boolean }>;
   canUseTool?: ReturnType<typeof vi.fn>;
@@ -162,6 +163,7 @@ function makeDeps(overrides: {
   });
 
   const manager = new SessionManager({
+    pdfCompatibility: overrides.pdfCompatibility,
     queryFn,
     permissionBroker,
     diffTracker,
@@ -194,6 +196,52 @@ function makeDeps(overrides: {
     capturedQueryArgs: [] as Array<{ prompt: string; options: Record<string, unknown> }>,
   };
 }
+
+describe("attachment validation", () => {
+  it("wraps the final model endpoint, including borrowed-room endpoints, and disposes it", async () => {
+    const compatibility = {
+      environment: vi.fn(async (env: Record<string, string>) => ({ ...env, ANTHROPIC_BASE_URL: "http://127.0.0.1:19191/pdf" })),
+      dispose: vi.fn(),
+    };
+    let options: Record<string, unknown> = {};
+    const ctx = makeDeps({ pdfCompatibility: compatibility, queryFn: async function* (args) {
+      options = args.options;
+      await takeFirstUserText(args.prompt);
+      yield { type: "result", subtype: "success", total_cost_usd: 0 };
+    } });
+    try {
+      await ctx.manager.start({ text: "read PDF", attachments: [] }, process.cwd(), {
+        extraEnv: { ANTHROPIC_BASE_URL: "http://127.0.0.1:19292", ANTHROPIC_AUTH_TOKEN: "room-borrow:fixture" },
+      });
+      expect(compatibility.environment).toHaveBeenCalledWith(expect.objectContaining({
+        ANTHROPIC_BASE_URL: "http://127.0.0.1:19292", ANTHROPIC_AUTH_TOKEN: "room-borrow:fixture",
+      }));
+      expect(options.env).toMatchObject({ ANTHROPIC_BASE_URL: "http://127.0.0.1:19191/pdf", ANTHROPIC_AUTH_TOKEN: "room-borrow:fixture" });
+    } finally { ctx.manager.disposeAll(); }
+    expect(compatibility.dispose).toHaveBeenCalledOnce();
+  });
+  it("rejects unreadable attachments before creating a model query", async () => {
+    const queryFn = vi.fn(defaultQueryFn());
+    const { manager } = makeDeps({ queryFn });
+    await expect(manager.start({ text: "Please read", attachments: [{ name: "missing.pdf",
+      path: path.join(os.tmpdir(), `missing-${Date.now()}-${Math.random()}.pdf`),
+      size: 12, mimeType: "application/pdf", kind: "binary" }] }, os.tmpdir())).rejects.toThrow("File not found");
+    expect(queryFn).not.toHaveBeenCalled();
+    manager.disposeAll();
+  });
+  it("ends the optimistic running state when a continuation attachment is unreadable", async () => {
+    const queryFn = vi.fn(defaultQueryFn());
+    const { manager, emitted } = makeDeps({ queryFn });
+    const id = await manager.start({ text: "hello", attachments: [] }, os.tmpdir());
+    const calls = queryFn.mock.calls.length;
+    await expect(manager.continue(id, { text: "Read this", attachments: [{ name: "missing.pdf",
+      path: path.join(os.tmpdir(), `missing-${Date.now()}-${Math.random()}.pdf`),
+      size: 12, mimeType: "application/pdf", kind: "binary" }] })).rejects.toThrow("File not found");
+    expect(queryFn).toHaveBeenCalledTimes(calls);
+    expect(emitted.at(-1)).toMatchObject({ type: "result", sessionId: id, ok: false, error: expect.stringContaining("File not found") });
+    manager.disposeAll();
+  });
+});
 
 describe("official room sandbox", () => {
   it("enables strict sandboxing only for room queries and uses their workspace", async () => {

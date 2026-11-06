@@ -50,6 +50,8 @@ export const IPC = {
   userPromptRespond: "user-prompt:respond",
   settingsGet: "settings:get",
   settingsSet: "settings:set",
+  photoFlowGet: "photo-flow:get",
+  photoFlowUpdated: "photo-flow:updated",
   cpaStart: "cpa:start",
   cpaStatus: "cpa:status",
   /** Fetch model ids from CPA /v1/models and merge into settings */
@@ -314,6 +316,7 @@ export type IpcInvokeMap = {
       sessionId: string;
       cwd: string;
       items: import("./models").ChatItem[];
+      leadingUser?: import("./models").ChatItem;
       total: number;
       hasMore: boolean;
       hasNewer: boolean;
@@ -324,6 +327,7 @@ export type IpcInvokeMap = {
     args: [{ sessionId: string; beforeId: string; limit?: number }];
     result: {
       items: import("./models").ChatItem[];
+      leadingUser?: import("./models").ChatItem;
       total: number;
       hasMore: boolean;
       hasNewer: boolean;
@@ -333,6 +337,7 @@ export type IpcInvokeMap = {
     args: [{ sessionId: string; afterId: string; limit?: number }];
     result: {
       items: import("./models").ChatItem[];
+      leadingUser?: import("./models").ChatItem;
       total: number;
       hasMore: boolean;
       hasNewer: boolean;
@@ -397,6 +402,7 @@ export type IpcInvokeMap = {
     result: { ok: boolean };
   };
   [IPC.settingsGet]: { args: []; result: PublicSettings };
+  [IPC.photoFlowGet]: { args: []; result: import("./photo-flow").PhotoFlowImage[] };
   [IPC.settingsSet]: {
     args: [Partial<AppSettings> & { token?: string }];
     result: PublicSettings;

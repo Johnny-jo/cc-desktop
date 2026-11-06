@@ -66,6 +66,7 @@ export type IpcHandlerContext = {
   onDesktopModelChanged?: (model: string) => void;
   /** Auto model sync changed settings — broadcast IPC.settingsUpdated */
   onSettingsSynced?: () => void;
+  photoFlow?: import("./photo-flow-service").PhotoFlowService;
 };
 
 export function registerIpcHandlers(ctx: IpcHandlerContext): void {
@@ -467,6 +468,7 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
         sessionId,
         cwd: summary.cwd,
         items: page.items,
+        leadingUser: page.leadingUser,
         total: page.total,
         hasMore: page.hasMore,
         hasNewer: page.hasNewer,
@@ -777,11 +779,14 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
   );
 
   ipcMain.handle(IPC.settingsGet, async () => ctx.settings.getPublic());
+  ipcMain.handle(IPC.photoFlowGet, async () => ctx.photoFlow?.getImages() ?? []);
 
   ipcMain.handle(
     IPC.settingsSet,
     async (_e, patch: Partial<AppSettings> & { token?: string }) => {
       ctx.settings.update(patch);
+      ctx.photoFlow?.setEnabled(ctx.settings.get().photoFlowEnabled !== false);
+      ctx.onSettingsSynced?.();
       if (typeof patch.defaultModel === "string" && patch.defaultModel.trim()) {
         ctx.onDesktopModelChanged?.(patch.defaultModel.trim());
       }

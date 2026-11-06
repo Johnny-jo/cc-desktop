@@ -410,10 +410,14 @@ const MessageRow = memo(function MessageRow({
   item,
   sessionId,
   onOpenFile,
+  projectPath,
+  editorPath,
 }: {
   item: ChatItem;
   sessionId: string | null;
   onOpenFile?: (rel: string, line?: number) => void;
+  projectPath: string | null;
+  editorPath: string | null;
 }) {
   if (item.kind === "tool") {
     return null;
@@ -464,7 +468,8 @@ const MessageRow = memo(function MessageRow({
         <div className="bubble bubble-system">{item.text}</div>
       ) : (
         <div className="bubble bubble-assistant">
-          <MarkdownBody text={item.text} streaming={item.streaming} />
+          <MarkdownBody text={item.text} streaming={item.streaming} projectPath={projectPath}
+            onOpenFile={projectPath === editorPath ? onOpenFile : undefined} />
         </div>
       )}
     </div>
@@ -638,6 +643,8 @@ export function MessageList({
 }) {
   const { t } = useI18n();
   const listRef = useRef<HTMLDivElement | null>(null);
+  const editorPath = useAppStore(state => state.projectPath);
+  const projectPath = useAppStore(state => state.sessions.find(session => session.id === sessionId)?.cwd ?? state.projectPath);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const spacerRef = useRef<HTMLDivElement | null>(null);
   const scrollControllerRef = useRef<ReturnType<typeof createChatScrollController> | null>(null);
@@ -931,6 +938,8 @@ export function MessageList({
                   item={block.item}
                   sessionId={sessionId}
                   onOpenFile={onOpenFile}
+                  projectPath={projectPath}
+                  editorPath={editorPath}
                 />
               )}
               {userItem ? (

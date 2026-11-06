@@ -548,7 +548,7 @@ export function FileEditor({
     <div className={hidden ? "file-editor is-hidden" : "file-editor"} hidden={hidden}>
       <div className="file-editor-head">
         <span className="file-editor-name" title={rel}>
-          {name}
+          <span className="file-editor-basename">{name}</span>
           {dirty ? <span className="file-editor-dirty" title="未保存">●</span> : null}
         </span>
         <span className="file-editor-path" title={rel}>
@@ -564,6 +564,7 @@ export function FileEditor({
                 ? "file-editor-status ok"
                 : "file-editor-status err"
             }
+            title={saveMsg}
           >
             {saveMsg}
           </span>

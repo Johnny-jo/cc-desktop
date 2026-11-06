@@ -49,6 +49,8 @@ export const zh: Messages = {
     themeLight: "浅色",
     themeSystem: "跟随系统",
     galaxyEffects: "银河粒子特效",
+    photoFlow: "日间照片流",
+    photoFlowHint: "日间展示流动照片，每天自动更新并缓存。切换即保存生效，关闭后隐藏照片并停止自动更新。",
     galaxyEffectsHint: "夜间以旋转银河替代 S，镜头由远及近，进入星河漫游。切换即保存生效，关闭后显示普通 S。",
     save: "保存",
     saving: "保存中…",

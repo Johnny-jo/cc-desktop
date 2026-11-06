@@ -945,6 +945,10 @@ textarea {
   flex-direction: column;
 }
 
+.chat-col[hidden] {
+  display: none;
+}
+
 .editor-col {
   position: relative;
   min-width: 0;
@@ -1107,6 +1111,8 @@ textarea {
 
 /* File editor pane (CodeMirror) */
 .file-editor {
+  min-width: 0;
+  container: file-editor / inline-size;
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -1131,10 +1137,23 @@ textarea {
 .file-editor-name {
   font-size: 0.962rem;
   font-weight: 600;
-  flex-shrink: 0;
+  min-width: 0;
+  max-width: 55%;
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+.file-editor-basename {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-editor-head > button, .file-editor-dirty {
+  flex: none;
+  white-space: nowrap;
 }
 
 .file-editor-dirty {
@@ -1165,7 +1184,11 @@ textarea {
 }
 
 .file-editor-status {
-  flex-shrink: 0;
+  min-width: 0;
+  max-width: 30%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 0.846rem;
 }
 
@@ -1175,6 +1198,13 @@ textarea {
 
 .file-editor-status.err {
   color: var(--danger, #ef4444);
+}
+
+@container file-editor (max-width: 480px) {
+  .file-editor-head { gap: 6px; padding-inline: 8px; }
+  .file-editor-path { display: none; }
+  .file-editor-name { flex: 1 1 0; max-width: none; }
+  .file-editor-status { flex-shrink: 0; }
 }
 
 .file-editor-body {
@@ -3347,6 +3377,10 @@ body.session-detaching {
   min-width: 0;
 }
 
+.chat-panel:not(.hero) {
+  --chat-max: 1240px;
+}
+
 .chat-title {
   font-size: 1.077rem;
   font-weight: 600;
@@ -5152,8 +5186,9 @@ button.activity-step-main:not(:disabled):hover .activity-step-name {
 
 .composer-input {
   width: 100%;
+  field-sizing: content;
   resize: none;
-  min-height: 48px;
+  min-height: max(48px, calc(2lh + 4px));
   max-height: 180px;
   background: transparent;
   border: none;
@@ -8188,14 +8223,6 @@ button.activity-step-main:not(:disabled):hover .activity-step-name {
 }
 
 .room-msg-text {
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-size: 0.962rem;
-  line-height: 1.55;
-  padding: 8px 12px;
-  border-radius: 12px;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-soft);
   display: inline-block;
 }
 
@@ -8358,11 +8385,6 @@ button.activity-step-main:not(:disabled):hover .activity-step-name {
   padding: 8px 0;
 }
 
-.room-msg.is-me .room-msg-text {
-  background: var(--accent-soft);
-  border-color: var(--accent);
-}
-
 /* @提及高亮：蓝色，@自己加底色 */
 .room-mention {
   color: var(--accent);
@@ -8439,11 +8461,6 @@ button.activity-step-main:not(:disabled):hover .activity-step-name {
   padding: 4px 0;
 }
 
-.room-msg.focus .room-msg-text {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent-soft);
-}
-
 /* Game result */
 .room-msg-game {
   display: inline-flex;
@@ -8473,25 +8490,6 @@ button.activity-step-main:not(:disabled):hover .activity-step-name {
   border-top: 1px solid var(--border-soft);
   flex-shrink: 0;
   background: var(--bg-panel);
-}
-
-.room-composer-box {
-  display: flex;
-  flex-direction: column;
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  background: var(--bg-input);
-  transition: border-color 140ms ease, box-shadow 140ms ease;
-}
-
-.room-composer-box:focus-within {
-  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
-}
-
-.room-composer-box.dragging {
-  border-color: var(--accent);
-  background: var(--accent-soft);
 }
 
 .room-quote-bar {
@@ -8532,28 +8530,6 @@ button.activity-step-main:not(:disabled):hover .activity-step-name {
 
 .room-quote-bar-x:hover {
   color: var(--text);
-}
-
-.room-input {
-  resize: none;
-  border: none;
-  background: transparent;
-  color: var(--text);
-  padding: 10px 14px 4px;
-  font: inherit;
-  min-height: 44px;
-}
-
-.room-input:focus {
-  outline: none;
-}
-
-.room-composer-bar {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-  padding: 4px 10px 10px;
 }
 
 .room-join-hint,

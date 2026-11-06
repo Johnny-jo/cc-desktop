@@ -3,8 +3,7 @@
  *
  * Mirrors the SDK's McpServerConfig but restricted to plain JSON-safe shapes
  * (no in-process `sdk` server instances, which cannot cross IPC or persist).
- * Field names match the SDK so the stored config can be passed to
- * `query({ options: { mcpServers } })` with no transformation.
+ * The desktop main process resolves bundled browser presets to stdio at launch.
  */
 
 export type McpStdioConfig = {
@@ -32,7 +31,9 @@ export type McpHttpConfig = {
   alwaysLoad?: boolean;
 };
 
-export type McpServerConfig = McpStdioConfig | McpSseConfig | McpHttpConfig;
+export type PlaywrightBrowser = "chrome" | "msedge";
+export type McpServerConfig = McpStdioConfig | McpSseConfig | McpHttpConfig
+  | { type: "playwright"; browser: PlaywrightBrowser };
 
 export type McpServersMap = Record<string, McpServerConfig>;
 
@@ -80,6 +81,9 @@ export function validateMcpServerConfig(
 ): string | null {
   const nameErr = validateMcpServerName(name);
   if (nameErr) return nameErr;
+  if (cfg.type === "playwright") {
+    return cfg.browser === "chrome" || cfg.browser === "msedge" ? null : `"${name}": select Chrome or Edge`;
+  }
   if (cfg.type === "sse" || cfg.type === "http") {
     const url = (cfg.url ?? "").trim();
     if (!url) return `"${name}": url is required for ${cfg.type}`;
@@ -117,7 +121,9 @@ export function sanitizeMcpServers(raw: unknown): McpServersMap {
     if (!cfgRaw || typeof cfgRaw !== "object" || Array.isArray(cfgRaw)) continue;
     const c = cfgRaw as Record<string, unknown>;
     const type = c.type;
-    if (type === "sse" || type === "http") {
+    if (type === "playwright") {
+      if (c.browser === "chrome" || c.browser === "msedge") out[name] = { type, browser: c.browser };
+    } else if (type === "sse" || type === "http") {
       const url = typeof c.url === "string" ? c.url : "";
       if (!url) continue;
       const cfg: McpServerConfig = {

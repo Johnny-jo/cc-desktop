@@ -66,6 +66,22 @@ describe("SettingsStore", () => {
     expect(new SettingsStore(deps).getPublic().galaxyEffectsEnabled).toBe(true);
   });
 
+  it("defaults photo flow on and persists an independent off choice across restarts", () => {
+    const deps = { userDataDir: dir, encrypt: (s: string) => s, decrypt: (s: string) => s };
+    const store = new SettingsStore(deps);
+    expect(store.getPublic().photoFlowEnabled).toBe(true);
+    store.update({ photoFlowEnabled: false });
+    store.update({ galaxyEffectsEnabled: false, uiFontSize: 14 });
+    store.update({ photoFlowEnabled: "true" as unknown as boolean });
+    const restarted = new SettingsStore(deps);
+    expect(restarted.getPublic().photoFlowEnabled).toBe(false);
+    restarted.update({ photoFlowEnabled: true });
+    expect(new SettingsStore(deps).getPublic().photoFlowEnabled).toBe(true);
+    expect(restarted.getPublic().galaxyEffectsEnabled).toBe(false);
+    fs.writeFileSync(path.join(dir, "settings.json"), JSON.stringify({ theme: "light", photoFlowEnabled: "false" }));
+    expect(new SettingsStore(deps).getPublic().photoFlowEnabled).toBe(true);
+  });
+
   it("preserves the galaxy effect choice across unrelated saves and restarts", () => {
     const deps = { userDataDir: dir, encrypt: (s: string) => s, decrypt: (s: string) => s };
     const store = new SettingsStore(deps);

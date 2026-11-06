@@ -2,7 +2,7 @@
   "name": "claude-desktop",
   "private": true,
   "engines": {
-    "node": ">=22.12.0"
+    "node": ">=22.13.0"
   },
   "packageManager": "pnpm@9.15.0",
   "scripts": {
@@ -13,8 +13,11 @@
     "typecheck": "pnpm -r typecheck",
     "prepare:vendor": "node scripts/prepare-vendor.mjs",
     "prepare:vendor:cpa": "node scripts/prepare-vendor.mjs --cpa-only",
+    "prepare:vendor:claude": "node scripts/prepare-vendor.mjs --claude-only",
+    "verify:vendor:claude": "node scripts/verify-claude-vendor.mjs",
     "package:win": "pnpm prepare:vendor && pnpm --filter @claude-desktop/desktop package:win",
     "package:win:app": "pnpm --filter @claude-desktop/desktop package:win",
-    "package:win:cpa": "pnpm prepare:vendor:cpa && pnpm --filter @claude-desktop/desktop package:win"
+    "package:win:cpa": "pnpm prepare:vendor:cpa && pnpm --filter @claude-desktop/desktop package:win",
+    "download:cpa": "powershell -NoProfile -File scripts/download-cpa.ps1"
   }
 }

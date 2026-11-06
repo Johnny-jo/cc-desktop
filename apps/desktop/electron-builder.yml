@@ -14,6 +14,8 @@ files:
 
 # Workspace package is bundled into out/ by electron-vite; no asarUnpack of node_modules required for shared.
 asar: true
+# electron-builder's smart unpacking extracts native ONNX/canvas modules with
+# their DLLs. Explicit asarUnpack globs break pnpm workspace symlink handling.
 
 # node-pty ships prebuilt binaries (build/Release with conpty.dll etc.) and is
 # EXTERNAL to asar (externalizeDepsPlugin keeps it in app node_modules).
@@ -26,6 +28,14 @@ npmRebuild: false
 # Ship Claude Code CLI + CPA outside asar so they can be spawned.
 # Populate vendor/ via: node scripts/prepare-vendor.mjs (from monorepo root).
 extraResources:
+  - from: resources/playwright-mcp
+    to: playwright-mcp
+    filter:
+      - "*.cjs"
+  - from: resources/models/ocr/ppocr_v5_mobile
+    to: models/ocr/ppocr_v5_mobile
+    filter:
+      - "**/*"
   - from: ../../vendor/win-x64/claude
     to: bin/claude
     filter:
@@ -103,7 +113,7 @@ forceCodeSigning: false
 # "${env.CLAUDE_DESKTOP_UPDATE_URL}" into the installer.
 # Pack-time: set CLAUDE_DESKTOP_UPDATE_URL=https://your-feed/
 # afterPack writes resources/app-update.yml with that resolved URL.
-afterPack: ../../scripts/after-pack-app-update.cjs
+afterPack: ../../scripts/after-pack-desktop.cjs
 
 # electron-vite outputs
 extraMetadata:

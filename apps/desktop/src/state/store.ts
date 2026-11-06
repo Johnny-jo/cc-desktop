@@ -5,6 +5,7 @@ import {
   applySdkEvent,
   bindSdkUserMsgIds as bindIds,
   createIdFactory,
+  leadingTurnUser,
   type Attachment,
   type ChatItem,
   type CpaStatus,
@@ -28,6 +29,8 @@ export type AppState = {
   sessions: SessionSummary[];
   activeSessionId: string | null;
   itemsBySession: Record<string, ChatItem[]>;
+  /** Context for a page starting mid-turn. Never used as a history cursor. */
+  leadingUserBySession: Record<string, ChatItem | undefined>;
   changesBySession: Record<string, FileChange[]>;
   /** SDK skills / slash commands keyed by session */
   slashBySession: Record<string, SlashCommandItem[]>;
@@ -77,6 +80,7 @@ let state: AppState = {
   sessions: [],
   activeSessionId: null,
   itemsBySession: {},
+  leadingUserBySession: {},
   changesBySession: {},
   slashBySession: {},
   permissionRequest: null,
@@ -114,8 +118,6 @@ function touchSessionCache(sessionId: string): void {
   sessionCacheLru = [sessionId, ...sessionCacheLru.filter((id) => id !== sessionId)];
 }
 
-/** Pending user prompt for startSession before sessionId is known. */
-let pendingStartPrompt: { text: string; attachments: Attachment[] } | null = null;
 /**
  * Queue of optimistically-appended user texts per session.
  * SDK often re-emits the same user turn after the agent finishes; we drop that echo.
@@ -188,6 +190,7 @@ function prunedSessionCaches(
     Pick<
       AppState,
       | "itemsBySession"
+      | "leadingUserBySession"
       | "changesBySession"
       | "slashBySession"
       | "hasMoreBySession"
@@ -197,6 +200,7 @@ function prunedSessionCaches(
 ): Pick<
   AppState,
   | "itemsBySession"
+  | "leadingUserBySession"
   | "changesBySession"
   | "slashBySession"
   | "hasMoreBySession"
@@ -205,6 +209,7 @@ function prunedSessionCaches(
   pruneSideMaps(keep);
   return {
     itemsBySession: pickRecord(overlay?.itemsBySession ?? state.itemsBySession, keep),
+    leadingUserBySession: pickRecord(overlay?.leadingUserBySession ?? state.leadingUserBySession, keep),
     changesBySession: pickRecord(
       overlay?.changesBySession ?? state.changesBySession,
       keep,
@@ -235,8 +240,10 @@ function bindSdkUserMsgIds(sessionId: string, items: ChatItem[]): ChatItem[] {
 }
 
 function transcriptUi(sessionId: string): TranscriptState {
+  const leading = state.leadingUserBySession[sessionId];
+  const items = getItems(sessionId);
   return {
-    items: getItems(sessionId),
+    items: leading ? [leading, ...items] : items,
     optimisticUserTexts: optimisticUserTexts.get(sessionId) ?? [],
   };
 }
@@ -247,17 +254,19 @@ function writeTranscriptUi(sessionId: string, t: TranscriptState): void {
   } else {
     optimisticUserTexts.delete(sessionId);
   }
-  let items = t.items;
-  if (items.length > RENDERER_TRANSCRIPT_CAP) {
-    items = items.slice(items.length - RENDERER_TRANSCRIPT_CAP);
-    setState({
-      itemsBySession: { ...state.itemsBySession, [sessionId]: items },
+  const previous = state.leadingUserBySession[sessionId];
+  const contextCount = previous && t.items[0]?.id === previous.id ? 1 : 0;
+  const start = Math.max(contextCount, t.items.length - RENDERER_TRANSCRIPT_CAP);
+  const pruned = start > contextCount;
+  const leading = leadingTurnUser(t.items, start);
+  setState({
+    leadingUserBySession: { ...state.leadingUserBySession, [sessionId]: leading },
+    itemsBySession: { ...state.itemsBySession, [sessionId]: start ? t.items.slice(start) : t.items },
+    ...(pruned && {
       hasMoreBySession: { ...state.hasMoreBySession, [sessionId]: true },
       hasNewerBySession: { ...state.hasNewerBySession, [sessionId]: false },
-    });
-    return;
-  }
-  setItems(sessionId, items);
+    }),
+  });
 }
 
 function upsertSession(summary: SessionSummary): void {
@@ -280,7 +289,9 @@ function upsertSession(summary: SessionSummary): void {
     activeSessionId = summary.id;
   }
 
-  setState({ sessions, running, activeSessionId });
+  setState({ sessions, running, activeSessionId,
+    ...(activeSessionId !== state.activeSessionId && summary.cwd ? { projectPath: summary.cwd } : {}),
+  });
 }
 
 function appendUserMessage(
@@ -357,19 +368,20 @@ function applySessionEvent(event: SdkNormalizedEvent): void {
   const prev = transcriptUi(sessionId);
   if (event.type === "user_msg_ids") {
     sdkUserMsgIds.set(sessionId, event.uuids);
-    const bound = bindIds(getItems(sessionId), event.uuids);
-    if (bound !== getItems(sessionId)) setItems(sessionId, bound);
+    const bound = bindIds(prev.items, event.uuids);
+    if (bound !== prev.items) writeTranscriptUi(sessionId, { ...prev, items: bound });
     return;
   }
 
   if (event.type === "items_replaced") {
     const next = applySdkEvent(prev, event, { nextId });
-    writeTranscriptUi(sessionId, next);
     sdkUserMsgIds.delete(sessionId);
     setState({
+      leadingUserBySession: { ...state.leadingUserBySession, [sessionId]: undefined },
       hasMoreBySession: { ...state.hasMoreBySession, [sessionId]: false },
       hasNewerBySession: { ...state.hasNewerBySession, [sessionId]: false },
     });
+    writeTranscriptUi(sessionId, next);
     return;
   }
 
@@ -396,7 +408,10 @@ function applySessionEvent(event: SdkNormalizedEvent): void {
     return;
   }
 
-  const next = applySdkEvent(prev, event, { nextId });
+  let idIndex = 0;
+  const next = applySdkEvent(prev, event, {
+    nextId: prefix => event.transcriptIds?.[idIndex++] ?? nextId(prefix),
+  });
   writeTranscriptUi(sessionId, next);
   applyResultFlags();
 }
@@ -420,32 +435,6 @@ function subscribeDesktopEvents(): void {
     desktop.on(IPC.sessionUpdated, (payload) => {
       const summary = payload as SessionSummary;
       upsertSession(summary);
-
-      // First turn: append the user bubble as soon as the session becomes
-      // running (early), not when startSession() resolves after the full turn
-      // (that put the question under the assistant reply).
-      // CLI mode: clear pending only — do not rewrite the frozen items cache.
-      if (pendingStartPrompt && summary.status === "running") {
-        if (state.cliMode) {
-          pendingStartPrompt = null;
-        } else {
-          const pending = pendingStartPrompt;
-          if (
-            !getItems(summary.id).some(
-              (i) =>
-                i.kind === "text" &&
-                i.role === "user" &&
-                i.text === pending.text,
-            )
-          ) {
-            pendingStartPrompt = null;
-            appendUserMessage(summary.id, pending.text, {
-              optimistic: true,
-              attachments: pending.attachments,
-            });
-          }
-        }
-      }
 
       // After a turn finishes, main attaches fresh contextUsage here.
       // Trigger auto-compress only then — and only with live renderer items.
@@ -662,6 +651,7 @@ export function enterCliMode(): void {
   setState({
     cliMode: true,
     itemsBySession: {},
+    leadingUserBySession: {},
     hasMoreBySession: {},
     hasNewerBySession: {},
   });
@@ -843,6 +833,7 @@ export async function deleteSession(sessionId: string): Promise<void> {
     loadingSessionId:
       state.loadingSessionId === sessionId ? null : state.loadingSessionId,
     itemsBySession: drop(state.itemsBySession),
+    leadingUserBySession: drop(state.leadingUserBySession),
     changesBySession: drop(state.changesBySession),
     slashBySession: drop(state.slashBySession),
     hasMoreBySession: drop(state.hasMoreBySession),
@@ -888,6 +879,7 @@ export async function selectSession(sessionId: string): Promise<void> {
         activeSessionId: sessionId,
         projectPath: cwd || state.projectPath,
         itemsBySession: {},
+        leadingUserBySession: {},
         changesBySession: pickRecord(
           { ...state.changesBySession, [sessionId]: res.changes ?? [] },
           keep,
@@ -917,6 +909,10 @@ export async function selectSession(sessionId: string): Promise<void> {
         itemsBySession: {
           ...state.itemsBySession,
           [sessionId]: restoredItems,
+        },
+        leadingUserBySession: {
+          ...state.leadingUserBySession,
+          [sessionId]: localHasStream ? state.leadingUserBySession[sessionId] : res.leadingUser,
         },
         changesBySession: {
           ...state.changesBySession,
@@ -980,6 +976,7 @@ export async function loadOlderMessages(
     const pruned = merged.length > RENDERER_TRANSCRIPT_CAP;
     const next = pruned ? merged.slice(0, RENDERER_TRANSCRIPT_CAP) : merged;
     setState({
+      leadingUserBySession: { ...state.leadingUserBySession, [sessionId]: page.leadingUser },
       itemsBySession: {
         ...state.itemsBySession,
         [sessionId]: next,
@@ -1024,6 +1021,8 @@ export async function loadNewerMessages(
     const pruned = merged.length > RENDERER_TRANSCRIPT_CAP;
     const next = pruned ? merged.slice(merged.length - RENDERER_TRANSCRIPT_CAP) : merged;
     setState({
+      leadingUserBySession: { ...state.leadingUserBySession,
+        [sessionId]: leadingTurnUser(merged, merged.length - next.length, state.leadingUserBySession[sessionId]) },
       itemsBySession: {
         ...state.itemsBySession,
         [sessionId]: next,
@@ -1096,6 +1095,7 @@ export function sendMessage(text: string, attachments: Attachment[] = []): void 
     if (state.hasNewerBySession[activeSessionId]) {
       setState({
         itemsBySession: { ...state.itemsBySession, [activeSessionId]: [] },
+        leadingUserBySession: { ...state.leadingUserBySession, [activeSessionId]: undefined },
         hasNewerBySession: {
           ...state.hasNewerBySession,
           [activeSessionId]: false,
@@ -1125,38 +1125,10 @@ export function sendMessage(text: string, attachments: Attachment[] = []): void 
     return;
   }
 
-  // New session: show the user bubble on first session:updated (running).
-  // startSession awaits the full turn, so appending only in .then() puts the
-  // question after the assistant reply.
-  pendingStartPrompt = { text: displayText, attachments };
+  // Main publishes the persisted first user row before opening the SDK stream.
   void desktop
     .startSession(prompt, state.projectPath ?? undefined)
-    .then((res) => {
-      const { sessionId } = res as { sessionId: string };
-      if (!state.activeSessionId || state.activeSessionId !== sessionId) {
-        setState({ activeSessionId: sessionId });
-      }
-      // Fallback if session:updated never carried the prompt (should be rare).
-      if (pendingStartPrompt) {
-        const pending = pendingStartPrompt;
-        pendingStartPrompt = null;
-        if (
-          !getItems(sessionId).some(
-            (i) =>
-              i.kind === "text" &&
-              i.role === "user" &&
-              i.text === pending.text,
-          )
-        ) {
-          appendUserMessage(sessionId, pending.text, {
-            optimistic: true,
-            attachments: pending.attachments,
-          });
-        }
-      }
-    })
     .catch((err: unknown) => {
-      pendingStartPrompt = null;
       const message = err instanceof Error ? err.message : String(err);
       setState({ lastError: message, running: false });
     });
@@ -1228,6 +1200,18 @@ export async function rewindToMessage(
   if (idx >= 0) {
     const truncated = items.slice(0, idx + 1);
     setItems(sessionId, truncated);
+  } else {
+    const leading = state.leadingUserBySession[sessionId];
+    if (leading?.kind === "text" && leading.sdkMsgId === sdkMsgId) {
+      // The rewind target was the context row before the paged window.
+      const tail = await desktop.selectSession(sessionId, SELECT_PAGE);
+      setState({
+        itemsBySession: { ...state.itemsBySession, [sessionId]: tail.items },
+        leadingUserBySession: { ...state.leadingUserBySession, [sessionId]: tail.leadingUser },
+        hasMoreBySession: { ...state.hasMoreBySession, [sessionId]: tail.hasMore },
+        hasNewerBySession: { ...state.hasNewerBySession, [sessionId]: tail.hasNewer },
+      });
+    }
   }
   const uuids = sdkUserMsgIds.get(sessionId);
   if (uuids) {
@@ -1441,6 +1425,7 @@ export function __resetStoreForTests(): void {
     sessions: [],
     activeSessionId: null,
     itemsBySession: {},
+    leadingUserBySession: {},
     changesBySession: {},
     slashBySession: {},
     permissionRequest: null,
@@ -1460,7 +1445,6 @@ export function __resetStoreForTests(): void {
     fsChangeTick: 0,
     changesSessionOverride: null,
   };
-  pendingStartPrompt = null;
   sessionCacheLru = [];
   autoCompressedAt.clear();
   bootstrapped = false;

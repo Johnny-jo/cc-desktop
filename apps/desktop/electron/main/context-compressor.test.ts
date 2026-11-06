@@ -60,6 +60,13 @@ describe("splitItemsForCompression", () => {
 });
 
 describe("compressContext", () => {
+  it("keeps the question owning a long first turn beside its remaining replies", async () => {
+    const items: ChatItem[] = [{ kind: "text", id: "first", role: "user", text: "Original request" },
+      ...Array.from({ length: 12 }, (_, i): ChatItem => ({ kind: "text", id: String(i), role: "assistant", text: String(i) }))];
+    const result = await compressContext(items, { summarize: async () => "Summary" });
+    expect(result.items.filter(row => row.id === "first")).toHaveLength(1);
+    expect(result.items[1]).toMatchObject({ role: "user", text: "Original request" });
+  });
   it("returns kept items and summary when there are older items", async () => {
     const items = textItems(KEEP_RECENT_ITEMS + 2);
     const summarize = vi.fn().mockResolvedValue("Summary of older messages.");

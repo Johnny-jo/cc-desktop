@@ -1,32 +1,26 @@
-# Claude Desktop — bundled CPA (CLIProxyAPI) template
-# On first run this is copied to userData/cpa/config.yaml and adjusted.
-
-# Bind localhost only (desktop embedding).
-host: "127.0.0.1"
-port: 8317
-
-tls:
-  enable: false
-  cert: ""
-  key: ""
-
-remote-management:
-  # Localhost-only management UI (/management.html).
-  # secret-key is required — empty disables the whole Management API (404).
-  # First-run / onboarding fills this with the same gateway token as api-keys
-  # so one password works for API + control panel login.
+# CC Desktop — bundled CLIProxyAPI v8 template.
+# Only placeholders are packaged; existing user/provider credentials are preserved.
+config-version: 8
+server:
+  host: "127.0.0.1"
+  port: 8317
+  tls:
+    enable: false
+    cert: ""
+    key: ""
+management:
   allow-remote: false
+  # Onboarding uses the gateway token for both client and management access.
   secret-key: "change-me"
   disable-control-panel: false
-  # Desktop ships management.html next to this config. Skip GitHub fetches.
+  # Upgrade the panel with the bundled backend, never independently to latest.
   disable-auto-update-panel: true
 
-# Reuse the same credential store as a standalone CPA install when present.
-auth-dir: "~/.cli-proxy-api"
-
-# Client keys accepted by the local gateway. Claude Desktop stores the matching
-# token in its own encrypted settings (Settings → Auth token).
-api-keys:
-  - change-me
-
-debug: false
+oauth:
+  auth-dir: "~/.cli-proxy-api"
+access:
+  api-keys:
+    - change-me
+observability:
+  logs:
+    debug: false
