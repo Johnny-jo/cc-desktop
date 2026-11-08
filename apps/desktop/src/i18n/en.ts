@@ -34,6 +34,7 @@ export const en = {
     allowOnce: "Allow once",
     allowSession: "Allow for this session",
     allowAlways: "Always allow",
+    approvalFailed: "Could not submit your decision. Please try again.",
     moreAllowOptions: "More allow options",
     typeResponse: "Type your response…",
     completed: "I've completed this",

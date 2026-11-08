@@ -22,6 +22,7 @@ import { formatTurnUsageLine } from "../lib/format-usage";
 import {
   loadNewerMessages,
   loadOlderMessages,
+  VIEWPORT_FILL_CAP,
   rewindToMessage,
   selectSession,
   useAppStore,
@@ -771,59 +772,76 @@ export function MessageList({
     return () => cancelAnimationFrame(frame);
   }, [pinKey, sessionId, updateScrollUi]);
 
-  const onLoadOlder = async () => {
-    if (!hasMore || !sessionId || loadingRef.current) return;
+  const lastFill = useRef("");
+  const pageIntent = useRef<{ sessionId: string; direction: "older" | "newer" } | null>(null);
+  const loadPage = useCallback(async (direction: "older" | "newer", fillViewport = false) => {
+    if (!sessionId || loadingRef.current || !(direction === "older" ? hasMore : hasNewer)) return;
+    if (!fillViewport) pageIntent.current = { sessionId, direction };
+    const setLoading = direction === "older" ? setLoadingOlder : setLoadingNewer;
+    const fetchPage = direction === "older" ? loadOlderMessages : loadNewerMessages;
     scrollControllerRef.current?.pause();
     const list = listRef.current;
     readingAnchor.current = list ? { sessionId, anchors: visibleReadingAnchors(list) } : null;
     loadingRef.current = true;
-    setLoadingOlder(true);
+    setLoading(true);
     try {
-      await loadOlderMessages(sessionId);
+      await fetchPage(sessionId, fillViewport);
     } finally {
       loadingRef.current = false;
-      setLoadingOlder(false);
+      setLoading(false);
     }
-  };
+  }, [sessionId, hasMore, hasNewer]);
 
-  const onLoadNewer = async () => {
-    if (!hasNewer || !sessionId || loadingRef.current) return;
-    scrollControllerRef.current?.pause();
+  useEffect(() => {
     const list = listRef.current;
-    readingAnchor.current = list ? { sessionId, anchors: visibleReadingAnchors(list) } : null;
-    loadingRef.current = true;
-    setLoadingNewer(true);
-    try {
-      await loadNewerMessages(sessionId);
-    } finally {
-      loadingRef.current = false;
-      setLoadingNewer(false);
-    }
-  };
+    const content = contentRef.current;
+    if (!list || !content || !sessionId || loading || running || loadingOlder || loadingNewer
+      || !items.length || items.length >= VIEWPORT_FILL_CAP || (!hasMore && !hasNewer)) return;
+    const fill = () => {
+      if (loadingRef.current || list.clientHeight === 0 || contentEndScrollTop(list) > 1) return;
+      const preferOlder = pageIntent.current?.sessionId === sessionId && pageIntent.current.direction === "older";
+      const direction = hasNewer && !(preferOlder && hasMore) ? "newer" : "older";
+      // A failed read (or a duplicate disk page) must not retry on every resize.
+      const key = JSON.stringify([sessionId, direction, items[0]?.id, items.at(-1)?.id, items.length]);
+      if (lastFill.current === key) return;
+      lastFill.current = key;
+      void loadPage(direction, true);
+    };
+    const observer = new ResizeObserver(fill);
+    observer.observe(list);
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [sessionId, items, hasMore, hasNewer, running, loading, loadingOlder, loadingNewer, loadPage]);
 
   useEffect(() => {
     const list = listRef.current;
     if (!list) return;
     const onScroll = () => {
       updateScrollUi();
+      const direction = scrollControllerRef.current?.getPagingDirection();
       if (loadingRef.current) {
         if (readingAnchor.current?.sessionId === sessionId) readingAnchor.current.anchors = visibleReadingAnchors(list);
         return;
       }
-      // Don't auto-page when the window fits on screen (opening a short tail
-      // would otherwise fire both edges at scrollTop 0).
-      if (list.scrollHeight <= list.clientHeight + SCROLL_LOAD_PX) return;
-      if (hasMore && list.scrollTop <= SCROLL_LOAD_PX) {
-        void onLoadOlder();
+      if (!direction) return;
+      if (direction === "older" && hasMore && list.scrollTop <= SCROLL_LOAD_PX) {
+        void loadPage("older");
         return;
       }
       const distBottom = Math.max(0, contentEndScrollTop(list) - list.scrollTop);
-      if (hasNewer && distBottom <= SCROLL_LOAD_PX) {
-        void onLoadNewer();
+      if (direction === "newer" && hasNewer && distBottom <= SCROLL_LOAD_PX) {
+        void loadPage("newer");
       }
     };
+    const unsubscribeInput = scrollControllerRef.current?.onPagingInput(direction => {
+      // At an absolute edge the browser cannot move, so no scroll event fires.
+      if (direction === "older" ? list.scrollTop <= 1 : contentEndScrollTop(list) - list.scrollTop <= 1) onScroll();
+    });
     list.addEventListener("scroll", onScroll, { passive: true });
-    return () => list.removeEventListener("scroll", onScroll);
+    return () => {
+      unsubscribeInput?.();
+      list.removeEventListener("scroll", onScroll);
+    };
     // Intentionally close over the latest loaders / flags.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
@@ -901,7 +919,7 @@ export function MessageList({
             type="button"
             className="message-load-older"
             disabled={loadingOlder}
-            onClick={() => void onLoadOlder()}
+            onClick={() => void loadPage("older")}
           >
             {loadingOlder ? t.common.loading : t.chat.loadOlder}
           </button>
@@ -980,7 +998,7 @@ export function MessageList({
             type="button"
             className="message-load-newer"
             disabled={loadingNewer}
-            onClick={() => void onLoadNewer()}
+            onClick={() => void loadPage("newer")}
           >
             {loadingNewer ? t.common.loading : t.chat.loadNewer}
           </button>

@@ -1,6 +1,8 @@
 import { getTranscriptFollowTarget, getTurnAnchorLayout, getTurnTrailingSpace } from "./chat-scroll";
 
 type TurnState = { sessionId: string | null; userId: string | null; running: boolean; hasNewer: boolean };
+type PagingDirection = "older" | "newer";
+const PAGING_INPUT_TTL_MS = 500;
 
 /** Owns only the main transcript's reading position and two temporary spacers. */
 export function createChatScrollController(list: HTMLElement, content: HTMLElement, spacer: HTMLElement) {
@@ -13,6 +15,37 @@ export function createChatScrollController(list: HTMLElement, content: HTMLEleme
   let leading = 0;
   let frame: number | null = null;
   let disposed = false;
+  let pagingDirection: PagingDirection | null = null;
+  let pagingInputListener: ((direction: PagingDirection) => void) | null = null;
+  let pagingUntil = 0;
+  let touchY: number | null = null;
+  let draggingScrollbar = false;
+  let scrollbarArmed = false;
+  let scrollbarUntil = 0;
+  let pointerY = 0;
+  let pointerScrollTop = 0;
+
+  const recordPagingInput = (delta: number, notify = true) => {
+    if (!delta) return;
+    pagingDirection = delta < 0 ? "older" : "newer";
+    pagingUntil = performance.now() + PAGING_INPUT_TTL_MS;
+    if (notify) pagingInputListener?.(pagingDirection);
+  };
+  const clearPagingInput = () => {
+    pagingDirection = null;
+    scrollbarArmed = false;
+  };
+  const inputReachesList = (event: Event, delta: number) => {
+    // A nested tool output/code block may consume the gesture itself.
+    for (let node = event.target as HTMLElement | null; node && node !== list; node = node.parentElement) {
+      if (node.scrollHeight <= node.clientHeight + 1) continue;
+      const style = getComputedStyle(node);
+      if (!/^(auto|scroll|overlay)$/.test(style.overflowY)) continue;
+      if (style.overscrollBehaviorY === "contain" || style.overscrollBehaviorY === "none"
+        || (delta < 0 ? node.scrollTop > 0 : node.scrollTop + node.clientHeight < node.scrollHeight - 1)) return false;
+    }
+    return true;
+  };
 
   const naturalHeight = () => {
     const style = getComputedStyle(list);
@@ -45,6 +78,7 @@ export function createChatScrollController(list: HTMLElement, content: HTMLEleme
     frame = requestAnimationFrame(() => { frame = null; pin(); });
   };
   const pause = () => {
+    clearPagingInput();
     following = false;
     anchor = null;
     if (state?.hasNewer) setTail(0);
@@ -53,17 +87,57 @@ export function createChatScrollController(list: HTMLElement, content: HTMLEleme
   };
   const onWheel = (event: Event) => {
     const wheel = event as WheelEvent;
-    if (wheel.deltaY !== 0) pause();
+    if (wheel.ctrlKey || wheel.deltaY === 0) return;
+    pause();
+    if (inputReachesList(event, wheel.deltaY)) recordPagingInput(wheel.deltaY);
   };
   const onKey = (event: Event) => {
     const key = event as KeyboardEvent;
     const target = key.target as HTMLElement | null;
     if (target?.closest?.("input, textarea, select, [contenteditable=true]")) return;
-    if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(key.key)) pause();
+    if (key.key === " " && target?.closest?.("button, summary, a[href], [role=button]")) return;
+    if (!["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(key.key)) return;
+    if (key.defaultPrevented) return;
+    pause();
+    const delta = ["ArrowUp", "PageUp", "Home"].includes(key.key) || (key.key === " " && key.shiftKey) ? -1 : 1;
+    if (inputReachesList(event, delta)) recordPagingInput(delta);
   };
   const onPointer = (event: Event) => {
     // A scrollbar drag targets the scroller itself; clicking a tool does not.
-    if (event.target === list) pause();
+    if (event.target !== list) return;
+    pause();
+    const pointer = event as PointerEvent;
+    const bounds = list.getBoundingClientRect();
+    const gutter = Math.max(12, list.offsetWidth - list.clientWidth);
+    if (pointer.clientX < bounds.right - gutter || pointer.clientX > bounds.right || !Number.isFinite(pointer.clientX)) return;
+    draggingScrollbar = true;
+    scrollbarArmed = true;
+    scrollbarUntil = performance.now() + PAGING_INPUT_TTL_MS;
+    pointerY = pointer.clientY;
+    pointerScrollTop = list.scrollTop;
+  };
+  const onPointerMove = (event: Event) => {
+    if (!draggingScrollbar) return;
+    const nextY = (event as PointerEvent).clientY;
+    const delta = nextY - pointerY;
+    pointerY = nextY;
+    scrollbarArmed = true;
+    recordPagingInput(delta);
+  };
+  const onPointerEnd = () => {
+    draggingScrollbar = false;
+    // Native track clicks may start their smooth scroll after pointerup.
+    scrollbarUntil = performance.now() + PAGING_INPUT_TTL_MS;
+  };
+  const onPointerCancel = () => { draggingScrollbar = false; scrollbarArmed = false; };
+  const onTouchStart = (event: Event) => {
+    pause();
+    touchY = (event as TouchEvent).touches?.[0]?.clientY ?? null;
+  };
+  const onTouchMove = (event: Event) => {
+    const nextY = (event as TouchEvent).touches?.[0]?.clientY;
+    if (touchY !== null && nextY !== undefined && inputReachesList(event, touchY - nextY)) recordPagingInput(touchY - nextY);
+    touchY = nextY ?? null;
   };
   const resize = () => {
     if (disposed || !following || !state || state.hasNewer) return;
@@ -92,8 +166,12 @@ export function createChatScrollController(list: HTMLElement, content: HTMLEleme
   observer?.observe(content);
   if (composer) observer?.observe(composer);
   list.addEventListener("wheel", onWheel, { passive: true });
-  list.addEventListener("touchstart", pause, { passive: true });
+  list.addEventListener("touchstart", onTouchStart, { passive: true });
+  list.addEventListener("touchmove", onTouchMove, { passive: true });
   list.addEventListener("pointerdown", onPointer, { passive: true });
+  window.addEventListener("pointermove", onPointerMove, { passive: true });
+  window.addEventListener("pointerup", onPointerEnd, { passive: true });
+  window.addEventListener("pointercancel", onPointerCancel, { passive: true });
   list.addEventListener("keydown", onKey);
   window.addEventListener("resize", resize);
 
@@ -122,8 +200,24 @@ export function createChatScrollController(list: HTMLElement, content: HTMLEleme
       schedulePin();
     },
     pause,
+    onPagingInput(listener: (direction: PagingDirection) => void) {
+      pagingInputListener = listener;
+      return () => { if (pagingInputListener === listener) pagingInputListener = null; };
+    },
+    getPagingDirection() {
+      // Pagination corrections and browser scroll anchoring also emit scroll.
+      // Only a fresh user gesture may request another page; pause() consumes it
+      // before loading so the corrected position cannot bounce to the other edge.
+      const delta = list.scrollTop - pointerScrollTop;
+      pointerScrollTop = list.scrollTop;
+      if (disposed) return null;
+      const now = performance.now();
+      if (scrollbarArmed && (draggingScrollbar || now <= scrollbarUntil) && delta) recordPagingInput(delta, false);
+      return performance.now() <= pagingUntil ? pagingDirection : null;
+    },
     followTail(smooth = false) {
       if (disposed || state?.hasNewer) return;
+      clearPagingInput();
       following = true;
       anchor = null;
       setTail(0);
@@ -131,11 +225,16 @@ export function createChatScrollController(list: HTMLElement, content: HTMLEleme
     },
     dispose() {
       disposed = true;
+      pagingInputListener = null;
       if (frame !== null) cancelAnimationFrame(frame);
       observer?.disconnect();
       list.removeEventListener("wheel", onWheel);
-      list.removeEventListener("touchstart", pause);
+      list.removeEventListener("touchstart", onTouchStart);
+      list.removeEventListener("touchmove", onTouchMove);
       list.removeEventListener("pointerdown", onPointer);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerEnd);
+      window.removeEventListener("pointercancel", onPointerCancel);
       list.removeEventListener("keydown", onKey);
       window.removeEventListener("resize", resize);
       content.style.paddingTop = originalLead;

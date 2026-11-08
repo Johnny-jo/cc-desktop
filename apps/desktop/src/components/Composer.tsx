@@ -160,11 +160,12 @@ async function buildMcpNote(): Promise<string> {
 
   for (const name of names) {
     const cfg = configured[name];
-    const target =
-      cfg && (cfg.type === "sse" || cfg.type === "http")
-        ? cfg.url
-        : cfg?.type === "playwright" ? cfg.browser : cfg?.command ?? "";
-    const type = cfg?.type ?? "stdio";
+    let target: string;
+    if (cfg.type === "windows-computer") target = "Windows desktop";
+    else if (cfg.type === "playwright") target = cfg.browser;
+    else if (cfg.type === "sse" || cfg.type === "http") target = cfg.url;
+    else target = cfg.command;
+    const type = cfg.type ?? "stdio";
     const liveInfo = liveByName.get(name);
     const statusPart = liveInfo
       ? ` — ${liveInfo.status}${liveInfo.tools ? `, ${liveInfo.tools.length} tools` : ""}${liveInfo.error ? ` (${liveInfo.error})` : ""}`
@@ -770,7 +771,7 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
   if (permissionRequest || userPromptRequest) {
     return (
       <div className="composer-shell composer-shell-prompt">
-        {permissionRequest ? <PermissionModal /> : <UserPromptModal />}
+        {permissionRequest ? <PermissionModal key={permissionRequest.requestId} request={permissionRequest} /> : <UserPromptModal />}
       </div>
     );
   }

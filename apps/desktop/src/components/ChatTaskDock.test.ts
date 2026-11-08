@@ -17,6 +17,8 @@ declare global {
       reset: () => void;
       mountScroll: () => void;
       mountHistory: () => void;
+      mountPagedHistory: (example?: "collapsed" | "long-collapsed" | "failed-read") => Promise<void>;
+      pageRequests: Array<{ direction: string; cursor: string }>;
       renderTurn: (items: ChatItem[]) => void;
       errors: string[];
     };
@@ -60,7 +62,7 @@ async function startBrowser(): Promise<void> {
           import { flushSync } from "react-dom";
           import { ChatTaskDock } from "./ChatTaskDock";
           import { MessageList } from "./MessageList";
-          import { useAppStore, __resetStoreForTests, __upsertSessionForTests, __applySessionEventForTests } from "../state/store";
+          import { useAppStore, selectSession, __resetStoreForTests, __upsertSessionForTests, __applySessionEventForTests } from "../state/store";
           import { createChatScrollController } from "../lib/chat-scroll-controller";
           import "./ChatProgressLayout.css";
           const host = document.getElementById("root");
@@ -69,6 +71,50 @@ async function startBrowser(): Promise<void> {
           console.error = (...args) => errors.push(args.map(String).join(" "));
           window.dockFixture = {
             errors,
+            pageRequests: [],
+            async mountPagedHistory(example) {
+              __resetStoreForTests();
+              __upsertSessionForTests({ id: "paged", title: "Paged history", cwd: "D:/project", updatedAt: 1, status: "idle" });
+              const all = Array.from({ length: example === "long-collapsed" ? 1200 : 240 }, (_, index) => index % 40 === 0
+                ? { kind: "text", id: "paged-" + index, role: "user", text: "History turn " + index }
+                : { kind: "tool", id: "paged-" + index, tool: { id: "paged-" + index, name: "Read", summary: "Read file " + index, status: "done" } });
+              const requests = window.dockFixture.pageRequests = [];
+              const prompt = { kind: "text", id: "paged-79", role: "user", text: "Find the game website", turnOutcome: "completed" };
+              if (example) {
+                all[79] = prompt;
+                for (let i = 80; i < all.length; i++) {
+                  all[i] = i < 84
+                    ? { kind: "text", id: "paged-" + i, role: "assistant", text: "", thinkingText: "Plan" }
+                    : { kind: "tool", id: "paged-" + i, tool: { id: "paged-" + i, name: "Read", status: "done" } };
+                }
+                all[all.length - 1] = { kind: "text", id: "answer", role: "assistant", text: "Found the official website." };
+              }
+              window.desktop = {
+                selectSession: async () => ({ items: all.slice(80, 160), hasMore: true, hasNewer: true, leadingUser: example ? prompt : undefined }),
+                loadOlderMessages: async (_session, cursor) => {
+                  requests.push({ direction: "older", cursor });
+                  const end = all.findIndex(item => item.id === cursor);
+                  return { items: all.slice(Math.max(0, end - 40), end), hasMore: end > 40 };
+                },
+                loadNewerMessages: async (_session, cursor) => {
+                  requests.push({ direction: "newer", cursor });
+                  if (example === "failed-read") throw Error("disk read failed");
+                  const start = all.findIndex(item => item.id === cursor) + 1;
+                  return { items: all.slice(start, start + 40), hasNewer: start + 40 < all.length };
+                },
+              };
+              await selectSession("paged");
+              function PagedHistory() {
+                const rows = useAppStore(state => state.itemsBySession.paged || []);
+                const leading = useAppStore(state => state.leadingUserBySession.paged);
+                const items = React.useMemo(() => leading ? [leading, ...rows] : rows, [rows, leading]);
+                const hasMore = useAppStore(state => state.hasMoreBySession.paged);
+                const hasNewer = useAppStore(state => state.hasNewerBySession.paged);
+                return <div className="chat-panel" style={{ height: example ? "1000px" : "520px" }}><MessageList items={items} sessionId="paged" hasMore={hasMore} hasNewer={hasNewer} running={false} /></div>;
+              }
+              document.getElementById("root").closest("main").style.cssText = "position:fixed;top:0;left:1rem;right:1rem;height:520px";
+              flushSync(() => root.render(<PagedHistory />));
+            },
             renderTurn(items) {
               flushSync(() => root.render(<div className="chat-panel"><MessageList items={items} sessionId="outcome" running={false} /></div>));
             },
@@ -597,6 +643,120 @@ describe("ChatTaskDock real React/DOM rendering", () => {
 });
 
 describe("main transcript real Electron layout", () => {
+  it("fills a viewport of collapsed activity with the adjacent reply and preserves its prompt and steps", async () => {
+    await evaluate(() => window.dockFixture.mountPagedHistory("collapsed"));
+    await expect.poll(() => evaluate(() => document.querySelector('[data-item-id="answer"]')?.textContent)).toContain("official website");
+    expect(await evaluate(() => document.querySelectorAll('[data-item-id="paged-79"]').length)).toBe(1);
+    await evaluate(() => {
+      const group = Array.from(document.querySelectorAll(".activity-group")).find(node => node.textContent?.includes("155"))!;
+      group.querySelector<HTMLButtonElement>("button")!.click();
+    });
+    expect(await evaluate(() => Boolean(document.querySelector('[data-item-id="paged-80"]') && document.querySelector('[data-item-id="paged-238"]')))).toBe(true);
+  });
+
+  it("stops filling a very long collapsed turn and still pages on a gesture without a scrollbar", async () => {
+    await evaluate(() => window.dockFixture.mountPagedHistory("long-collapsed"));
+    await evaluate(() => new Promise(resolve => setTimeout(resolve, 360)));
+    const before = await evaluate(() => window.dockFixture.pageRequests.length);
+    expect(before).toBeGreaterThan(0);
+    expect(before).toBeLessThan(10);
+    await evaluate(() => {
+      document.querySelector(".main-chat-message-list")!.dispatchEvent(new WheelEvent("wheel", { deltaY: 80 }));
+      return new Promise(resolve => setTimeout(resolve, 240));
+    });
+    expect(await evaluate(() => window.dockFixture.pageRequests.length)).toBe(before + 1);
+  });
+
+  it("leaves a failed viewport fill available for an explicit retry", async () => {
+    await evaluate(() => window.dockFixture.mountPagedHistory("failed-read"));
+    await evaluate(() => new Promise(resolve => setTimeout(resolve, 240)));
+    expect(await evaluate(() => window.dockFixture.pageRequests.length)).toBe(1);
+    await evaluate(() => document.querySelector<HTMLButtonElement>(".message-load-newer")!.click());
+    await expect.poll(() => evaluate(() => window.dockFixture.pageRequests.length)).toBe(2);
+  });
+
+  it("does not load history in response to a programmatic reading-position correction", async () => {
+    await evaluate(() => window.dockFixture.mountPagedHistory());
+    await evaluate(() => {
+      document.querySelector<HTMLElement>(".main-chat-message-list")!.scrollTop = 40;
+      return new Promise(resolve => setTimeout(resolve, 160));
+    });
+    expect(await evaluate(() => window.dockFixture.pageRequests)).toEqual([]);
+  });
+
+  it.each(["wheel", "keyboard", "touch", "scrollbar"])("loads only newer history on %s input where the two edge thresholds overlap", async input => {
+    await evaluate(() => window.dockFixture.mountPagedHistory());
+    const range = await evaluate(input => {
+      const list = document.querySelector<HTMLElement>(".main-chat-message-list")!;
+      const panel = document.querySelector<HTMLElement>("#root > .chat-panel")!;
+      panel.style.height = (list.scrollHeight - 120) + "px";
+      if (input === "wheel") list.dispatchEvent(new WheelEvent("wheel", { deltaY: 60 }));
+      if (input === "keyboard") list.dispatchEvent(new KeyboardEvent("keydown", { key: "PageDown" }));
+      if (input === "touch") {
+        list.dispatchEvent(Object.assign(new Event("touchstart"), { touches: [{ clientY: 120 }] }));
+        list.dispatchEvent(Object.assign(new Event("touchmove"), { touches: [{ clientY: 60 }] }));
+      }
+      if (input === "scrollbar") {
+        list.dispatchEvent(new PointerEvent("pointerdown", { clientX: list.getBoundingClientRect().right - 2, clientY: 20 }));
+        window.dispatchEvent(new PointerEvent("pointermove", { clientY: 80 }));
+      }
+      list.scrollTop = 60;
+      return list.scrollHeight - list.clientHeight;
+    }, input);
+    expect(range).toBe(120);
+    await evaluate(() => new Promise(resolve => setTimeout(resolve, 240)));
+    const requests = await evaluate(() => window.dockFixture.pageRequests);
+    expect(requests).toEqual([{ direction: "newer", cursor: "paged-159" }]);
+  });
+
+  it.each(["older", "newer"])("loads one %s page on a fresh wheel gesture at an already reached boundary", async direction => {
+    await evaluate(() => window.dockFixture.mountPagedHistory());
+    await evaluate(direction => {
+      const list = document.querySelector<HTMLElement>(".main-chat-message-list")!;
+      list.scrollTop = direction === "older" ? 0 : list.scrollHeight;
+      return new Promise(resolve => setTimeout(resolve, 40));
+    }, direction);
+    expect(await evaluate(() => window.dockFixture.pageRequests)).toEqual([]);
+    await evaluate(direction => {
+      document.querySelector<HTMLElement>(".main-chat-message-list")!.dispatchEvent(new WheelEvent("wheel", { deltaY: direction === "older" ? -60 : 60 }));
+      return new Promise(resolve => setTimeout(resolve, 240));
+    }, direction);
+    expect(await evaluate(() => window.dockFixture.pageRequests)).toEqual([{ direction, cursor: direction === "older" ? "paged-80" : "paged-159" }]);
+  });
+
+  it("loads newer history when a scrollbar track click scrolls after pointer release", async () => {
+    await evaluate(() => window.dockFixture.mountPagedHistory());
+    await evaluate(() => {
+      const list = document.querySelector<HTMLElement>(".main-chat-message-list")!;
+      const bounds = list.getBoundingClientRect();
+      list.dispatchEvent(new PointerEvent("pointerdown", { clientX: bounds.right - 2, clientY: bounds.bottom - 2 }));
+      window.dispatchEvent(new PointerEvent("pointerup"));
+      list.scrollTop = list.scrollHeight;
+      return new Promise(resolve => setTimeout(resolve, 240));
+    });
+    expect(await evaluate(() => window.dockFixture.pageRequests)).toEqual([{ direction: "newer", cursor: "paged-159" }]);
+  });
+
+  it("does not treat Space on an activity button or scrolling nested output as transcript paging", async () => {
+    await evaluate(() => window.dockFixture.mountPagedHistory());
+    await evaluate(() => {
+      const list = document.querySelector<HTMLElement>(".main-chat-message-list")!;
+      const nested = document.createElement("div");
+      nested.id = "nested-output";
+      nested.style.cssText = "height:40px;overflow-y:auto;flex:none";
+      nested.innerHTML = '<div style="height:200px">Tool output</div>';
+      list.querySelector(".message-list-content")!.appendChild(nested);
+      list.scrollTop = list.scrollHeight;
+      return new Promise(resolve => setTimeout(resolve, 40));
+    });
+    await evaluate(() => {
+      document.querySelector(".activity-group-toggle")!.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true }));
+      document.getElementById("nested-output")!.dispatchEvent(new WheelEvent("wheel", { deltaY: 60, bubbles: true }));
+      return new Promise(resolve => setTimeout(resolve, 160));
+    });
+    expect(await evaluate(() => window.dockFixture.pageRequests)).toEqual([]);
+  });
+
   it.each(["cancelled", "interrupted", "failed", "completed"] as const)("shows the persisted %s outcome after remounting", async outcome => {
     await evaluate(items => window.dockFixture.renderTurn(items), [
       { kind: "text" as const, id: "u", role: "user" as const, text: "Work", turnOutcome: outcome },

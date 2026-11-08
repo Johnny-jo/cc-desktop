@@ -23,6 +23,8 @@ function fixture() {
   const scrolls: number[] = [];
   const list = Object.assign(new EventTarget(), {
     clientHeight: 1000,
+    offsetWidth: 1000,
+    clientWidth: 985,
     scrollTop: 0,
     getBoundingClientRect: () => ({ top: 0, right: 1000 }),
     closest: () => ({ querySelector: () => composer }),
@@ -50,6 +52,20 @@ function fixture() {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("chat scroll controller", () => {
+  it("tracks native scrollbar reversals without pointermove and consumes the gesture before pagination correction", () => {
+    const f = fixture(); f.grow(2000); f.update(false);
+    f.list.scrollTop = 300;
+    f.list.dispatchEvent(Object.assign(new Event("pointerdown"), { clientX: 999, clientY: 400 }));
+    f.list.scrollTop = 350;
+    expect(f.controller.getPagingDirection()).toBe("newer");
+    f.list.scrollTop = 50;
+    expect(f.controller.getPagingDirection()).toBe("older");
+    f.controller.pause();
+    f.list.scrollTop = 300;
+    expect(f.controller.getPagingDirection()).toBeNull();
+    f.controller.dispose();
+  });
+
   it("reserves only enough to align the new turn and consumes it as content grows", () => {
     const f = fixture(); f.update();
     expect(f.list.scrollTop).toBe(460);

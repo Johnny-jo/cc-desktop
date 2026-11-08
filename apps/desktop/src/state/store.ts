@@ -10,6 +10,7 @@ import {
   type ChatItem,
   type CpaStatus,
   type FileChange,
+  type PermissionDecision,
   type PermissionMode,
   type PermissionRequest,
   type PublicSettings,
@@ -35,6 +36,7 @@ export type AppState = {
   /** SDK skills / slash commands keyed by session */
   slashBySession: Record<string, SlashCommandItem[]>;
   permissionRequest: PermissionRequest | null;
+  permissionQueue: PermissionRequest[];
   /** 房间远程执行审批队首；保留单条读取 API。 */
   roomPermAsk: RoomPermAskPayload | null;
   /** 按 requestId 去重的 FIFO 待审批队列，包含当前队首。 */
@@ -84,6 +86,7 @@ let state: AppState = {
   changesBySession: {},
   slashBySession: {},
   permissionRequest: null,
+  permissionQueue: [],
   roomPermAsk: null,
   roomPermAskQueue: [],
   userPromptRequest: null,
@@ -256,7 +259,7 @@ function writeTranscriptUi(sessionId: string, t: TranscriptState): void {
   }
   const previous = state.leadingUserBySession[sessionId];
   const contextCount = previous && t.items[0]?.id === previous.id ? 1 : 0;
-  const start = Math.max(contextCount, t.items.length - RENDERER_TRANSCRIPT_CAP);
+  const start = Math.max(contextCount, t.items.length - transcriptWindowLimit(getItems(sessionId).length));
   const pruned = start > contextCount;
   const leading = leadingTurnUser(t.items, start);
   setState({
@@ -321,7 +324,9 @@ function applySessionEvent(event: SdkNormalizedEvent): void {
   const { sessionId } = event;
   // Also reconcile on completion when a renderer missed permission:resolved.
   if (event.type === "result") {
-    if (state.permissionRequest?.sessionId === sessionId) setState({ permissionRequest: null });
+    if (state.permissionQueue.some(r => r.sessionId === sessionId)) {
+      setPermissionQueue(state.permissionQueue.filter(r => r.sessionId !== sessionId));
+    }
     if (state.userPromptRequest?.sessionId === sessionId) setState({ userPromptRequest: null });
   }
   if (event.type === "result" && (event.outcome === "interrupted" || event.outcome === "cancelled") &&
@@ -485,13 +490,14 @@ function subscribeDesktopEvents(): void {
 
   unsubs.push(
     desktop.on(IPC.permissionRequest, (payload) => {
-      setState({ permissionRequest: payload as PermissionRequest });
+      const request = payload as PermissionRequest;
+      if (!state.permissionQueue.some(r => r.requestId === request.requestId)) {
+        setPermissionQueue([...state.permissionQueue, request]);
+      }
     }),
     desktop.on(IPC.permissionResolved, (payload) => {
       const { requestId } = payload as { requestId: string };
-      if (state.permissionRequest?.requestId === requestId) {
-        setState({ permissionRequest: null });
-      }
+      removePermissionRequest(requestId);
     }),
   );
 
@@ -844,6 +850,14 @@ export async function deleteSession(sessionId: string): Promise<void> {
 /** Renderer sliding window. Initial select and live cap share this length. */
 export const RENDERER_TRANSCRIPT_CAP = 80;
 const SELECT_PAGE = RENDERER_TRANSCRIPT_CAP;
+// Several disk pages can fold into a single visible activity. Only grow the
+// window while filling an empty viewport, and keep that window bounded.
+export const VIEWPORT_FILL_CAP = 4 * RENDERER_TRANSCRIPT_CAP;
+
+function transcriptWindowLimit(currentLength: number, fillViewport = false): number {
+  if (fillViewport) return VIEWPORT_FILL_CAP;
+  return Math.min(VIEWPORT_FILL_CAP, Math.max(RENDERER_TRANSCRIPT_CAP, currentLength));
+}
 
 export async function selectSession(sessionId: string): Promise<void> {
   touchSessionCache(sessionId);
@@ -954,6 +968,7 @@ export async function selectSession(sessionId: string): Promise<void> {
 /** Prepend the next older disk page and prune the newer tail. */
 export async function loadOlderMessages(
   sessionId: string,
+  fillViewport = false,
 ): Promise<{ ok: boolean }> {
   const items = getItems(sessionId);
   const beforeId = items[0]?.id;
@@ -961,7 +976,12 @@ export async function loadOlderMessages(
     return { ok: false };
   }
   try {
-    const page = await getDesktop().loadOlderMessages(sessionId, beforeId);
+    const desktop = getDesktop();
+    const room = VIEWPORT_FILL_CAP - items.length;
+    if (fillViewport && room <= 0) return { ok: false };
+    const page = fillViewport
+      ? await desktop.loadOlderMessages(sessionId, beforeId, Math.min(room, 40))
+      : await desktop.loadOlderMessages(sessionId, beforeId);
     const current = getItems(sessionId);
     if (current[0]?.id !== beforeId) return { ok: false };
     if (!page.items.length) {
@@ -973,8 +993,9 @@ export async function loadOlderMessages(
     const seen = new Set(current.map((i) => i.id));
     const older = page.items.filter((i) => !seen.has(i.id));
     const merged = bindSdkUserMsgIds(sessionId, [...older, ...current]);
-    const pruned = merged.length > RENDERER_TRANSCRIPT_CAP;
-    const next = pruned ? merged.slice(0, RENDERER_TRANSCRIPT_CAP) : merged;
+    const limit = transcriptWindowLimit(current.length, fillViewport);
+    const pruned = merged.length > limit;
+    const next = pruned ? merged.slice(0, limit) : merged;
     setState({
       leadingUserBySession: { ...state.leadingUserBySession, [sessionId]: page.leadingUser },
       itemsBySession: {
@@ -999,6 +1020,7 @@ export async function loadOlderMessages(
 /** Append the next newer disk page and prune the older head. */
 export async function loadNewerMessages(
   sessionId: string,
+  fillViewport = false,
 ): Promise<{ ok: boolean }> {
   const items = getItems(sessionId);
   const afterId = items[items.length - 1]?.id;
@@ -1006,7 +1028,12 @@ export async function loadNewerMessages(
     return { ok: false };
   }
   try {
-    const page = await getDesktop().loadNewerMessages(sessionId, afterId);
+    const desktop = getDesktop();
+    const room = VIEWPORT_FILL_CAP - items.length;
+    if (fillViewport && room <= 0) return { ok: false };
+    const page = fillViewport
+      ? await desktop.loadNewerMessages(sessionId, afterId, Math.min(room, 40))
+      : await desktop.loadNewerMessages(sessionId, afterId);
     const current = getItems(sessionId);
     if (current[current.length - 1]?.id !== afterId) return { ok: false };
     if (!page.items.length) {
@@ -1018,8 +1045,9 @@ export async function loadNewerMessages(
     const seen = new Set(current.map((i) => i.id));
     const newer = page.items.filter((i) => !seen.has(i.id));
     const merged = bindSdkUserMsgIds(sessionId, [...current, ...newer]);
-    const pruned = merged.length > RENDERER_TRANSCRIPT_CAP;
-    const next = pruned ? merged.slice(merged.length - RENDERER_TRANSCRIPT_CAP) : merged;
+    const limit = transcriptWindowLimit(current.length, fillViewport);
+    const pruned = merged.length > limit;
+    const next = pruned ? merged.slice(merged.length - limit) : merged;
     setState({
       leadingUserBySession: { ...state.leadingUserBySession,
         [sessionId]: leadingTurnUser(merged, merged.length - next.length, state.leadingUserBySession[sessionId]) },
@@ -1366,8 +1394,21 @@ export async function syncCpaModels(): Promise<void> {
   }
 }
 
-export function clearPermissionRequest(): void {
-  setState({ permissionRequest: null });
+function setPermissionQueue(queue: PermissionRequest[]): void {
+  setState({ permissionQueue: queue, permissionRequest: queue[0] ?? null });
+}
+
+function removePermissionRequest(id: string): void {
+  if (state.permissionQueue.some(r => r.requestId === id)) {
+    setPermissionQueue(state.permissionQueue.filter(r => r.requestId !== id));
+  }
+}
+
+export async function respondToPermission(requestId: string, decision: PermissionDecision): Promise<void> {
+  // A reply means either accepted or already settled (ok:false). A rejected
+  // IPC call means neither: retain the card so the user can retry.
+  await getDesktop().respondPermission(requestId, decision);
+  removePermissionRequest(requestId);
 }
 
 function setRoomPermAskQueue(queue: RoomPermAskPayload[]): void {
@@ -1429,6 +1470,7 @@ export function __resetStoreForTests(): void {
     changesBySession: {},
     slashBySession: {},
     permissionRequest: null,
+    permissionQueue: [],
     roomPermAsk: null,
     roomPermAskQueue: [],
     userPromptRequest: null,

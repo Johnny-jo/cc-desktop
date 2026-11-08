@@ -3,16 +3,19 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   IPC,
+  type PermissionRequest,
   type PublicSettings,
   type RoomPermAskPayload,
 } from "@claude-desktop/shared";
 import type { DesktopApi } from "../lib/desktop-api";
+import { PermissionBroker } from "../../electron/main/permission-broker";
 import { RoomPermAskModal } from "../components/RoomPermAskModal";
 import {
   __resetStoreForTests,
   bootstrapStore,
   clearRoomPermAsk,
   getState,
+  respondToPermission,
   respondRoomPermAsk,
   subscribe,
 } from "./store";
@@ -43,10 +46,11 @@ function createDesktopBoundary() {
     getSettings: async () => settings,
     getCpaStatus: async () => ({ state: "unknown" as const }),
     listSessions: async () => [],
+    respondPermission: vi.fn<DesktopApi["respondPermission"]>(),
     respondRoomPermAsk: vi.fn<DesktopApi["respondRoomPermAsk"]>()
       .mockResolvedValue({ ok: true }),
   } satisfies Pick<DesktopApi,
-    "on" | "getSettings" | "getCpaStatus" | "listSessions" | "respondRoomPermAsk"
+    "on" | "getSettings" | "getCpaStatus" | "listSessions" | "respondRoomPermAsk" | "respondPermission"
   >;
   return {
     desktop,
@@ -103,6 +107,62 @@ beforeEach(async () => {
 afterEach(() => {
   __resetStoreForTests();
   vi.unstubAllGlobals();
+});
+
+describe("chat approval card through the desktop bridge", () => {
+  it("executes matching calls once and keeps the unrelated prompt through a late IPC acknowledgement", async () => {
+    const saved: string[] = [];
+    const broker = new PermissionBroker({ getMode: () => "default",
+      getAllowRules: () => saved, onAddAllowRule: r => { saved.push(r); },
+      requestFromUi: r => boundary.emitChannel(IPC.permissionRequest, r),
+      onResolved: requestId => boundary.emitChannel(IPC.permissionResolved, { requestId }),
+      timeoutMs: 150 });
+    const ack = deferredResponse();
+    boundary.desktop.respondPermission.mockImplementation(async (id, decision) => {
+      const ok = broker.respond(id, decision);
+      await ack.promise;
+      return { ok };
+    });
+    const execute = vi.fn();
+    const run = async (command: string) => {
+      const result = await broker.canUseTool("Bash", { command }, "s");
+      if (result.behavior === "allow") execute(result.updatedInput.command);
+    };
+    const first = run("git status");
+    const next = run("git status -s");
+    const different = run("git diff");
+    const head = getState().permissionRequest!;
+    expect(head.summary).toBe("git status");
+    const submitting = respondToPermission(head.requestId, { behavior: "allow", scope: "always" });
+    await Promise.all([first, next, run("git status --short")]);
+    expect(execute.mock.calls.flat().sort()).toEqual(["git status", "git status --short", "git status -s"].sort());
+    expect(getState().permissionRequest?.summary).toBe("git diff");
+    ack.resolve({ ok: true });
+    await submitting;
+    const last = getState().permissionRequest!;
+    expect(last.summary).toBe("git diff");
+    await respondToPermission(last.requestId, { behavior: "deny" });
+    await different;
+    expect(getState().permissionRequest).toBeNull();
+    expect(execute).toHaveBeenCalledTimes(3);
+  });
+
+  it("retains the card on IPC failure, removes only the acknowledged ID on retry", async () => {
+    const request: PermissionRequest = { requestId: "a", sessionId: "s", toolName: "Edit", summary: "a", inputPreview: {} };
+    boundary.emitChannel(IPC.permissionRequest, request);
+    boundary.emitChannel(IPC.permissionRequest, request);
+    boundary.desktop.respondPermission.mockRejectedValueOnce(new Error("disk full"));
+    await expect(respondToPermission("a", { behavior: "allow", scope: "always" })).rejects.toThrow("disk full");
+    expect(getState().permissionRequest).toEqual(request);
+    const ack = deferredResponse();
+    boundary.desktop.respondPermission.mockReturnValueOnce(ack.promise);
+    const retry = respondToPermission("a", { behavior: "allow", scope: "once" });
+    boundary.emitChannel(IPC.permissionRequest, { ...request, requestId: "b" });
+    expect(getState().permissionRequest).toEqual(request);
+    ack.resolve({ ok: true });
+    await retry;
+    expect(getState().permissionRequest?.requestId).toBe("b");
+  });
 });
 
 describe("room approval queue through desktop subscriptions", () => {

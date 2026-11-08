@@ -36,6 +36,7 @@ export const zh: Messages = {
     allowOnce: "允许一次",
     allowSession: "本会话允许",
     allowAlways: "始终允许",
+    approvalFailed: "审批未提交，请重试。",
     moreAllowOptions: "更多允许选项",
     typeResponse: "输入你的回答…",
     completed: "我已完成",

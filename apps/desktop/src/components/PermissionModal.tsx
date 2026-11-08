@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import type { PermissionDecision, PermissionRequest } from "@claude-desktop/shared";
-import { clearPermissionRequest, useAppStore } from "../state/store";
+import { respondToPermission } from "../state/store";
 import { useI18n } from "../i18n/useI18n";
 import { PermissionDetails, permissionAction } from "./PermissionDetails";
 
@@ -50,9 +50,13 @@ function parseAskQuestions(input: unknown): AskQuestion[] | null {
 function AskQuestionForm({
   request,
   respond,
+  submitting,
+  error,
 }: {
   request: PermissionRequest;
   respond: (d: PermissionDecision) => void;
+  submitting: boolean;
+  error: React.ReactNode;
 }) {
   const { t } = useI18n();
   const questions = parseAskQuestions(request.inputPreview) ?? [];
@@ -144,10 +148,12 @@ function AskQuestionForm({
         ))}
       </div>
 
+      {error}
       <div className="agent-prompt-actions">
         <button
           type="button"
           className="btn agent-prompt-secondary"
+          disabled={submitting}
           onClick={() =>
             respond({ behavior: "deny", message: t.prompts.userDeclined })
           }
@@ -157,7 +163,7 @@ function AskQuestionForm({
         <button
           type="button"
           className="btn agent-prompt-primary"
-          disabled={!allAnswered}
+          disabled={!allAnswered || submitting}
           onClick={submit}
         >
           {t.prompts.submitAnswer}
@@ -167,24 +173,28 @@ function AskQuestionForm({
   );
 }
 
-export function PermissionModal() {
+export function PermissionModal({ request }: { request: PermissionRequest }) {
   const { t } = useI18n();
-  const request = useAppStore((s) => s.permissionRequest);
-
-  if (!request) return null;
-
-  const respond = (decision: PermissionDecision) => {
-    const desktop = window.desktop;
-    if (!desktop) return;
-    void desktop.respondPermission(request.requestId, decision);
-    clearPermissionRequest();
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const respond = async (decision: PermissionDecision) => {
+    if (submitting) return;
+    setSubmitting(true);
+    setError("");
+    try {
+      await respondToPermission(request.requestId, decision);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setSubmitting(false);
+    }
   };
+  const errorMessage = error ? <p role="alert">{t.prompts.approvalFailed} {error}</p> : null;
 
   if (request.toolName === "AskUserQuestion") {
     const questions = parseAskQuestions(request.inputPreview);
     if (questions) {
       return (
-        <AskQuestionForm request={request} respond={respond} />
+        <AskQuestionForm request={request} respond={respond} submitting={submitting} error={errorMessage} />
       );
     }
   }
@@ -203,12 +213,14 @@ export function PermissionModal() {
 
         <div className="agent-prompt-content">
           <PermissionDetails request={request} t={t.prompts} />
+          {errorMessage}
         </div>
 
         <div className="agent-prompt-actions">
           <button
             type="button"
             className="btn agent-prompt-secondary"
+            disabled={submitting}
             onClick={() => respond({ behavior: "deny", message: "User denied" })}
           >
             {t.prompts.decline}
@@ -217,6 +229,7 @@ export function PermissionModal() {
             <button
               type="button"
               className="btn agent-prompt-primary permission-allow-once"
+              disabled={submitting}
               onClick={() => respond({ behavior: "allow", scope: "once" })}
             >
               {request.toolName === "Edit" ? t.prompts.allowEditOnce : request.toolName === "Write" ? t.prompts.allowWriteOnce : t.prompts.allowOnce}
@@ -231,12 +244,14 @@ export function PermissionModal() {
                 <button
                   type="button"
                   onClick={() => respond({ behavior: "allow", scope: "session" })}
+                  disabled={submitting}
                 >
                   {t.prompts.allowSession}
                 </button>
                 <button
                   type="button"
                   onClick={() => respond({ behavior: "allow", scope: "always" })}
+                  disabled={submitting}
                 >
                   {t.prompts.allowAlways}
                 </button>
