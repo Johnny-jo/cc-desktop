@@ -1,0 +1,2 @@
+# The packaged OCR dictionary is pinned by its upstream byte checksum.
+apps/desktop/resources/models/ocr/ppocr_v5_mobile/ppocrv5_dict.txt text eol=lf

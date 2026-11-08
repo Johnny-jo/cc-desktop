@@ -16,3 +16,5 @@ tools/
 .tmp/
 .claude/worktrees/
 .claude/settings.local.json
+# Playwright MCP page snapshots captured while debugging locally
+.playwright-mcp/
