@@ -9,6 +9,7 @@ export * from "./attachments";
 export * from "./model-context-limits";
 export * from "./mcp-servers";
 export * from "./transcript-reducer";
+export * from "./transcript-turns";
 export { updateSessionProgress, rebuildSessionProgress, restoreSessionProgress } from "./session-progress";
 export * from "./room-protocol";
 export * from "./room-list-preview";

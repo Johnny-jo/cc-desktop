@@ -14,9 +14,53 @@ import {
   SessionArchive,
   mergeTranscriptItems,
   TRANSCRIPT_CHUNK_ITEMS,
+  pageTranscriptTurns,
 } from "./session-archive";
+import { AppDatabase } from "./app-database";
 
 describe("SessionArchive", () => {
+  it.each(["chunks", "sqlite"] as const)("restores complete twelve-turn pages from %s without hydrating unrelated history", backend => {
+    const dir = tmpDir();
+    const database = backend === "sqlite" ? AppDatabase.open(dir) : undefined;
+    if (backend === "sqlite") expect(database).not.toBeNull();
+    try {
+      const archive = new SessionArchive(dir, database ?? undefined);
+      const turns: ChatItem[][] = Array.from({ length: 30 }, (_, turn) => [
+        { kind: "text", id: `user-${turn}`, role: "user", text: "Question" },
+        ...Array.from({ length: turn === 22 ? 350 : 4 }, (_, step): ChatItem => ({
+          kind: "tool", id: `tool-${turn}-${step}`,
+          tool: { id: `tool-${turn}-${step}`, name: "Read", summary: "Reading", status: "done" },
+        })),
+        { kind: "text", id: `answer-${turn}`, role: "assistant", text: "Answer" },
+      ]);
+      archive.saveItems("s", turns.flat());
+      const fullLoad = vi.spyOn(archive, "loadItems");
+      const read = (options: { beforeId?: string; afterId?: string; limit?: number }) => archive.loadItemsPage("s", options);
+      const tail = pageTranscriptTurns(read, { turnLimit: 12 });
+      expect(tail.items.map(item => item.id)).toEqual(turns.slice(18).flat().map(item => item.id));
+      expect(tail).toMatchObject({ hasMore: true, hasNewer: false, leadingUser: undefined });
+      const older = pageTranscriptTurns(read, { beforeId: tail.items[0]!.id, turnLimit: 12 });
+      expect(older.items.map(item => item.id)).toEqual(turns.slice(6, 18).flat().map(item => item.id));
+      const newer = pageTranscriptTurns(read, { afterId: older.items.at(-1)!.id, turnLimit: 12 });
+      expect(newer.items).toEqual(tail.items);
+      expect(newer.hasNewer).toBe(false);
+      expect(pageTranscriptTurns(read, { beforeId: "missing", turnLimit: 12 }).items).toEqual([]);
+      expect(fullLoad).not.toHaveBeenCalled();
+    } finally { database?.close(); }
+  });
+
+  it("keeps an old transcript without user markers as a single complete turn", () => {
+    const archive = new SessionArchive(tmpDir());
+    const items: ChatItem[] = Array.from({ length: 300 }, (_, i) => ({
+      kind: "text", id: `legacy-${i}`, role: "assistant", text: `Output ${i}`,
+    }));
+    archive.saveItems("legacy", items);
+    const read = (options: { beforeId?: string; afterId?: string; limit?: number }) => archive.loadItemsPage("legacy", options);
+    expect(pageTranscriptTurns(read, { turnLimit: 12 })).toMatchObject({
+      items, hasMore: false, hasNewer: false,
+    });
+  });
+
   it("does not erase a persisted turn outcome with a stale renderer page", () => {
     const user = { kind: "text" as const, id: "u", role: "user" as const, text: "Work" };
     expect(mergeTranscriptItems([{ ...user, turnOutcome: "interrupted" }], [user])[0])

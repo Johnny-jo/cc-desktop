@@ -7,7 +7,12 @@ import type {
   PermissionDecision,
   UserPrompt,
   UserPromptDecision,
+  TranscriptPageOptions,
 } from "@claude-desktop/shared";
+
+function pageOptions(options?: number | TranscriptPageOptions): TranscriptPageOptions {
+  return typeof options === "number" ? { limit: options } : options ?? {};
+}
 
 const desktop = {
   /** Omit path to open the native directory picker. */
@@ -78,8 +83,8 @@ const desktop = {
       error?: string;
     }>,
 
-  selectSession: (sessionId: string, limit?: number) =>
-    ipcRenderer.invoke(IPC.sessionSelect, { sessionId, limit }) as Promise<{
+  selectSession: (sessionId: string, options?: number | TranscriptPageOptions) =>
+    ipcRenderer.invoke(IPC.sessionSelect, { sessionId, ...pageOptions(options) }) as Promise<{
       sessionId: string;
       cwd: string;
       items: ChatItem[];
@@ -90,11 +95,11 @@ const desktop = {
       changes: import("@claude-desktop/shared").FileChange[];
     }>,
 
-  loadOlderMessages: (sessionId: string, beforeId: string, limit?: number) =>
+  loadOlderMessages: (sessionId: string, beforeId: string, options?: number | TranscriptPageOptions) =>
     ipcRenderer.invoke(IPC.sessionLoadOlder, {
       sessionId,
       beforeId,
-      limit,
+      ...pageOptions(options),
     }) as Promise<{
       items: ChatItem[];
       leadingUser?: ChatItem;
@@ -103,11 +108,11 @@ const desktop = {
       hasNewer: boolean;
     }>,
 
-  loadNewerMessages: (sessionId: string, afterId: string, limit?: number) =>
+  loadNewerMessages: (sessionId: string, afterId: string, options?: number | TranscriptPageOptions) =>
     ipcRenderer.invoke(IPC.sessionLoadNewer, {
       sessionId,
       afterId,
-      limit,
+      ...pageOptions(options),
     }) as Promise<{
       items: ChatItem[];
       leadingUser?: ChatItem;

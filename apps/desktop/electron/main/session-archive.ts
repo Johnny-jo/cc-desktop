@@ -4,6 +4,8 @@ import {
   DIFF_MAX_EVENTS_PER_FILE,
   compactFileChange,
   leadingTurnUser,
+  transcriptTurnRange,
+  type TranscriptPageOptions,
   rebuildSessionProgress,
   restoreSessionProgress,
   restoreTaskPlan,
@@ -62,6 +64,58 @@ export type TranscriptPage = {
   /** Newer rows exist after this page. */
   hasNewer: boolean;
 };
+
+/**
+ * Assemble whole turns from bounded storage reads. This works for hydrated
+ * sessions, legacy JSON chunks and SQLite without loading unrelated history.
+ */
+export function pageTranscriptTurns(
+  readPage: (cursor: { beforeId?: string; afterId?: string; limit?: number }) => TranscriptPage,
+  opts: TranscriptPageOptions & { beforeId?: string; afterId?: string },
+): TranscriptPage {
+  const limit = Math.max(1, Math.floor(opts.turnLimit!));
+  const forward = Boolean(opts.afterId);
+  let cursor = forward ? opts.afterId : opts.beforeId;
+  const pages: ChatItem[][] = [];
+  let userTurns = 0;
+  let partialFirstTurn = false;
+  let page: TranscriptPage;
+  let leadingUser: ChatItem | undefined;
+  let outerHasMore = false;
+  let outerHasNewer = false;
+  do {
+    page = readPage({ ...(forward ? { afterId: cursor } : { beforeId: cursor }), limit: TRANSCRIPT_CHUNK_ITEMS });
+    if (!pages.length) {
+      outerHasMore = page.hasMore;
+      outerHasNewer = page.hasNewer;
+      leadingUser = page.leadingUser;
+      const first = page.items[0];
+      partialFirstTurn = Boolean(first && !(first.kind === "text" && first.role === "user"));
+    }
+    if (!page.items.length) break;
+    pages.push(page.items);
+    if (!forward) leadingUser = page.leadingUser;
+    userTurns += page.items.filter(item => item.kind === "text" && item.role === "user").length;
+    const nextCursor = (forward ? page.items.at(-1) : page.items[0])!.id;
+    if (nextCursor === cursor) break;
+    cursor = nextCursor;
+    if (forward) {
+      // Read through the final turn until the following user's message.
+      if (userTurns + Number(partialFirstTurn) > limit || !page.hasNewer) break;
+    } else {
+      if (userTurns >= limit || !page.hasMore) break;
+    }
+  } while (true);
+  const items = (forward ? pages : pages.reverse()).flat();
+  const { start, end } = transcriptTurnRange(items, limit, forward ? "older" : "newer");
+  return {
+    items: items.slice(start, end),
+    leadingUser: leadingTurnUser(items, start, leadingUser),
+    total: page.total,
+    hasMore: forward ? outerHasMore : start > 0 || page.hasMore,
+    hasNewer: forward ? end < items.length || page.hasNewer : outerHasNewer,
+  };
+}
 
 /** Slice a transcript for the renderer sliding window. */
 export function pageTranscriptItems(

@@ -9,10 +9,10 @@ import {
   getState,
   loadNewerMessages,
   loadOlderMessages,
-  RENDERER_TRANSCRIPT_CAP,
   selectSession,
   sendMessage,
 } from "./store";
+import { TRANSCRIPT_TURN_WINDOW, type ChatItem } from "@claude-desktop/shared";
 
 function runningSession(id: string) {
   __upsertSessionForTests({
@@ -96,18 +96,20 @@ describe("prompt queue", () => {
 
   it("caps live renderer transcript and marks hasMore so older rows stay on disk", () => {
     runningSession("s1");
-    for (let i = 0; i < 100; i++) {
+    const total = TRANSCRIPT_TURN_WINDOW + 20;
+    for (let i = 0; i < total; i++) {
       __applySessionEventForTests({
-        type: "text_done",
+        type: "user_message",
         sessionId: "s1",
         text: `msg-${i}`,
+        submittedItem: userItem(`user-${i}`, `msg-${i}`),
       });
     }
     const items = getState().itemsBySession.s1 ?? [];
-    expect(items.length).toBe(RENDERER_TRANSCRIPT_CAP);
+    expect(items.length).toBe(TRANSCRIPT_TURN_WINDOW);
     expect(getState().hasMoreBySession.s1).toBe(true);
     expect(items[0]).toMatchObject({ text: "msg-20" });
-    expect(items[items.length - 1]).toMatchObject({ text: "msg-99" });
+    expect(items[items.length - 1]).toMatchObject({ text: `msg-${total - 1}` });
     expect(getState().hasNewerBySession.s1).toBe(false);
   });
 
@@ -296,21 +298,61 @@ function textItem(id: string, text: string): {
   return { kind: "text", id, role: "assistant", text };
 }
 
+function userItem(id: string, text: string): Extract<ChatItem, { kind: "text" }> {
+  return { kind: "text", id, role: "user", text };
+}
+
 describe("sliding transcript window", () => {
-  it("keeps the first prompt and its outcome while paging by persisted row IDs", async () => {
+  it("loads twelve whole turns and retains the adjacent page while paging in either direction", async () => {
+    const turns = Array.from({ length: 60 }, (_, i) => [
+      userItem(`user-${i}`, `Question ${i}`),
+      ...Array.from({ length: i === 54 ? 350 : 2 }, (_, j): ChatItem => ({
+        kind: "tool", id: `tool-${i}-${j}`, tool: { id: `tool-${i}-${j}`, name: "Read", summary: "Read", status: "done" },
+      })),
+      textItem(`answer-${i}`, `Answer ${i}`),
+    ]);
+    const select = vi.fn(async (_id: string, { turnLimit }: { turnLimit: number }) => ({
+      items: turns.slice(-turnLimit).flat(), hasMore: true, hasNewer: false,
+    }));
+    Object.assign(window.desktop, { selectSession: select });
+    desktop.loadOlderMessages.mockImplementation(async (_id: string, cursor: string, { turnLimit }: { turnLimit: number }) => {
+      const end = turns.findIndex(turn => turn[0]!.id === cursor);
+      return { items: turns.slice(Math.max(0, end - turnLimit), end).flat(), hasMore: end > turnLimit };
+    });
+    desktop.loadNewerMessages.mockImplementation(async (_id: string, cursor: string, { turnLimit }: { turnLimit: number }) => {
+      const start = turns.findIndex(turn => turn.at(-1)!.id === cursor) + 1;
+      return { items: turns.slice(start, start + turnLimit).flat(), hasNewer: start + turnLimit < turns.length };
+    });
+
+    await selectSession("s1");
+    expect(select).toHaveBeenCalledWith("s1", { turnLimit: 12 });
+    const tail = getState().itemsBySession.s1;
+    expect(tail).toEqual(turns.slice(48).flat());
+    await loadOlderMessages("s1");
+    expect(desktop.loadOlderMessages).toHaveBeenCalledWith("s1", "user-48", { turnLimit: 12 });
+    expect(getState().itemsBySession.s1).toEqual(turns.slice(36).flat());
+    await loadOlderMessages("s1");
+    expect(getState().itemsBySession.s1).toEqual(turns.slice(24, 48).flat());
+    expect(getState().hasNewerBySession.s1).toBe(true);
+
+    await loadNewerMessages("s1");
+    expect(desktop.loadNewerMessages).toHaveBeenCalledWith("s1", "answer-47", { turnLimit: 12 });
+    expect(getState().itemsBySession.s1).toEqual(turns.slice(36).flat());
+    expect(getState().hasNewerBySession.s1).toBe(false);
+  });
+
+  it("keeps a long turn's prompt, all tool work and its final outcome in the same window", async () => {
     runningSession("s1");
     const user = { kind: "text" as const, role: "user" as const, id: "persisted-user", text: "first question" };
     __applySessionEventForTests({ type: "user_message", text: user.text, submittedItem: user, sessionId: "s1" });
-    for (let i = 0; i < RENDERER_TRANSCRIPT_CAP + 4; i++) {
+    for (let i = 0; i < 350; i++) {
       __applySessionEventForTests({ type: "text_done", text: "step " + i, sessionId: "s1", transcriptIds: ["persisted-" + i] });
     }
     __applySessionEventForTests({ type: "result", ok: true, sessionId: "s1" });
     const tail = getState().itemsBySession.s1;
-    expect(tail).toHaveLength(RENDERER_TRANSCRIPT_CAP);
-    expect(getState().leadingUserBySession.s1).toMatchObject({ ...user, turnOutcome: "completed" });
-    desktop.loadOlderMessages.mockResolvedValue({ items: [user], hasMore: false });
-    await loadOlderMessages("s1");
-    expect(desktop.loadOlderMessages).toHaveBeenCalledWith("s1", "persisted-4");
+    expect(tail).toHaveLength(351);
+    expect(tail[0]).toMatchObject({ ...user, turnOutcome: "completed" });
+    expect(tail.at(-1)).toMatchObject({ text: "step 349" });
     expect(getState().itemsBySession.s1.filter(row => row.id === user.id)).toHaveLength(1);
     expect(getState().leadingUserBySession.s1).toBeUndefined();
   });
@@ -334,13 +376,14 @@ describe("sliding transcript window", () => {
     g.window.desktop = desktop;
   });
 
-  function fillLiveTail(n = RENDERER_TRANSCRIPT_CAP): void {
+  function fillLiveTail(n = TRANSCRIPT_TURN_WINDOW): void {
     runningSession("s1");
     for (let i = 0; i < n; i++) {
       __applySessionEventForTests({
-        type: "text_done",
+        type: "user_message",
         sessionId: "s1",
         text: `msg-${i}`,
+        submittedItem: userItem(`live-${i}`, `msg-${i}`),
       });
     }
   }
@@ -348,9 +391,9 @@ describe("sliding transcript window", () => {
   it("loadOlder prepends a page and prunes the newer tail so the window stays capped", async () => {
     fillLiveTail();
     const before = getState().itemsBySession.s1 ?? [];
-    expect(before).toHaveLength(RENDERER_TRANSCRIPT_CAP);
+    expect(before).toHaveLength(TRANSCRIPT_TURN_WINDOW);
 
-    const older = Array.from({ length: 40 }, (_, i) => textItem(`old-${i}`, `old-${i}`));
+    const older = Array.from({ length: 12 }, (_, i) => userItem(`old-${i}`, `old-${i}`));
     desktop.loadOlderMessages.mockResolvedValue({
       items: older,
       total: 200,
@@ -361,12 +404,12 @@ describe("sliding transcript window", () => {
     await loadOlderMessages("s1");
 
     const after = getState().itemsBySession.s1 ?? [];
-    expect(after).toHaveLength(RENDERER_TRANSCRIPT_CAP);
+    expect(after).toHaveLength(TRANSCRIPT_TURN_WINDOW);
     expect(after[0]).toMatchObject({ id: "old-0" });
-    expect(after[39]).toMatchObject({ id: "old-39" });
-    expect(after[40]).toMatchObject({ text: "msg-0" });
-    expect(after.at(-1)).toMatchObject({ text: "msg-39" });
-    expect(after.some((i) => i.kind === "text" && i.text === "msg-79")).toBe(false);
+    expect(after[11]).toMatchObject({ id: "old-11" });
+    expect(after[12]).toMatchObject({ text: "msg-0" });
+    expect(after.at(-1)).toMatchObject({ text: `msg-${TRANSCRIPT_TURN_WINDOW - 13}` });
+    expect(after.some((i) => i.kind === "text" && i.text === `msg-${TRANSCRIPT_TURN_WINDOW - 1}`)).toBe(false);
     expect(getState().hasMoreBySession.s1).toBe(true);
     expect(getState().hasNewerBySession.s1).toBe(true);
   });
@@ -384,10 +427,10 @@ describe("sliding transcript window", () => {
 
   it("loadNewer appends a page and prunes the older head so the window stays capped", async () => {
     fillLiveTail();
-    const prunedTail = (getState().itemsBySession.s1 ?? []).slice(40);
+    const prunedTail = (getState().itemsBySession.s1 ?? []).slice(12);
 
     desktop.loadOlderMessages.mockResolvedValue({
-      items: Array.from({ length: 40 }, (_, i) => textItem(`old-${i}`, `old-${i}`)),
+      items: Array.from({ length: 12 }, (_, i) => userItem(`old-${i}`, `old-${i}`)),
       total: 200,
       hasMore: true,
       hasNewer: true,
@@ -404,9 +447,9 @@ describe("sliding transcript window", () => {
     await loadNewerMessages("s1");
 
     const after = getState().itemsBySession.s1 ?? [];
-    expect(after).toHaveLength(RENDERER_TRANSCRIPT_CAP);
+    expect(after).toHaveLength(TRANSCRIPT_TURN_WINDOW);
     expect(after[0]).toMatchObject({ text: "msg-0" });
-    expect(after.at(-1)).toMatchObject({ text: "msg-79" });
+    expect(after.at(-1)).toMatchObject({ text: `msg-${TRANSCRIPT_TURN_WINDOW - 1}` });
     expect(after.some((i) => i.kind === "text" && i.id === "old-0")).toBe(false);
     expect(getState().hasMoreBySession.s1).toBe(true);
     expect(getState().hasNewerBySession.s1).toBe(false);
@@ -415,7 +458,7 @@ describe("sliding transcript window", () => {
   it("does not apply live stream items while the window is scrolled into history", async () => {
     fillLiveTail();
     desktop.loadOlderMessages.mockResolvedValue({
-      items: Array.from({ length: 40 }, (_, i) => textItem(`old-${i}`, `old-${i}`)),
+      items: Array.from({ length: 12 }, (_, i) => userItem(`old-${i}`, `old-${i}`)),
       total: 200,
       hasMore: true,
       hasNewer: true,
@@ -443,7 +486,7 @@ describe("sliding transcript window", () => {
   it("sendMessage while scrolled into history snaps the window back to the new tail", async () => {
     fillLiveTail();
     desktop.loadOlderMessages.mockResolvedValue({
-      items: Array.from({ length: 40 }, (_, i) => textItem(`old-${i}`, `old-${i}`)),
+      items: Array.from({ length: 12 }, (_, i) => userItem(`old-${i}`, `old-${i}`)),
       total: 200,
       hasMore: true,
       hasNewer: true,
@@ -601,12 +644,12 @@ describe("renderer session cache pruning", () => {
       status: "idle",
     });
     stubSelect("s1", {
-      items: Array.from({ length: RENDERER_TRANSCRIPT_CAP }, (_, i) =>
-        textItem(`s1-${i}`, `msg-${i}`),
+      items: Array.from({ length: TRANSCRIPT_TURN_WINDOW }, (_, i) =>
+        userItem(`s1-${i}`, `msg-${i}`),
       ),
     });
     await selectSession("s1");
-    expect(getState().itemsBySession.s1).toHaveLength(RENDERER_TRANSCRIPT_CAP);
+    expect(getState().itemsBySession.s1).toHaveLength(TRANSCRIPT_TURN_WINDOW);
 
     const g = globalThis as unknown as { window?: { desktop?: Record<string, unknown> } };
     const desktop = g.window!.desktop as {
@@ -614,7 +657,7 @@ describe("renderer session cache pruning", () => {
       selectSession: ReturnType<typeof vi.fn>;
     };
     desktop.loadOlderMessages = vi.fn().mockResolvedValue({
-      items: Array.from({ length: 8 }, (_, i) => textItem(`old-${i}`, `old-${i}`)),
+      items: Array.from({ length: 8 }, (_, i) => userItem(`old-${i}`, `old-${i}`)),
       total: 40,
       hasMore: true,
       hasNewer: true,

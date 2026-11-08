@@ -2143,6 +2143,31 @@ describe("SessionManager", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("pages complete user turns despite hundreds of tool records within a turn", async () => {
+    const ctx = makeDeps();
+    const id = await ctx.manager.start({ text: "start", attachments: [] }, "D:/p");
+    const turns: ChatItem[][] = Array.from({ length: 30 }, (_, turn) => [
+      { kind: "text", role: "user", id: `user-${turn}`, text: `Question ${turn}` },
+      ...Array.from({ length: turn === 20 ? 350 : 3 }, (_, step): ChatItem => ({
+        kind: "tool", id: `tool-${turn}-${step}`,
+        tool: { id: `tool-${turn}-${step}`, name: "Read", summary: "Read file", status: "done" },
+      })),
+      { kind: "text", role: "assistant", id: `answer-${turn}`, text: `Answer ${turn}` },
+    ]);
+    ctx.manager.saveTranscript(id, turns.flat(), { replace: true });
+    const tail = ctx.manager.getTranscriptPage(id, { turnLimit: 12 });
+    expect(tail.items).toEqual(turns.slice(18).flat());
+    expect(tail.hasMore).toBe(true);
+    expect(tail.hasNewer).toBe(false);
+    const older = ctx.manager.getTranscriptPage(id, { beforeId: tail.items[0]!.id, turnLimit: 12 });
+    expect(older.items).toEqual(turns.slice(6, 18).flat());
+    const newer = ctx.manager.getTranscriptPage(id, { afterId: older.items.at(-1)!.id, turnLimit: 12 });
+    expect(newer.items).toEqual(tail.items);
+    const first = ctx.manager.getTranscriptPage(id, { beforeId: older.items[0]!.id, turnLimit: 12 });
+    expect(first.items).toEqual(turns.slice(0, 6).flat());
+    expect(first.hasMore).toBe(false);
+  });
+
   it("getTranscriptPage returns shallow-copied items", async () => {
     const ctx = makeDeps();
     const sessionId = await ctx.manager.start(

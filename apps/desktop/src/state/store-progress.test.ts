@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { SessionSummary } from "@claude-desktop/shared";
+import { TRANSCRIPT_TURN_WINDOW } from "@claude-desktop/shared";
 import {
   __applySessionEventForTests, __resetStoreForTests, __upsertSessionForTests,
-  getState, RENDERER_TRANSCRIPT_CAP,
+  getState,
 } from "./store";
 
 const summary: SessionSummary = {
@@ -26,11 +27,13 @@ describe("main chat progress summary routing", () => {
   });
   it("keeps progress beyond the renderer history cap and the parent's result", () => {
     __upsertSessionForTests(summary);
-    for (let i = 0; i < RENDERER_TRANSCRIPT_CAP + 10; i++) {
+    for (let i = 0; i < TRANSCRIPT_TURN_WINDOW + 10; i++) {
+      __applySessionEventForTests({ type: "user_message", sessionId: summary.id, text: `Question ${i}`,
+        submittedItem: { kind: "text", role: "user", id: `user-${i}`, text: `Question ${i}` } });
       __applySessionEventForTests({ type: "text_done", sessionId: summary.id, text: `Output ${i}` });
     }
     __applySessionEventForTests({ type: "result", sessionId: summary.id, ok: true });
-    expect(getState().itemsBySession[summary.id]).toHaveLength(RENDERER_TRANSCRIPT_CAP);
+    expect(getState().itemsBySession[summary.id]).toHaveLength(2 * TRANSCRIPT_TURN_WINDOW);
     expect(getState().sessions[0]).toMatchObject({ status: "idle", progress: summary.progress });
   });
 

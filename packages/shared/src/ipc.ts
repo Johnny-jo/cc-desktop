@@ -18,6 +18,7 @@ import type {
   UserPrompt,
 } from "./models";
 import type { BrowserAuthorizationRequest, BrowserAuthorizationStatus, BrowserExtensionSetupRequest, BrowserExtensionSetupStatus } from "./mcp-servers";
+import type { TranscriptPageOptions } from "./transcript-turns";
 
 export const IPC = {
   projectOpen: "project:open",
@@ -319,7 +320,7 @@ export type IpcInvokeMap = {
     result: { results: SessionSearchHit[] };
   };
   [IPC.sessionSelect]: {
-    args: [{ sessionId: string; limit?: number }];
+    args: [{ sessionId: string } & TranscriptPageOptions];
     result: {
       sessionId: string;
       cwd: string;
@@ -332,7 +333,7 @@ export type IpcInvokeMap = {
     };
   };
   [IPC.sessionLoadOlder]: {
-    args: [{ sessionId: string; beforeId: string; limit?: number }];
+    args: [{ sessionId: string; beforeId: string } & TranscriptPageOptions];
     result: {
       items: import("./models").ChatItem[];
       leadingUser?: import("./models").ChatItem;
@@ -342,7 +343,7 @@ export type IpcInvokeMap = {
     };
   };
   [IPC.sessionLoadNewer]: {
-    args: [{ sessionId: string; afterId: string; limit?: number }];
+    args: [{ sessionId: string; afterId: string } & TranscriptPageOptions];
     result: {
       items: import("./models").ChatItem[];
       leadingUser?: import("./models").ChatItem;

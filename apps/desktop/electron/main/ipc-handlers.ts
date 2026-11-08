@@ -17,6 +17,7 @@ import type {
   UserPromptDecision,
   UserPrompt,
   BrowserExtensionSetupRequest,
+  TranscriptPageOptions,
 } from "@claude-desktop/shared";
 import { prepareBrowserExtension, getBrowserExtensionStatus } from "./browser-extension-setup";
 import { getBrowserAuthorizationStatus, saveBrowserAuthorization, clearBrowserAuthorization } from "./browser-authorization";
@@ -455,7 +456,7 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
     IPC.sessionSelect,
     async (
       _e,
-      { sessionId, limit }: { sessionId: string; limit?: number },
+      { sessionId, ...options }: { sessionId: string } & TranscriptPageOptions,
     ) => {
       const summary = ctx.sessions.getSummary(sessionId);
       if (!summary) {
@@ -466,7 +467,7 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
         ctx.settings.update({ lastProjectPath: summary.cwd });
         ctx.rooms?.reportLocalProject(summary.cwd);
       }
-      const page = ctx.sessions.getTranscriptPage(sessionId, { limit });
+      const page = ctx.sessions.getTranscriptPage(sessionId, options);
       return {
         sessionId,
         cwd: summary.cwd,
@@ -487,10 +488,10 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
       {
         sessionId,
         beforeId,
-        limit,
-      }: { sessionId: string; beforeId: string; limit?: number },
+        ...options
+      }: { sessionId: string; beforeId: string } & TranscriptPageOptions,
     ) => {
-      return ctx.sessions.getTranscriptPage(sessionId, { beforeId, limit });
+      return ctx.sessions.getTranscriptPage(sessionId, { beforeId, ...options });
     },
   );
 
@@ -501,10 +502,10 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
       {
         sessionId,
         afterId,
-        limit,
-      }: { sessionId: string; afterId: string; limit?: number },
+        ...options
+      }: { sessionId: string; afterId: string } & TranscriptPageOptions,
     ) => {
-      return ctx.sessions.getTranscriptPage(sessionId, { afterId, limit });
+      return ctx.sessions.getTranscriptPage(sessionId, { afterId, ...options });
     },
   );
 

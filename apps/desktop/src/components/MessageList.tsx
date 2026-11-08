@@ -14,6 +14,7 @@ import type {
   TurnUsage,
   TurnOutcome,
 } from "@claude-desktop/shared";
+import { transcriptTurnStarts, TRANSCRIPT_TURN_WINDOW } from "@claude-desktop/shared";
 import { MarkdownBody } from "./MarkdownBody";
 import { AttachmentChips } from "./AttachmentChips";
 import { ChatActivity } from "./ChatActivity";
@@ -22,7 +23,6 @@ import { formatTurnUsageLine } from "../lib/format-usage";
 import {
   loadNewerMessages,
   loadOlderMessages,
-  VIEWPORT_FILL_CAP,
   rewindToMessage,
   selectSession,
   useAppStore,
@@ -796,7 +796,7 @@ export function MessageList({
     const list = listRef.current;
     const content = contentRef.current;
     if (!list || !content || !sessionId || loading || running || loadingOlder || loadingNewer
-      || !items.length || items.length >= VIEWPORT_FILL_CAP || (!hasMore && !hasNewer)) return;
+      || !items.length || transcriptTurnStarts(items).length >= TRANSCRIPT_TURN_WINDOW || (!hasMore && !hasNewer)) return;
     const fill = () => {
       if (loadingRef.current || list.clientHeight === 0 || contentEndScrollTop(list) > 1) return;
       const preferOlder = pageIntent.current?.sessionId === sessionId && pageIntent.current.direction === "older";

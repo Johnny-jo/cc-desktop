@@ -17,6 +17,7 @@ import type {
   SlashCommandItem,
   TurnUsage,
   ToolCardState,
+  TranscriptPageOptions,
 } from "@claude-desktop/shared";
 import type { PermissionBroker } from "./permission-broker";
 import type { DiffTracker } from "./diff-tracker";
@@ -26,6 +27,7 @@ import type { UserPromptBroker } from "./user-prompt-broker";
 import {
   mergeTranscriptItems,
   pageTranscriptItems,
+  pageTranscriptTurns,
   type SessionArchive,
   type StoredSession,
   type TranscriptPage,
@@ -889,8 +891,11 @@ export class SessionManager {
   /** Incremental UI restore — tail, before `beforeId`, or after `afterId`. */
   getTranscriptPage(
     sessionId: string,
-    opts?: { beforeId?: string; afterId?: string; limit?: number },
-  ) {
+    opts?: TranscriptPageOptions & { beforeId?: string; afterId?: string },
+  ): TranscriptPage {
+    if (opts?.turnLimit && Number.isFinite(opts.turnLimit) && opts.turnLimit > 0) {
+      return pageTranscriptTurns(cursor => this.getTranscriptPage(sessionId, cursor), opts);
+    }
     const entry = this.sessions.get(sessionId);
     if (entry) {
       if (entry.itemsHydrated) {

@@ -60,6 +60,7 @@ async function startBrowser(): Promise<void> {
           import React from "react";
           import { createRoot } from "react-dom/client";
           import { flushSync } from "react-dom";
+          import { transcriptTurnRange } from "@claude-desktop/shared";
           import { ChatTaskDock } from "./ChatTaskDock";
           import { MessageList } from "./MessageList";
           import { useAppStore, selectSession, __resetStoreForTests, __upsertSessionForTests, __applySessionEventForTests } from "../state/store";
@@ -91,16 +92,20 @@ async function startBrowser(): Promise<void> {
               }
               window.desktop = {
                 selectSession: async () => ({ items: all.slice(80, 160), hasMore: true, hasNewer: true, leadingUser: example ? prompt : undefined }),
-                loadOlderMessages: async (_session, cursor) => {
+                loadOlderMessages: async (_session, cursor, options = 40) => {
                   requests.push({ direction: "older", cursor });
                   const end = all.findIndex(item => item.id === cursor);
-                  return { items: all.slice(Math.max(0, end - 40), end), hasMore: end > 40 };
+                  const start = typeof options === "number" ? Math.max(0, end - options)
+                    : transcriptTurnRange(all.slice(0, end), options.turnLimit, "newer").start;
+                  return { items: all.slice(start, end), hasMore: start > 0 };
                 },
-                loadNewerMessages: async (_session, cursor) => {
+                loadNewerMessages: async (_session, cursor, options = 40) => {
                   requests.push({ direction: "newer", cursor });
                   if (example === "failed-read") throw Error("disk read failed");
                   const start = all.findIndex(item => item.id === cursor) + 1;
-                  return { items: all.slice(start, start + 40), hasNewer: start + 40 < all.length };
+                  const end = typeof options === "number" ? Math.min(all.length, start + options)
+                    : start + transcriptTurnRange(all.slice(start), options.turnLimit, "older").end;
+                  return { items: all.slice(start, end), hasNewer: end < all.length };
                 },
               };
               await selectSession("paged");
@@ -142,6 +147,7 @@ async function startBrowser(): Promise<void> {
               flushSync(() => root.render(props.map((entry, key) => React.createElement(ChatTaskDock, { ...entry, key }))));
             },
             reset() {
+              Object.defineProperty(navigator, "language", { configurable: true, value: "en" });
               window.scrollFixture?.controller.dispose();
               window.scrollFixture?.panel.remove();
               delete window.scrollFixture;
@@ -654,17 +660,18 @@ describe("main transcript real Electron layout", () => {
     expect(await evaluate(() => Boolean(document.querySelector('[data-item-id="paged-80"]') && document.querySelector('[data-item-id="paged-238"]')))).toBe(true);
   });
 
-  it("stops filling a very long collapsed turn and still pages on a gesture without a scrollbar", async () => {
+  it("loads a very long collapsed turn through its final reply without counting tool rows as turns", async () => {
     await evaluate(() => window.dockFixture.mountPagedHistory("long-collapsed"));
     await evaluate(() => new Promise(resolve => setTimeout(resolve, 360)));
     const before = await evaluate(() => window.dockFixture.pageRequests.length);
     expect(before).toBeGreaterThan(0);
-    expect(before).toBeLessThan(10);
+    expect(before).toBeLessThan(4);
+    expect(await evaluate(() => document.querySelector('[data-item-id="answer"]')?.textContent)).toContain("official website");
     await evaluate(() => {
       document.querySelector(".main-chat-message-list")!.dispatchEvent(new WheelEvent("wheel", { deltaY: 80 }));
       return new Promise(resolve => setTimeout(resolve, 240));
     });
-    expect(await evaluate(() => window.dockFixture.pageRequests.length)).toBe(before + 1);
+    expect(await evaluate(() => window.dockFixture.pageRequests.length)).toBe(before);
   });
 
   it("leaves a failed viewport fill available for an explicit retry", async () => {

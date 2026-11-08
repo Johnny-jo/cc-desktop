@@ -6,6 +6,10 @@ import {
   bindSdkUserMsgIds as bindIds,
   createIdFactory,
   leadingTurnUser,
+  transcriptTurnRange,
+  transcriptTurnStarts,
+  TRANSCRIPT_TURNS_PER_PAGE,
+  TRANSCRIPT_TURN_WINDOW,
   type Attachment,
   type ChatItem,
   type CpaStatus,
@@ -259,7 +263,7 @@ function writeTranscriptUi(sessionId: string, t: TranscriptState): void {
   }
   const previous = state.leadingUserBySession[sessionId];
   const contextCount = previous && t.items[0]?.id === previous.id ? 1 : 0;
-  const start = Math.max(contextCount, t.items.length - transcriptWindowLimit(getItems(sessionId).length));
+  const start = Math.max(contextCount, transcriptTurnRange(t.items, TRANSCRIPT_TURN_WINDOW, "newer").start);
   const pruned = start > contextCount;
   const leading = leadingTurnUser(t.items, start);
   setState({
@@ -847,17 +851,8 @@ export async function deleteSession(sessionId: string): Promise<void> {
   });
 }
 
-/** Renderer sliding window. Initial select and live cap share this length. */
-export const RENDERER_TRANSCRIPT_CAP = 80;
-const SELECT_PAGE = RENDERER_TRANSCRIPT_CAP;
-// Several disk pages can fold into a single visible activity. Only grow the
-// window while filling an empty viewport, and keep that window bounded.
-export const VIEWPORT_FILL_CAP = 4 * RENDERER_TRANSCRIPT_CAP;
-
-function transcriptWindowLimit(currentLength: number, fillViewport = false): number {
-  if (fillViewport) return VIEWPORT_FILL_CAP;
-  return Math.min(VIEWPORT_FILL_CAP, Math.max(RENDERER_TRANSCRIPT_CAP, currentLength));
-}
+// Keep the adjacent page for stable reading anchors while paging by whole turns.
+const SELECT_PAGE = { turnLimit: TRANSCRIPT_TURNS_PER_PAGE };
 
 export async function selectSession(sessionId: string): Promise<void> {
   touchSessionCache(sessionId);
@@ -977,11 +972,11 @@ export async function loadOlderMessages(
   }
   try {
     const desktop = getDesktop();
-    const room = VIEWPORT_FILL_CAP - items.length;
+    const room = TRANSCRIPT_TURN_WINDOW - transcriptTurnStarts(items).length;
     if (fillViewport && room <= 0) return { ok: false };
     const page = fillViewport
-      ? await desktop.loadOlderMessages(sessionId, beforeId, Math.min(room, 40))
-      : await desktop.loadOlderMessages(sessionId, beforeId);
+      ? await desktop.loadOlderMessages(sessionId, beforeId, { turnLimit: Math.min(room, TRANSCRIPT_TURNS_PER_PAGE) })
+      : await desktop.loadOlderMessages(sessionId, beforeId, SELECT_PAGE);
     const current = getItems(sessionId);
     if (current[0]?.id !== beforeId) return { ok: false };
     if (!page.items.length) {
@@ -993,9 +988,9 @@ export async function loadOlderMessages(
     const seen = new Set(current.map((i) => i.id));
     const older = page.items.filter((i) => !seen.has(i.id));
     const merged = bindSdkUserMsgIds(sessionId, [...older, ...current]);
-    const limit = transcriptWindowLimit(current.length, fillViewport);
-    const pruned = merged.length > limit;
-    const next = pruned ? merged.slice(0, limit) : merged;
+    const { end } = transcriptTurnRange(merged, TRANSCRIPT_TURN_WINDOW, "older");
+    const pruned = end < merged.length;
+    const next = pruned ? merged.slice(0, end) : merged;
     setState({
       leadingUserBySession: { ...state.leadingUserBySession, [sessionId]: page.leadingUser },
       itemsBySession: {
@@ -1029,11 +1024,11 @@ export async function loadNewerMessages(
   }
   try {
     const desktop = getDesktop();
-    const room = VIEWPORT_FILL_CAP - items.length;
+    const room = TRANSCRIPT_TURN_WINDOW - transcriptTurnStarts(items).length;
     if (fillViewport && room <= 0) return { ok: false };
     const page = fillViewport
-      ? await desktop.loadNewerMessages(sessionId, afterId, Math.min(room, 40))
-      : await desktop.loadNewerMessages(sessionId, afterId);
+      ? await desktop.loadNewerMessages(sessionId, afterId, { turnLimit: Math.min(room, TRANSCRIPT_TURNS_PER_PAGE) })
+      : await desktop.loadNewerMessages(sessionId, afterId, SELECT_PAGE);
     const current = getItems(sessionId);
     if (current[current.length - 1]?.id !== afterId) return { ok: false };
     if (!page.items.length) {
@@ -1045,9 +1040,9 @@ export async function loadNewerMessages(
     const seen = new Set(current.map((i) => i.id));
     const newer = page.items.filter((i) => !seen.has(i.id));
     const merged = bindSdkUserMsgIds(sessionId, [...current, ...newer]);
-    const limit = transcriptWindowLimit(current.length, fillViewport);
-    const pruned = merged.length > limit;
-    const next = pruned ? merged.slice(merged.length - limit) : merged;
+    const { start } = transcriptTurnRange(merged, TRANSCRIPT_TURN_WINDOW, "newer");
+    const pruned = start > 0;
+    const next = pruned ? merged.slice(start) : merged;
     setState({
       leadingUserBySession: { ...state.leadingUserBySession,
         [sessionId]: leadingTurnUser(merged, merged.length - next.length, state.leadingUserBySession[sessionId]) },
