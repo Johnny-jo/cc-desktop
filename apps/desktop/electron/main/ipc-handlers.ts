@@ -16,7 +16,10 @@ import type {
   PermissionDecision,
   UserPromptDecision,
   UserPrompt,
+  BrowserExtensionSetupRequest,
 } from "@claude-desktop/shared";
+import { prepareBrowserExtension, getBrowserExtensionStatus } from "./browser-extension-setup";
+import { getBrowserAuthorizationStatus, saveBrowserAuthorization, clearBrowserAuthorization } from "./browser-authorization";
 import { attachmentFromFile, guessMimeType } from "@claude-desktop/shared";
 import { MAX_IMAGE_ATTACHMENT_SIZE } from "./attachment-reader";
 import { performRoomAttachmentAction } from "./room-attachment-actions";
@@ -980,6 +983,40 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
   ipcMain.handle(IPC.appWindowControl, (event, { action }: { action: string }) => {
     const win = BrowserWindow.fromWebContents(event.sender);
     return controlWindow(win, action);
+  });
+
+  ipcMain.handle(IPC.appOpenBrowserExtension, async (): Promise<void> => {
+    await shell.openExternal("https://chromewebstore.google.com/detail/playwright-extension/mmlmfjhmonkocbjadbfplnigmagldckm");
+  });
+
+  function browserSetupRequest(value: unknown): BrowserExtensionSetupRequest {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("请选择浏览器");
+    const request = value as BrowserExtensionSetupRequest;
+    const valid = validateMcpServers({ browser: { type: "playwright", browser: request.browser, profile: request.profile } });
+    if (!valid.ok) throw new Error(valid.error);
+    return { browser: request.browser, profile: request.profile?.trim() || undefined };
+  }
+  ipcMain.handle(IPC.appSetupBrowserExtension, async (_event, value: unknown) => {
+    const request = browserSetupRequest(value);
+    return prepareBrowserExtension(request.browser, request.profile);
+  });
+  ipcMain.handle(IPC.appBrowserExtensionStatus, async (_event, value: unknown) => {
+    const request = browserSetupRequest(value);
+    return getBrowserExtensionStatus(request.browser, request.profile);
+  });
+  ipcMain.handle(IPC.appBrowserAuthorizationStatus, async (_event, value: unknown) => {
+    const request = browserSetupRequest(value);
+    return getBrowserAuthorizationStatus(request.browser, request.profile);
+  });
+  ipcMain.handle(IPC.appSaveBrowserAuthorization, async (_event, value: unknown) => {
+    const request = browserSetupRequest(value);
+    const token = (value as { token?: unknown }).token;
+    if (typeof token !== "string" || !token.trim() || token.length > 512) throw new Error("请粘贴扩展页面上的连接令牌");
+    return saveBrowserAuthorization(request.browser, request.profile, token);
+  });
+  ipcMain.handle(IPC.appClearBrowserAuthorization, async (_event, value: unknown) => {
+    const request = browserSetupRequest(value);
+    return clearBrowserAuthorization(request.browser, request.profile);
   });
 
   ipcMain.handle(

@@ -1,0 +1,114 @@
+.control-settings-target {
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.control-settings-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 18px 2px;
+}
+
+.control-settings-identity {
+  flex: 1 1 160px;
+  min-width: 0;
+}
+
+.control-settings-identity h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.control-settings-identity p {
+  margin: 4px 0 0;
+  line-height: 1.5;
+  color: var(--text-muted);
+  font-size: 0.846rem;
+}
+
+.control-settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+}
+
+.control-settings-status {
+  white-space: nowrap;
+  color: var(--text-faint);
+  font-size: 0.808rem;
+}
+
+.control-settings-status[data-connected="true"] {
+  color: var(--ok);
+}
+
+.control-settings-profiles {
+  display: grid;
+  gap: 10px;
+  padding: 0 2px 18px;
+}
+
+.control-app-icon {
+  position: relative;
+  flex: 0 0 30px;
+  height: 30px;
+  border-radius: 50%;
+  overflow: hidden;
+}
+.control-app-icon::before,
+.control-app-icon::after {
+  position: absolute;
+  content: "";
+}
+.control-app-icon-windows-computer {
+  border-radius: 7px;
+  background: var(--bg-active);
+  color: var(--text-muted);
+}
+.control-app-icon-windows-computer::before {
+  inset: 6px 4px 9px;
+  border: 1.7px solid currentColor;
+  border-radius: 3px;
+}
+.control-app-icon-windows-computer::after {
+  bottom: 6px;
+  left: 10px;
+  width: 10px;
+  height: 2px;
+  border-radius: 2px;
+  background: currentColor;
+}
+.control-app-icon-chrome {
+  background: conic-gradient(from -30deg, #e9473c 0 33.33%, #f8c641 0 66.66%, #33a653 0);
+}
+.control-app-icon-chrome::before {
+  inset: 8px;
+  border-radius: 50%;
+  border: 1.4px solid white;
+  background: #2682eb;
+}
+.control-app-icon-msedge {
+  background: conic-gradient(from 40deg at 51% 54%, #33c9a5, #21b6b9 24%, #0871bc 38%, #075899 51%, #159be0 70%, #37c9a7);
+}
+.control-app-icon-msedge::before {
+  width: 21px;
+  height: 11px;
+  top: 10px;
+  right: -2px;
+  border-radius: 55% 70% 64% 70%;
+  background: var(--bg-elevated);
+  box-shadow: -1px 3px 0 1px #0a74b8;
+}
+.control-app-icon-msedge::after {
+  width: 15px;
+  height: 7px;
+  top: 8px;
+  right: 0;
+  border-radius: 60% 0 50%;
+  background: linear-gradient(100deg, #188ec8, #2ccab0);
+}

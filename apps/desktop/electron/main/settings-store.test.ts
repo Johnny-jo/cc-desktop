@@ -11,6 +11,13 @@ describe("SettingsStore", () => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "cd-settings-"));
   });
 
+  it("does not install an in-memory allow rule when its settings write fails", () => {
+    const store = new SettingsStore({ userDataDir: dir, encrypt: s => s, decrypt: s => s });
+    fs.mkdirSync(path.join(dir, "settings.json"));
+    expect(() => store.update({ permissionAllow: ["Bash(git status)"] })).toThrow();
+    expect(store.get().permissionAllow).toEqual([]);
+  });
+
   it("persists public settings and keeps token out of public view", () => {
     const store = new SettingsStore({
       userDataDir: dir,
@@ -101,6 +108,22 @@ describe("SettingsStore", () => {
     expect(store.getPublic().galaxyEffectsEnabled).toBe(false);
     fs.writeFileSync(path.join(dir, "settings.json"), JSON.stringify({ galaxyEffectsEnabled: "false" }), "utf8");
     expect(new SettingsStore(deps).getPublic().galaxyEffectsEnabled).toBe(true);
+  });
+
+  it("retains disabled control profiles separately across restarts and filters invalid records", () => {
+    const deps = { userDataDir: dir, encrypt: (s: string) => s, decrypt: (s: string) => s };
+    const store = new SettingsStore(deps);
+    expect(store.getPublic().disabledControlServers).toEqual({});
+    const daily = { type: "playwright", browser: "chrome", profile: "Profile 3", connection: "extension" } as const;
+    store.update({ disabledControlServers: { daily } });
+    store.update({ mcpServers: { files: { command: "node" } } });
+    const restarted = new SettingsStore(deps).getPublic();
+    expect(restarted.disabledControlServers).toEqual({ daily });
+    expect(restarted.mcpServers).toEqual({ files: { command: "node" } });
+    fs.writeFileSync(path.join(dir, "settings.json"), JSON.stringify({
+      disabledControlServers: { daily, "bad/profile": daily, custom: { command: "node" } },
+    }));
+    expect(new SettingsStore(deps).getPublic().disabledControlServers).toEqual({ daily });
   });
 
   it("persists and reloads MCP servers, dropping invalid entries", () => {

@@ -43,6 +43,30 @@ describe("validateMcpServerConfig", () => {
   it("rejects an invalid name", () => {
     expect(validateMcpServerConfig("bad name!", { command: "node" })).toMatch(/name/);
   });
+
+  it.each([undefined, "extension", "isolated"] as const)("accepts browser connection %s", (connection) => {
+    expect(validateMcpServerConfig("browser", {
+      type: "playwright", browser: "msedge", connection, profile: "Profile 2",
+    })).toBeNull();
+  });
+
+  it("rejects an unknown browser connection", () => {
+    expect(validateMcpServerConfig("browser", {
+      type: "playwright", browser: "msedge", connection: "remote" as never,
+    })).toMatch(/connection/);
+  });
+
+  it.each(["../Default", "..\\Default", "a/b", "a\\b", ".", "..", "C:Default", "a\u0000b", "a".repeat(81)])(
+    "rejects unsafe browser profile %j", (profile) => {
+      expect(validateMcpServerConfig("browser", {
+        type: "playwright", browser: "msedge", profile,
+      })).toMatch(/profile/);
+    },
+  );
+
+  it.each([undefined, "", "Default", "Profile 2", "a".repeat(80)])("accepts profile %j", (profile) => {
+    expect(validateMcpServerConfig("browser", { type: "playwright", browser: "chrome", profile })).toBeNull();
+  });
 });
 
 describe("validateMcpServers", () => {
@@ -61,6 +85,29 @@ describe("validateMcpServers", () => {
 });
 
 describe("sanitizeMcpServers", () => {
+  it("validates the Windows desktop preset and reloads only its type", () => {
+    const saved = { computer: { type: "windows-computer" } } as const;
+    expect(validateMcpServers(saved)).toEqual({ ok: true, mcpServers: saved });
+    const json = JSON.stringify({ computer: { ...saved.computer, command: "unused", env: { X: "1" } } });
+    expect(sanitizeMcpServers(JSON.parse(json))).toEqual(saved);
+  });
+
+  it("round trips browser connection and profile through persisted JSON", () => {
+    const saved = {
+      daily: { type: "playwright", browser: "msedge", connection: "extension", profile: "Profile 2" },
+      isolated: { type: "playwright", browser: "chrome", connection: "isolated", profile: "" },
+      legacy: { type: "playwright", browser: "msedge" },
+    };
+    expect(sanitizeMcpServers(JSON.parse(JSON.stringify(saved)))).toEqual(saved);
+  });
+
+  it("drops browser presets with invalid connection or profile fields", () => {
+    expect(sanitizeMcpServers({
+      badConnection: { type: "playwright", browser: "msedge", connection: "remote" },
+      badProfile: { type: "playwright", browser: "chrome", profile: "../Default" },
+      nonStringProfile: { type: "playwright", browser: "chrome", profile: 2 },
+    })).toEqual({});
+  });
   it("returns {} for non-object input", () => {
     expect(sanitizeMcpServers(null)).toEqual({});
     expect(sanitizeMcpServers("x")).toEqual({});

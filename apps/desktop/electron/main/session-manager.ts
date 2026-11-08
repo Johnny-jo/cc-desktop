@@ -140,6 +140,8 @@ export type SessionManagerDeps = {
   }) => void;
   /** Packaged Electron app? Controls bundled claude.exe resolution. */
   isPackaged?: boolean;
+  /** Encrypted authorization store, read only by the local browser MCP process. */
+  browserAuthStorePath?: string;
   /** Explicit Claude Code CLI path (overrides auto-detect). */
   claudeExecutablePath?: string | null;  /**
    * Optional: per-operation content snapshots for change rollback.
@@ -249,6 +251,8 @@ type SessionEntry = {
   slashCommands: SlashCommandItem[];
   /** True while waiting for a result after push */
   turnActive: boolean;
+  desktopToolPrefixes?: string[];
+  usedDesktopControl?: boolean;
   /** Last time this SDK query was opened or reused. */
   lastQueryUsedAt: number;
   /** Parks an idle SDK query so old sessions do not retain Claude children. */
@@ -300,6 +304,11 @@ type SessionEntry = {
   extraEnv?: Record<string, string>;
   skipCpa?: boolean;
 };
+
+function desktopToolPrefixes(servers: McpServersMap): string[] {
+  return Object.entries(servers).filter(([, config]) => config.type === "windows-computer")
+    .map(([name]) => `mcp__${name}__`);
+}
 
 /** Keep only a very small warm-query set; resume reopens parked sessions. */
 const MAX_LIVE_QUERIES = 2;
@@ -593,6 +602,7 @@ export class SessionManager {
   private readonly emitSlashCommands: SessionManagerDeps["emitSlashCommands"];
   private readonly onNotification: SessionManagerDeps["onNotification"];
   private readonly isPackaged: boolean;
+  private readonly browserAuthStorePath: string | undefined;
   private readonly claudeExecutablePath: string | null | undefined;
 
   private readonly sessions = new Map<string, SessionEntry>();
@@ -633,6 +643,7 @@ export class SessionManager {
     this.compressor = deps.compressor;
     this.snapshots = deps.snapshots;
     this.isPackaged = Boolean(deps.isPackaged);
+    this.browserAuthStorePath = deps.browserAuthStorePath;
     this.claudeExecutablePath = deps.claudeExecutablePath;
 
     // Restore only lightweight summaries. Transcripts and file changes hydrate
@@ -768,6 +779,12 @@ export class SessionManager {
   private scheduleIdleClose(entry: SessionEntry): void {
     this.clearIdleCloseTimer(entry);
     if (!entry.query || entry.turnActive) return;
+    if (entry.usedDesktopControl) {
+      // Closing this SDK stream closes the MCP's stdin and its native workers,
+      // including the elevated worker. continue() resumes the same SDK session.
+      this.parkSession(entry);
+      return;
+    }
     const timer = setTimeout(() => {
       entry.idleCloseTimer = undefined;
       this.parkSession(entry);
@@ -1510,8 +1527,9 @@ export class SessionManager {
     }
     try {
       const result = await entry.query.setMcpServers(
-        resolveMcpServers(servers, this.isPackaged, !entry.pathJail && !entry.roomReadOnlyTurn),
+        resolveMcpServers(servers, this.isPackaged, !entry.pathJail && !entry.roomReadOnlyTurn, entry.summary.title, this.browserAuthStorePath),
       );
+      entry.desktopToolPrefixes = desktopToolPrefixes(servers);
       this.settings.update({ mcpServers: servers });
       return {
         ok: true,
@@ -1554,7 +1572,7 @@ export class SessionManager {
         maxTurns: 1,
         tools: [],
         strictMcpConfig: true,
-        mcpServers: resolveMcpServers(target, this.isPackaged),
+        mcpServers: resolveMcpServers(target, this.isPackaged, true, "浏览器连接测试", this.browserAuthStorePath),
         // Don't load CLAUDE.md / project settings into the probe.
         settingSources: [],
       },
@@ -2284,6 +2302,8 @@ export class SessionManager {
   ): Record<string, unknown> {
     const queryGen = entry.streamGen;
     const settings = this.settings.get();
+    entry.desktopToolPrefixes = desktopToolPrefixes(settings.mcpServers ?? {});
+    entry.usedDesktopControl = false;
     const env = {
       ...this.cpa.buildProcessEnv(entry.model || settings.defaultModel),
       ...(entry.extraEnv ?? {}),
@@ -2335,7 +2355,7 @@ export class SessionManager {
       Object.keys(queryExtras.servers).length
         ? {
             mcpServers: {
-              ...resolveMcpServers(settings.mcpServers ?? {}, this.isPackaged, !entry.pathJail && !entry.roomReadOnlyTurn),
+              ...resolveMcpServers(settings.mcpServers ?? {}, this.isPackaged, !entry.pathJail && !entry.roomReadOnlyTurn, entry.summary.title, this.browserAuthStorePath),
               ...queryExtras.servers,
             },
           }
@@ -2392,6 +2412,9 @@ export class SessionManager {
                 hookOptions?: { signal?: AbortSignal },
               ) => {
                 const name = String(input.tool_name ?? "");
+                if (entry.streamGen === queryGen && entry.desktopToolPrefixes?.some(prefix => name.startsWith(prefix))) {
+                  entry.usedDesktopControl = true;
+                }
                 const toolInput = (input.tool_input ?? {}) as Record<string, unknown>;
                 const deny = (reason: string) => ({
                   hookSpecificOutput: {
@@ -2518,6 +2541,7 @@ export class SessionManager {
           name,
           input,
           sessionId,
+          AbortSignal.any([abortController.signal, _sdkOpts.signal]),
         );
         if (roomCancelled()) {
           return { behavior: "deny" as const, message: "Room turn cancelled" };
@@ -2888,6 +2912,7 @@ export class SessionManager {
       if (entry.streamGen === myGen) {
         this.settleLiveAgents(entry, "unknown");
         entry.roomAbortTurn?.detach?.();
+        if (entry.usedDesktopControl && !entry.turnActive) this.parkSession(entry);
       }
     }
   }

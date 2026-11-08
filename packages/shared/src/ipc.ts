@@ -17,6 +17,7 @@ import type {
   UserPromptRequest,
   UserPrompt,
 } from "./models";
+import type { BrowserAuthorizationRequest, BrowserAuthorizationStatus, BrowserExtensionSetupRequest, BrowserExtensionSetupStatus } from "./mcp-servers";
 
 export const IPC = {
   projectOpen: "project:open",
@@ -97,6 +98,13 @@ export const IPC = {
   /** Renderer → Main: current UI theme changed (sync window chrome) */
   appThemeChanged: "app:theme-changed",
   appWindowControl: "app:window-control",
+  /** Open the fixed official Playwright extension installation page in the OS browser. */
+  appOpenBrowserExtension: "app:open-browser-extension",
+  appSetupBrowserExtension: "app:setup-browser-extension",
+  appBrowserExtensionStatus: "app:browser-extension-status",
+  appBrowserAuthorizationStatus: "app:browser-authorization-status",
+  appSaveBrowserAuthorization: "app:save-browser-authorization",
+  appClearBrowserAuthorization: "app:clear-browser-authorization",
   /** Read-only process and bounded-cache memory diagnostics snapshot. */
   appMemoryDiagnostics: "app:memory-diagnostics",
   /** List installed skills (user dir + project dir) */
@@ -566,6 +574,30 @@ export type IpcInvokeMap = {
   [IPC.appWindowControl]: {
     args: [{ action: "minimize" | "maximize" | "close" | "state" }];
     result: { ok: boolean; maximized: boolean };
+  };
+  [IPC.appOpenBrowserExtension]: {
+    args: [];
+    result: void;
+  };
+  [IPC.appSetupBrowserExtension]: {
+    args: [BrowserExtensionSetupRequest];
+    result: BrowserExtensionSetupStatus;
+  };
+  [IPC.appBrowserExtensionStatus]: {
+    args: [BrowserExtensionSetupRequest];
+    result: BrowserExtensionSetupStatus;
+  };
+  [IPC.appBrowserAuthorizationStatus]: {
+    args: [BrowserExtensionSetupRequest];
+    result: BrowserAuthorizationStatus;
+  };
+  [IPC.appSaveBrowserAuthorization]: {
+    args: [BrowserAuthorizationRequest];
+    result: BrowserAuthorizationStatus;
+  };
+  [IPC.appClearBrowserAuthorization]: {
+    args: [BrowserExtensionSetupRequest];
+    result: BrowserAuthorizationStatus;
   };
   [IPC.appMemoryDiagnostics]: {
     args: [];

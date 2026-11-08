@@ -3,7 +3,7 @@
  *
  * Mirrors the SDK's McpServerConfig but restricted to plain JSON-safe shapes
  * (no in-process `sdk` server instances, which cannot cross IPC or persist).
- * The desktop main process resolves bundled browser presets to stdio at launch.
+ * The desktop main process resolves bundled presets to stdio at launch.
  */
 
 export type McpStdioConfig = {
@@ -32,9 +32,26 @@ export type McpHttpConfig = {
 };
 
 export type PlaywrightBrowser = "chrome" | "msedge";
-export type McpServerConfig = McpStdioConfig | McpSseConfig | McpHttpConfig
-  | { type: "playwright"; browser: PlaywrightBrowser };
+export type PlaywrightConnection = "extension" | "isolated";
+export type BrowserExtensionSetupRequest = { browser: PlaywrightBrowser; profile?: string };
+export type BrowserAuthorizationRequest = BrowserExtensionSetupRequest & { token: string };
+export type BrowserAuthorizationStatus = {
+  browser: PlaywrightBrowser;
+  profileName: string;
+  configured: boolean;
+};
+export type BrowserExtensionSetupStatus = {
+  browser: PlaywrightBrowser;
+  profileName: string;
+  state: "ready" | "pending-download" | "pending-enable";
+  message: string;
+  registered: boolean;
+};
+export type ControlServerConfig =
+  | { type: "windows-computer" }
+  | { type: "playwright"; browser: PlaywrightBrowser; connection?: PlaywrightConnection; profile?: string };
 
+export type McpServerConfig = McpStdioConfig | McpSseConfig | McpHttpConfig | ControlServerConfig;
 export type McpServersMap = Record<string, McpServerConfig>;
 
 /** Live connection status for one MCP server in a running session. */
@@ -81,8 +98,16 @@ export function validateMcpServerConfig(
 ): string | null {
   const nameErr = validateMcpServerName(name);
   if (nameErr) return nameErr;
+  if (cfg.type === "windows-computer") return null;
   if (cfg.type === "playwright") {
-    return cfg.browser === "chrome" || cfg.browser === "msedge" ? null : `"${name}": select Chrome or Edge`;
+    if (cfg.browser !== "chrome" && cfg.browser !== "msedge") return `"${name}": select Chrome or Edge`;
+    if (cfg.connection !== undefined && cfg.connection !== "extension" && cfg.connection !== "isolated") {
+      return `"${name}": connection must be extension or isolated`;
+    }
+    if (cfg.profile !== undefined && !isSafeBrowserProfile(cfg.profile)) {
+      return `"${name}": profile must be a directory name of at most 80 characters (for example Profile 2)`;
+    }
+    return null;
   }
   if (cfg.type === "sse" || cfg.type === "http") {
     const url = (cfg.url ?? "").trim();
@@ -121,8 +146,20 @@ export function sanitizeMcpServers(raw: unknown): McpServersMap {
     if (!cfgRaw || typeof cfgRaw !== "object" || Array.isArray(cfgRaw)) continue;
     const c = cfgRaw as Record<string, unknown>;
     const type = c.type;
-    if (type === "playwright") {
-      if (c.browser === "chrome" || c.browser === "msedge") out[name] = { type, browser: c.browser };
+    if (type === "windows-computer") {
+      out[name] = { type };
+    } else if (type === "playwright") {
+      const connection = c.connection;
+      if (c.browser !== "chrome" && c.browser !== "msedge") continue;
+      if (connection !== undefined && connection !== "extension" && connection !== "isolated") continue;
+      if (c.profile !== undefined && !isSafeBrowserProfile(c.profile)) continue;
+      const cfg: Extract<McpServerConfig, { type: "playwright" }> = {
+        type,
+        browser: c.browser,
+        ...(connection !== undefined ? { connection } : {}),
+        ...(c.profile !== undefined ? { profile: c.profile } : {}),
+      };
+      out[name] = cfg;
     } else if (type === "sse" || type === "http") {
       const url = typeof c.url === "string" ? c.url : "";
       if (!url) continue;
@@ -149,6 +186,11 @@ export function sanitizeMcpServers(raw: unknown): McpServersMap {
     }
   }
   return out;
+}
+
+function isSafeBrowserProfile(value: unknown): value is string {
+  return typeof value === "string" && value.length <= 80 &&
+    value !== "." && value !== ".." && !/[<>:"/\\|?*\u0000-\u001f]/.test(value);
 }
 
 function isStringRecord(v: unknown): v is Record<string, string> {

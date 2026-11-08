@@ -1,4 +1,5 @@
 appId: com.cc-desktop.app
+beforePack: ./build/windows-computer.cjs
 productName: CC Desktop
 copyright: Copyright © CC Desktop contributors
 
@@ -28,6 +29,12 @@ npmRebuild: false
 # Ship Claude Code CLI + CPA outside asar so they can be spawned.
 # Populate vendor/ via: node scripts/prepare-vendor.mjs (from monorepo root).
 extraResources:
+  - from: resources/windows-computer/dist
+    to: windows-computer
+    filter:
+      - "server.cjs"
+      - "AgentOS.Computer.exe"
+      - "THIRD-PARTY-NOTICES.txt"
   - from: resources/playwright-mcp
     to: playwright-mcp
     filter:

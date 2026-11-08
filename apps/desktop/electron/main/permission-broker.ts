@@ -35,6 +35,7 @@ type PendingEntry = {
   toolName: string;
   input: Record<string, unknown>;
   timer: ReturnType<typeof setTimeout>;
+  detachAbort: () => void;
 };
 
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
@@ -68,7 +69,7 @@ function extractMatchInput(
     const path = String(input.file_path ?? input.path ?? "");
     return { toolName, path: path || undefined };
   }
-  if (toolName === "Bash") {
+  if (toolName === "Bash" || toolName === "PowerShell") {
     const command = String(input.command ?? "");
     return { toolName, command: command || undefined };
   }
@@ -76,7 +77,7 @@ function extractMatchInput(
 }
 
 function summarize(toolName: string, input: Record<string, unknown>): string {
-  if (toolName === "Bash") {
+  if (toolName === "Bash" || toolName === "PowerShell") {
     return String(input.command ?? "").slice(0, 120);
   }
   if (toolName === "Edit" || toolName === "Write" || toolName === "Read") {
@@ -111,7 +112,17 @@ export class PermissionBroker {
     toolName: string,
     input: Record<string, unknown>,
     sessionId: string,
+    signal?: AbortSignal,
   ): Promise<ToolPermissionResult> {
+    if (signal?.aborted) return { behavior: "deny", message: "Permission request cancelled" };
+    return this.automaticDecision(toolName, input, sessionId)
+      ?? this.askUi(toolName, input, sessionId, signal);
+  }
+
+  /** The same policy applies to new calls and to calls already waiting in the queue. */
+  private automaticDecision(
+    toolName: string, input: Record<string, unknown>, sessionId: string,
+  ): ToolPermissionResult | null {
     const mode = this.getMode();
     const matchInput = extractMatchInput(toolName, input);
 
@@ -133,14 +144,14 @@ export class PermissionBroker {
 
     if (
       mode === "plan" &&
-      (toolName === "Edit" || toolName === "Write" || toolName === "Bash")
+      (toolName === "Edit" || toolName === "Write" || toolName === "Bash" || toolName === "PowerShell")
     ) {
       return { behavior: "deny", message: "Plan mode: writes disabled" };
     }
 
     // Destructive Bash always requires confirmation (even under auto/acceptEdits).
-    if (toolName === "Bash" && isDestructiveBash(String(input.command ?? ""))) {
-      return this.askUi(toolName, input, sessionId);
+    if ((toolName === "Bash" || toolName === "PowerShell") && isDestructiveBash(String(input.command ?? ""))) {
+      return null;
     }
 
     if (allowedByRule) {
@@ -163,44 +174,57 @@ export class PermissionBroker {
       return { behavior: "allow", updatedInput: input };
     }
 
-    return this.askUi(toolName, input, sessionId);
+    return null;
   }
 
   respond(requestId: string, decision: PermissionDecision): boolean {
     const entry = this.pending.get(requestId);
     if (!entry) return false;
 
-    clearTimeout(entry.timer);
-    this.pending.delete(requestId);
-    this.onResolved?.(requestId, entry.sessionId);
-
-    if (decision.behavior === "allow") {
+    if (decision.behavior === "deny") {
+      this.finish(requestId, entry, { behavior: "deny", message: decision.message });
+      return true;
+    }
+    // Don't remove the request (or its timeout) until saving succeeds: a
+    // renderer can retry the save or explicitly allow just this invocation.
+    let matchesGrant: ((other: PendingEntry) => boolean) | undefined;
+    if (decision.scope !== "once" && entry.toolName !== "AskUserQuestion") {
+      const rule = ruleFromToolInput(entry.toolName, entry.input);
       if (decision.scope === "session") {
         const list = this.rules.get(entry.sessionId) ?? [];
-        list.push(ruleFromToolInput(entry.toolName, entry.input));
+        list.push(rule);
         this.rules.set(entry.sessionId, list);
-      } else if (decision.scope === "always") {
-        // Persist a Claude Code-style rule derived from this invocation.
-        const r = ruleFromToolInput(entry.toolName, entry.input);
-        const ruleStr = r.commandPrefix
-          ? `${r.toolName}(${r.commandPrefix})`
-          : r.pathPrefix
-            ? `${r.toolName}(${r.pathPrefix}**)`
-            : r.toolName;
-        const normalized = normalizeRuleString(ruleStr);
-        if (normalized) this.onAddAllowRule?.(normalized);
+        matchesGrant = other => other.sessionId === entry.sessionId &&
+          matchSessionRule([rule], extractMatchInput(other.toolName, other.input));
+      } else {
+        const spec = rule.commandExact !== undefined
+          ? (rule.toolName === "Bash" ? "=" : "") + rule.commandExact
+          : rule.commandPrefix ? rule.commandPrefix + ":*"
+          : rule.pathPrefix ? rule.pathPrefix + "**" : undefined;
+        const raw = spec === undefined ? rule.toolName : `${rule.toolName}(${spec})`;
+        const normalized = normalizeRuleString(raw);
+        if (!normalized || !this.onAddAllowRule) throw new Error("Cannot save this permission rule");
+        this.onAddAllowRule(normalized);
+        matchesGrant = other => matchPersistedRules([normalized], extractMatchInput(other.toolName, other.input));
       }
-      entry.resolve({
-        behavior: "allow",
-        updatedInput: decision.updatedInput ?? entry.input,
-      });
-    } else {
-      entry.resolve({
-        behavior: "deny",
-        message: decision.message,
-      });
+    }
+    this.finish(requestId, entry, { behavior: "allow", updatedInput: decision.updatedInput ?? entry.input });
+    if (matchesGrant) {
+      for (const [id, other] of this.pending) {
+        if (!matchesGrant(other)) continue;
+        const result = this.automaticDecision(other.toolName, other.input, other.sessionId);
+        if (result) this.finish(id, other, result);
+      }
     }
     return true;
+  }
+
+  private finish(id: string, entry: PendingEntry, result: ToolPermissionResult): void {
+    this.pending.delete(id);
+    clearTimeout(entry.timer);
+    entry.detachAbort();
+    entry.resolve(result);
+    this.onResolved?.(id, entry.sessionId);
   }
 
   clearSession(sessionId: string): void {
@@ -211,6 +235,7 @@ export class PermissionBroker {
     toolName: string,
     input: Record<string, unknown>,
     sessionId: string,
+    signal?: AbortSignal,
   ): Promise<ToolPermissionResult> {
     const requestId = randomUUID();
     const req: PermissionRequest = {
@@ -222,15 +247,12 @@ export class PermissionBroker {
     };
 
     return new Promise<ToolPermissionResult>((resolve) => {
-      const timer = setTimeout(() => {
-        if (!this.pending.has(requestId)) return;
-        this.pending.delete(requestId);
-        this.onResolved?.(requestId, sessionId);
-        resolve({
-          behavior: "deny",
-          message: "Permission request timed out",
-        });
-      }, this.timeoutMs);
+      const deny = (message: string) => {
+        const entry = this.pending.get(requestId);
+        if (entry) this.finish(requestId, entry, { behavior: "deny", message });
+      };
+      const onAbort = () => deny("Permission request cancelled");
+      const timer = setTimeout(() => deny("Permission request timed out"), this.timeoutMs);
 
       this.pending.set(requestId, {
         resolve,
@@ -238,8 +260,9 @@ export class PermissionBroker {
         toolName,
         input,
         timer,
+        detachAbort: () => signal?.removeEventListener("abort", onAbort),
       });
-
+      signal?.addEventListener("abort", onAbort, { once: true });
       this.requestFromUi(req);
     });
   }

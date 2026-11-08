@@ -3,6 +3,14 @@ import path from "node:path";
 import type { AppSettings, PermissionMode, PublicSettings } from "@claude-desktop/shared";
 import { normalizeRuleString, sanitizeMcpServers } from "@claude-desktop/shared";
 
+function sanitizeDisabledControlServers(raw: unknown): NonNullable<AppSettings["disabledControlServers"]> {
+  const profiles: NonNullable<AppSettings["disabledControlServers"]> = {};
+  for (const [name, config] of Object.entries(sanitizeMcpServers(raw))) {
+    if (config.type === "windows-computer" || config.type === "playwright") profiles[name] = config;
+  }
+  return profiles;
+}
+
 function sanitizeModelEfforts(raw: unknown): AppSettings["modelEfforts"] | undefined {
   if (raw === undefined) return undefined;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
@@ -96,6 +104,7 @@ const DEFAULTS: AppSettings = {
   modelContextLimits: {},
   modelEfforts: {},
   mcpServers: {},
+  disabledControlServers: {},
   permissionAllow: [],
   permissionDeny: [],
   agents: [],
@@ -143,6 +152,7 @@ export class SettingsStore {
       models: [...this.settings.models],
       modelContextLimits: { ...this.settings.modelContextLimits },
       mcpServers: { ...this.settings.mcpServers },
+      disabledControlServers: { ...this.settings.disabledControlServers },
       permissionAllow: [...(this.settings.permissionAllow ?? [])],
       permissionDeny: [...(this.settings.permissionDeny ?? [])],
       agents: (this.settings.agents ?? []).map((a) => ({
@@ -180,6 +190,9 @@ export class SettingsStore {
     }
     if (publicPatch.mcpServers) {
       publicPatch.mcpServers = { ...publicPatch.mcpServers };
+    }
+    if (publicPatch.disabledControlServers !== undefined) {
+      publicPatch.disabledControlServers = sanitizeDisabledControlServers(publicPatch.disabledControlServers);
     }
     if (publicPatch.permissionAllow !== undefined) {
       publicPatch.permissionAllow = sanitizePermissionRules(publicPatch.permissionAllow);
@@ -240,23 +253,25 @@ export class SettingsStore {
       publicPatch.permissionMode = publicPatch.permissionMode as PermissionMode;
     }
 
-    this.settings = {
+    const nextSettings = {
       ...this.settings,
       ...publicPatch,
       models: publicPatch.models ?? this.settings.models,
     };
     if (clearEffort) {
-      delete this.settings.effort;
+      delete nextSettings.effort;
     }
 
+    let nextToken = this.token;
+    let nextTokenEnc = this.tokenEnc;
     if (token !== undefined) {
       if (token === null || token === "") {
-        this.token = null;
-        this.tokenEnc = undefined;
+        nextToken = null;
+        nextTokenEnc = undefined;
       } else {
         try {
-          this.tokenEnc = this.encrypt(token);
-          this.token = token;
+          nextTokenEnc = this.encrypt(token);
+          nextToken = token;
         } catch (err) {
           this.logger.warn(
             `SettingsStore: failed to encrypt token; refusing to store. ${String(err)}`,
@@ -266,7 +281,10 @@ export class SettingsStore {
       }
     }
 
-    this.save();
+    this.save(nextSettings, nextTokenEnc);
+    this.settings = nextSettings;
+    this.token = nextToken;
+    this.tokenEnc = nextTokenEnc;
   }
 
   private load(): void {
@@ -312,6 +330,7 @@ export class SettingsStore {
         modelContextLimits: limits,
         modelEfforts: sanitizeModelEfforts(rest.modelEfforts) ?? {},
         mcpServers: sanitizeMcpServers(rest.mcpServers),
+        disabledControlServers: sanitizeDisabledControlServers(rest.disabledControlServers),
         permissionAllow: sanitizePermissionRules(rest.permissionAllow) ?? [],
         permissionDeny: sanitizePermissionRules(rest.permissionDeny) ?? [],
         agents: sanitizeAgents(rest.agents) ?? [],
@@ -357,14 +376,14 @@ export class SettingsStore {
     }
   }
 
-  private save(): void {
+  private save(settings: AppSettings, tokenEnc: string | undefined): void {
     const dir = path.dirname(this.filePath);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
     const payload: StoredFile = {
-      ...this.settings,
-      ...(this.tokenEnc !== undefined ? { tokenEnc: this.tokenEnc } : {}),
+      ...settings,
+      ...(tokenEnc !== undefined ? { tokenEnc } : {}),
     };
     fs.writeFileSync(this.filePath, JSON.stringify(payload, null, 2), "utf8");
   }

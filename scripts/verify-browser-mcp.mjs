@@ -62,29 +62,36 @@ try {
   await page.waitForFunction(() => window.desktop?.getSettings !== undefined);
   assert.ok(await page.evaluate(async () => (await window.desktop.getSettings()).hasToken), "CPA token decrypt failed");
   await page.getByRole("button", { name: "设置", exact: true }).first().click();
-  await page.getByRole("button", { name: /MCP 服务器/ }).click();
-  await page.getByRole("button", { name: "添加浏览器" }).click();
+  await page.getByRole("button", { name: /^操控/ }).click();
 
   for (const browser of ["chrome", "msedge"]) {
+    const label = browser === "chrome" ? "Google Chrome" : "Microsoft Edge";
     const route = "/" + randomUUID();
     const fixture = { value: randomUUID(), receipt: "CC-" + randomUUID() };
     fixtures.set(route, fixture);
     const url = `http://127.0.0.1:${server.address().port}${route}`;
-    await page.getByLabel("浏览器", { exact: false }).filter({ visible: true }).last().selectOption(browser);
+    if (browser === "msedge") await page.getByRole("switch", { name: "Google Chrome操控" }).click();
+    await page.getByRole("switch", { name: label + "操控" }).click();
+    await page.getByRole("button", { name: "管理" + label + "配置" }).click();
+    await page.getByLabel("浏览器模式").selectOption("isolated");
     await page.getByRole("button", { name: "保存更改" }).click();
-    await page.waitForFunction(async (channel) => (await window.desktop.getSettings()).mcpServers?.browser?.browser === channel, browser);
+    await page.waitForFunction(async channel => Object.values((await window.desktop.getSettings()).mcpServers ?? {})
+      .some(config => config.type === "playwright" && config.browser === channel && config.connection === "isolated"), browser);
+    const serverName = await page.getByLabel("配置名称", { exact: true }).inputValue();
     await page.getByRole("button", { name: "测试连接" }).click();
-    await page.getByText("已连接 1 / 1 个服务器", { exact: true }).waitFor({ timeout: 45000 });
-    const result = await page.evaluate(async ({ url, value, project }) => {
+    await page.getByText("测试通过 1 / 1 · " + serverName, { exact: true }).waitFor({ timeout: 45000 });
+    const result = await page.evaluate(async ({ url, value, project, serverName }) => {
       const api = window.desktop;
       const toolNames = [];
+      const prefix = `mcp__${serverName}__browser_`;
       const stop = api.on("session:event", event => {
         if (event.type === "tool_start") toolNames.push(event.tool.name);
       });
       const permit = api.on("permission:request", request => {
-        const allowed = /^(ToolSearch|mcp__browser__browser_(navigate|snapshot|click|type|fill_form|press_key))$/.test(request.toolName);
+        const allowed = request.toolName === "ToolSearch" || (request.toolName.startsWith(prefix) &&
+          ["navigate", "snapshot", "click", "type", "fill_form", "press_key"].includes(request.toolName.slice(prefix.length)));
         const input = request.inputPreview;
-        const safeUrl = request.toolName !== "mcp__browser__browser_navigate" || input?.url === url;
+        const safeUrl = request.toolName !== prefix + "navigate" || input?.url === url;
         void api.respondPermission(request.requestId, allowed && safeUrl ? { behavior: "allow", scope: "once" } : { behavior: "deny" });
       });
       try {
@@ -95,9 +102,9 @@ try {
         const transcript = await api.selectSession(sessionId);
         return { toolNames, reply: transcript.items.filter(i => i.kind === "text" && i.role === "assistant").map(i => i.text).join("\n") };
       } finally { stop(); permit(); }
-    }, { url, value: fixture.value, project });
+    }, { url, value: fixture.value, project, serverName });
     console.log(JSON.stringify({ browser, model: current.defaultModel, tools: result.toolNames }));
-    assert.ok(result.toolNames.includes("mcp__browser__browser_navigate"), "Expected a real browser MCP navigation");
+    assert.ok(result.toolNames.includes(`mcp__${serverName}__browser_navigate`), "Expected a real browser MCP navigation");
     assert.ok(fixture.userAgent?.includes("Chrome/"), "Expected a Chromium browser form POST");
     assert.equal(fixture.userAgent.includes("Edg/"), browser === "msedge", "Wrong browser channel");
     assert.ok(result.reply.includes(fixture.receipt), "Model did not read back the server-issued receipt");

@@ -3,6 +3,122 @@ import type { PermissionDecision, PermissionRequest } from "@claude-desktop/shar
 import { PermissionBroker } from "./permission-broker";
 
 describe("PermissionBroker", () => {
+  it.each(["session", "always"] as const)("releases waiting and future matches of a %s grant", async (scope) => {
+    const rules: string[] = [];
+    const prompts: PermissionRequest[] = [];
+    const resolved = vi.fn();
+    const broker = new PermissionBroker({
+      getMode: () => "default", getAllowRules: () => rules,
+      onAddAllowRule: r => { rules.push(r); },
+      requestFromUi: r => prompts.push(r), onResolved: resolved, timeoutMs: 100,
+    });
+    const run = (command: string, session = "s") => broker.canUseTool("Bash", { command }, session);
+    const first = run("git status");
+    const second = run("git status -s");
+    const other = run("git diff");
+    const otherSession = run("git status", "other");
+    broker.respond(prompts[0]!.requestId, { behavior: "allow", scope });
+    for (const [p, command] of [[first, "git status"], [second, "git status -s"]] as const) {
+      expect(await p).toEqual({ behavior: "allow", updatedInput: { command } });
+    }
+    expect(resolved).not.toHaveBeenCalledWith(prompts[2]!.requestId, "s");
+    expect(broker.respond(prompts[2]!.requestId, { behavior: "deny" })).toBe(true);
+    expect((await other).behavior).toBe("deny");
+    expect(broker.respond(prompts[3]!.requestId, { behavior: "deny" })).toBe(scope === "session");
+    expect((await otherSession).behavior).toBe(scope === "session" ? "deny" : "allow");
+    expect((await run("git status -sb")).behavior).toBe("allow");
+    expect(prompts).toHaveLength(4);
+  });
+
+  it.each(["session", "always"] as const)("does not extend a %s command approval to another shell command", async (scope) => {
+    const saved: string[] = [];
+    const prompts: PermissionRequest[] = [];
+    const broker = new PermissionBroker({ getMode: () => "default",
+      getAllowRules: () => saved, onAddAllowRule: r => { saved.push(r); },
+      requestFromUi: r => prompts.push(r), timeoutMs: 200 });
+    const run = (command: string) => broker.canUseTool("Bash", { command }, "s");
+    const first = run("git status");
+    const chained = run("git status && whoami");
+    broker.respond(prompts[0]!.requestId, { behavior: "allow", scope });
+    expect(broker.respond(prompts[1]!.requestId, { behavior: "deny" })).toBe(true);
+    const later = run("git status; whoami");
+    expect(prompts).toHaveLength(3);
+    broker.respond(prompts[2]!.requestId, { behavior: "deny" });
+    expect((await Promise.all([first, chained, later])).map(p => p.behavior)).toEqual(["allow", "deny", "deny"]);
+  });
+
+  it.each(["session", "always"] as const)("remembers a %s multiline Bash script with wildcards literally", async scope => {
+    const saved: string[] = [], prompts: PermissionRequest[] = [];
+    const broker = new PermissionBroker({ getMode: () => "default",
+      getAllowRules: () => saved, onAddAllowRule: r => { saved.push(r); },
+      requestFromUi: r => prompts.push(r), timeoutMs: 200 });
+    const run = (command: string) => broker.canUseTool("Bash", { command }, "s");
+    const script = "ls -l *.md\nls -l *.txt";
+    const first = run(script);
+    broker.respond(prompts[0]!.requestId, { behavior: "allow", scope });
+    expect((await run(script)).behavior).toBe("allow");
+    const different = run(script + "; whoami");
+    expect(prompts).toHaveLength(2);
+    broker.respond(prompts[1]!.requestId, { behavior: "deny" });
+    expect((await different).behavior).toBe("deny");
+    await first;
+  });
+
+  it("does not bulk-approve destructive commands or commands denied since they queued", async () => {
+    const prompts: PermissionRequest[] = [];
+    const deny: string[] = [];
+    const broker = new PermissionBroker({ getMode: () => "default", getDenyRules: () => deny,
+      requestFromUi: r => prompts.push(r), timeoutMs: 100 });
+    const pending = ["git status", "git status -s", "git status && rm -rf foo"].map(command =>
+      broker.canUseTool("Bash", { command }, "s"));
+    deny.push("Bash(git status -s)");
+    broker.respond(prompts[0]!.requestId, { behavior: "allow", scope: "session" });
+    expect(broker.respond(prompts[2]!.requestId, { behavior: "deny" })).toBe(true);
+    expect(await pending[1]).toMatchObject({ behavior: "deny", message: expect.stringMatching(/denied by rule/i) });
+    await Promise.all(pending);
+  });
+
+  it("keeps a failed rule save available for a one-time decision", async () => {
+    const prompts: PermissionRequest[] = [];
+    const onResolved = vi.fn();
+    const broker = new PermissionBroker({ getMode: () => "default", requestFromUi: r => prompts.push(r),
+      onResolved, onAddAllowRule: () => { throw new Error("disk full"); } });
+    const pending = broker.canUseTool("Edit", { file_path: "src/a" }, "s");
+    const id = prompts[0]!.requestId;
+    expect(() => broker.respond(id, { behavior: "allow", scope: "always" })).toThrow("disk full");
+    expect(onResolved).not.toHaveBeenCalled();
+    expect(broker.respond(id, { behavior: "allow", scope: "once" })).toBe(true);
+    expect((await pending).behavior).toBe("allow");
+  });
+
+  it("withdraws an aborted SDK request before a subsequent matching grant", async () => {
+    const prompts: PermissionRequest[] = [];
+    const controller = new AbortController();
+    const broker = new PermissionBroker({ getMode: () => "default", requestFromUi: r => prompts.push(r), timeoutMs: 100 });
+    const first = broker.canUseTool("Bash", { command: "git status" }, "s");
+    const stopped = broker.canUseTool("Bash", { command: "git status -s" }, "s", controller.signal);
+    controller.abort();
+    broker.respond(prompts[0]!.requestId, { behavior: "allow", scope: "session" });
+    expect(await stopped).toMatchObject({ behavior: "deny", message: expect.stringMatching(/cancel/i) });
+    await first;
+  });
+
+  it.each(["session", "always"] as const)("scopes PowerShell %s approvals to the command, including literal wildcards", async (scope) => {
+    const rules: string[] = [];
+    const prompts: PermissionRequest[] = [];
+    const broker = new PermissionBroker({ getMode: () => "default", getAllowRules: () => rules,
+      onAddAllowRule: r => { rules.push(r); }, requestFromUi: r => prompts.push(r), timeoutMs: 100 });
+    const run = (command: string) => broker.canUseTool("PowerShell", { command }, "s");
+    const first = run("Get-Item *.md");
+    const second = run("Get-Item *.md");
+    broker.respond(prompts[0]!.requestId, { behavior: "allow", scope });
+    expect((await second).behavior).toBe("allow");
+    const unrelated = run("Get-Item private.md; Start-Process calc; #.md");
+    expect(prompts).toHaveLength(3);
+    broker.respond(prompts[2]!.requestId, { behavior: "deny" });
+    expect((await unrelated).behavior).toBe("deny");
+    await first;
+  });
   it.each(["allow", "deny"] as const)("notifies all request viewers once on %s", async (behavior) => {
     const requestFromUi = vi.fn();
     const onResolved = vi.fn();

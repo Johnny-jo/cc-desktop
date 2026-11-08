@@ -592,6 +592,7 @@ function bootstrap() {
     snapshots,
     isPackaged: app.isPackaged,
     claudeExecutablePath: claudeExe,
+    browserAuthStorePath: path.join(userDataDir, "browser-auth.json"),
     compressor: createContextCompressor(
       () => settings.get(),
       () => settings.getToken(),

@@ -368,6 +368,8 @@ export type AppSettings = {
   modelContextLimits: Record<string, number>;
   /** Configured MCP servers (JSON-safe), passed to the SDK on session start */
   mcpServers?: import("./mcp-servers").McpServersMap;
+  /** Saved desktop/browser profiles that are currently switched off. */
+  disabledControlServers?: Record<string, import("./mcp-servers").ControlServerConfig>;
   /**
    * Persisted permission rules, Claude Code style:
    * "Edit", "Edit(src/**)", "Bash(npm run *)". Allow rules auto-approve

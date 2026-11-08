@@ -1,9 +1,13 @@
 import { defineConfig, externalizeDepsPlugin } from "electron-vite";
 import { resolve } from "node:path";
+import { createRequire } from "node:module";
+
+const buildWindowsComputer = createRequire(resolve("package.json"))("./build/windows-computer.cjs") as () => Promise<void>;
 
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin({ exclude: ["@claude-desktop/shared", "yaml"] })],
+    plugins: [externalizeDepsPlugin({ exclude: ["@claude-desktop/shared", "yaml"] }),
+      { name: "windows-computer", buildStart: () => buildWindowsComputer() }],
     build: {
       outDir: "out/main",
       rollupOptions: {
@@ -11,6 +15,7 @@ export default defineConfig({
           index: resolve("electron/main/index.ts"),
           "mod-host-worker": resolve("electron/main/mod-host-worker.ts"),
           "pdf-text-worker": resolve("electron/main/pdf-text-worker.ts"),
+          "desktop-vision-worker": resolve("electron/main/desktop-vision-worker.ts"),
         },
       },
     },

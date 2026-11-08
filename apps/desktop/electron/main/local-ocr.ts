@@ -2,13 +2,14 @@ import type { PaddleOcrService, PaddleOptions } from "paddleocr";
 import { readVerifiedOcrModels, resolveOcrModelsDir } from "./ocr-models";
 
 export type OcrLine = { text: string; confidence: number };
+export type LocatedOcrLine = OcrLine & { box: { x: number; y: number; width: number; height: number } };
 export type OcrImage = { width: number; height: number; data: Uint8Array };
 export interface PdfOcr {
   recognize(image: OcrImage): Promise<OcrLine[]>;
   dispose?(): Promise<void>;
 }
 
-/** Owned by the document subprocess. No native inference runs in the UI/main process. */
+/** Document and desktop vision subprocesses own their own CPU inference sessions. */
 export class LocalOcr implements PdfOcr {
   private pending?: Promise<PaddleOcrService>;
   constructor(private readonly modelsDir = resolveOcrModelsDir()) {}
@@ -35,11 +36,14 @@ export class LocalOcr implements PdfOcr {
     });
   }
 
-  async recognize(image: OcrImage): Promise<OcrLine[]> {
-    this.pending ??= this.load();
+  async recognize(image: OcrImage): Promise<LocatedOcrLine[]> {
+    this.pending ??= this.load().catch(error => { this.pending = undefined; throw error; });
     const service = await this.pending;
     const results = await service.recognize(image, { ordering: { sortByReadingOrder: true } });
-    return results.filter(line => line.text.trim()).map(line => ({ text: line.text.trim(), confidence: line.confidence }));
+    return results.filter(line => line.text.trim()).map(line => ({
+      text: line.text.trim(), confidence: line.confidence,
+      box: { x: line.box.x, y: line.box.y, width: line.box.width, height: line.box.height },
+    }));
   }
 
   async dispose(): Promise<void> {

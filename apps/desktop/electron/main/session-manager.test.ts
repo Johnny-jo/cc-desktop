@@ -651,6 +651,24 @@ describe("SessionManager", () => {
     expect(progress[0]).toMatchObject({ elapsedSeconds: 3 });
   });
 
+  it("closes the desktop MCP transport on the result even without an explicit release tool call", async () => {
+    const close = vi.fn();
+    const queryFn: QueryFn = args => {
+      const gen = (async function* () {
+        await takeFirstUserText(args.prompt);
+        const hooks = args.options.hooks as { PreToolUse: { hooks: ((input: { tool_name: string }) => Promise<unknown>)[] }[] };
+        await hooks.PreToolUse[0]!.hooks[0]!({ tool_name: "mcp__my_desktop__click" });
+        yield { type: "result", subtype: "success", total_cost_usd: 0 };
+        for await (const _ of args.prompt as AsyncIterable<unknown>) { }
+      })();
+      return Object.assign(gen, { close }) as never;
+    };
+    const ctx = makeDeps({ queryFn });
+    vi.mocked(ctx.settings.get).mockReturnValue({ ...baseSettings, mcpServers: { my_desktop: { type: "windows-computer" } } });
+    await ctx.manager.start({ text: "click", attachments: [] }, "D:/p");
+    expect(close).toHaveBeenCalledOnce();
+  });
+
   it("closes an idle live query when its session is deleted", async () => {
     const close = vi.fn();
     const queryFn: QueryFn = (args) => {
@@ -782,7 +800,7 @@ describe("SessionManager", () => {
       .fn()
       .mockResolvedValue({ behavior: "allow", updatedInput: { file_path: "a" } });
     let passedCanUseTool:
-      | ((name: string, input: Record<string, unknown>) => Promise<unknown>)
+      | ((name: string, input: Record<string, unknown>, opts: { signal: AbortSignal }) => Promise<unknown>)
       | undefined;
 
     const queryFn: QueryFn = async function* (args) {
@@ -795,8 +813,11 @@ describe("SessionManager", () => {
     const sessionId = await ctx.manager.start({ text: "hi", attachments: [] }, "D:/p");
 
     expect(passedCanUseTool).toBeTypeOf("function");
-    await passedCanUseTool!("Read", { file_path: "a" });
-    expect(canUseTool).toHaveBeenCalledWith("Read", { file_path: "a" }, sessionId);
+    const request = new AbortController();
+    await passedCanUseTool!("Read", { file_path: "a" }, { signal: request.signal });
+    expect(canUseTool).toHaveBeenCalledWith("Read", { file_path: "a" }, sessionId, expect.any(AbortSignal));
+    request.abort();
+    expect(canUseTool.mock.calls[0]![3].aborted).toBe(true);
   });
 
   it("tracks Edit/Write via diffTracker and emitDiff", async () => {

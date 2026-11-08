@@ -425,6 +425,19 @@ const desktop = {
       import("@claude-desktop/shared").AppMemoryDiagnostics
     >,
 
+  openBrowserExtension: () =>
+    ipcRenderer.invoke(IPC.appOpenBrowserExtension) as Promise<void>,
+  setupBrowserExtension: (request: import("@claude-desktop/shared").BrowserExtensionSetupRequest) =>
+    ipcRenderer.invoke(IPC.appSetupBrowserExtension, request) as Promise<import("@claude-desktop/shared").BrowserExtensionSetupStatus>,
+  getBrowserExtensionStatus: (request: import("@claude-desktop/shared").BrowserExtensionSetupRequest) =>
+    ipcRenderer.invoke(IPC.appBrowserExtensionStatus, request) as Promise<import("@claude-desktop/shared").BrowserExtensionSetupStatus>,
+  getBrowserAuthorizationStatus: (request: import("@claude-desktop/shared").BrowserExtensionSetupRequest) =>
+    ipcRenderer.invoke(IPC.appBrowserAuthorizationStatus, request) as Promise<import("@claude-desktop/shared").BrowserAuthorizationStatus>,
+  saveBrowserAuthorization: (request: import("@claude-desktop/shared").BrowserAuthorizationRequest) =>
+    ipcRenderer.invoke(IPC.appSaveBrowserAuthorization, request) as Promise<import("@claude-desktop/shared").BrowserAuthorizationStatus>,
+  clearBrowserAuthorization: (request: import("@claude-desktop/shared").BrowserExtensionSetupRequest) =>
+    ipcRenderer.invoke(IPC.appClearBrowserAuthorization, request) as Promise<import("@claude-desktop/shared").BrowserAuthorizationStatus>,
+
   /** Hot update: current status / check / download / quit-and-install */
   getUpdateStatus: () =>
     ipcRenderer.invoke(IPC.appUpdateGetStatus) as Promise<

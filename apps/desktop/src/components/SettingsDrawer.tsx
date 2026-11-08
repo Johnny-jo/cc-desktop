@@ -2,11 +2,13 @@ import React, { Suspense, lazy, useEffect, useRef, useState } from "react";
 import type {
   AppSettings,
   McpServersMap,
-  PlaywrightBrowser,
+  PlaywrightConnection,
   ModelInfo,
   PublicSettings,
   SessionMcpServerStatus,
   UpdateStatusDto,
+  BrowserExtensionSetupStatus,
+  BrowserAuthorizationStatus,
 } from "@claude-desktop/shared";
 import {
   CONTEXT_LIMIT_MAX,
@@ -14,7 +16,6 @@ import {
   buildModelContextLimitsPatch,
   normalizeRuleString,
   resolveContextLimit,
-  validateMcpServers,
 } from "@claude-desktop/shared";
 import { getDesktop, hasDesktopApi } from "../lib/desktop-api";
 import { useI18n } from "../i18n/useI18n";
@@ -27,6 +28,9 @@ import {
 import { RoomModsSettings } from "./settings/RoomModsSettings";
 import { ThemedSelect } from "./Select";
 import { ToggleSwitch } from "./ToggleSwitch";
+import { buildMcpServersPatch, controlTarget, mcpServersToDrafts, newMcpRow, setControlEnabled, type ControlTarget, type McpServerDraft } from "./settings/mcp-form";
+import { ControlSettings } from "./settings/ControlSettings";
+export { buildMcpServersPatch, mcpServersToDrafts, setControlEnabled, suggestMcpServerName } from "./settings/mcp-form";
 
 const MemoryDiagnostics = lazy(() =>
   import("./settings/MemoryDiagnostics").then((module) => ({
@@ -48,24 +52,8 @@ type SettingsPage =
   | "agents"
   | "skills"
   | "plugins"
+  | "control"
   | "mcp";
-
-/** Editable draft of one MCP server row (strings for free typing). */
-type McpServerDraft = {
-  /** stable local key for React list rendering */
-  id: string;
-  name: string;
-  type: "stdio" | "sse" | "http" | "playwright";
-  browser?: PlaywrightBrowser;
-  command: string;
-  /** space-separated args (stdio) */
-  argsText: string;
-  url: string;
-  /** one KEY=VALUE per line (stdio env) */
-  envText: string;
-  /** one KEY=VALUE per line (sse/http headers) */
-  headersText: string;
-};
 
 /** Editable draft of one custom agent. */
 type AgentDraft = {
@@ -111,18 +99,13 @@ type FormState = {
   locale: string;
 };
 
-let mcpDraftSeq = 0;
-function nextBrowserName(rows: McpServerDraft[]): string {
-  const names = new Set(rows.map((row) => row.name.trim()));
-  let name = "browser";
-  for (let n = 2; names.has(name); n++) name = `browser-${n}`;
-  return name;
-}
-
-function newMcpDraftId(): string {
-  mcpDraftSeq += 1;
-  return `mcp-${Date.now()}-${mcpDraftSeq}`;
-}
+const mcpServerLabels: Record<McpServerDraft["type"], string> = {
+  "windows-computer": "Windows 桌面控制",
+  playwright: "浏览器配置",
+  stdio: "本地命令",
+  http: "远程 HTTP",
+  sse: "远程 SSE",
+};
 
 function parseModelIds(modelsCsv: string): string[] {
   const seen = new Set<string>();
@@ -135,93 +118,6 @@ function parseModelIds(modelsCsv: string): string[] {
     }
   }
   return ids;
-}
-
-function kvRecordToText(rec?: Record<string, string>): string {
-  if (!rec) return "";
-  return Object.entries(rec)
-    .map(([k, v]) => `${k}=${v}`)
-    .join("\n");
-}
-
-function kvTextToRecord(text: string): Record<string, string> | undefined {
-  const out: Record<string, string> = {};
-  for (const line of text.split("\n")) {
-    const t = line.trim();
-    if (!t) continue;
-    const eq = t.indexOf("=");
-    if (eq <= 0) continue;
-    out[t.slice(0, eq).trim()] = t.slice(eq + 1).trim();
-  }
-  return Object.keys(out).length ? out : undefined;
-}
-
-function mcpServersToDrafts(map?: McpServersMap): McpServerDraft[] {
-  return Object.entries(map ?? {}).map(([name, cfg]) => {
-    if (cfg.type === "playwright") {
-      return { id: newMcpDraftId(), name, type: cfg.type, browser: cfg.browser,
-        command: "", argsText: "", url: "", envText: "", headersText: "" };
-    }
-    if (cfg.type === "sse" || cfg.type === "http") {
-      return {
-        id: newMcpDraftId(),
-        name,
-        type: cfg.type,
-        command: "",
-        argsText: "",
-        url: cfg.url ?? "",
-        envText: "",
-        headersText: kvRecordToText(cfg.headers),
-      };
-    }
-    return {
-      id: newMcpDraftId(),
-      name,
-      type: "stdio",
-      command: cfg.command ?? "",
-      argsText: (cfg.args ?? []).join(" "),
-      url: "",
-      envText: kvRecordToText(cfg.env),
-      headersText: "",
-    };
-  });
-}
-
-/** Convert draft rows to a validated McpServersMap, or return an error. */
-function buildMcpServersPatch(
-  drafts: McpServerDraft[],
-): { ok: true; mcpServers: McpServersMap } | { ok: false; error: string } {
-  const map: McpServersMap = {};
-  const seen = new Set<string>();
-  for (const d of drafts) {
-    const name = d.name.trim();
-    if (!name) continue; // skip empty rows
-    if (seen.has(name)) return { ok: false, error: `Duplicate MCP server name "${name}"` };
-    seen.add(name);
-    if (d.type === "playwright") {
-      map[name] = { type: "playwright", browser: d.browser ?? "msedge" };
-    } else if (d.type === "stdio") {
-      map[name] = {
-        type: "stdio",
-        command: d.command.trim(),
-        ...(d.argsText.trim()
-          ? { args: d.argsText.trim().split(/\s+/) }
-          : {}),
-        ...(kvTextToRecord(d.envText) ? { env: kvTextToRecord(d.envText) } : {}),
-      };
-    } else {
-      map[name] = {
-        type: d.type,
-        url: d.url.trim(),
-        ...(kvTextToRecord(d.headersText)
-          ? { headers: kvTextToRecord(d.headersText) }
-          : {}),
-      };
-    }
-  }
-  const validated = validateMcpServers(map);
-  if (!validated.ok) return { ok: false, error: validated.error };
-  return { ok: true, mcpServers: map };
 }
 
 function fromSettings(s: PublicSettings | null): FormState {
@@ -239,7 +135,7 @@ function fromSettings(s: PublicSettings | null): FormState {
     shutdownCpaOnQuit: s?.shutdownCpaOnQuit ?? false,
     defaultContextLimit: String(s?.defaultContextLimit ?? 200_000),
     modelContextLimitDraft: draft,
-    mcpServers: mcpServersToDrafts(s?.mcpServers),
+    mcpServers: mcpServersToDrafts(s?.mcpServers, s?.disabledControlServers),
     permissionAllowText: (s?.permissionAllow ?? []).join("\n"),
     permissionDenyText: (s?.permissionDeny ?? []).join("\n"),
     agents: (s?.agents ?? []).map((a) => ({
@@ -315,6 +211,23 @@ function parseRulesText(
   return { ok: true, rules };
 }
 
+type BrowserAuthorizationDraft = {
+  busy?: boolean; status?: BrowserAuthorizationStatus; token?: string; error?: string;
+};
+type ServerPage = "control" | "mcp";
+type ServerNotes = Partial<Record<ServerPage, string>>;
+
+export function mergeBrowserAuthorizationStatus(current: BrowserAuthorizationDraft | undefined, status: BrowserAuthorizationStatus): BrowserAuthorizationDraft {
+  const sameProfile = current?.status?.browser === status.browser &&
+    current.status.profileName.toLowerCase() === status.profileName.toLowerCase();
+  return { ...current, status, token: sameProfile ? current.token : "", error: undefined };
+}
+
+function browserErrorText(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.replace(/^(?:Error: )?Error invoking remote method '[^']+': (?:Error: )?/, "");
+}
+
 export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   const { t } = useI18n();
   const settings = useAppStore((s) => s.settings);
@@ -333,12 +246,61 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   const [localError, setLocalError] = useState<string | null>(null);
   const [savedNote, setSavedNote] = useState<string | null>(null);
   /** Live MCP status by server name (from running session or probe) */
-  const [mcpLive, setMcpLive] = useState<Record<string, SessionMcpServerStatus>>({});
-  const [mcpProbing, setMcpProbing] = useState(false);
+  const [mcpLive, setMcpLive] = useState<Record<string, SessionMcpServerStatus & { probe?: boolean }>>({});
+  const [probingTarget, setProbingTarget] = useState<ControlTarget | "mcp" | null>(null);
+  const probeInFlight = useRef(false);
   const [mcpBusy, setMcpBusy] = useState<string | null>(null);
-  const [mcpNote, setMcpNote] = useState<string | null>(null);
+  const [mcpNotes, setMcpNotes] = useState<ServerNotes>({});
+  const [expandedControl, setExpandedControl] = useState<ControlTarget | null>(null);
+  const statusEpoch = useRef(0);
+  const [browserSetup, setBrowserSetup] = useState<Record<string, { busy: boolean; status?: BrowserExtensionSetupStatus; error?: string }>>({});
+  const [browserAuthorization, setBrowserAuthorization] = useState<Record<string, BrowserAuthorizationDraft>>({});
   /** IDEA 风格左侧导航当前页 */
   const [page, setPage] = useState<SettingsPage>("general");
+  useEffect(() => {
+    if (!open || page !== "control" || !hasDesktopApi("getBrowserExtensionStatus")) return;
+    const pending = form.mcpServers.filter(row => row.type === "playwright" &&
+      controlTarget(row) === expandedControl && (row.connection ?? "extension") === "extension" &&
+      browserSetup[browserSetupKey(row)]?.status?.state !== "ready" &&
+      browserSetup[browserSetupKey(row)]?.status && !browserSetup[browserSetupKey(row)]?.busy &&
+      !browserSetup[browserSetupKey(row)]?.error);
+    if (!pending.length) return;
+    let stopped = false;
+    let checking = false;
+    const timer = setInterval(() => {
+      if (checking) return;
+      checking = true;
+      void Promise.all(pending.map(async row => {
+        const key = browserSetupKey(row);
+        try {
+          const status = await getDesktop().getBrowserExtensionStatus({ browser: row.browser ?? "msedge", profile: row.profile?.trim() || undefined });
+          if (!stopped) setBrowserSetup(current => JSON.stringify(current[key]?.status) === JSON.stringify(status)
+            ? current : { ...current, [key]: { busy: false, status } });
+        } catch (error) {
+          if (!stopped) setBrowserSetup(current => ({ ...current, [key]: { busy: false, error: browserErrorText(error) } }));
+        }
+      })).finally(() => { checking = false; });
+    }, 2000);
+    return () => { stopped = true; clearInterval(timer); };
+  }, [open, page, expandedControl, form.mcpServers, browserSetup]);
+  useEffect(() => {
+    if (!open || page !== "control" || !hasDesktopApi("getBrowserAuthorizationStatus")) return;
+    let stopped = false;
+    for (const row of form.mcpServers) {
+      if (controlTarget(row) !== expandedControl || row.type !== "playwright" || row.connection === "isolated") continue;
+      const key = browserSetupKey(row);
+      void getDesktop().getBrowserAuthorizationStatus({ browser: row.browser ?? "msedge", profile: row.profile?.trim() || undefined })
+        .then(status => {
+          if (!stopped) setBrowserAuthorization(current => ({ ...current, [key]: mergeBrowserAuthorizationStatus(current[key], status) }));
+        }).catch(error => {
+          if (!stopped) setBrowserAuthorization(current => ({ ...current, [key]: { ...current[key], error: browserErrorText(error) } }));
+        });
+    }
+    return () => { stopped = true; };
+  }, [open, page, expandedControl, form.mcpServers]);
+  useEffect(() => {
+    if (!open) setBrowserAuthorization(current => Object.fromEntries(Object.entries(current).map(([key, value]) => [key, { ...value, token: "" }])));
+  }, [open]);
   const [skillsInfo, setSkillsInfo] = useState<{
     userDir: string;
     projectDir: string | null;
@@ -452,6 +414,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
 
   useEffect(() => {
     if (!open) {
+      statusEpoch.current++;
       openedRef.current = false;
       // Restore live-preview font if user closed without saving
       if (settings) {
@@ -474,7 +437,10 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
     setClosePending(false);
     setLocalError(null);
     setSavedNote(null);
-    setMcpNote(null);
+    setMcpNotes({});
+    setExpandedControl(null);
+    setBrowserSetup({});
+    setBrowserAuthorization({});
     setMcpLive({});
     void refreshCatalog();
     void refreshMcpLive();
@@ -514,93 +480,83 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [dirty, onClose, open, saving]);
 
-  /**
-   * Load live MCP status: prefer the active session's control request;
-   * fall back to a throwaway probe query when no session is running.
-   */
+  function setServerNote(page: ServerPage, message?: string) {
+    setMcpNotes(current => ({ ...current, [page]: message }));
+  }
+
   async function refreshMcpLive() {
+    if (!activeSessionId) return;
+    const epoch = statusEpoch.current;
     try {
-      const desktop = getDesktop();
-      let statuses: SessionMcpServerStatus[] | null = null;
-      if (activeSessionId) {
-        const res = await desktop.getSessionMcpStatus(activeSessionId);
-        statuses = res?.statuses ?? null;
+      const res = await getDesktop().getSessionMcpStatus(activeSessionId);
+      if (epoch === statusEpoch.current) {
+        setMcpLive(Object.fromEntries((res?.statuses ?? []).map(status => [status.name, status])));
       }
-      if (statuses === null) {
-        setMcpProbing(true);
-        try {
-          const res = await desktop.probeMcpServers();
-          statuses = res.statuses;
-        } finally {
-          setMcpProbing(false);
-        }
-      }
-      setMcpLive(
-        Object.fromEntries((statuses ?? []).map((s) => [s.name, s])),
-      );
     } catch {
-      // best-effort; status badges just stay hidden
+      // A previous session may already have released its SDK query.
     }
   }
 
-  async function onMcpReconnect(name: string) {
+  async function changeSessionServer(row: McpServerDraft, enabled?: boolean) {
     if (!activeSessionId) return;
+    const page = controlTarget(row) ? "control" : "mcp";
+    const name = row.name.trim();
     setMcpBusy(name);
-    setMcpNote(null);
+    setServerNote(page);
     try {
-      const res = await getDesktop().reconnectSessionMcpServer(
-        activeSessionId,
-        name,
-      );
-      if (!res.ok) setMcpNote(`Reconnect ${name}: ${res.error ?? "failed"}`);
+      const api = getDesktop();
+      const result = enabled === undefined
+        ? await api.reconnectSessionMcpServer(activeSessionId, name)
+        : await api.toggleSessionMcpServer(activeSessionId, name, enabled);
+      if (!result.ok) setServerNote(page, `${name}：${result.error ?? "操作失败"}`);
       await refreshMcpLive();
-    } catch (err) {
-      setMcpNote(err instanceof Error ? err.message : String(err));
+    } catch (error) {
+      setServerNote(page, browserErrorText(error));
     } finally {
       setMcpBusy(null);
     }
   }
 
-  async function onMcpToggle(name: string, enabled: boolean) {
-    if (!activeSessionId) return;
-    setMcpBusy(name);
-    setMcpNote(null);
-    try {
-      const res = await getDesktop().toggleSessionMcpServer(
-        activeSessionId,
-        name,
-        enabled,
-      );
-      if (!res.ok) setMcpNote(`Toggle ${name}: ${res.error ?? "failed"}`);
-      await refreshMcpLive();
-    } catch (err) {
-      setMcpNote(err instanceof Error ? err.message : String(err));
-    } finally {
-      setMcpBusy(null);
-    }
+  function showMcpError(result: { error: string; row: string }) {
+    const row = form.mcpServers.find(draft => draft.id === result.row);
+    const target = row && controlTarget(row);
+    setPage(target ? "control" : "mcp");
+    if (target) setExpandedControl(target);
+    setLocalError(result.error);
   }
 
-  async function onMcpProbeDraft() {
-    setMcpNote(null);
-    const patchMcp = buildMcpServersPatch(form.mcpServers);
-    if (!patchMcp.ok) {
-      setLocalError(patchMcp.error);
+  async function onMcpProbeDraft(rows: McpServerDraft[], page: ServerPage) {
+    if (probeInFlight.current) return;
+    setServerNote(page);
+    setLocalError(null);
+    const patch = buildMcpServersPatch(rows);
+    if (!patch.ok) return showMcpError(patch);
+    const names = Object.keys(patch.mcpServers);
+    if (!names.length) {
+      setServerNote(page, "请先填写要测试的配置。");
       return;
     }
-    setMcpProbing(true);
+    const epoch = ++statusEpoch.current;
+    probeInFlight.current = true;
+    setProbingTarget(controlTarget(rows[0]) ?? "mcp");
     try {
-      const res = await getDesktop().probeMcpServers(patchMcp.mcpServers);
-      setMcpLive(
-        Object.fromEntries(res.statuses.map((s) => [s.name, s])),
-      );
-      const expected = Object.keys(patchMcp.mcpServers);
-      const connected = expected.filter(name =>
-        res.statuses.some(server => server.name === name && server.status === "connected"));
-      setMcpNote(`已连接 ${connected.length} / ${expected.length} 个服务器`);
-    } catch (err) {
-      setMcpNote(err instanceof Error ? err.message : String(err));
+      const res = await getDesktop().probeMcpServers(patch.mcpServers);
+      if (epoch !== statusEpoch.current) return;
+      const requested = new Set(names);
+      const statuses = res.statuses.filter(status => requested.has(status.name));
+      setMcpLive(current => {
+        const next = { ...current };
+        for (const name of names) delete next[name];
+        for (const status of statuses) next[status.name] = { ...status, probe: true };
+        return next;
+      });
+      const passed = statuses.filter(status => status.status === "connected").length;
+      setServerNote(page, `测试通过 ${passed} / ${names.length} · ${names.join("、")}`);
+    } catch (error) {
+      if (epoch === statusEpoch.current) setServerNote(page, browserErrorText(error));
     } finally {
-      setMcpProbing(false);
+      probeInFlight.current = false;
+      setProbingTarget(null);
     }
   }
 
@@ -628,6 +584,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   };
 
   const configuredModelIds = parseModelIds(form.modelsCsv);
+  const customServers = form.mcpServers.filter(row => !controlTarget(row));
   const defaultModelOptions = [
     {
       value: "",
@@ -762,58 +719,91 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
     );
   }
 
-  function updateMcpRow(id: string, patch: Partial<McpServerDraft>) {
+  function editServerRows(
+    change: (rows: McpServerDraft[]) => McpServerDraft[],
+    page: ServerPage,
+    affected: McpServerDraft[] = [],
+  ) {
+    statusEpoch.current++;
+    setServerNote(page);
+    setMcpLive(current => {
+      const next = { ...current };
+      for (const row of affected) delete next[row.name.trim()];
+      return next;
+    });
     setClosePending(false);
     setSavedNote(null);
     setLocalError(null);
-    setForm((prev) => ({
-      ...prev,
-      mcpServers: prev.mcpServers.map((r) =>
-        r.id === id ? { ...r, ...patch } : r,
-      ),
-    }));
+    setForm(prev => ({ ...prev, mcpServers: change(prev.mcpServers) }));
   }
 
-  function addMcpRow(type: McpServerDraft["type"] = "stdio") {
-    setClosePending(false);
-    setSavedNote(null);
-    setLocalError(null);
-    setForm((prev) => ({
-      ...prev,
-      mcpServers: [
-        ...prev.mcpServers,
-        {
-          id: newMcpDraftId(),
-          name: type === "playwright" ? nextBrowserName(prev.mcpServers) : "",
-          type,
-          command: "",
-          argsText: "",
-          url: "",
-          envText: "",
-          headersText: "",
-        },
-      ],
-    }));
+  function updateMcpRow(row: McpServerDraft, patch: Partial<McpServerDraft>) {
+    editServerRows(rows => rows.map(r => r.id === row.id ? { ...r, ...patch } : r),
+      controlTarget(row) ? "control" : "mcp", [row]);
   }
 
-  function removeMcpRow(id: string) {
-    setClosePending(false);
-    setSavedNote(null);
-    setLocalError(null);
-    setForm((prev) => ({
-      ...prev,
-      mcpServers: prev.mcpServers.filter((r) => r.id !== id),
-    }));
+  function browserSetupKey(row: McpServerDraft): string {
+    return `${row.id}:${row.browser ?? "msedge"}:${row.profile?.trim() ?? ""}`;
+  }
+
+  async function checkBrowserSetup(row: McpServerDraft, install: boolean) {
+    const key = browserSetupKey(row);
+    setBrowserSetup(current => ({ ...current, [key]: { ...current[key], busy: true, error: undefined } }));
+    try {
+      const request = { browser: row.browser ?? "msedge", profile: row.profile?.trim() || undefined };
+      const api = getDesktop();
+      if (!hasDesktopApi(install ? "setupBrowserExtension" : "getBrowserExtensionStatus")) {
+        throw new Error("请重启应用以使用浏览器自动安装功能。");
+      }
+      const status = await (install ? api.setupBrowserExtension(request) : api.getBrowserExtensionStatus(request));
+      setBrowserSetup(current => ({ ...current, [key]: { busy: false, status } }));
+      if (hasDesktopApi("getBrowserAuthorizationStatus")) {
+        const authorization = await api.getBrowserAuthorizationStatus({ browser: request.browser, profile: status.profileName });
+        setBrowserAuthorization(current => ({ ...current, [key]: mergeBrowserAuthorizationStatus(current[key], authorization) }));
+      }
+    } catch (error) {
+      setBrowserSetup(current => ({ ...current, [key]: { busy: false, error: browserErrorText(error) } }));
+    }
+  }
+
+  async function updateBrowserAuthorization(row: McpServerDraft, clear = false) {
+    const key = browserSetupKey(row);
+    const token = browserAuthorization[key]?.token ?? "";
+    setBrowserAuthorization(current => ({ ...current, [key]: { ...current[key], busy: true, error: undefined } }));
+    try {
+      const api = getDesktop();
+      if (!hasDesktopApi(clear ? "clearBrowserAuthorization" : "saveBrowserAuthorization")) {
+        throw new Error("请重启应用以使用连接授权配置功能。");
+      }
+      const selected = browserAuthorization[key]?.status;
+      if (!selected) throw new Error("请先刷新状态，确认要配置的浏览器目录。");
+      const request = { browser: selected.browser, profile: selected.profileName };
+      const status = await (clear ? api.clearBrowserAuthorization(request) : api.saveBrowserAuthorization({ ...request, token }));
+      setBrowserAuthorization(current => ({ ...current, [key]: { busy: false, status, token: "" } }));
+    } catch (error) {
+      setBrowserAuthorization(current => ({ ...current, [key]: { ...current[key], busy: false, error: browserErrorText(error) } }));
+    }
+  }
+
+  function addMcpRow(type: "stdio" | "http") {
+    editServerRows(rows => [...rows, newMcpRow(rows, type)], "mcp");
+  }
+
+  function removeMcpRow(row: McpServerDraft) {
+    editServerRows(rows => rows.filter(r => r.id !== row.id), controlTarget(row) ? "control" : "mcp", [row]);
   }
 
   function renderMcpStatus(row: McpServerDraft) {
     const live = mcpLive[row.name.trim()];
     if (!live) return null;
+    const setupError = row.type === "playwright" && row.connection !== "isolated"
+      ? browserSetup[browserSetupKey(row)]?.error ?? browserAuthorization[browserSetupKey(row)]?.error : undefined;
+    const error = /connection closed/i.test(live.error ?? "") ? setupError ?? live.error : live.error;
     const enabled = live.status !== "disabled";
     return (
       <div className="settings-mcp-status">
         <span className={`mcp-badge mcp-badge-${live.status}`}>
-          {live.status}
+          {live.probe && live.status === "connected" ? "测试通过" : live.status}
         </span>
         {live.serverInfo ? (
           <span className="settings-hint">
@@ -825,18 +815,18 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
             {live.tools.length} 个工具
           </span>
         ) : null}
-        {live.error ? (
-          <span className="settings-mcp-error" title={live.error}>
-            {live.error}
+        {error ? (
+          <span className="settings-mcp-error" title={error}>
+            {error}
           </span>
         ) : null}
-        {activeSessionId && sessionStatus !== "running" ? (
+        {activeSessionId && !live.probe && sessionStatus !== "running" ? (
           <span className="settings-mcp-actions">
             <button
               type="button"
               className="btn btn-ghost btn-sm"
               disabled={mcpBusy === row.name}
-              onClick={() => void onMcpReconnect(row.name.trim())}
+              onClick={() => void changeSessionServer(row)}
             >
               重连
             </button>
@@ -844,7 +834,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
               checked={enabled}
               label={enabled ? `停用 MCP ${row.name}` : `启用 MCP ${row.name}`}
               disabled={mcpBusy === row.name}
-              onCheckedChange={(next) => void onMcpToggle(row.name.trim(), next)}
+              onCheckedChange={(next) => void changeSessionServer(row, next)}
             />
           </span>
         ) : null}
@@ -1146,6 +1136,182 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
     );
   }
 
+  function renderMcpRow(row: McpServerDraft, index: number) {
+    const target = controlTarget(row);
+    return (
+      <section key={row.id} className="settings-config-card">
+        <header className="settings-config-card-head">
+          <div className="settings-config-identity">
+            {!target && <span className="settings-config-index">{index + 1}</span>}
+            <span>
+              <strong>{row.name.trim() || "未命名服务器"}</strong>
+              <small>{mcpServerLabels[row.type]}</small>
+            </span>
+          </div>
+          <button
+            type="button"
+            className="settings-card-remove"
+            title={target ? "删除配置" : "删除服务器"}
+            onClick={() => removeMcpRow(row)}
+          >
+            删除
+          </button>
+        </header>
+        {!row.disabled && renderMcpStatus(row)}
+        <div className="settings-config-grid">
+          <label className="settings-field">
+            <span>{target ? "配置名称" : "服务器名称"}</span>
+            <input
+              placeholder={target ? "例如 work" : "例如 github"}
+              value={row.name}
+              spellCheck={false}
+              onChange={(e) => updateMcpRow(row, { name: e.target.value })}
+            />
+          </label>
+          {!target && (
+            <label className="settings-field">
+              <span>连接方式</span>
+              <select className="select" value={row.type}
+                onChange={e => updateMcpRow(row, { type: e.target.value as McpServerDraft["type"] })}>
+                <option value="stdio">本地命令 · stdio</option>
+                <option value="http">远程服务 · HTTP</option>
+                <option value="sse">远程服务 · SSE</option>
+              </select>
+            </label>
+          )}
+          {row.type === "playwright" ? (
+            <>
+              <label className="settings-field">
+                <span>浏览器模式</span>
+                <select className="select" value={row.connection ?? "extension"}
+                  onChange={(e) => updateMcpRow(row, { connection: e.target.value as PlaywrightConnection })}>
+                  <option value="extension">日常浏览器（复用登录状态）</option>
+                  <option value="isolated">独立窗口</option>
+                </select>
+                <small>{(row.connection ?? "extension") === "extension"
+                  ? "连接你日常使用的浏览器，复用登录状态。首次连接时，扩展会请你选择共享的标签页，这是正常步骤。"
+                  : "每个会话打开独立窗口，使用独立的登录状态。"}</small>
+              </label>
+              <label className="settings-field settings-config-wide">
+                <span>日常浏览器配置目录（可选）</span>
+                <input placeholder="例如 Profile 2（留空使用最近使用的配置）"
+                  value={row.profile ?? ""} maxLength={80} spellCheck={false}
+                  onChange={(e) => updateMcpRow(row, { profile: e.target.value })} />
+                <small>填写配置目录名称，无需完整路径。历史和书签查询只读此配置；日常模式也连接此配置中的浏览器。</small>
+              </label>
+              {(row.connection ?? "extension") === "extension" ? (
+                <div className="settings-config-wide">
+                  <p className="settings-hint">首次连接会自动准备浏览器扩展。浏览器要求确认启用时，在提示中确认即可。</p>
+                  <div className="settings-collection-actions">
+                    <button type="button" className="btn btn-ghost btn-sm"
+                      disabled={browserSetup[browserSetupKey(row)]?.busy}
+                      onClick={() => void checkBrowserSetup(row, true)}>
+                      {browserSetup[browserSetupKey(row)]?.busy ? "正在检测…" : "自动安装并检测"}
+                    </button>
+                    <button type="button" className="btn btn-ghost btn-sm"
+                      disabled={browserSetup[browserSetupKey(row)]?.busy}
+                      onClick={() => void checkBrowserSetup(row, false)}>刷新状态</button>
+                  </div>
+                  <p className="settings-hint" role="status">
+                    {browserSetup[browserSetupKey(row)]?.error ?? browserSetup[browserSetupKey(row)]?.status?.message}
+                  </p>
+                  <label>
+                    <span>连接授权</span>
+                    <input type="password" autoComplete="off" spellCheck={false}
+                      placeholder="粘贴扩展授权页的连接令牌"
+                      value={browserAuthorization[browserSetupKey(row)]?.token ?? ""}
+                      disabled={browserAuthorization[browserSetupKey(row)]?.busy}
+                      onChange={event => {
+                        const key = browserSetupKey(row);
+                        const token = event.target.value;
+                        setBrowserAuthorization(current => ({ ...current, [key]: { ...current[key], token, error: undefined } }));
+                      }} />
+                  </label>
+                  <div className="settings-collection-actions">
+                    <button type="button" className="btn btn-ghost btn-sm"
+                      disabled={browserAuthorization[browserSetupKey(row)]?.busy || !browserAuthorization[browserSetupKey(row)]?.status || !browserAuthorization[browserSetupKey(row)]?.token?.trim()}
+                      onClick={() => void updateBrowserAuthorization(row)}>保存连接授权</button>
+                    <button type="button" className="btn btn-ghost btn-sm"
+                      disabled={browserAuthorization[browserSetupKey(row)]?.busy || !browserAuthorization[browserSetupKey(row)]?.status?.configured}
+                      onClick={() => void updateBrowserAuthorization(row, true)}>清除授权</button>
+                  </div>
+                  <p className="settings-hint" role="status">
+                    {browserAuthorization[browserSetupKey(row)]?.error ?? (browserAuthorization[browserSetupKey(row)]?.status?.configured
+                      ? `已为 ${browserAuthorization[browserSetupKey(row)]?.status?.profileName} 加密保存授权，下次连接自动使用。`
+                      : browserAuthorization[browserSetupKey(row)]?.status
+                        ? `当前配置：${browserAuthorization[browserSetupKey(row)]?.status?.profileName}。保存一次后即可自动连接，重置令牌后请重新保存。`
+                        : "正在检测授权配置，请稍候；检测失败时可刷新状态。")}
+                  </p>
+                </div>
+              ) : null}
+            </>
+          ) : row.type === "windows-computer" ? null : row.type === "stdio" ? (
+            <>
+              <label className="settings-field">
+                <span>启动命令</span>
+                <input
+                  placeholder="例如 npx"
+                  value={row.command}
+                  spellCheck={false}
+                  onChange={(e) =>
+                    updateMcpRow(row, { command: e.target.value })
+                  }
+                />
+              </label>
+              <label className="settings-field">
+                <span>命令参数</span>
+                <input
+                  placeholder="例如 -y @modelcontextprotocol/server-filesystem"
+                  value={row.argsText}
+                  spellCheck={false}
+                  onChange={(e) =>
+                    updateMcpRow(row, { argsText: e.target.value })
+                  }
+                />
+              </label>
+              <label className="settings-field settings-config-wide">
+                <span>环境变量（可选）</span>
+                <textarea
+                  rows={3}
+                  placeholder={"每行一个 KEY=VALUE"}
+                  value={row.envText}
+                  spellCheck={false}
+                  onChange={(e) =>
+                    updateMcpRow(row, { envText: e.target.value })
+                  }
+                />
+              </label>
+            </>
+          ) : (
+            <>
+              <label className="settings-field settings-config-wide">
+                <span>服务地址</span>
+                <input
+                  placeholder="https://example.com/mcp"
+                  value={row.url}
+                  spellCheck={false}
+                  onChange={(e) => updateMcpRow(row, { url: e.target.value })}
+                />
+              </label>
+              <label className="settings-field settings-config-wide">
+                <span>请求头（可选）</span>
+                <textarea
+                  rows={3}
+                  placeholder={"每行一个 KEY=VALUE，例如 Authorization=Bearer …"}
+                  value={row.headersText}
+                  spellCheck={false}
+                  onChange={(e) =>
+                    updateMcpRow(row, { headersText: e.target.value })
+                  }
+                />
+              </label>
+            </>
+          )}
+        </div>
+      </section>
+    );
+  }
+
   function renderMcpServers() {
     return (
       <div className="settings-mcp settings-collection">
@@ -1156,141 +1322,17 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
               本地服务使用 stdio 命令，远程服务使用 HTTP 或 SSE 地址。保存后可应用到当前会话。
             </p>
           </div>
-          <span className="settings-count-badge">{form.mcpServers.length}</span>
+          <span className="settings-count-badge">{customServers.length}</span>
         </div>
-        {form.mcpServers.length === 0 ? (
+        {customServers.length === 0 ? (
           <div className="settings-empty-state">
             <strong>还没有 MCP 服务器</strong>
             <span>添加本地命令，或连接一个远程 HTTP/SSE 服务。</span>
           </div>
         ) : (
-          form.mcpServers.map((row, index) => (
-            <section key={row.id} className="settings-config-card">
-              <header className="settings-config-card-head">
-                <div className="settings-config-identity">
-                  <span className="settings-config-index">{index + 1}</span>
-                  <span>
-                    <strong>{row.name.trim() || "未命名服务器"}</strong>
-                    <small>{row.type === "playwright" ? "Playwright MCP" : row.type === "stdio" ? "本地命令" : `远程 ${row.type.toUpperCase()}`}</small>
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  className="settings-card-remove"
-                  title="删除服务器"
-                  onClick={() => removeMcpRow(row.id)}
-                >
-                  删除
-                </button>
-              </header>
-              {renderMcpStatus(row)}
-              <div className="settings-config-grid">
-                <label className="settings-field">
-                  <span>服务器名称</span>
-                  <input
-                    placeholder="例如 github"
-                    value={row.name}
-                    spellCheck={false}
-                    onChange={(e) => updateMcpRow(row.id, { name: e.target.value })}
-                  />
-                </label>
-                <label className="settings-field">
-                  <span>连接方式</span>
-                  <select
-                    className="select"
-                    value={row.type}
-                    onChange={(e) =>
-                      updateMcpRow(row.id, {
-                        type: e.target.value as McpServerDraft["type"],
-                      })
-                    }
-                  >
-                    <option value="stdio">本地命令 · stdio</option>
-                    <option value="playwright">内置浏览器 · Playwright MCP</option>
-                    <option value="http">远程服务 · HTTP</option>
-                    <option value="sse">远程服务 · SSE</option>
-                  </select>
-                </label>
-                {row.type === "playwright" ? (
-                  <label className="settings-field settings-config-wide">
-                    <span>浏览器</span>
-                    <select className="select" value={row.browser ?? "msedge"}
-                      onChange={(e) => updateMcpRow(row.id, { browser: e.target.value as PlaywrightBrowser })}>
-                      <option value="msedge">Microsoft Edge</option>
-                      <option value="chrome">Google Chrome</option>
-                    </select>
-                    <small>使用本机已安装的浏览器，每个会话打开独立窗口。</small>
-                  </label>
-                ) : row.type === "stdio" ? (
-                  <>
-                    <label className="settings-field">
-                      <span>启动命令</span>
-                      <input
-                        placeholder="例如 npx"
-                        value={row.command}
-                        spellCheck={false}
-                        onChange={(e) =>
-                          updateMcpRow(row.id, { command: e.target.value })
-                        }
-                      />
-                    </label>
-                    <label className="settings-field">
-                      <span>命令参数</span>
-                      <input
-                        placeholder="例如 -y @modelcontextprotocol/server-filesystem"
-                        value={row.argsText}
-                        spellCheck={false}
-                        onChange={(e) =>
-                          updateMcpRow(row.id, { argsText: e.target.value })
-                        }
-                      />
-                    </label>
-                    <label className="settings-field settings-config-wide">
-                      <span>环境变量（可选）</span>
-                      <textarea
-                        rows={3}
-                        placeholder={"每行一个 KEY=VALUE"}
-                        value={row.envText}
-                        spellCheck={false}
-                        onChange={(e) =>
-                          updateMcpRow(row.id, { envText: e.target.value })
-                        }
-                      />
-                    </label>
-                  </>
-                ) : (
-                  <>
-                    <label className="settings-field settings-config-wide">
-                      <span>服务地址</span>
-                      <input
-                        placeholder="https://example.com/mcp"
-                        value={row.url}
-                        spellCheck={false}
-                        onChange={(e) => updateMcpRow(row.id, { url: e.target.value })}
-                      />
-                    </label>
-                    <label className="settings-field settings-config-wide">
-                      <span>请求头（可选）</span>
-                      <textarea
-                        rows={3}
-                        placeholder={"每行一个 KEY=VALUE，例如 Authorization=Bearer …"}
-                        value={row.headersText}
-                        spellCheck={false}
-                        onChange={(e) =>
-                          updateMcpRow(row.id, { headersText: e.target.value })
-                        }
-                      />
-                    </label>
-                  </>
-                )}
-              </div>
-            </section>
-          ))
+          customServers.map(renderMcpRow)
         )}
         <div className="settings-collection-actions">
-          <button type="button" className="btn" onClick={() => addMcpRow("playwright")}>
-            添加浏览器
-          </button>
           <button type="button" className="btn btn-primary" onClick={() => addMcpRow("stdio")}>
             添加本地服务器
           </button>
@@ -1300,14 +1342,14 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
           <button
             type="button"
             className="btn btn-ghost settings-mcp-test"
-            disabled={mcpProbing || form.mcpServers.length === 0}
-            title="启动临时会话，测试表单中的所有服务器"
-            onClick={() => void onMcpProbeDraft()}
+            disabled={probingTarget !== null || customServers.length === 0}
+            title="测试此页的自定义服务器"
+            onClick={() => void onMcpProbeDraft(customServers, "mcp")}
           >
-            {mcpProbing ? "测试中…" : "测试连接"}
+            {probingTarget === "mcp" ? "测试中…" : "测试连接"}
           </button>
         </div>
-        {mcpNote ? <p className="settings-hint">{mcpNote}</p> : null}
+        {mcpNotes.mcp && <p className="settings-hint" role="status">{mcpNotes.mcp}</p>}
       </div>
     );
   }
@@ -1324,12 +1366,13 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
       .split(",")
       .map((m) => m.trim())
       .filter(Boolean);
-    if (models.length === 0) {
+    const configuringServersBeforeModels = (page === "control" || page === "mcp") && !settings?.models.length;
+    if (models.length === 0 && !configuringServersBeforeModels) {
       setLocalError("Models list cannot be empty");
       return;
     }
-    const defaultModel = form.defaultModel.trim() || models[0];
-    if (!models.includes(defaultModel)) {
+    const defaultModel = form.defaultModel.trim() || models[0] || "";
+    if (defaultModel && !models.includes(defaultModel)) {
       models.unshift(defaultModel);
     }
     const defaultContextLimit = Number(form.defaultContextLimit);
@@ -1357,7 +1400,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
 
     const patchMcp = buildMcpServersPatch(form.mcpServers);
     if (!patchMcp.ok) {
-      setLocalError(patchMcp.error);
+      showMcpError(patchMcp);
       return;
     }
 
@@ -1412,6 +1455,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
       defaultContextLimit: Math.floor(defaultContextLimit),
       modelContextLimits: patchLimits.modelContextLimits,
       mcpServers: patchMcp.mcpServers,
+      disabledControlServers: patchMcp.disabledControlServers,
       permissionAllow: allowRules.rules,
       permissionDeny: denyRules.rules,
       agents: agentsPatch.agents,
@@ -1432,36 +1476,37 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
     setSaving(true);
     try {
       await saveSettings(patch);
-      setForm(committedForm);
+      setForm(current => current === form ? committedForm : current);
       setSavedFingerprint(JSON.stringify(committedForm));
       setClosePending(false);
       setSavedNote("设置已保存");
 
-      // Push the new MCP set into the running session so it takes effect
-      // immediately (also persists — setMcpServers updates settings too).
-      const mcpChanged =
-        JSON.stringify(settings?.mcpServers ?? {}) !==
-        JSON.stringify(patchMcp.mcpServers);
-      if (mcpChanged && activeSessionId && sessionStatus === "running") {
+      const previous = buildMcpServersPatch(mcpServersToDrafts(settings?.mcpServers));
+      const before = previous.ok ? previous.mcpServers : settings?.mcpServers ?? {};
+      const after = patchMcp.mcpServers;
+      const scope = (config?: McpServersMap[string]): ServerPage =>
+        config?.type === "playwright" || config?.type === "windows-computer" ? "control" : "mcp";
+      const changedPages = new Set<ServerPage>();
+      for (const name of new Set([...Object.keys(before), ...Object.keys(after)])) {
+        if (JSON.stringify(before[name]) === JSON.stringify(after[name])) continue;
+        if (before[name]) changedPages.add(scope(before[name]));
+        if (after[name]) changedPages.add(scope(after[name]));
+      }
+      if (changedPages.size && activeSessionId) {
         try {
-          const res = await getDesktop().setSessionMcpServers(
-            activeSessionId,
-            patchMcp.mcpServers,
-          );
-          if (!res.ok) {
-            setMcpNote(`Saved; live apply failed: ${res.error ?? "unknown"}`);
-          } else if (res.result && Object.keys(res.result.errors).length) {
-            setMcpNote(
-              `Saved; connect errors: ${Object.entries(res.result.errors)
-                .map(([n, e]) => `${n}: ${e}`)
-                .join("; ")}`,
-            );
-          } else {
-            setMcpNote("Applied to running session");
+          const res = await getDesktop().setSessionMcpServers(activeSessionId, after);
+          const errors = Object.entries(res.result?.errors ?? {});
+          for (const page of new Set([...changedPages, ...errors.map(([name]) => scope(after[name] ?? before[name]))])) {
+            const details = errors.filter(([name]) => scope(after[name] ?? before[name]) === page)
+              .map(([name, reason]) => `${name}：${reason}`).join(" · ");
+            const failed = !res.ok && res.error !== "No live session query";
+            if (failed) setServerNote(page, `设置已保存，当前会话应用失败：${res.error ?? "未知错误"}`);
+            else if (details) setServerNote(page, `设置已保存，连接失败：${details}`);
+            else setServerNote(page, res.ok ? "已应用到当前会话" : "下次启动会话时生效");
           }
           await refreshMcpLive();
-        } catch {
-          setMcpNote("Saved; live apply failed (session query gone)");
+        } catch (error) {
+          for (const page of changedPages) setServerNote(page, `设置已保存，当前会话应用失败：${browserErrorText(error)}`);
         }
       }
     } catch (err) {
@@ -1484,7 +1529,8 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
       sub: `${skillsInfo?.skills.length ?? 0} 个`,
     },
     { key: "plugins", label: "本地插件", sub: "plugin 目录" },
-    { key: "mcp", label: "MCP 服务器", sub: `${form.mcpServers.length} 个` },
+    { key: "control", label: "操控", sub: "桌面应用与浏览器" },
+    { key: "mcp", label: "MCP 服务器", sub: `${customServers.length} 个` },
   ];
   const activePage = pages.find((p) => p.key === page) ?? pages[0];
 
@@ -1978,6 +2024,17 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
             {page === "skills" ? renderSkills() : null}
 
             {page === "plugins" ? renderPlugins() : null}
+
+            {page === "control" && (
+              <ControlSettings rows={form.mcpServers} live={mcpLive} isWindows={navigator.platform.startsWith("Win")}
+                expanded={expandedControl} onExpand={setExpandedControl} renderProfile={renderMcpRow}
+                onToggle={(target, enabled) => editServerRows(rows => setControlEnabled(rows, target, enabled),
+                  "control", form.mcpServers.filter(row => controlTarget(row) === target))}
+                onAdd={target => editServerRows(rows => [...rows, newMcpRow(rows, "playwright", target,
+                  !rows.some(row => controlTarget(row) === target && !row.disabled))], "control")}
+                probingTarget={probingTarget} onProbe={rows => void onMcpProbeDraft(rows, "control")}
+                note={mcpNotes.control} />
+            )}
 
             {page === "mcp" ? renderMcpServers() : null}
 
