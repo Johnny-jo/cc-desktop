@@ -18,3 +18,7 @@ tools/
 .claude/settings.local.json
 # Playwright MCP page snapshots captured while debugging locally
 .playwright-mcp/
+
+# 本地 agent 调试快照，不是项目源码
+.agents/
+problem/
