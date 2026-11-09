@@ -39,6 +39,7 @@ import { registerIpcHandlers } from "./ipc-handlers";
 import { ProviderManager } from "./provider-manager";
 import { QuotaManager } from "./provider-quota-manager";
 import { OAuthHandler } from "./oauth-handler";
+import { CredentialManager } from "./credential-manager";
 import { registerProviderHandlers } from "./provider-ipc-handlers";
 import {
   getClaudeExecutablePath,
@@ -707,7 +708,12 @@ function bootstrap() {
     userDataDir,
   });
   const quotaManager = new QuotaManager();
-  const oauthHandler = new OAuthHandler(providerManager);
+  // 凭证加密复用与设置存储同一套 safeStorage 封装：系统加密不可用时明确降级，
+  // 不再像旧实现那样拼 PowerShell 命令串。
+  const providerCredentials = new CredentialManager(
+    safeStorage.isEncryptionAvailable() ? { encrypt, decrypt } : null,
+  );
+  const oauthHandler = new OAuthHandler(providerManager, providerCredentials);
 
   registerIpcHandlers({
     photoFlow,
@@ -736,7 +742,13 @@ function bootstrap() {
   });
 
   // 注册 Provider IPC 处理器
-  registerProviderHandlers(ipcMain, providerManager, quotaManager, oauthHandler);
+  registerProviderHandlers({
+    providerManager,
+    credentials: providerCredentials,
+    quotaManager,
+    oauthHandler,
+    sendToRenderer,
+  });
 
   const stopClaudeSettingsWatch = watchClaudeCodeModel(applyCliModelToDesktop);
 
@@ -773,39 +785,46 @@ function bootstrap() {
   void cpa.ensureReady().catch(() => undefined);
 
   // 启动后台配额同步（1 小时一次）
+  // 只同步「已配置凭证」的 provider，并在拿到模型目录后把状态推给渲染进程。
+  // 不再做 usedQuota/limitTokens 的 80% 告警：这些上游没有通用的用量接口，
+  // 真正的账号配额由 CPA 侧（cpa-quota.ts）负责。
   const quotaSyncInterval = setInterval(async () => {
-    const configs = providerManager.listConfigs();
-    for (const config of configs) {
+    for (const config of providerManager.listConfigs()) {
       if (!config.enabled) continue;
 
       const encrypted = providerManager.loadApiKey(config.id);
-      if (!encrypted) continue;
+      let credential: string | null = null;
+      if (encrypted) {
+        try {
+          credential = providerCredentials.decrypt(encrypted);
+        } catch (err) {
+          console.warn(`[Provider] Cannot decrypt API key for ${config.id}:`, err);
+        }
+      }
+      if (!credential) {
+        credential = await oauthHandler.ensureFreshToken(config.id);
+      }
+      if (!credential) continue;
 
       try {
-        const { CredentialManager } = await import("./credential-manager");
-        const apiKey = CredentialManager.decrypt(encrypted);
-        const result = await quotaManager.syncQuota(config, apiKey);
-
-        if (result.quota) {
-          const ratio =
-            result.quota.usedQuota && result.quota.limitTokens
-              ? result.quota.usedQuota / result.quota.limitTokens
-              : 0;
-          if (ratio >= 0.8) {
-            // 发送配额告警事件到所有渲染进程
-            sendToRenderer(IPC.providerUpdated, {
-              providerId: config.id,
-              status: {
-                providerId: config.id,
-                type: config.type,
-                name: config.name,
-                enabled: config.enabled,
-                authenticated: true,
-                quota: result.quota,
-              },
-            });
-          }
+        quotaManager.invalidateCache(config.id);
+        const result = await quotaManager.syncQuota(config, credential);
+        if (result.error) {
+          console.warn(`[Provider] Quota sync failed for ${config.id}: ${result.error}`);
+          continue;
         }
+        sendToRenderer(IPC.providerUpdated, {
+          providerId: config.id,
+          status: {
+            providerId: config.id,
+            type: config.type,
+            name: config.name,
+            enabled: config.enabled,
+            authenticated: true,
+            quota: result.quota ?? undefined,
+            availableModels: result.models,
+          },
+        });
       } catch (err) {
         console.warn(`[Provider] Quota sync failed for ${config.id}:`, err);
       }

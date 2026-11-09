@@ -235,7 +235,7 @@ export const IPC = {
   providerUpdateConfig: "provider:update-config",
   providerDeleteConfig: "provider:delete-config",
   providerStartOAuth: "provider:start-oauth",
-  providerCompleteOAuth: "provider:complete-oauth",
+  providerCancelOAuth: "provider:cancel-oauth",
   providerTestAuth: "provider:test-auth",
   providerGetStatus: "provider:get-status",
   providerSyncQuota: "provider:sync-quota",
@@ -1077,12 +1077,14 @@ export type IpcInvokeMap = {
     result: { ok: boolean; error?: string };
   };
   [IPC.providerStartOAuth]: {
-    args: [{ type: string; clientId?: string }];
-    result: { authorizationUrl: string; state: string };
+    args: [{ id: string }];
+    result:
+      | { ok: true; authorizationUrl: string; state: string }
+      | { ok: false; error: string };
   };
-  [IPC.providerCompleteOAuth]: {
-    args: [{ type: string; code: string; state: string; codeVerifier?: string }];
-    result: { ok: boolean; token?: string; error?: string };
+  [IPC.providerCancelOAuth]: {
+    args: [{ state: string }];
+    result: { ok: boolean };
   };
   [IPC.providerTestAuth]: {
     args: [{ id: string }];
@@ -1098,7 +1100,7 @@ export type IpcInvokeMap = {
   };
   [IPC.providerSetDefaultContextLimit]: {
     args: [{ providerId: string; limit: number }];
-    result: { ok: boolean };
+    result: { ok: boolean; error?: string };
   };
 };
 

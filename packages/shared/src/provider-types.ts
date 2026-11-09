@@ -11,17 +11,17 @@ export type AuthMethod = "api-key" | "oauth2";
  * 各 Provider 的认证配置
  */
 export type ProviderAuthConfig =
+  // Anthropic 与 OpenAI 都没有可供第三方桌面应用调用的公开 OAuth 授权码端点
+  // （它们只在自家 CLI 内部走各自流程），因此这里只支持 API Key。
   | {
       type: "claude";
-      authMethod: "api-key" | "oauth2";
+      authMethod: "api-key";
       apiKey?: string; // 加密存储
-      oauthToken?: string; // OAuth 访问令牌
     }
   | {
       type: "openai";
-      authMethod: "api-key" | "oauth2";
+      authMethod: "api-key";
       apiKey?: string;
-      oauthToken?: string;
     }
   | {
       type: "deepseek";
@@ -68,6 +68,11 @@ export type ProviderConfig = {
   lastAuthenticatedAt?: number;
   /** 最后配额同步的时间戳 */
   lastQuotaSyncAt?: number;
+  /**
+   * OAuth 客户端 ID（公开信息，可明文持久化）。仅对支持 OAuth 的 provider 有意义。
+   * client secret 不放在这里 —— 桌面应用是公共客户端，走 PKCE，不需要也不该保存 secret。
+   */
+  oauthClientId?: string;
 };
 
 /**
@@ -126,7 +131,14 @@ export type AuthenticationStatus = {
 };
 
 /**
- * OAuth 配置（各 Provider 不同）
+ * OAuth 配置（各 Provider 不同）。
+ *
+ * 只有确实存在「第三方公共客户端可用」的授权码端点的 provider 才在此登记。
+ * claude / openai 没有这样的公开端点（上一版凭猜测写下的 api.anthropic.com/oauth/*
+ * 与 platform.openai.com/oauth/* 并不存在），所以留空、仅支持 API Key。
+ *
+ * clientId 由用户在自己的云控制台注册后填入（见 ProviderConfig.oauthClientId），
+ * 这里只放端点与 scope。
  */
 export const OAuthConfigs: Record<
   ProviderType,
@@ -134,29 +146,25 @@ export const OAuthConfigs: Record<
     authorizationUrl?: string;
     tokenUrl?: string;
     scope?: string;
-    clientId?: string; // 需由用户在设置中填写或从环境变量读取
   }
 > = {
-  claude: {
-    authorizationUrl: "https://api.anthropic.com/oauth/authorize",
-    tokenUrl: "https://api.anthropic.com/oauth/token",
-    scope: "messages:read messages:write",
-  },
-  openai: {
-    authorizationUrl: "https://platform.openai.com/oauth/authorize",
-    tokenUrl: "https://platform.openai.com/oauth/token",
-    scope: "read",
-  },
+  claude: {}, // 无公开 OAuth 授权码端点，仅支持 API Key
+  openai: {}, // 同上
   gemini: {
     authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth",
     tokenUrl: "https://oauth2.googleapis.com/token",
-    scope: "https://www.googleapis.com/auth/generative-ai",
+    scope: "https://www.googleapis.com/auth/generative-language",
   },
   deepseek: {}, // DeepSeek 仅支持 API Key
   kimi: {}, // Kimi 仅支持 API Key
   xai: {}, // xAI 仅支持 API Key
   "openai-compatible": {}, // 兼容协议仅支持 API Key
 };
+
+/** 该 provider 类型是否支持 OAuth 登录（供 UI 决定是否显示「OAuth 2.0」选项）。 */
+export function supportsOAuth(type: ProviderType): boolean {
+  return Boolean(OAuthConfigs[type]?.authorizationUrl && OAuthConfigs[type]?.tokenUrl);
+}
 
 /**
  * Provider 端点配置（用于调用 API）
@@ -167,36 +175,66 @@ export const ProviderEndpoints: Record<
     baseUrl: string;
     modelsEndpoint: string;
     chatEndpoint: string;
+    /**
+     * 该 provider 的鉴权头格式。Anthropic 用 x-api-key + anthropic-version，
+     * Google 用 x-goog-api-key，其余用 Bearer。
+     */
+    authHeader: "bearer" | "x-api-key" | "x-goog-api-key";
   }
 > = {
   claude: {
     baseUrl: "https://api.anthropic.com",
     modelsEndpoint: "/v1/models",
     chatEndpoint: "/v1/messages",
+    authHeader: "x-api-key",
   },
   openai: {
     baseUrl: "https://api.openai.com",
     modelsEndpoint: "/v1/models",
     chatEndpoint: "/v1/chat/completions",
+    authHeader: "bearer",
   },
   deepseek: {
     baseUrl: "https://api.deepseek.com",
     modelsEndpoint: "/v1/models",
     chatEndpoint: "/v1/chat/completions",
+    authHeader: "bearer",
   },
   kimi: {
     baseUrl: "https://api.moonshot.cn",
     modelsEndpoint: "/v1/models",
     chatEndpoint: "/v1/chat/completions",
+    authHeader: "bearer",
   },
   xai: {
     baseUrl: "https://api.x.ai",
     modelsEndpoint: "/v1/models",
     chatEndpoint: "/v1/chat/completions",
+    authHeader: "bearer",
   },
   gemini: {
     baseUrl: "https://generativelanguage.googleapis.com",
     modelsEndpoint: "/v1beta/models",
     chatEndpoint: "/v1beta/models",
+    authHeader: "x-goog-api-key",
   },
 };
+
+/**
+ * 构造请求某个 provider 的鉴权头。
+ * Anthropic 额外要求 anthropic-version，否则 /v1/models 会 400。
+ */
+export function providerAuthHeaders(
+  type: Exclude<ProviderType, "openai-compatible">,
+  credential: string,
+): Record<string, string> {
+  const spec = ProviderEndpoints[type];
+  switch (spec.authHeader) {
+    case "x-api-key":
+      return { "x-api-key": credential, "anthropic-version": "2023-06-01" };
+    case "x-goog-api-key":
+      return { "x-goog-api-key": credential };
+    default:
+      return { authorization: `Bearer ${credential}` };
+  }
+}
