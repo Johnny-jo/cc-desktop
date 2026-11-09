@@ -29,13 +29,12 @@ apps/desktop typecheck: ✓ Done
 
 | 功能模块 | 状态 | 说明 |
 |---|---|---|
-| **Provider 认证** | ✅ | 7 种 provider API Key + OAuth 支持 |
-| **密钥加密** | ✅ | DPAPI 加密存储（Windows） |
-| **配额管理** | ✅ | 自动同步 + 用户手输 + 缓存 |
+| **Provider 认证** | ✅ | 7 种 provider API Key；Gemini 另支持 OAuth（PKCE） |
+| **密钥加密** | ✅ | Electron `safeStorage`（Windows 上即 DPAPI） |
+| **配额管理** | ✅ | 模型目录 + 上下文窗口，拿不到就标来源而非编造 |
 | **后台同步** | ✅ | 1 小时间隔自动更新 |
-| **UI 集成** | ✅ | 设置页 + 仪表盘 |
-| **告警机制** | ✅ | 80% 自动检测和广播 |
-| **IPC 通道** | ✅ | 12 个通道完全实现 |
+| **UI 集成** | ✅ | 设置页 + 仪表盘 + 选择器 |
+| **IPC 通道** | ✅ | 10 个通道 + 1 个推送事件 |
 
 ## 提交历史
 
@@ -64,35 +63,27 @@ apps/desktop typecheck: ✓ Done
 - [x] ProviderSettings 组件集成
 - [x] ProviderDashboard 组件集成
 - [x] 类型检查通过
-- [x] .env.example 创建
+- [x] 单元测试覆盖（凭证加密 / provider 配置 / 窗口解析 / OAuth 回调）
 
-## 环境变量配置
+## OAuth 客户端配置
 
-复制 `.env.example` 到 `.env`，填写 OAuth 客户端信息：
-
-```bash
-cp .env.example .env
-```
-
-编辑 `.env` 添加：
-
-```bash
-PROVIDER_OAUTH_CLAUDE_CLIENT_ID=your-id
-PROVIDER_OAUTH_CLAUDE_CLIENT_SECRET=your-secret
-# ... 其他 provider 信息
-```
+OAuth 客户端 ID 随 provider 配置保存（`provider.oauthClientId`），不再通过
+`.env` 下发；桌面应用是公共客户端，使用 PKCE，不保存 client secret。
+`.env.example` 现在只保留更新源与调试开关。
 
 ## 支持的 Providers
 
-| Provider | API | OAuth | 模型查询 |
+| Provider | API Key | OAuth | 窗口来源 |
 |---|---|---|---|
-| Claude (Anthropic) | ✓ | ✓ | ✓ |
-| OpenAI | ✓ | ✓ | ✓ |
-| DeepSeek | ✓ | | ✓ |
-| Kimi (Moonshot) | ✓ | | ✓ |
-| xAI (Grok) | ✓ | | ✓ |
-| Gemini (Google) | ✓ | ✓ | ✓ |
-| OpenAI 兼容 | ✓ | | 手输 |
+| Claude (Anthropic) | ✓ | — | 内置表 / 用户设置 |
+| OpenAI | ✓ | — | 内置表 / 用户设置 |
+| DeepSeek | ✓ | — | 内置表 / 用户设置 |
+| Kimi (Moonshot) | ✓ | — | 内置表 / 用户设置 |
+| xAI (Grok) | ✓ | — | 内置表 / 用户设置 |
+| Gemini (Google) | ✓ | ✓ | `/v1beta/models` 的 `inputTokenLimit` |
+| OpenAI 兼容 | ✓ | — | 网关返回 / 用户手输 |
+
+> Claude 与 OpenAI 没有供第三方桌面应用使用的公开 OAuth 授权码端点，只支持 API Key。
 
 ## 测试步骤
 

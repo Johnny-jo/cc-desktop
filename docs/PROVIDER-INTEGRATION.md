@@ -119,32 +119,31 @@ import { ProviderSelector } from "./ProviderSelector";
 </div>
 ```
 
-### 5. 环境变量配置
+### 5. OAuth 客户端配置
 
-在 `.env` 或系统环境中设置 OAuth 客户端信息：
+OAuth 客户端 ID 不通过环境变量下发，而是随 provider 配置保存
+（`ProviderConfig.oauthClientId`，添加后可在设置里修改）。这样多账号 / 多 provider
+不会互相串用同一个 client ID。
 
-```bash
-# Claude OAuth
-PROVIDER_OAUTH_CLAUDE_CLIENT_ID=your-client-id
-PROVIDER_OAUTH_CLAUDE_CLIENT_SECRET=your-secret
+桌面应用属于**公共客户端**：走 PKCE，不保存也不发送 `client_secret`。
 
-# OpenAI OAuth
-PROVIDER_OAUTH_OPENAI_CLIENT_ID=your-client-id
-PROVIDER_OAUTH_OPENAI_CLIENT_SECRET=your-secret
+目前只有登记了真实授权码端点的 provider 支持 OAuth：
 
-# Gemini OAuth
-PROVIDER_OAUTH_GEMINI_CLIENT_ID=your-client-id
-PROVIDER_OAUTH_GEMINI_CLIENT_SECRET=your-secret
-```
+| Provider | 授权端点 | 备注 |
+|---|---|---|
+| Gemini | `accounts.google.com/o/oauth2/v2/auth` | 用户自备 Google Cloud OAuth 客户端 |
+| Claude | — | 无公开端点，仅 API Key |
+| OpenAI | — | 无公开端点，仅 API Key |
+
+回调由主进程在 `127.0.0.1` 的随机端口上临时监听（RFC 8252），
+不占用固定端口，也不需要渲染进程回传授权码。
 
 ### 6. 日志和监控
-
-在 IPC 处理器中添加日志：
 
 ```typescript
 console.log(`[Provider] Adding config for ${type} as ${id}`);
 console.log(`[Provider] Syncing quota for ${providerId}`);
-console.log(`[Provider] Usage: ${usedQuota}/${limitTokens} (${usagePercent}%)`);
+console.log(`[Provider] Models visible: ${models.length}`);
 ```
 
 ## 数据流
@@ -171,28 +170,29 @@ User → ProviderSettings UI
 
 ## 安全考虑
 
-1. **密钥加密**：所有 API Key 和 OAuth token 都使用 DPAPI（Windows）加密存储
-2. **文件权限**：确保 `~/.cc-desktop/providers/` 只有当前用户可读写
-3. **内存清理**：解密后的密钥不应长期保存在内存中
-4. **OAuth**：使用 PKCE 防止授权码拦截
-5. **Token 刷新**：定期验证 token 有效性，过期时自动刷新
+1. **密钥加密**：API Key 与 OAuth token 用 Electron `safeStorage` 加密
+   （Windows 上是 DPAPI），再单独写入 `<id>.key` / `<id>.oauth`。
+2. **不落明文**：`configs.json` 只存非敏感字段，API Key 写入前就被剥离。
+3. **文件名校验**：provider id 必须匹配 `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`，
+   防止渲染进程用 `../` 把凭证写到 userData 之外。
+4. **OAuth**：PKCE（S256）+ state 校验；不携带 client_secret。
+5. **Token 刷新**：过期前 60 秒内自动用 refresh_token 续期，失败则视为未认证。
 
-## 故障恢复
+## 降级行为
 
-如果密钥加密失败：
+系统加密不可用（极少见，例如无密钥环的 Linux 桌面）时：
 
-```typescript
-// 降级到 base64 编码（提示用户风险）
-console.warn("Failed to use DPAPI, using base64 fallback");
-```
+- 凭证以 `b64:` 前缀存 base64 明文；
+- `CredentialManager.encryptionAvailable` 返回 `false`，UI 应提示用户；
+- 已存在的 `enc:` 凭证此时**无法解密**，会显式报错要求重新输入，
+  而不是把乱码当成密钥去请求上游。
 
 ## 测试检查清单
 
-- [ ] 添加 API Key Provider，测试认证
-- [ ] 添加 OAuth Provider，测试授权流程
-- [ ] 同步配额，检查是否正确解析 context_window
-- [ ] 手设置 context limit，验证保存和应用
-- [ ] 删除 Provider，确认密钥被清除
-- [ ] 配额达到 80% 时，检查告警是否显示
-- [ ] 重启应用，验证配置持久化
+- [ ] 添加 API Key Provider，点「测试认证」应返回可见模型数
+- [ ] OAuth Provider 点「OAuth 登录」应打开系统浏览器，完成后状态变为已认证
+- [ ] 同步配额，确认窗口来源显示为「上游 /models」「手动设置」或「内置表」
+- [ ] 手设 context limit，验证保存并在同步后仍生效
+- [ ] 删除 Provider，确认 `<id>.key` / `<id>.oauth` 被清除
+- [ ] 重启应用，验证配置与凭证持久化
 - [ ] 检查 Provider 选择器是否在 Composer 中正常工作
