@@ -3,6 +3,7 @@ import type { ChatItem, ModelQuotaInfo } from "@claude-desktop/shared";
 import { MessageList } from "./MessageList";
 import { Composer } from "./Composer";
 import { AgentWelcome } from "./AgentWelcome";
+import { PhotoFlow } from "./PhotoFlow";
 import { ChatTaskDock } from "./ChatTaskDock";
 import { useAppStore } from "../state/store";
 import { useI18n } from "../i18n/useI18n";
@@ -120,6 +121,7 @@ export function ChatPanel({ onOpenSettings, onOpenFile }: ChatPanelProps) {
       className={activeSessionId ? "chat-panel" : "chat-panel hero"}
       ref={panelRef}
     >
+      {!activeSessionId ? <PhotoFlow english={t.common.ok === "OK"} /> : null}
       <div className="chat-body">
         <div className="chat-inner">
           {showBanner && ctx ? (

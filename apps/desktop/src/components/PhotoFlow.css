@@ -1,0 +1,77 @@
+.photo-flow {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  display: none;
+  overflow: hidden;
+  pointer-events: none;
+  contain: layout paint;
+}
+.photo-flow[data-active="true"] { display: block; }
+.photo-flow-track { position: absolute; inset: 0; }
+.photo-flow-card {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: var(--photo-width, 160px);
+  aspect-ratio: 1.28;
+  padding: 5px;
+  border: 1px solid rgb(255 255 255 / 90%);
+  border-radius: 9px;
+  background: #fff;
+  box-shadow: 0 3px 6px rgb(38 49 54 / 4%), 0 14px 30px -10px rgb(38 49 54 / 20%);
+  will-change: transform, opacity;
+  user-select: none;
+}
+.photo-flow-card[hidden] { display: none; }
+.photo-flow-card-1 { aspect-ratio: 0.88; }
+.photo-flow-card-3 { aspect-ratio: 1.5; }
+.photo-flow-card img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 5px;
+  filter: saturate(0.78);
+}
+.chat-panel.hero.has-photo-flow { isolation: isolate; }
+.chat-panel.hero.has-photo-flow > .chat-body { position: relative; z-index: 1; pointer-events: none; }
+.chat-panel.hero.has-photo-flow > .chat-composer { position: relative; z-index: 2; pointer-events: none; }
+.chat-panel.hero.has-photo-flow .agent-wordmark,
+.chat-panel.hero.has-photo-flow .composer-shell { pointer-events: auto; }
+.chat-panel.hero.has-photo-flow .composer {
+  background: rgb(255 255 255 / 96%);
+  box-shadow: 0 5px 24px rgb(24 38 50 / 7%);
+}
+.chat-panel.hero.has-photo-flow .composer-project-row {
+  width: fit-content;
+  max-width: 100%;
+  border-radius: 8px;
+  background: rgb(255 255 255 / 88%);
+}
+.photo-flow-toggle {
+  position: absolute;
+  right: 20px;
+  bottom: 18px;
+  z-index: 101;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border: 1px solid rgb(100 116 139 / 12%);
+  border-radius: 20px;
+  background: rgb(255 255 255 / 90%);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 11px;
+  pointer-events: auto;
+  cursor: pointer;
+}
+.photo-flow-toggle svg { width: 12px; height: 12px; }
+.photo-flow-toggle:hover { color: var(--text); border-color: var(--border); }
+.photo-flow-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.photo-flow[data-reduced-motion="true"] .photo-flow-toggle { display: none; }
+@media (max-width: 640px) {
+  .photo-flow-card { padding: 3px; border-radius: 6px; }
+  .photo-flow-toggle { right: 12px; bottom: 12px; }
+}
