@@ -24,6 +24,7 @@ import {
   useAppStore,
 } from "../state/store";
 import { RoomModsSettings } from "./settings/RoomModsSettings";
+import { AuthTab } from "./settings/AuthTab";
 import { ThemedSelect } from "./Select";
 import { ToggleSwitch } from "./ToggleSwitch";
 
@@ -42,6 +43,7 @@ type SettingsPage =
   | "general"
   | "room"
   | "cpa"
+  | "auth"
   | "diagnostics"
   | "permissions"
   | "agents"
@@ -1435,6 +1437,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
     { key: "general", label: "通用", sub: "模型 / 语言 / 字体 / 更新" },
     { key: "room", label: "群聊设置", sub: "Mod / 选集 / 制作" },
     { key: "cpa", label: "CPA 与上下文", sub: "exe / config / 端口 / 窗口" },
+    { key: "auth", label: "认证文件", sub: "API 密钥 / Token" },
     { key: "diagnostics", label: "内存诊断", sub: "进程 / 缓存 / JS 堆" },
     { key: "permissions", label: "权限规则", sub: "allow / deny" },
     { key: "agents", label: "自定义 Agents", sub: "Task 子代理" },
@@ -1912,6 +1915,8 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
               </div>
             </>
           ) : null}
+
+            {page === "auth" ? <AuthTab /> : null}
 
             {page === "diagnostics" ? (
               <Suspense fallback={<p className="settings-hint">正在加载诊断工具…</p>}>

@@ -1,5 +1,6 @@
 import type {
   AppSettings,
+  AuthFileEntry,
   Attachment,
   CpaStatus,
   FileChange,
@@ -217,6 +218,15 @@ export const IPC = {
   modsDelete: "mods:delete",
   modsOpenDir: "mods:open-dir",
   modsScaffold: "mods:scaffold",
+  // Auth files management (Phase 1: Desktop-managed credentials)
+  /** Renderer → Main: list local auth-file entries */
+  authList: "auth:list",
+  /** Renderer → Main: delete an auth-file entry by id */
+  authDelete: "auth:delete",
+  /** Renderer → Main: toggle disabled state of an auth-file */
+  authSetDisabled: "auth:set-disabled",
+  /** Renderer → Main: refresh quota for a single auth-file, update cache */
+  authRefreshQuota: "auth:refresh-quota",
 } as const;
 
 export type AppMemoryDiagnostics = {
@@ -1007,6 +1017,22 @@ export type IpcInvokeMap = {
   [IPC.modsScaffold]: {
     args: [{ id: string; name: string }];
     result: { ok: boolean; packDir?: string; error?: string };
+  };
+  [IPC.authList]: {
+    args: [];
+    result: AuthFileEntry[];
+  };
+  [IPC.authDelete]: {
+    args: [{ id: string }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.authSetDisabled]: {
+    args: [{ id: string; disabled: boolean }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.authRefreshQuota]: {
+    args: [{ id: string }];
+    result: { ok: boolean; error?: string };
   };
 };
 

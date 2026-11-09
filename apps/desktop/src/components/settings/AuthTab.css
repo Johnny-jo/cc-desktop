@@ -1,0 +1,215 @@
+.auth-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 0;
+}
+
+.auth-tab__header {
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--bg-border, #e5e5e5);
+}
+
+.auth-tab__header h2 {
+  margin: 0 0 0.5rem 0;
+  font-size: 1.125rem;
+  font-weight: 600;
+}
+
+.auth-tab__description {
+  margin: 0;
+  font-size: 0.875rem;
+  color: var(--text-secondary, #666);
+}
+
+.auth-tab__error {
+  padding: 1rem;
+  background-color: var(--bg-error-light, #fee);
+  border: 1px solid var(--border-error, #f88);
+  border-radius: 4px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
+.auth-tab__error p {
+  margin: 0;
+  font-size: 0.875rem;
+  color: var(--text-error, #c00);
+}
+
+.auth-tab__error button {
+  padding: 0.25rem 0.75rem;
+  font-size: 0.875rem;
+  border: 1px solid var(--border-error, #f88);
+  background: transparent;
+  color: var(--text-error, #c00);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.auth-tab__error button:hover {
+  background-color: var(--bg-error-hover, #fdd);
+}
+
+.auth-tab__empty {
+  padding: 2rem 1rem;
+  text-align: center;
+  color: var(--text-secondary, #666);
+}
+
+.auth-tab__empty p {
+  margin: 0.5rem 0;
+  font-size: 0.875rem;
+}
+
+.auth-tab__empty-hint {
+  font-size: 0.8rem;
+  color: var(--text-tertiary, #999);
+}
+
+.auth-tab__list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.auth-tab__item {
+  padding: 1rem;
+  border: 1px solid var(--bg-border, #e5e5e5);
+  border-radius: 4px;
+  background-color: var(--bg-item, #fafafa);
+  transition: all 0.2s ease;
+}
+
+.auth-tab__item:hover {
+  border-color: var(--bg-border-hover, #ccc);
+  background-color: var(--bg-item-hover, #fff);
+}
+
+.auth-tab__item.disabled {
+  opacity: 0.6;
+  background-color: var(--bg-disabled, #f5f5f5);
+}
+
+.auth-tab__item-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
+.auth-tab__item-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.auth-tab__item-name {
+  font-weight: 500;
+  font-size: 0.95rem;
+  margin: 0 0 0.25rem 0;
+}
+
+.auth-tab__item-provider {
+  font-size: 0.8rem;
+  color: var(--text-secondary, #666);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.auth-tab__item-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.auth-tab__button {
+  padding: 0.4rem 0.6rem;
+  font-size: 0.8rem;
+  border: 1px solid var(--bg-border, #e5e5e5);
+  background-color: var(--bg-button, #f9f9f9);
+  color: var(--text-primary, #333);
+  border-radius: 3px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.auth-tab__button:hover {
+  border-color: var(--bg-border-hover, #ccc);
+  background-color: var(--bg-button-hover, #f0f0f0);
+}
+
+.auth-tab__button-quota {
+  /* standard button */
+}
+
+.auth-tab__button-delete {
+  color: var(--text-error, #c00);
+}
+
+.auth-tab__button-delete:hover {
+  background-color: var(--bg-error-light, #fee);
+  border-color: var(--border-error, #f88);
+}
+
+.auth-tab__toggle {
+  display: flex;
+  align-items: center;
+}
+
+.auth-tab__item-meta {
+  margin-top: 0.75rem;
+  font-size: 0.8rem;
+  color: var(--text-tertiary, #999);
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.auth-tab__item-quota {
+  margin-top: 0.75rem;
+  padding: 0.5rem;
+  background-color: var(--bg-secondary, #f0f0f0);
+  border-radius: 3px;
+  font-size: 0.8rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.auth-tab__quota-label {
+  color: var(--text-secondary, #666);
+  font-weight: 500;
+}
+
+.auth-tab__quota-time {
+  color: var(--text-tertiary, #999);
+  font-size: 0.75rem;
+}
+
+.auth-tab__quota-windows {
+  list-style: none;
+  padding: 0;
+  margin: 0.25rem 0 0 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.auth-tab__quota-windows li {
+  color: var(--text-primary, #333);
+  font-size: 0.8rem;
+}
+
+.auth-tab.loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+}
+
+.auth-tab.loading p {
+  color: var(--text-secondary, #666);
+}

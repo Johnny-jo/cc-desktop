@@ -196,6 +196,28 @@ export type ModelQuotaInfo = {
 /** Exact effort levels accepted by the bundled Claude Agent SDK. */
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
+/**
+ * Metadata for a local auth-file entry (no token — stored separately).
+ * Mirrors the fields from CPA auth-files but managed entirely by Desktop.
+ */
+export type AuthFileEntry = {
+  /** Stable local id, e.g. "kimi-0" */
+  id: string;
+  /** Display name, e.g. "My Kimi account" */
+  name: string;
+  /** Provider key, e.g. "kimi" | "xai" | "antigravity" */
+  provider: string;
+  /** When true, this credential is skipped for requests */
+  disabled?: boolean;
+  /** ISO timestamp of when the token was last saved */
+  savedAt?: string;
+  /** Cached quota info from the last successful quota fetch */
+  quotaCache?: {
+    observedAt: number;
+    windows: ModelQuotaWindow[];
+  };
+};
+
 export type ModelInfo = {
   id: string;
   /** Parsed context window from CPA /v1/models; undefined if unknown */

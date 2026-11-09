@@ -27,6 +27,7 @@ import { SnapshotStore } from "./snapshot-store";
 import { PermissionBroker } from "./permission-broker";
 import { UserPromptBroker } from "./user-prompt-broker";
 import { CpaSupervisor } from "./cpa-supervisor";
+import { AuthFileManager } from "./auth-file-manager";
 import { applyCpaModelCatalog } from "./cpa-model-sync";
 import { SessionArchive } from "./session-archive";
 import { SessionManager, type QueryFn } from "./session-manager";
@@ -680,6 +681,8 @@ function bootstrap() {
     sendToRenderer(IPC.settingsUpdated, settings.getPublic());
   };
 
+  const authFiles = new AuthFileManager(app.getPath("userData"));
+
   registerIpcHandlers({
     window: getMainWindow,
     sessions,
@@ -690,6 +693,7 @@ function bootstrap() {
     diffs,
     snapshots,
     terminal,
+    authFiles,
     onThemeChanged: applyWindowTheme,
     autoUpdater,
     rooms,

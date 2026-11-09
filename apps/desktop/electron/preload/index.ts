@@ -888,6 +888,50 @@ const desktop = {
       error?: string;
     }>,
 
+  // ── Auth Files Management (Phase 1) ────────────────────────────────────
+
+  /** List all local auth-file entries (no tokens). */
+  authList: () =>
+    ipcRenderer.invoke(IPC.authList) as Promise<
+      Array<{
+        id: string;
+        name: string;
+        provider: string;
+        disabled?: boolean;
+        savedAt?: string;
+        quotaCache?: {
+          observedAt: number;
+          windows: Array<{
+            label: string;
+            usedPercent: number;
+            resetAt?: number;
+            windowMinutes?: number;
+          }>;
+        };
+      }>
+    >,
+
+  /** Delete an auth-file entry by id. */
+  authDelete: (id: string) =>
+    ipcRenderer.invoke(IPC.authDelete, { id }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+
+  /** Toggle disabled state of an auth-file. */
+  authSetDisabled: (id: string, disabled: boolean) =>
+    ipcRenderer.invoke(IPC.authSetDisabled, { id, disabled }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+
+  /** Refresh quota for an auth-file. */
+  authRefreshQuota: (id: string) =>
+    ipcRenderer.invoke(IPC.authRefreshQuota, { id }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+
   on: (channel: string, listener: (...args: unknown[]) => void) => {
     const allowed = new Set<string>(Object.values(IPC));
     if (!allowed.has(channel)) return () => {};

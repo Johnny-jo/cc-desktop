@@ -41,6 +41,7 @@ import {
 } from "./runtime-paths";
 import type { TerminalHost } from "./terminal-host";
 import { resolveInside } from "./project-path";
+import type { AuthFileManager } from "./auth-file-manager";
 
 export type IpcHandlerContext = {
   window: () => BrowserWindow | null;
@@ -52,6 +53,7 @@ export type IpcHandlerContext = {
   diffs: DiffTracker;
   snapshots: SnapshotStore;
   terminal: TerminalHost;
+  authFiles: AuthFileManager;
   /** Sync native window chrome when the UI theme flips */
   onThemeChanged?: (theme: "dark" | "light", senderId: number) => void;
   /** Optional hot-update controller (packaged builds only) */
@@ -1346,6 +1348,62 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
     IPC.skillsReload,
     async (_e, { sessionId }: { sessionId: string }) => {
       return await ctx.sessions.reloadSkills(sessionId);
+    },
+  );
+
+  // ── Auth Files Management (Phase 1: Desktop-managed credentials) ──────────
+
+  ipcMain.handle(IPC.authList, async () => {
+    return ctx.authFiles.list();
+  });
+
+  ipcMain.handle(IPC.authDelete, async (_e, { id }: { id: string }) => {
+    try {
+      ctx.authFiles.delete(id);
+      return { ok: true };
+    } catch (error) {
+      console.error("[auth] delete failed:", error);
+      return { ok: false, error: String(error) };
+    }
+  });
+
+  ipcMain.handle(
+    IPC.authSetDisabled,
+    async (_e, { id, disabled }: { id: string; disabled: boolean }) => {
+      try {
+        ctx.authFiles.setDisabled(id, disabled);
+        return { ok: true };
+      } catch (error) {
+        console.error("[auth] setDisabled failed:", error);
+        return { ok: false, error: String(error) };
+      }
+    },
+  );
+
+  ipcMain.handle(
+    IPC.authRefreshQuota,
+    async (_e, { id }: { id: string }) => {
+      try {
+        const entries = ctx.authFiles.list();
+        const entry = entries.find((e) => e.id === id);
+        if (!entry) {
+          return { ok: false, error: "Auth entry not found" };
+        }
+        const token = ctx.authFiles.getToken(id);
+        if (!token) {
+          return { ok: false, error: "Token not found" };
+        }
+        // For now, just update the quota cache with current timestamp
+        // Real quota fetch would be implemented here (Phase 2)
+        ctx.authFiles.updateQuotaCache(id, {
+          observedAt: Date.now(),
+          windows: [],
+        });
+        return { ok: true };
+      } catch (error) {
+        console.error("[auth] refreshQuota failed:", error);
+        return { ok: false, error: String(error) };
+      }
     },
   );
 }
