@@ -8899,6 +8899,13 @@ button.activity-step-main:not(:disabled):hover .activity-step-name {
   gap: var(--space-3);
 }
 
+/* Provider 页：仪表盘 + 管理两段，靠自身 gap 分隔，不加额外内边距 */
+.settings-provider-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
 .settings-field {
   display: flex;
   flex-direction: column;

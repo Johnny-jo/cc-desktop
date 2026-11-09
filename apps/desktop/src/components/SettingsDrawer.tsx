@@ -2042,16 +2042,11 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
 
             {page === "mcp" ? renderMcpServers() : null}
 
+            {/* 两个区块自带标题与间距，这里不再外包一层 padding / h3。 */}
             {page === "providers" && (
-              <div style={{ padding: "0 1rem" }}>
-                <div style={{ marginBottom: "2rem" }}>
-                  <h3>Provider 配额仪表盘</h3>
-                  <ProviderDashboard />
-                </div>
-                <div>
-                  <h3>Provider 管理</h3>
-                  <ProviderSettings />
-                </div>
+              <div className="settings-provider-page">
+                <ProviderDashboard />
+                <ProviderSettings />
               </div>
             )}
 
