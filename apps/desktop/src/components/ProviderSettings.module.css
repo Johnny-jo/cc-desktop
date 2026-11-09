@@ -138,6 +138,13 @@
   font-size: 0.75rem;
 }
 
+.hint {
+  margin: 0;
+  color: var(--text-secondary, #6b7280);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
 .error {
   padding: 0.5rem;
   background: #fee2e2;

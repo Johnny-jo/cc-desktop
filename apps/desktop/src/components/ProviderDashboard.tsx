@@ -1,72 +1,62 @@
 import React, { useEffect, useState } from "react";
-import type { ProviderConfig, ProviderStatus, QuotaInfo } from "@claude-desktop/shared";
+import type { ProviderConfig, ProviderStatus } from "@claude-desktop/shared";
 import styles from "./ProviderDashboard.module.css";
 
-interface DashboardData {
-  providers: Array<ProviderConfig & { status: ProviderStatus }>;
-  totalQuota: number;
-  usedQuota: number;
-  totalCost?: number;
+/**
+ * 仪表盘只展示真实存在的量：
+ * - 已配置 / 已启用 / 已认证的 provider 数量
+ * - 每个 provider 的模型目录与上下文窗口（窗口可能是「查不到」，那就显示「未知」）
+ *
+ * 这里不汇总「总上下文窗口」或「已用 token」：不同 provider 的窗口不能相加
+ * （相加没有物理意义），而这些上游也没有可查询的用量接口。
+ */
+interface ProviderRow {
+  config: ProviderConfig;
+  status: ProviderStatus | null;
 }
 
 export function ProviderDashboard() {
-  const [data, setData] = useState<DashboardData | null>(null);
+  const [rows, setRows] = useState<ProviderRow[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
-  useEffect(() => {
-    loadDashboardData();
-    const interval = setInterval(() => loadDashboardData(), 60000); // 每分钟刷新
-    return () => clearInterval(interval);
-  }, []);
-
   const loadDashboardData = async () => {
     try {
-      const configs = (await window.desktop.invoke("provider:list-configs", {})) || [];
-
-      let totalQuota = 0;
-      let usedQuota = 0;
-      const providerData: Array<ProviderConfig & { status: ProviderStatus }> = [];
-
+      const configs = (await window.desktop.listProviders()) || [];
+      const next: ProviderRow[] = [];
       for (const config of configs) {
-        const status = (await window.desktop.invoke("provider:get-status", { id: config.id })) as ProviderStatus;
-        if (status && config.enabled) {
-          providerData.push({ ...config, status });
-          if (status.quota?.limitTokens) {
-            totalQuota += status.quota.limitTokens;
-          }
-          if (status.quota?.usedQuota) {
-            usedQuota += status.quota.usedQuota;
-          }
-        }
+        const status = await window.desktop.getProviderStatus(config.id);
+        next.push({ config, status });
       }
-
-      setData({
-        providers: providerData,
-        totalQuota,
-        usedQuota,
-      });
+      setRows(next);
     } finally {
       setLoading(false);
     }
   };
 
+  useEffect(() => {
+    void loadDashboardData();
+    const interval = setInterval(() => void loadDashboardData(), 60000); // 每分钟刷新
+    return () => clearInterval(interval);
+  }, []);
+
   const handleRefresh = async () => {
     setRefreshing(true);
-    await loadDashboardData();
-    setRefreshing(false);
+    try {
+      await loadDashboardData();
+    } finally {
+      setRefreshing(false);
+    }
   };
 
   if (loading) {
     return <div className={styles.container}>加载中...</div>;
   }
 
-  if (!data) {
-    return <div className={styles.container}>无数据</div>;
-  }
-
-  const usagePercent = data.totalQuota > 0 ? (data.usedQuota / data.totalQuota) * 100 : 0;
-  const isWarning = usagePercent >= 80;
+  const all = rows ?? [];
+  const enabled = all.filter((r) => r.config.enabled);
+  const authenticated = all.filter((r) => r.status?.authenticated);
+  const unknownLimit = enabled.filter((r) => !r.status?.quota?.limitTokens).length;
 
   return (
     <div className={styles.container}>
@@ -77,96 +67,78 @@ export function ProviderDashboard() {
         </button>
       </div>
 
-      {/* 总体概览 */}
       <div className={styles.summary}>
         <div className={styles.card}>
-          <h2>总上下文窗口</h2>
-          <p className={styles.value}>{(data.totalQuota / 1e6).toFixed(1)}M tokens</p>
-          <p className={styles.subtext}>跨所有 Providers</p>
+          <h2>已配置</h2>
+          <p className={styles.value}>{all.length}</p>
+          <p className={styles.subtext}>其中 {enabled.length} 个已启用</p>
         </div>
 
         <div className={styles.card}>
-          <h2>已使用</h2>
-          <p className={`${styles.value} ${isWarning ? styles.warning : ""}`}>{(data.usedQuota / 1e6).toFixed(1)}M tokens</p>
-          <p className={styles.subtext}>{usagePercent.toFixed(1)}% 使用率</p>
+          <h2>已认证</h2>
+          <p className={`${styles.value} ${authenticated.length < enabled.length ? styles.warning : ""}`}>
+            {authenticated.length}
+          </p>
+          <p className={styles.subtext}>
+            {enabled.length > 0 && authenticated.length === 0 ? "去「Provider 管理」补凭证" : "凭证可用的 Provider"}
+          </p>
         </div>
 
         <div className={styles.card}>
-          <h2>剩余</h2>
-          <p className={styles.value}>{((data.totalQuota - data.usedQuota) / 1e6).toFixed(1)}M tokens</p>
-          <p className={styles.subtext}>可用</p>
+          <h2>窗口未知</h2>
+          <p className={styles.value}>{unknownLimit}</p>
+          <p className={styles.subtext}>同步一次配额以获取模型窗口</p>
         </div>
       </div>
 
-      {/* 使用率进度条 */}
-      <div className={styles.progressSection}>
-        <div className={styles.progressHeader}>
-          <h3>总体使用率</h3>
-          <span className={`${styles.percent} ${isWarning ? styles.warning : ""}`}>{usagePercent.toFixed(1)}%</span>
-        </div>
-        <div className={styles.progressBar}>
-          <div
-            className={`${styles.progressFill} ${isWarning ? styles.warning : ""}`}
-            style={{ width: `${Math.min(usagePercent, 100)}%` }}
-          />
-        </div>
-        {isWarning && <div className={styles.alert}>⚠️ 使用率已达 80%，建议关注配额消耗</div>}
-      </div>
-
-      {/* Provider 详情 */}
       <div className={styles.providersSection}>
         <h2>各 Provider 详情</h2>
         <div className={styles.providersList}>
-          {data.providers.map((prov) => {
-            const quota = prov.status.quota;
-            const provUsagePercent = quota?.limitTokens ? (quota.usedQuota || 0) / quota.limitTokens : 0;
-            const provWarning = provUsagePercent >= 0.8;
-
+          {all.map(({ config, status }) => {
+            const quota = status?.quota;
+            const models = status?.availableModels ?? [];
             return (
-              <div key={prov.id} className={styles.providerCard}>
+              <div key={config.id} className={styles.providerCard}>
                 <div className={styles.providerHeader}>
                   <div>
-                    <h4>{prov.name}</h4>
-                    <p className={styles.type}>{prov.type}</p>
+                    <h4>{config.name}</h4>
+                    <p className={styles.type}>{config.type}</p>
                   </div>
-                  <span className={prov.status.authenticated ? styles.authenticated : styles.notAuthenticated}>
-                    {prov.status.authenticated ? "✓" : "✗"}
+                  <span className={status?.authenticated ? styles.authenticated : styles.notAuthenticated}>
+                    {status?.authenticated ? "✓" : "✗"}
                   </span>
                 </div>
 
-                {quota && (
-                  <div className={styles.providerBody}>
-                    <div className={styles.quotaRow}>
-                      <span>Limit:</span>
-                      <strong>{(quota.limitTokens! / 1e6).toFixed(1)}M tokens</strong>
-                    </div>
-                    <div className={styles.quotaRow}>
-                      <span>Used:</span>
-                      <strong>{((quota.usedQuota || 0) / 1e6).toFixed(1)}M tokens</strong>
-                    </div>
-
-                    <div className={styles.miniProgressBar}>
-                      <div
-                        className={`${styles.miniProgressFill} ${provWarning ? styles.warning : ""}`}
-                        style={{ width: `${Math.min(provUsagePercent * 100, 100)}%` }}
-                      />
-                    </div>
-                    <p className={styles.usagePercent}>{(provUsagePercent * 100).toFixed(1)}% 使用</p>
-
-                    {quota.syncedAt && (
-                      <p className={styles.syncedTime}>Last synced: {new Date(quota.syncedAt).toLocaleString()}</p>
-                    )}
+                <div className={styles.providerBody}>
+                  <div className={styles.quotaRow}>
+                    <span>上下文窗口:</span>
+                    <strong>
+                      {quota?.limitTokens ? `${quota.limitTokens.toLocaleString()} tokens` : "未知"}
+                    </strong>
                   </div>
-                )}
+                  <div className={styles.quotaRow}>
+                    <span>可见模型:</span>
+                    <strong>{models.length > 0 ? `${models.length} 个` : "未同步"}</strong>
+                  </div>
+                  {quota?.source && (
+                    <div className={styles.quotaRow}>
+                      <span>来源:</span>
+                      <strong>{quota.source === "api" ? "上游 /models" : quota.source === "manual" ? "手动设置" : "内置表"}</strong>
+                    </div>
+                  )}
+                  {quota?.syncedAt && (
+                    <p className={styles.syncedTime}>Last synced: {new Date(quota.syncedAt).toLocaleString()}</p>
+                  )}
+                </div>
 
-                {prov.status.lastError && <div className={styles.error}>{prov.status.lastError}</div>}
+                {status?.lastError && <div className={styles.error}>{status.lastError}</div>}
               </div>
             );
           })}
         </div>
       </div>
 
-      {data.providers.length === 0 && <div className={styles.empty}>未添加任何 Provider</div>}
+      {all.length === 0 && <div className={styles.empty}>未添加任何 Provider</div>}
     </div>
   );
 }

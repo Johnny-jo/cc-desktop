@@ -14,18 +14,18 @@ export function ProviderSelector({ onProviderSelected, currentProviderId }: Prov
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    loadProviders();
+    void loadProviders();
   }, []);
 
   const loadProviders = async () => {
     try {
-      const result = (await window.desktop.invoke("provider:list-configs", {})) || [];
-      const enabledProviders = result.filter((p: ProviderConfig) => p.enabled);
+      const result = (await window.desktop.listProviders()) || [];
+      const enabledProviders = result.filter((p) => p.enabled);
       setConfigs(enabledProviders);
 
       const newStatuses = new Map<string, ProviderStatus>();
       for (const config of enabledProviders) {
-        const status = (await window.desktop.invoke("provider:get-status", { id: config.id })) as ProviderStatus;
+        const status = await window.desktop.getProviderStatus(config.id);
         if (status) {
           newStatuses.set(config.id, status);
         }
@@ -73,11 +73,6 @@ export function ProviderSelector({ onProviderSelected, currentProviderId }: Prov
         <div className={styles.menu}>
           {configs.map((config) => {
             const status = statuses.get(config.id);
-            const usagePercent =
-              status?.quota?.limitTokens && status.quota.usedQuota
-                ? (status.quota.usedQuota / status.quota.limitTokens) * 100
-                : 0;
-            const isWarning = usagePercent >= 80;
 
             return (
               <div
@@ -100,13 +95,11 @@ export function ProviderSelector({ onProviderSelected, currentProviderId }: Prov
                 {status?.quota && (
                   <div className={styles.itemQuota}>
                     <div className={styles.quotaMini}>
-                      <span className={styles.quotaLabel}>Limit:</span>
-                      <span className={styles.quotaValue}>{(status.quota.limitTokens! / 1e6).toFixed(1)}M</span>
-                    </div>
-                    <div className={styles.quotaMini}>
-                      <span className={styles.quotaLabel}>Used:</span>
-                      <span className={`${styles.quotaValue} ${isWarning ? styles.warning : ""}`}>
-                        {((status.quota.usedQuota || 0) / 1e6).toFixed(1)}M ({usagePercent.toFixed(0)}%)
+                      <span className={styles.quotaLabel}>Context:</span>
+                      <span className={styles.quotaValue}>
+                        {status.quota.limitTokens
+                          ? `${Math.round(status.quota.limitTokens / 1000)}K`
+                          : "未知"}
                       </span>
                     </div>
                   </div>
