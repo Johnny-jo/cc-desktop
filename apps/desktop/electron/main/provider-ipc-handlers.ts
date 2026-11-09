@@ -1,16 +1,17 @@
 /**
  * Provider IPC 处理器（集成到 ipc-handlers.ts）
- * 示例片段 - 实际集成时需添加到 registerIpcHandlers 函数中
  */
 
 import { IPC } from "@claude-desktop/shared";
 import type { ProviderConfig } from "@claude-desktop/shared";
 import { ProviderManager } from "./provider-manager";
 import { CredentialManager } from "./credential-manager";
+import { QuotaManager } from "./provider-quota-manager";
 
 export function registerProviderHandlers(
   ipcMain: any,
   providerManager: ProviderManager,
+  quotaManager: QuotaManager,
 ) {
   // 列出所有 Provider 配置
   ipcMain.handle(IPC.providerListConfigs, async () => {
@@ -20,7 +21,6 @@ export function registerProviderHandlers(
   // 添加新 Provider
   ipcMain.handle(IPC.providerAddConfig, async (_e: any, { config }: { config: ProviderConfig }) => {
     try {
-      // 加密 API Key 如果存在
       const finalConfig = { ...config };
       if (config.auth.apiKey) {
         const encrypted = CredentialManager.encrypt(config.auth.apiKey);
@@ -37,7 +37,6 @@ export function registerProviderHandlers(
   // 更新 Provider
   ipcMain.handle(IPC.providerUpdateConfig, async (_e: any, { id, config }: { id: string; config: Partial<ProviderConfig> }) => {
     try {
-      // 如果更新了 API Key，重新加密
       if (config.auth?.apiKey) {
         const encrypted = CredentialManager.encrypt(config.auth.apiKey);
         providerManager.saveApiKey(id, encrypted);
@@ -57,6 +56,7 @@ export function registerProviderHandlers(
     try {
       providerManager.deleteApiKey(id);
       providerManager.deleteConfig(id);
+      quotaManager.invalidateCache(id);
       return { ok: true };
     } catch (err) {
       return { ok: false, error: String(err) };
@@ -67,6 +67,74 @@ export function registerProviderHandlers(
   ipcMain.handle(IPC.providerGetStatus, async (_e: any, { id }: { id: string }) => {
     const status = providerManager.getStatus(id);
     return status;
+  });
+
+  // 同步配额
+  ipcMain.handle(IPC.providerSyncQuota, async (_e: any, { id }: { id: string }) => {
+    try {
+      const config = providerManager.getConfig(id);
+      if (!config) {
+        return { ok: false, error: "Provider not found" };
+      }
+
+      // 读取加密的 API Key
+      let apiKey: string | undefined;
+      const encrypted = providerManager.loadApiKey(id);
+      if (encrypted) {
+        apiKey = CredentialManager.decrypt(encrypted);
+      }
+
+      const result = await quotaManager.syncQuota(config, apiKey);
+      if (result.error) {
+        return { ok: false, error: result.error };
+      }
+      return { ok: true, quota: result.quota };
+    } catch (err) {
+      return { ok: false, error: String(err) };
+    }
+  });
+
+  // 测试认证
+  ipcMain.handle(IPC.providerTestAuth, async (_e: any, { id }: { id: string }) => {
+    try {
+      const config = providerManager.getConfig(id);
+      if (!config) {
+        return { ok: false, message: "Provider not found" };
+      }
+
+      let apiKey = config.auth.apiKey;
+      if (!apiKey) {
+        const encrypted = providerManager.loadApiKey(id);
+        if (encrypted) {
+          apiKey = CredentialManager.decrypt(encrypted);
+        }
+      }
+
+      if (!apiKey) {
+        return { ok: false, message: "No API key configured" };
+      }
+
+      const endpoint = providerManager.getEndpoint(config.type);
+      if (!endpoint) {
+        return { ok: false, message: "Unsupported provider type" };
+      }
+
+      const response = await fetch(`${endpoint.baseUrl}${endpoint.modelsEndpoint}`, {
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+        },
+      });
+
+      if (response.ok) {
+        return { ok: true, message: "Authentication successful" };
+      } else if (response.status === 401) {
+        return { ok: false, message: "Invalid API key" };
+      } else {
+        return { ok: false, message: `API error: ${response.statusText}` };
+      }
+    } catch (err) {
+      return { ok: false, message: String(err) };
+    }
   });
 
   // OAuth 流程：生成授权 URL
@@ -91,48 +159,15 @@ export function registerProviderHandlers(
     }
   });
 
-  // 测试认证
-  ipcMain.handle(IPC.providerTestAuth, async (_e: any, { id }: { id: string }) => {
+  // 设置默认 context limit
+  ipcMain.handle(IPC.providerSetDefaultContextLimit, async (_e: any, { providerId, limit }: { providerId: string; limit: number }) => {
     try {
-      const config = providerManager.getConfig(id);
-      if (!config) {
-        return { ok: false, message: "Provider not found" };
-      }
-
-      // 获取加密的 API Key 并解密
-      let apiKey = config.auth.apiKey;
-      if (!apiKey) {
-        const encrypted = providerManager.loadApiKey(id);
-        if (encrypted) {
-          apiKey = CredentialManager.decrypt(encrypted);
-        }
-      }
-
-      if (!apiKey) {
-        return { ok: false, message: "No API key configured" };
-      }
-
-      // 调用 /v1/models 端点测试认证
-      const endpoint = providerManager.getEndpoint(config.type);
-      if (!endpoint) {
-        return { ok: false, message: "Unsupported provider type" };
-      }
-
-      const response = await fetch(`${endpoint.baseUrl}${endpoint.modelsEndpoint}`, {
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-        },
-      });
-
-      if (response.ok) {
-        return { ok: true, message: "Authentication successful" };
-      } else if (response.status === 401) {
-        return { ok: false, message: "Invalid API key" };
-      } else {
-        return { ok: false, message: `API error: ${response.statusText}` };
-      }
+      providerManager.updateConfig(providerId, { contextLimitOverride: limit });
+      quotaManager.invalidateCache(providerId);
+      return { ok: true };
     } catch (err) {
-      return { ok: false, message: String(err) };
+      return { ok: false };
     }
   });
 }
+
