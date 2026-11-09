@@ -17,6 +17,7 @@ export * from "./room-mentions";
 export * from "./room-attachments";
 export * from "./room-message-receipts";
 export * from "./room-seat-bind";
+export * from "./provider-types";
 // room-crypto / room-handshake / room-pdu 依赖 node:crypto，仅供主进程经
 // "@claude-desktop/shared/room-crypto" 等子路径引入（同 mod-hash 惯例），
 // 不进桶文件——渲染进程与 sandboxed preload 没有 node:crypto。
