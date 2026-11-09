@@ -19,6 +19,7 @@ import type {
 } from "./models";
 import type { BrowserAuthorizationRequest, BrowserAuthorizationStatus, BrowserExtensionSetupRequest, BrowserExtensionSetupStatus } from "./mcp-servers";
 import type { TranscriptPageOptions } from "./transcript-turns";
+import type { ProviderConfig, ProviderStatus, AuthenticationStatus, QuotaInfo } from "./provider-types";
 
 export const IPC = {
   projectOpen: "project:open",
@@ -228,6 +229,18 @@ export const IPC = {
   modsDelete: "mods:delete",
   modsOpenDir: "mods:open-dir",
   modsScaffold: "mods:scaffold",
+  /** Provider 认证与配额管理 */
+  providerListConfigs: "provider:list-configs",
+  providerAddConfig: "provider:add-config",
+  providerUpdateConfig: "provider:update-config",
+  providerDeleteConfig: "provider:delete-config",
+  providerStartOAuth: "provider:start-oauth",
+  providerCancelOAuth: "provider:cancel-oauth",
+  providerTestAuth: "provider:test-auth",
+  providerGetStatus: "provider:get-status",
+  providerSyncQuota: "provider:sync-quota",
+  providerSetDefaultContextLimit: "provider:set-default-context-limit",
+  providerUpdated: "provider:updated",
 } as const;
 
 export type AppMemoryDiagnostics = {
@@ -1047,6 +1060,48 @@ export type IpcInvokeMap = {
     args: [{ id: string; name: string }];
     result: { ok: boolean; packDir?: string; error?: string };
   };
+  [IPC.providerListConfigs]: {
+    args: [];
+    result: ProviderConfig[];
+  };
+  [IPC.providerAddConfig]: {
+    args: [{ config: ProviderConfig }];
+    result: { ok: boolean; id?: string; error?: string };
+  };
+  [IPC.providerUpdateConfig]: {
+    args: [{ id: string; config: Partial<ProviderConfig> }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.providerDeleteConfig]: {
+    args: [{ id: string }];
+    result: { ok: boolean; error?: string };
+  };
+  [IPC.providerStartOAuth]: {
+    args: [{ id: string }];
+    result:
+      | { ok: true; authorizationUrl: string; state: string }
+      | { ok: false; error: string };
+  };
+  [IPC.providerCancelOAuth]: {
+    args: [{ state: string }];
+    result: { ok: boolean };
+  };
+  [IPC.providerTestAuth]: {
+    args: [{ id: string }];
+    result: { ok: boolean; message?: string };
+  };
+  [IPC.providerGetStatus]: {
+    args: [{ id: string }];
+    result: ProviderStatus | null;
+  };
+  [IPC.providerSyncQuota]: {
+    args: [{ id: string }];
+    result: { ok: boolean; quota?: QuotaInfo; error?: string };
+  };
+  [IPC.providerSetDefaultContextLimit]: {
+    args: [{ providerId: string; limit: number }];
+    result: { ok: boolean; error?: string };
+  };
 };
 
 /**
@@ -1150,6 +1205,10 @@ export type IpcEventMap = {
       /** getActions for the preferred local seat */
       actions?: Record<string, { params?: unknown; hint?: string }>;
     };
+  };
+  [IPC.providerUpdated]: {
+    providerId: string;
+    status: ProviderStatus;
   };
   // also permission mode can piggyback via settings
   permissionMode?: PermissionMode;

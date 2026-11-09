@@ -30,6 +30,8 @@ import { ThemedSelect } from "./Select";
 import { ToggleSwitch } from "./ToggleSwitch";
 import { buildMcpServersPatch, controlTarget, mcpServersToDrafts, newMcpRow, setControlEnabled, type ControlTarget, type McpServerDraft } from "./settings/mcp-form";
 import { ControlSettings } from "./settings/ControlSettings";
+import { ProviderSettings } from "./ProviderSettings";
+import { ProviderDashboard } from "./ProviderDashboard";
 export { buildMcpServersPatch, mcpServersToDrafts, setControlEnabled, suggestMcpServerName } from "./settings/mcp-form";
 
 const MemoryDiagnostics = lazy(() =>
@@ -53,7 +55,8 @@ type SettingsPage =
   | "skills"
   | "plugins"
   | "control"
-  | "mcp";
+  | "mcp"
+  | "providers";
 
 /** Editable draft of one custom agent. */
 type AgentDraft = {
@@ -1520,6 +1523,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
     { key: "general", label: "通用", sub: "模型 / 语言 / 字体 / 更新" },
     { key: "room", label: "群聊设置", sub: "Mod / 选集 / 制作" },
     { key: "cpa", label: "CPA 与上下文", sub: "exe / config / 端口 / 窗口" },
+    { key: "providers", label: "Provider 管理", sub: "API Key / OAuth / 配额" },
     { key: "diagnostics", label: "内存诊断", sub: "进程 / 缓存 / JS 堆" },
     { key: "permissions", label: "权限规则", sub: "allow / deny" },
     { key: "agents", label: "自定义 Agents", sub: "Task 子代理" },
@@ -2037,6 +2041,19 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
             )}
 
             {page === "mcp" ? renderMcpServers() : null}
+
+            {page === "providers" && (
+              <div style={{ padding: "0 1rem" }}>
+                <div style={{ marginBottom: "2rem" }}>
+                  <h3>Provider 配额仪表盘</h3>
+                  <ProviderDashboard />
+                </div>
+                <div>
+                  <h3>Provider 管理</h3>
+                  <ProviderSettings />
+                </div>
+              </div>
+            )}
 
           </div>
 

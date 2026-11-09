@@ -915,6 +915,71 @@ const desktop = {
       error?: string;
     }>,
 
+  // ── Provider 管理 ─────────────────────────────────────────────────────
+  listProviders: () =>
+    ipcRenderer.invoke(IPC.providerListConfigs) as Promise<
+      import("@claude-desktop/shared").ProviderConfig[]
+    >,
+
+  addProvider: (config: import("@claude-desktop/shared").ProviderConfig) =>
+    ipcRenderer.invoke(IPC.providerAddConfig, { config }) as Promise<{
+      ok: boolean;
+      id?: string;
+      error?: string;
+    }>,
+
+  updateProvider: (
+    id: string,
+    config: Partial<import("@claude-desktop/shared").ProviderConfig>,
+  ) =>
+    ipcRenderer.invoke(IPC.providerUpdateConfig, { id, config }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+
+  deleteProvider: (id: string) =>
+    ipcRenderer.invoke(IPC.providerDeleteConfig, { id }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+
+  getProviderStatus: (id: string) =>
+    ipcRenderer.invoke(IPC.providerGetStatus, { id }) as Promise<
+      import("@claude-desktop/shared").ProviderStatus | null
+    >,
+
+  testProviderAuth: (id: string) =>
+    ipcRenderer.invoke(IPC.providerTestAuth, { id }) as Promise<{
+      ok: boolean;
+      message?: string;
+    }>,
+
+  syncProviderQuota: (id: string) =>
+    ipcRenderer.invoke(IPC.providerSyncQuota, { id }) as Promise<{
+      ok: boolean;
+      quota?: import("@claude-desktop/shared").QuotaInfo;
+      error?: string;
+    }>,
+
+  startProviderOAuth: (id: string) =>
+    ipcRenderer.invoke(IPC.providerStartOAuth, { id }) as Promise<
+      | { ok: true; authorizationUrl: string; state: string }
+      | { ok: false; error: string }
+    >,
+
+  cancelProviderOAuth: (state: string) =>
+    ipcRenderer.invoke(IPC.providerCancelOAuth, { state }) as Promise<{ ok: boolean }>,
+
+  setProviderContextLimit: (providerId: string, limit: number) =>
+    ipcRenderer.invoke(IPC.providerSetDefaultContextLimit, { providerId, limit }) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+
+  /** Generic invoke for any IPC channel */
+  invoke: (channel: string, args: unknown) =>
+    ipcRenderer.invoke(channel, args),
+
   on: (channel: string, listener: (...args: unknown[]) => void) => {
     const allowed = new Set<string>(Object.values(IPC));
     if (!allowed.has(channel)) return () => {};
