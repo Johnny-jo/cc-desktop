@@ -915,6 +915,10 @@ const desktop = {
       error?: string;
     }>,
 
+  /** Generic invoke for any IPC channel */
+  invoke: (channel: string, args: unknown) =>
+    ipcRenderer.invoke(channel, args),
+
   on: (channel: string, listener: (...args: unknown[]) => void) => {
     const allowed = new Set<string>(Object.values(IPC));
     if (!allowed.has(channel)) return () => {};

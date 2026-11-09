@@ -20,7 +20,7 @@ export function ProviderSelector({ onProviderSelected, currentProviderId }: Prov
   const loadProviders = async () => {
     try {
       const result = (await window.desktop.invoke("provider:list-configs", {})) || [];
-      const enabledProviders = result.filter((p) => p.enabled);
+      const enabledProviders = result.filter((p: ProviderConfig) => p.enabled);
       setConfigs(enabledProviders);
 
       const newStatuses = new Map<string, ProviderStatus>();

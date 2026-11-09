@@ -76,6 +76,8 @@ export type ProviderConfig = {
 export type QuotaInfo = {
   providerId: string;
   source: "api" | "manual" | "builtin"; // api: 从 /v1/models 或专有接口、manual: 用户手输、builtin: 内置表
+  limitTokens?: number; // 模型上下文窗口限制
+  usedTokens?: number; // 已使用的 token
   totalQuota?: number; // 总额度
   usedQuota?: number; // 已使用
   remainingQuota?: number; // 剩余

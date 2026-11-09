@@ -134,7 +134,7 @@ export class ProviderManager {
       type: config.type,
       name: config.name,
       enabled: config.enabled,
-      authenticated: !!config.auth.apiKey || !!config.auth.oauthToken,
+      authenticated: !!config.auth.apiKey || !!(config.auth as any).oauthToken,
       quota: undefined, // 由 QuotaSyncManager 填充
       availableModels: undefined, // 由模型同步模块填充
     };

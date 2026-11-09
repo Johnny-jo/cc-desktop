@@ -36,6 +36,10 @@ import { SessionManager, type QueryFn } from "./session-manager";
 import { PdfCompatibilityProxy } from "./pdf-compatibility-proxy";
 import { createContextCompressor } from "./context-compressor";
 import { registerIpcHandlers } from "./ipc-handlers";
+import { ProviderManager } from "./provider-manager";
+import { QuotaManager } from "./provider-quota-manager";
+import { OAuthHandler } from "./oauth-handler";
+import { registerProviderHandlers } from "./provider-ipc-handlers";
 import {
   getClaudeExecutablePath,
   isPlaceholderCpaConfig,
@@ -698,6 +702,13 @@ function bootstrap() {
   });
   photoFlow.setEnabled(settings.get().photoFlowEnabled !== false);
 
+  // Provider 管理（替代 CLI proxy API）
+  const providerManager = new ProviderManager({
+    userDataDir,
+  });
+  const quotaManager = new QuotaManager();
+  const oauthHandler = new OAuthHandler(providerManager);
+
   registerIpcHandlers({
     photoFlow,
     window: getMainWindow,
@@ -723,6 +734,9 @@ function bootstrap() {
       sendToRenderer(IPC.settingsUpdated, settings.getPublic());
     },
   });
+
+  // 注册 Provider IPC 处理器
+  registerProviderHandlers(ipcMain, providerManager, quotaManager, oauthHandler);
 
   const stopClaudeSettingsWatch = watchClaudeCodeModel(applyCliModelToDesktop);
 
@@ -758,10 +772,51 @@ function bootstrap() {
   // the user is not left with a dead gateway after install/update.
   void cpa.ensureReady().catch(() => undefined);
 
+  // 启动后台配额同步（1 小时一次）
+  const quotaSyncInterval = setInterval(async () => {
+    const configs = providerManager.listConfigs();
+    for (const config of configs) {
+      if (!config.enabled) continue;
+
+      const encrypted = providerManager.loadApiKey(config.id);
+      if (!encrypted) continue;
+
+      try {
+        const { CredentialManager } = await import("./credential-manager");
+        const apiKey = CredentialManager.decrypt(encrypted);
+        const result = await quotaManager.syncQuota(config, apiKey);
+
+        if (result.quota) {
+          const ratio =
+            result.quota.usedQuota && result.quota.limitTokens
+              ? result.quota.usedQuota / result.quota.limitTokens
+              : 0;
+          if (ratio >= 0.8) {
+            // 发送配额告警事件到所有渲染进程
+            sendToRenderer(IPC.providerUpdated, {
+              providerId: config.id,
+              status: {
+                providerId: config.id,
+                type: config.type,
+                name: config.name,
+                enabled: config.enabled,
+                authenticated: true,
+                quota: result.quota,
+              },
+            });
+          }
+        }
+      } catch (err) {
+        console.warn(`[Provider] Quota sync failed for ${config.id}:`, err);
+      }
+    }
+  }, 3600000); // 1 小时
+
   app.on("before-quit", () => {
     isQuitting = true;
     photoFlow.dispose();
     if (cpaModelSyncTimer) clearTimeout(cpaModelSyncTimer);
+    clearInterval(quotaSyncInterval);
     stopClaudeSettingsWatch();
     // stopIfManaged is a no-op unless this app spawned CPA.
     // Always call it so managed children are not orphaned on quit.
