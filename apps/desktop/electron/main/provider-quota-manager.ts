@@ -205,6 +205,14 @@ export class QuotaManager {
     };
   }
 
+  /**
+   * 只读缓存，不发起请求：用于 `provider:get-status`，让 UI 能显示上次同步结果。
+   * 过期也照常返回——调用方展示的是「上次同步到的值」，由 syncedAt 说明新鲜度。
+   */
+  peek(providerId: string): QuotaSyncResult | null {
+    return this.cache.get(providerId)?.result ?? null;
+  }
+
   /** 清除指定 Provider 的缓存 */
   invalidateCache(providerId: string): void {
     this.cache.delete(providerId);

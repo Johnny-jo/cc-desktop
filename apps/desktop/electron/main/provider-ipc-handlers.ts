@@ -96,7 +96,18 @@ export function registerProviderHandlers(deps: ProviderHandlerDeps): void {
   });
 
   ipcMain.handle(IPC.providerGetStatus, async (_e, { id }: { id: string }) => {
-    return providerManager.getStatus(id);
+    const status = providerManager.getStatus(id);
+    if (!status) return null;
+
+    // ProviderManager 不知道配额缓存，这里把上次同步的结果并进去，
+    // 否则 UI 拿到的 quota 永远是 undefined、卡片上一片空白。
+    const cached = quotaManager.peek(id);
+    if (cached) {
+      status.quota = cached.quota ?? undefined;
+      status.availableModels = cached.models;
+      status.lastError = cached.error;
+    }
+    return status;
   });
 
   ipcMain.handle(IPC.providerSyncQuota, async (_e, { id }: { id: string }) => {
