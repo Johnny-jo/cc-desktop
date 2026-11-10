@@ -10,6 +10,7 @@ export type McpServerDraft = {
   browser?: PlaywrightBrowser;
   connection?: PlaywrightConnection;
   profile?: string;
+  cdpEndpoint?: string;
   disabled?: boolean;
   original?: McpServersMap[string];
   command: string;
@@ -66,7 +67,7 @@ export function mcpServersToDrafts(map?: McpServersMap, disabled?: Record<string
     }
     if (cfg.type === "playwright") {
       return { ...base, type: cfg.type, browser: cfg.browser,
-        connection: cfg.connection ?? "extension", profile: cfg.profile,
+        connection: cfg.connection ?? "extension", profile: cfg.profile, cdpEndpoint: cfg.cdpEndpoint,
         command: "", argsText: "", url: "", envText: "", headersText: "" };
     }
     if (cfg.type === "sse" || cfg.type === "http") {
@@ -120,7 +121,8 @@ function configFromDraft(row: McpServerDraft): McpServerConfig {
   if (row.type === "windows-computer") return { type: row.type };
   if (row.type === "playwright") return {
     type: row.type, browser: row.browser ?? "msedge", connection: row.connection ?? "extension",
-    ...(row.profile?.trim() && { profile: row.profile.trim() }),
+    ...(row.connection === "cdp" ? { cdpEndpoint: row.cdpEndpoint?.trim() ?? "" }
+      : row.profile?.trim() ? { profile: row.profile.trim() } : {}),
   };
   const original = row.original;
   // Preserve SDK options that have no editable field when saving control settings.

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
-import type { ProviderConfig, ProviderStatus, ProviderType } from "@claude-desktop/shared";
-import { supportsOAuth } from "@claude-desktop/shared";
+import type { ClaudeApiKeyAuth, ProviderConfig, ProviderStatus, ProviderType } from "@claude-desktop/shared";
+import { IPC, supportsOAuth, ProviderEndpoints, normalizeProviderBaseUrl } from "@claude-desktop/shared";
 import styles from "./ProviderSettings.module.css";
 
 function formatTokens(n?: number): string {
@@ -13,46 +13,30 @@ function formatTokens(n?: number): string {
 interface ProviderCardProps {
   config: ProviderConfig;
   status?: ProviderStatus;
-  onDelete: (id: string) => void;
-  onTestAuth: (id: string) => void;
-  onSyncQuota: (id: string) => void;
-  onOAuthLogin: (id: string) => void;
+  notice?: { error?: string; message?: string };
+  onDelete: (id: string) => Promise<void>;
+  onTestAuth: (id: string) => Promise<void>;
+  onSyncQuota: (id: string) => Promise<void>;
+  onOAuthLogin: (id: string) => Promise<void>;
+  onCancelOAuth: (id: string, state: string) => Promise<void>;
+  onOAuthCallback: (id: string, state: string, redirectUrl: string) => Promise<void>;
 }
 
-function ProviderCard({ config, status, onDelete, onTestAuth, onSyncQuota, onOAuthLogin }: ProviderCardProps) {
-  const [testing, setTesting] = useState(false);
-  const [syncing, setSyncing] = useState(false);
-  const [signingIn, setSigningIn] = useState(false);
-
-  const handleTest = async () => {
-    setTesting(true);
-    try {
-      await onTestAuth(config.id);
-    } finally {
-      setTesting(false);
-    }
-  };
-
-  const handleSync = async () => {
-    setSyncing(true);
-    try {
-      await onSyncQuota(config.id);
-    } finally {
-      setSyncing(false);
-    }
-  };
-
-  const handleSignIn = async () => {
-    setSigningIn(true);
-    try {
-      await onOAuthLogin(config.id);
-    } finally {
-      setSigningIn(false);
-    }
+function ProviderCard({ config, status, notice, onDelete, onTestAuth, onSyncQuota, onOAuthLogin, onCancelOAuth, onOAuthCallback }: ProviderCardProps) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [redirectUrl, setRedirectUrl] = useState("");
+  const run = async (action: string, operation: () => Promise<void>) => {
+    if (busy) return;
+    setBusy(action);
+    try { await operation(); } finally { setBusy(null); }
   };
 
   const quota = status?.quota;
+  const contextLimit = quota?.limitTokens ?? config.contextLimitOverride;
   const modelCount = status?.availableModels?.length ?? 0;
+  const pending = Boolean(status?.oauthPending);
+  const error = notice?.error || status?.lastError;
 
   return (
     <div className={styles.card}>
@@ -68,16 +52,29 @@ function ProviderCard({ config, status, onDelete, onTestAuth, onSyncQuota, onOAu
           className={styles.cardDelete}
           title="删除"
           aria-label={`删除 ${config.name}`}
-          onClick={() => onDelete(config.id)}
+          disabled={Boolean(busy)}
+          onClick={() => setConfirmingDelete(true)}
         >
           ×
         </button>
       </div>
 
+      {confirmingDelete && (
+        <div className={styles.deleteConfirm} role="group" aria-label={`删除确认 ${config.name}`}>
+          <p>确定删除「{config.name}」？其凭证也会一并删除。</p>
+          <div className={styles.deleteActions}>
+            <button type="button" className={styles.btnSecondary} disabled={Boolean(busy)} onClick={() => setConfirmingDelete(false)} autoFocus>取消</button>
+            <button type="button" className={styles.btnDanger} aria-label={`确认删除 ${config.name}`} disabled={Boolean(busy)} onClick={() => void run("delete", () => onDelete(config.id))}>
+              {busy === "delete" ? "删除中…" : "确认删除"}
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className={styles.cardBody}>
         <div className={styles.pills}>
           <span className={`${styles.pill} ${status?.authenticated ? styles.pillOk : styles.pillWarn}`}>
-            {status?.authenticated ? "已认证" : "未认证"}
+            {pending ? "等待授权" : status?.authenticated ? "已认证" : "未认证"}
           </span>
           <span className={`${styles.pill} ${config.enabled ? styles.pillMuted : styles.pillWarn}`}>
             {config.enabled ? "已启用" : "已停用"}
@@ -88,7 +85,7 @@ function ProviderCard({ config, status, onDelete, onTestAuth, onSyncQuota, onOAu
         <dl className={styles.meta}>
           <div className={styles.metaRow}>
             <dt>上下文窗口</dt>
-            <dd>{formatTokens(quota?.limitTokens)}</dd>
+            <dd>{formatTokens(contextLimit)}{!quota?.limitTokens && contextLimit ? "（手动设置）" : ""}</dd>
           </div>
           <div className={styles.metaRow}>
             <dt>可见模型</dt>
@@ -102,20 +99,42 @@ function ProviderCard({ config, status, onDelete, onTestAuth, onSyncQuota, onOAu
           )}
         </dl>
 
-        {status?.lastError && <p className={styles.error}>{status.lastError}</p>}
+        {pending && <p className={styles.hint} role="status">已打开系统浏览器，正在等待授权。完成后会自动刷新。</p>}
+        {pending && config.type === "claude" && status?.oauthState && (
+          <form className={styles.callbackForm} onSubmit={e => {
+            e.preventDefault();
+            if (redirectUrl.trim()) void run("callback", () => onOAuthCallback(config.id, status.oauthState!, redirectUrl.trim()));
+          }}>
+            <label htmlFor={`oauth-callback-${config.id}`}>Claude 授权回调</label>
+            <input id={`oauth-callback-${config.id}`} value={redirectUrl} onChange={e => setRedirectUrl(e.target.value)}
+              disabled={Boolean(busy)} autoComplete="off" placeholder="粘贴 code#state 或完整回调链接" />
+            <p className={styles.hint}>完成 Claude 授权后，粘贴页面提供的 code#state 或完整回调链接。</p>
+            <button type="submit" className={styles.btn} disabled={Boolean(busy) || !redirectUrl.trim()}>
+              {busy === "callback" ? "验证中…" : "完成授权"}
+            </button>
+          </form>
+        )}
+        {error && <p className={styles.error} role="alert">{error}</p>}
+        {!error && notice?.message && <p className={styles.hint} role="status">{notice.message}</p>}
       </div>
 
       <div className={styles.cardFooter}>
-        <button type="button" onClick={handleTest} disabled={testing} className={styles.btn}>
-          {testing ? "测试中…" : "测试认证"}
+        <button type="button" onClick={() => void run("test", () => onTestAuth(config.id))} disabled={Boolean(busy) || pending} className={styles.btn}>
+          {busy === "test" ? "测试中…" : "测试认证"}
         </button>
-        <button type="button" onClick={handleSync} disabled={syncing} className={styles.btn}>
-          {syncing ? "同步中…" : "同步配额"}
+        <button type="button" onClick={() => void run("sync", () => onSyncQuota(config.id))} disabled={Boolean(busy) || pending} className={styles.btn}>
+          {busy === "sync" ? "同步中…" : "同步模型 / 窗口"}
         </button>
         {supportsOAuth(config.type) && (
-          <button type="button" onClick={handleSignIn} disabled={signingIn} className={styles.btn}>
-            {signingIn ? "已开浏览器…" : "OAuth 登录"}
-          </button>
+          pending && status?.oauthState ? (
+            <button type="button" onClick={() => void run("cancel", () => onCancelOAuth(config.id, status.oauthState!))} disabled={Boolean(busy)} className={styles.btn}>
+              {busy === "cancel" ? "取消中…" : "取消授权"}
+            </button>
+          ) : (
+            <button type="button" onClick={() => void run("oauth", () => onOAuthLogin(config.id))} disabled={Boolean(busy) || pending} className={styles.btn}>
+              {busy === "oauth" ? "打开浏览器…" : "OAuth 登录"}
+            </button>
+          )
         )}
       </div>
     </div>
@@ -133,7 +152,10 @@ function AddProviderModal({ isOpen, onClose, onSubmit }: AddProviderModalProps) 
   const [authMethod, setAuthMethod] = useState<"api-key" | "oauth2">("api-key");
   const [name, setName] = useState("");
   const [apiKey, setApiKey] = useState("");
+  const [apiKeyAuth, setApiKeyAuth] = useState<ClaudeApiKeyAuth>("auto");
   const [baseUrl, setBaseUrl] = useState("");
+  const [oauthClientId, setOAuthClientId] = useState("");
+  const [oauthProjectId, setOAuthProjectId] = useState("");
   const [contextLimit, setContextLimit] = useState("200000");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -148,11 +170,28 @@ function AddProviderModal({ isOpen, onClose, onSubmit }: AddProviderModalProps) 
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (loading) return;
     setError(null);
 
     const limit = Number(contextLimit);
-    if (!Number.isFinite(limit) || limit < 1024 || limit > 10_000_000) {
+    if (!Number.isInteger(limit) || limit < 1024 || limit > 10_000_000) {
       setError("Context Limit 必须是 1024 到 10000000 之间的整数");
+      return;
+    }
+    if (authMethod === "api-key" && (providerType === "openai-compatible" || baseUrl.trim())) {
+      try {
+        normalizeProviderBaseUrl(baseUrl);
+      } catch {
+        setError("Base URL 必须是有效的 HTTP 或 HTTPS 地址，且不包含账号密码、查询参数或片段");
+        return;
+      }
+    }
+    if (authMethod === "api-key" && !apiKey.trim()) {
+      setError("请输入 API Key");
+      return;
+    }
+    if (authMethod === "oauth2" && providerType === "gemini" && !oauthClientId.trim()) {
+      setError("请输入你在 Google Cloud 创建的桌面应用 OAuth Client ID");
       return;
     }
 
@@ -166,18 +205,28 @@ function AddProviderModal({ isOpen, onClose, onSubmit }: AddProviderModalProps) 
         auth:
           providerType === "openai-compatible"
             ? { type: "openai-compatible", authMethod: "api-key", baseUrl: baseUrl.trim() }
-            : ({ type: providerType, authMethod } as ProviderConfig["auth"]),
-        contextLimitOverride: Math.floor(limit),
+            : ({ type: providerType, authMethod,
+              ...(authMethod === "api-key" && baseUrl.trim() ? { baseUrl: baseUrl.trim() } : {}),
+              ...(providerType === "claude" && authMethod === "api-key" && apiKeyAuth !== "auto" ? { apiKeyAuth } : {}),
+            } as ProviderConfig["auth"]),
+        contextLimitOverride: limit,
       };
 
-      if (authMethod === "api-key" && apiKey) {
-        config.auth.apiKey = apiKey;
+      if (authMethod === "api-key" && apiKey.trim()) {
+        config.auth.apiKey = apiKey.trim();
+      }
+      if (authMethod === "oauth2" && providerType === "gemini") {
+        config.oauthClientId = oauthClientId.trim();
+        if (oauthProjectId.trim()) config.oauthProjectId = oauthProjectId.trim();
       }
 
       await onSubmit(config);
       setName("");
       setApiKey("");
+      setApiKeyAuth("auto");
       setBaseUrl("");
+      setOAuthClientId("");
+      setOAuthProjectId("");
       setContextLimit("200000");
       onClose();
     } catch (err) {
@@ -193,7 +242,8 @@ function AddProviderModal({ isOpen, onClose, onSubmit }: AddProviderModalProps) 
     <div className={styles.modal} role="dialog" aria-modal="true" aria-label="添加 Provider">
       <div className={styles.modalContent}>
         <h2>添加 Provider</h2>
-        <form onSubmit={handleSubmit}>
+        <form onSubmit={handleSubmit} noValidate>
+          <fieldset disabled={loading} className={styles.formFields}>
           <div className={styles.formGroup}>
             <label htmlFor="provider-type">Provider 类型</label>
             <select
@@ -236,7 +286,7 @@ function AddProviderModal({ isOpen, onClose, onSubmit }: AddProviderModalProps) 
             </div>
           )}
 
-          {providerType !== "openai-compatible" && authMethod === "api-key" && (
+          {authMethod === "api-key" && (
             <div className={styles.formGroup}>
               <label htmlFor="provider-key">API Key</label>
               <input
@@ -250,22 +300,53 @@ function AddProviderModal({ isOpen, onClose, onSubmit }: AddProviderModalProps) 
             </div>
           )}
 
+          {providerType === "claude" && authMethod === "api-key" && (
+            <div className={styles.formGroup}>
+              <label htmlFor="provider-key-auth">服务鉴权</label>
+              <select id="provider-key-auth" value={apiKeyAuth} onChange={e => setApiKeyAuth(e.target.value as ClaudeApiKeyAuth)}>
+                <option value="auto">自动（官方 API Key，中转服务 Bearer）</option>
+                <option value="x-api-key">API Key（x-api-key）</option>
+                <option value="bearer">Bearer / Auth Token</option>
+              </select>
+              <p className={styles.hint}>中转服务生成的 API Key 通常选择自动；如服务商指定鉴权方式，可在此切换。调用仍使用 Claude Messages 协议。</p>
+            </div>
+          )}
+
           {providerType !== "openai-compatible" && authMethod === "oauth2" && (
             <p className={styles.hint}>
-              添加后点「OAuth 登录」用系统浏览器完成授权。需要先在 provider 配置里填好 OAuth 客户端 ID。
+              保存后将打开系统浏览器，直接向 {providerType === "claude" ? "Claude" : providerType === "openai" ? "OpenAI" : "Google"} 授权登录。账号凭证仅加密保存在本机。
             </p>
           )}
 
-          {providerType === "openai-compatible" && (
+          {providerType === "gemini" && authMethod === "oauth2" && (
+            <>
             <div className={styles.formGroup}>
-              <label htmlFor="provider-base-url">Base URL</label>
+              <label htmlFor="provider-oauth-client-id">Google OAuth Client ID</label>
+              <input id="provider-oauth-client-id" type="text" value={oauthClientId}
+                onChange={e => setOAuthClientId(e.target.value)} placeholder="…apps.googleusercontent.com" autoComplete="off" />
+              <p className={styles.hint}>使用你在 Google Cloud 创建的桌面应用客户端 ID，无需客户端密钥。</p>
+            </div>
+            <div className={styles.formGroup}>
+              <label htmlFor="provider-oauth-project-id">Google Cloud Project ID（可选）</label>
+              <input id="provider-oauth-project-id" type="text" value={oauthProjectId}
+                onChange={e => setOAuthProjectId(e.target.value)} placeholder="my-cloud-project" autoComplete="off" />
+              <p className={styles.hint}>在自有项目中启用 Generative Language API；调用使用项目配额，并非 Gemini CLI 个人免费额度。</p>
+            </div>
+            </>
+          )}
+
+          {authMethod === "api-key" && (
+            <div className={styles.formGroup}>
+              <label htmlFor="provider-base-url">Base URL{providerType === "openai-compatible" ? "" : "（可选）"}</label>
               <input
                 id="provider-base-url"
                 type="text"
                 value={baseUrl}
                 onChange={(e) => setBaseUrl(e.target.value)}
-                placeholder="http://127.0.0.1:8317"
+                placeholder={providerType === "openai-compatible" ? "http://localhost:8080/v1" : `${ProviderEndpoints[providerType].baseUrl}${ProviderEndpoints[providerType].modelsEndpoint.replace(/\/models$/, "")}`}
+                autoComplete="off"
               />
+              <p className={styles.hint}>{providerType === "openai-compatible" ? "填写兼容服务的 API 地址。" : "留空使用官方地址；填写后，模型同步与调用均使用此地址。"}</p>
             </div>
           )}
 
@@ -278,20 +359,21 @@ function AddProviderModal({ isOpen, onClose, onSubmit }: AddProviderModalProps) 
               onChange={(e) => setContextLimit(e.target.value)}
               min={1024}
               max={10000000}
-              step={1024}
+              step={1}
             />
           </div>
 
-          {error && <p className={styles.error}>{error}</p>}
+          {error && <p className={styles.error} role="alert">{error}</p>}
 
           <div className={styles.modalFooter}>
-            <button type="button" onClick={onClose} className={styles.btnSecondary}>
+            <button type="button" onClick={onClose} disabled={loading} className={styles.btnSecondary}>
               取消
             </button>
             <button type="submit" disabled={loading} className={styles.btnPrimary}>
-              {loading ? "添加中…" : "添加"}
+              {loading ? "保存中…" : authMethod === "oauth2" ? "保存并登录" : "添加"}
             </button>
           </div>
+          </fieldset>
         </form>
       </div>
     </div>
@@ -303,11 +385,14 @@ export function ProviderSettings() {
   const [statuses, setStatuses] = useState<Map<string, ProviderStatus>>(new Map());
   const [showModal, setShowModal] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [notices, setNotices] = useState<Map<string, { error?: string; message?: string }>>(new Map());
 
   useEffect(() => {
     void loadProviders();
     const interval = setInterval(() => void loadProviders(), 30000); // 每 30 秒刷新
-    return () => clearInterval(interval);
+    const unsubscribe = window.desktop.on(IPC.providerUpdated, () => void loadProviders());
+    return () => { clearInterval(interval); unsubscribe(); };
   }, []);
 
   const loadProviders = async () => {
@@ -323,8 +408,25 @@ export function ProviderSettings() {
         }
       }
       setStatuses(newStatuses);
+      setLoadError(null);
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
+    }
+  };
+
+  const setNotice = (id: string, notice: { error?: string; message?: string }) => {
+    setNotices(prev => new Map(prev).set(id, notice));
+  };
+
+  const providerAction = async (id: string, operation: () => Promise<string | void>) => {
+    setNotice(id, {});
+    try {
+      const message = await operation();
+      if (message) setNotice(id, { message });
+    } catch (err) {
+      setNotice(id, { error: err instanceof Error ? err.message : String(err) });
     }
   };
 
@@ -334,54 +436,61 @@ export function ProviderSettings() {
     if (!result.ok) {
       throw new Error(result.error || "添加 Provider 失败");
     }
+    // 已保存的账号先留在列表中；浏览器打开失败时可直接从卡片重试，不再重复添加。
+    setConfigs(prev => [...prev.filter(item => item.id !== config.id), config]);
     await loadProviders();
+    if (config.auth.authMethod === "oauth2") await handleOAuthLogin(config.id);
   };
 
   const handleDeleteProvider = async (id: string) => {
-    if (!confirm("确定要删除此 Provider 吗？其凭证也会一并删除。")) return;
-    try {
+    await providerAction(id, async () => {
       const result = await window.desktop.deleteProvider(id);
-      if (!result.ok) {
-        alert(`删除失败: ${result.error}`);
-        return;
-      }
+      if (!result.ok) throw new Error(result.error || "删除失败");
       await loadProviders();
-    } catch (err) {
-      alert(`删除失败: ${err}`);
-    }
+    });
   };
 
   const handleTestAuth = async (id: string) => {
-    try {
+    await providerAction(id, async () => {
       const result = await window.desktop.testProviderAuth(id);
-      alert(result.message || (result.ok ? "认证成功" : "认证失败"));
-      if (result.ok) await loadProviders();
-    } catch (err) {
-      alert(`认证错误: ${err}`);
-    }
+      await loadProviders();
+      if (!result.ok) throw new Error(result.message || "认证失败");
+      return result.message || "认证成功";
+    });
   };
 
   const handleSyncQuota = async (id: string) => {
-    try {
+    await providerAction(id, async () => {
       const result = await window.desktop.syncProviderQuota(id);
-      if (result.ok) {
-        await loadProviders();
-      } else {
-        alert(`配额同步失败: ${result.error}`);
-      }
-    } catch (err) {
-      alert(`配额同步错误: ${err}`);
-    }
+      await loadProviders();
+      if (!result.ok) throw new Error(result.error || "模型与上下文窗口同步失败");
+      return "模型与上下文窗口已同步";
+    });
   };
 
   const handleOAuthLogin = async (id: string) => {
-    const result = await window.desktop.startProviderOAuth(id);
-    if (!result.ok) {
-      alert(`OAuth 登录失败: ${result.error}`);
-      return;
-    }
-    // 授权在系统浏览器里完成，成功后主进程会推送 provider:updated。
-    alert("已打开浏览器，完成授权后返回本窗口即可。");
+    await providerAction(id, async () => {
+      const result = await window.desktop.startProviderOAuth(id);
+      if (!result.ok) throw new Error(result.error || "OAuth 登录失败");
+      await loadProviders();
+    });
+  };
+
+  const handleCancelOAuth = async (id: string, state: string) => {
+    await providerAction(id, async () => {
+      const result = await window.desktop.cancelProviderOAuth(state);
+      if (!result.ok) throw new Error("取消授权失败，请重试");
+      await loadProviders();
+      return "已取消授权，可重新登录";
+    });
+  };
+
+  const handleOAuthCallback = async (id: string, state: string, redirectUrl: string) => {
+    await providerAction(id, async () => {
+      const result = await window.desktop.submitProviderOAuthCallback(state, redirectUrl);
+      if (!result.ok) throw new Error(result.error || "授权回调验证失败");
+      await loadProviders();
+    });
   };
 
   return (
@@ -389,13 +498,14 @@ export function ProviderSettings() {
       <div className={styles.sectionHead}>
         <div>
           <h3>Provider 管理</h3>
-          <p>添加模型服务凭证后可在这里测试、同步上下文窗口。密钥使用系统安全存储加密保存。</p>
+          <p>管理模型服务账号，使用 API Key 或 OAuth 直接连接服务商。凭证使用系统安全存储加密保存。</p>
         </div>
         <button type="button" onClick={() => setShowModal(true)} className={styles.btnPrimary}>
           + 添加 Provider
         </button>
       </div>
 
+      {loadError && <p className={styles.error} role="alert">加载 Provider 失败：{loadError} <button type="button" className={styles.btn} onClick={() => void loadProviders()}>重试</button></p>}
       {loading ? (
         <p className={styles.hint}>加载中…</p>
       ) : configs.length === 0 ? (
@@ -410,10 +520,13 @@ export function ProviderSettings() {
               key={config.id}
               config={config}
               status={statuses.get(config.id)}
+              notice={notices.get(config.id)}
               onDelete={handleDeleteProvider}
               onTestAuth={handleTestAuth}
               onSyncQuota={handleSyncQuota}
               onOAuthLogin={handleOAuthLogin}
+              onCancelOAuth={handleCancelOAuth}
+              onOAuthCallback={handleOAuthCallback}
             />
           ))}
         </div>

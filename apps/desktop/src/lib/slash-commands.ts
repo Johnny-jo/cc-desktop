@@ -27,8 +27,8 @@ export const APP_SLASH_COMMANDS: SlashCommandItem[] = [
     description: "Cycle permission mode (default → acceptEdits → plan)",
   },
   {
-    name: "cpa",
-    description: "Ensure CPA is ready and sync model list",
+    name: "provider",
+    description: "Ensure the Provider service is ready and sync model list",
   },
   {
     name: "help",

@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach, afterEach } from "vitest";
+import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -24,6 +24,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -45,6 +46,15 @@ describe("isValidProviderId", () => {
 });
 
 describe("ProviderManager", () => {
+  it("reports a persistence failure and rolls back in-memory config", () => {
+    vi.spyOn(fs, "renameSync").mockImplementation(() => { throw new Error("disk unavailable"); });
+    expect(() => manager.addConfig(claudeConfig())).toThrow(/保存/);
+    expect(manager.listConfigs()).toEqual([]);
+  });
+  it("does not keep transient keys or OAuth tokens in the public config snapshot", () => {
+    manager.addConfig({ ...claudeConfig(), auth: { type: "claude", authMethod: "api-key", apiKey: "never-public" } });
+    expect(manager.listConfigs()[0].auth.apiKey).toBeUndefined();
+  });
   it("never persists API keys into configs.json", () => {
     manager.addConfig(claudeConfig());
     manager.updateConfig("claude-1", {
@@ -120,8 +130,8 @@ describe("ProviderManager", () => {
 
   it("reports OAuth support only for providers with real endpoints", () => {
     expect(manager.getOAuthConfig("gemini").authorizationUrl).toContain("accounts.google.com");
-    expect(manager.getOAuthConfig("claude")).toEqual({});
-    expect(manager.getOAuthConfig("openai")).toEqual({});
+    expect(manager.getOAuthConfig("claude").authorizationUrl).toBe("https://claude.com/cai/oauth/authorize");
+    expect(manager.getOAuthConfig("openai").authorizationUrl).toBe("https://auth.openai.com/oauth/authorize");
   });
 
   it("returns null endpoint for unknown or openai-compatible providers", () => {

@@ -28,7 +28,7 @@ import type { SessionManager } from "./session-manager";
 import type { PermissionBroker } from "./permission-broker";
 import type { UserPromptBroker } from "./user-prompt-broker";
 import type { SettingsStore } from "./settings-store";
-import type { CpaSupervisor } from "./cpa-supervisor";
+import type { ModelRuntime } from "./model-runtime";
 import { applyCpaModelCatalog } from "./cpa-model-sync";
 import type { DiffTracker } from "./diff-tracker";
 import type { SnapshotStore } from "./snapshot-store";
@@ -38,11 +38,6 @@ import {
   ensureSkillsDir,
   listSkills,
 } from "./skill-store";
-import {
-  resolveEffectiveCpaPaths,
-  writeCpaConfigWithApiKey,
-  type RuntimePathEnv,
-} from "./runtime-paths";
 import type { TerminalHost } from "./terminal-host";
 import { resolveInside } from "./project-path";
 
@@ -52,7 +47,7 @@ export type IpcHandlerContext = {
   permissions: PermissionBroker;
   userPrompts: UserPromptBroker;
   settings: SettingsStore;
-  cpa: CpaSupervisor;
+  cpa: ModelRuntime;
   diffs: DiffTracker;
   snapshots: SnapshotStore;
   terminal: TerminalHost;
@@ -798,51 +793,17 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
     },
   );
 
-  /**
-   * First-run onboarding: save gateway token, rewrite CPA config api-keys to
-   * match, re-resolve bundled paths, optionally start CPA.
-   */
+  /** Complete native Provider setup. Old arguments remain wire compatible. */
   ipcMain.handle(
     IPC.appCompleteOnboarding,
     async (
       _e,
-      { token, startCpa }: { token: string; startCpa?: boolean },
+      _request: { token?: string; startCpa?: boolean },
     ) => {
-      const trimmed = (token ?? "").trim();
-      if (!trimmed) {
-        return {
-          ok: false,
-          settings: ctx.settings.getPublic(),
-          cpaStatus: ctx.cpa.getStatus(),
-          error: "Token is required",
-        };
-      }
       try {
-        const pathEnv: RuntimePathEnv = {
-          isPackaged: app.isPackaged,
-          resourcesPath: process.resourcesPath,
-          userDataDir: app.getPath("userData"),
-        };
-        const current = ctx.settings.get();
-        const configPath = writeCpaConfigWithApiKey(pathEnv, {
-          port: current.cpaPort || 8317,
-          apiKey: trimmed,
-        });
-        const paths = resolveEffectiveCpaPaths(
-          pathEnv,
-          { ...current, cpaConfigPath: configPath },
-          { apiKey: trimmed },
-        );
-        ctx.settings.update({
-          token: trimmed,
-          cpaExePath: paths.cpaExePath,
-          cpaConfigPath: paths.cpaConfigPath,
-          setupCompleted: true,
-        });
-        let cpaStatus = ctx.cpa.getStatus();
-        if (startCpa !== false) {
-          cpaStatus = await ctx.cpa.ensureReady();
-        }
+        const cpaStatus = await ctx.cpa.ensureReady();
+        if (cpaStatus.state !== "ready") throw new Error("本机 Provider 服务启动失败，请重试");
+        ctx.settings.update({ setupCompleted: true });
         return {
           ok: true,
           settings: ctx.settings.getPublic(),
@@ -868,7 +829,7 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
     await ctx.cpa.ensureReady();
     const catalog = await ctx.cpa.listModelCatalog();
     if (catalog.length === 0) {
-      throw new Error("CPA returned an empty model list");
+      throw new Error("尚无可用模型，请在 Provider 管理中添加账号并测试连接");
     }
     applyCpaModelCatalog(catalog, ctx.settings);
     const { models, defaultModel } = ctx.settings.get();
@@ -876,16 +837,8 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
   });
 
   ipcMain.handle(IPC.cpaModelCatalog, async () => {
-    // Best-effort live refresh: keys/models newly added under CPA's
-    // openai-compatibility section (and their reasoning efforts) show up
-    // without a manual Settings → 从 CPA 同步模型 round-trip.
-    try {
-      const catalog = await ctx.cpa.listModelCatalog();
-      if (applyCpaModelCatalog(catalog, ctx.settings)) ctx.onSettingsSynced?.();
-    } catch {
-      // CPA offline or token missing — fall back to the cached catalog.
-    }
-    await ctx.sessions.refreshModelCatalog();
+    // Discovery runs on startup and explicit provider sync. A UI read must
+    // never wait for another account's network timeout or a live SDK query.
     return ctx.cpa.getModelCatalog();
   });
 

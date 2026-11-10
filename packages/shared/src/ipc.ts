@@ -61,6 +61,8 @@ export const IPC = {
   cpaSyncModels: "cpa:sync-models",
   /** Read-only cached CPA model catalog (ids + contextLimit) */
   cpaModelCatalog: "cpa:model-catalog",
+  /** Cached native catalog or capabilities changed, including startup discovery. */
+  modelCatalogUpdated: "model:catalog-updated",
   /** Read CPA's real provider quota for one model. */
   cpaModelQuota: "cpa:model-quota",
   modelSet: "model:set",
@@ -236,11 +238,14 @@ export const IPC = {
   providerDeleteConfig: "provider:delete-config",
   providerStartOAuth: "provider:start-oauth",
   providerCancelOAuth: "provider:cancel-oauth",
+  providerSubmitOAuthCallback: "provider:submit-oauth-callback",
   providerTestAuth: "provider:test-auth",
   providerGetStatus: "provider:get-status",
   providerSyncQuota: "provider:sync-quota",
   providerSetDefaultContextLimit: "provider:set-default-context-limit",
   providerUpdated: "provider:updated",
+  providerGetUsage: "provider:get-usage",
+  providerUsageUpdated: "provider:usage-updated",
 } as const;
 
 export type AppMemoryDiagnostics = {
@@ -1086,6 +1091,10 @@ export type IpcInvokeMap = {
     args: [{ state: string }];
     result: { ok: boolean };
   };
+  [IPC.providerSubmitOAuthCallback]: {
+    args: [{ state: string; redirectUrl: string }];
+    result: { ok: boolean; error?: string };
+  };
   [IPC.providerTestAuth]: {
     args: [{ id: string }];
     result: { ok: boolean; message?: string };
@@ -1093,6 +1102,10 @@ export type IpcInvokeMap = {
   [IPC.providerGetStatus]: {
     args: [{ id: string }];
     result: ProviderStatus | null;
+  };
+  [IPC.providerGetUsage]: {
+    args: [{ range: import("./provider-types").ProviderUsageRange; providerId?: string }];
+    result: import("./provider-types").ProviderUsageDashboard;
   };
   [IPC.providerSyncQuota]: {
     args: [{ id: string }];
@@ -1210,6 +1223,8 @@ export type IpcEventMap = {
     providerId: string;
     status: ProviderStatus;
   };
+  [IPC.providerUsageUpdated]: { at: number };
+  [IPC.modelCatalogUpdated]: { at: number };
   // also permission mode can piggyback via settings
   permissionMode?: PermissionMode;
 };

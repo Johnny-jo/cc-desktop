@@ -133,7 +133,7 @@ function IconTheme({ isLight }: { isLight: boolean }) {
 
 /**
  * 窗口最左侧的窄 icon 栏（参考 QQ）：上方是视图切换（AI 对话 / 群聊 /
- * 好友占位 / CLI），下方自底向上是 设置 / CPA / 日夜模式。
+ * 好友占位 / CLI），下方自底向上是 设置 / Provider 服务 / 日夜模式。
  */
 export function SideRail({
   mode,
@@ -174,10 +174,10 @@ export function SideRail({
           : "";
   const cpaTitle =
     cpaStatus.state === "error"
-      ? `CPA 错误：${cpaStatus.message}`
+      ? `Provider 服务错误：${cpaStatus.message}`
       : cpaStatus.state === "ready"
-        ? "CPA 运行中"
-        : "启动 CPA";
+        ? "Provider 服务运行中"
+        : cpaStatus.state === "starting" ? "Provider 服务启动中…" : "启动 Provider 服务";
 
   return (
     <nav className="side-rail" aria-label="主导航">
@@ -248,6 +248,7 @@ export function SideRail({
           className={`side-rail-btn side-rail-cpa${cpaClass}`}
           title={cpaTitle}
           aria-label={cpaTitle}
+          disabled={cpaStatus.state === "starting"}
           onClick={() => void startCpa()}
         >
           <IconCpa />

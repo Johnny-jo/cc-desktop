@@ -62,7 +62,7 @@ export function UpdateBanner() {
         <>
           <span>
             发现新版本 <strong>v{status.version}</strong>
-            （热更新，不会覆盖 CPA / 设置）
+            （热更新，不会覆盖账号凭证和设置）
           </span>
           <button
             type="button"

@@ -10,6 +10,7 @@ import { createPortal } from "react-dom";
 export type SelectOption = {
   value: string;
   label?: string;
+  title?: string;
 };
 
 /**
@@ -232,7 +233,7 @@ export function ThemedSelect({
               tabIndex={-1}
             >
               {options.map((o, i) => (
-                <li key={o.value} role="option" aria-selected={o.value === value}>
+                <li key={o.value} role="option" aria-selected={o.value === value} title={o.title}>
                   <button
                     type="button"
                     className={[

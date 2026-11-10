@@ -13,10 +13,12 @@
 
 import type { ProviderConfig, ProviderModel, QuotaInfo } from "@claude-desktop/shared";
 import {
-  ProviderEndpoints,
+  providerApiUrl,
   providerAuthHeaders,
+  claudeApiKeyHeaders,
   builtinContextLimit,
 } from "@claude-desktop/shared";
+import { hasCustomProviderApi, modelReasoningCapabilities } from "./provider-model-capabilities";
 
 export interface QuotaSyncResult {
   providerId: string;
@@ -51,7 +53,7 @@ export function modelContextLimit(model: RawModel): number | undefined {
     // 有些网关把 max_tokens 当「输出上限」而不是窗口，几百这种明显不是窗口的值跳过。
     if (v && (field !== "max_tokens" || v >= 1024)) return v;
   }
-  return positiveInt(model.inputTokenLimit) ?? positiveInt(model.input_token_limit);
+  return positiveInt(model.inputTokenLimit) ?? positiveInt(model.input_token_limit) ?? positiveInt(model.max_input_tokens);
 }
 
 /** Gemini 的 name 是 "models/gemini-2.5-pro"，展示与匹配都去掉前缀。 */
@@ -59,7 +61,7 @@ function stripModelsPrefix(name: string): string {
   return name.startsWith("models/") ? name.slice("models/".length) : name;
 }
 
-export function normalizeModels(type: string, payload: unknown): ProviderModel[] {
+export function normalizeModels(type: string, payload: unknown, customApi = type === "openai-compatible"): ProviderModel[] {
   if (!payload || typeof payload !== "object") return [];
   const obj = payload as Record<string, unknown>;
   // Gemini: { models: [...] }；其余: { data: [...] }
@@ -72,6 +74,7 @@ export function normalizeModels(type: string, payload: unknown): ProviderModel[]
   const out: ProviderModel[] = [];
   for (const item of raw) {
     if (!item || typeof item !== "object") continue;
+    if (type === "gemini" && Array.isArray(item.supportedGenerationMethods) && !item.supportedGenerationMethods.includes("generateContent")) continue;
     const rawId = typeof item.id === "string" ? item.id : typeof item.name === "string" ? item.name : "";
     if (!rawId) continue;
     const id = type === "gemini" ? stripModelsPrefix(rawId) : rawId;
@@ -83,7 +86,7 @@ export function normalizeModels(type: string, payload: unknown): ProviderModel[]
       modelContextLimit(item) ??
       // 网关没给窗口时，用模型名匹配内置表；再不行就不猜。
       builtinContextLimit(id);
-    out.push({ id, name: display, contextLimit });
+    out.push({ id, name: display, contextLimit, ...modelReasoningCapabilities(item, type === "openai" ? id : undefined, customApi) });
   }
   return out;
 }
@@ -91,18 +94,8 @@ export function normalizeModels(type: string, payload: unknown): ProviderModel[]
 export class QuotaManager {
   private cache: Map<string, { result: QuotaSyncResult; cachedAt: number }> = new Map();
 
-  /** 计算本次同步要访问的 models URL；无法同步时返回 null。 */
-  private modelsUrl(config: ProviderConfig): string | null {
-    if (config.type === "openai-compatible") {
-      const base = (config.auth as { baseUrl?: string }).baseUrl?.trim();
-      if (!base) return null;
-      return `${base.replace(/\/+$/, "")}/models`;
-    }
-    const endpoints = ProviderEndpoints[config.type];
-    return endpoints ? `${endpoints.baseUrl}${endpoints.modelsEndpoint}` : null;
-  }
-
   private headersFor(config: ProviderConfig, credential: string): Record<string, string> {
+    if (config.type === "claude" && config.auth.authMethod === "api-key") return claudeApiKeyHeaders(config, credential);
     if (config.type === "openai-compatible") {
       return { authorization: `Bearer ${credential}` };
     }
@@ -114,50 +107,49 @@ export class QuotaManager {
    * 不返回「使用量」——没有可用接口。
    */
   async syncQuota(config: ProviderConfig, credential?: string): Promise<QuotaSyncResult> {
+    if (!credential) {
+      return { providerId: config.id, quota: null, error: "No credential configured" };
+    }
     const cached = this.cache.get(config.id);
     if (cached && Date.now() - cached.cachedAt < CACHE_TTL_MS) {
       return cached.result;
     }
 
-    if (!credential) {
-      return { providerId: config.id, quota: null, error: "No credential configured" };
-    }
-
-    const url = this.modelsUrl(config);
-    if (!url) {
-      return {
-        providerId: config.id,
-        quota: null,
-        error:
-          config.type === "openai-compatible"
-            ? "OpenAI-compatible providers need a base URL"
-            : `${config.type} has no known models endpoint`,
-      };
-    }
-
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
-      const response = await fetch(url, {
-        headers: { accept: "application/json", ...this.headersFor(config, credential) },
-        signal: controller.signal,
-      });
+      const url = providerApiUrl(config, "models");
+      let pageUrl = url;
+      const pages = new Set<string>();
+      const modelMap = new Map<string, ProviderModel>();
+      for (let page = 0; page < 100; page++) {
+        if (pages.has(pageUrl)) throw new Error("模型目录返回了重复的分页游标");
+        pages.add(pageUrl);
+        const response = await fetch(pageUrl, {
+          headers: { accept: "application/json", ...this.headersFor(config, credential) },
+          signal: controller.signal,
+          redirect: "error",
+        });
 
-      if (!response.ok) {
-        const detail = await response.text().catch(() => "");
-        const hint =
-          response.status === 401 || response.status === 403
-            ? "凭证无效或无权限"
-            : `HTTP ${response.status}`;
-        return {
-          providerId: config.id,
-          quota: null,
-          error: `${hint}${detail ? ` — ${detail.slice(0, 200)}` : ""}`,
-        };
+        if (!response.ok) {
+          const detail = await response.text().catch(() => "");
+          const hint = response.status === 401 || response.status === 403 ? "凭证无效或无权限" : `HTTP ${response.status}`;
+          return { providerId: config.id, quota: null, error: `${hint}${detail ? ` — ${detail.split(credential).join("[redacted]").slice(0, 200)}` : ""}` };
+        }
+
+        const payload = await response.json() as Record<string, unknown>;
+        for (const model of normalizeModels(config.type, payload, hasCustomProviderApi(config))) modelMap.set(model.id, model);
+        let next: string | undefined;
+        if (config.type === "gemini" && typeof payload.nextPageToken === "string" && payload.nextPageToken) {
+          const target = new URL(url); target.searchParams.set("pageToken", payload.nextPageToken); next = target.toString();
+        } else if (config.type === "claude" && payload.has_more === true && typeof payload.last_id === "string" && payload.last_id) {
+          const target = new URL(url); target.searchParams.set("after_id", payload.last_id); next = target.toString();
+        }
+        if (!next) break;
+        if (page === 99) throw new Error("模型目录分页超出上限");
+        pageUrl = next;
       }
-
-      const payload = await response.json();
-      const models = normalizeModels(config.type, payload);
+      const models = [...modelMap.values()];
 
       // 只在这个 provider 的所有已知模型窗口一致时才敢声称一个「provider 级」窗口；
       // 否则交给用户按模型设置（modelContextLimits），避免一个数字误导全部模型。

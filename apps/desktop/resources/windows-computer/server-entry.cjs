@@ -71,9 +71,9 @@ function register(name, description, inputSchema, readOnly, execute) {
     activeOperation = owner;
     const signal = AbortSignal.any([owner.signal, extra.signal]);
     try {
-      if (!["act_on_target", "click", "list_windows", "list_displays"].includes(name)) session.invalidate();
+      if (!["act_on_target", "click", "scroll", "drag", "list_windows", "list_displays"].includes(name)) session.invalidate();
       const {data, image} = await execute(args, signal);
-      if (signal.aborted && name === "act_on_target" && data?.executed) {
+      if (signal.aborted && ["act_on_target","scroll","drag"].includes(name) && data?.executed) {
         const receipt = {executed:true, windowId:data.windowId, targetId:data.targetId, via:data.via, verification:{status:"interrupted"}};
         return {content:[{type:"text", text:JSON.stringify(receipt)}]};
       }
@@ -82,7 +82,7 @@ function register(name, description, inputSchema, readOnly, execute) {
       if (image) content.push(image);
       return {content};
     } catch (error) {
-      const detail = name === "act_on_target" && signal.aborted
+      const detail = ["act_on_target","scroll","drag"].includes(name) && signal.aborted
         ? "Action interrupted without a confirmed result. Inspect the current state before retrying."
         : error.message;
       return { isError:true, content:[{ type:"text", text:detail }] };
@@ -154,6 +154,15 @@ tool("select_item", "Select a list item advertising SelectionItemPattern.", { wi
 register("click", "Click a physical screen point belonging to the observed foreground window. Use absolute pixel coordinates, including negative monitor offsets. For image coordinates add the capture bounds' x and y. If the window moves, obtain a new observation before clicking.", {
   windowId, observationId, x: z.number().int(), y: z.number().int(), button: z.enum(["left", "right", "double"]).default("left"),
 }, false, async (args, signal) => ({data:await session.click(args, signal)}));
+const screenPixel = z.number().int().min(-2147483648).max(2147483647);
+register("scroll", "Scroll at an absolute physical screen point in the latest inspected foreground window. sceneId is consumed once. deltaY uses wheel detents: positive up, negative down; deltaX positive right, negative left. Each axis is limited to 20 detents; supply a nonzero axis. Returns independent readback; inspect again before another action. Administrator windows are unsupported.", {
+  windowId, sceneId:token, x:screenPixel, y:screenPixel,
+  deltaX:z.number().int().min(-20).max(20).default(0), deltaY:z.number().int().min(-20).max(20).default(0), verifyText:searchText.optional(),
+}, false, async (args,signal) => ({data:await session.scroll(args,signal)}));
+register("drag", "Drag the left mouse button between absolute physical screen points in the latest inspected foreground window. Both endpoints and the entire straight path must stay inside that window. sceneId is consumed once; inspect again afterwards. Cancellation releases the held button and never replays the gesture. Returns independent readback. Administrator windows are unsupported.", {
+  windowId, sceneId:token, startX:screenPixel, startY:screenPixel, endX:screenPixel, endY:screenPixel,
+  durationMs:z.number().int().min(1).max(2000).default(500), verifyText:searchText.optional(),
+}, false, async (args,signal) => ({data:await session.drag(args,signal)}));
 tool("type_text", "Type literal Unicode text into the focused field of the foreground window, using the system keyboard.", { windowId, text: z.string().min(1).max(8192) });
 tool("shortcut", "Press a key or a chord in the foreground window, e.g. [\"CTRL\",\"S\"].", { windowId, keys: z.array(z.string().min(1).max(24)).min(1).max(5) });
 tool("release_control", "Release this session's foreground input ownership when finished.", {});

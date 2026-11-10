@@ -19,6 +19,11 @@ namespace AgentOS.Computer
         };
         static readonly AutomationDesktop Automation = new AutomationDesktop();
         static readonly VisualDesktop Visual = new VisualDesktop();
+        static Program()
+        {
+            DesktopLease.BeforeStop = delegate { while (!NativeDesktop.StopPointerInput()) Thread.Sleep(100); };
+            DesktopLease.CanReleaseIdle = delegate { return !NativeDesktop.HasOwnedPointer; };
+        }
 
         internal static string Field(IDictionary<string, object> data, string key, bool required = true)
         {
@@ -28,7 +33,16 @@ namespace AgentOS.Computer
             throw new ArgumentException("Expected a string for " + key);
         }
 
-        internal static object Dispatch(string op, IDictionary<string, object> a, DesktopLease lease)
+        static int Integer(IDictionary<string, object> data, string key, int? fallback = null)
+        {
+            object value;
+            if (!data.TryGetValue(key,out value) && fallback.HasValue) return fallback.Value;
+            if (value is int) return (int)value;
+            throw new ArgumentException("Expected an integer for " + key);
+        }
+
+        internal static object Dispatch(string op, IDictionary<string, object> a, DesktopLease lease,
+            CancellationToken cancellation = default(CancellationToken))
         {
             if (op == "list_windows") return NativeDesktop.ListWindows();
             if (op == "finish_pointer") { NativeDesktop.FinishPointer(); return new { finished = true }; }
@@ -47,7 +61,7 @@ namespace AgentOS.Computer
                 }
                 catch { lease.EndFrame(); throw; }
             }
-            if (op == "release_control") { Visual.Clear(); Automation.Clear(); lease.Release(); return new { released = true }; }
+            if (op == "release_control") { Visual.Clear(); Automation.Clear(); NativeDesktop.RequirePointerReleased(); lease.Release(); return new { released = true }; }
             string window = Field(a, "windowId");
             if (op == "input_access") return WindowInputAccess.Inspect(window);
             if (op == "observe_window") return Automation.Observe(window, Field(a, "cursor", false));
@@ -87,6 +101,32 @@ namespace AgentOS.Computer
                     Automation.ValidateObservation(window, observation);
                     return NativeDesktop.Click(window, x, y, button, lease.MovePointer,
                         delegate { Automation.ValidateObservation(window, observation); });
+                case "scroll":
+                case "drag":
+                    try
+                    {
+                        string pointerObservation = Field(a,"observationId");
+                        int startX = Integer(a,op == "scroll" ? "x" : "startX");
+                        int startY = Integer(a,op == "scroll" ? "y" : "startY");
+                        int endX = op == "scroll" ? startX : Integer(a,"endX");
+                        int endY = op == "scroll" ? startY : Integer(a,"endY");
+                        Action validate, geometry;
+                        if (VisualDesktop.IsVisualId(pointerObservation))
+                        {
+                            validate = Visual.ValidatePointerObservation(window,pointerObservation,startX,startY,endX,endY);
+                            geometry = delegate { Visual.ValidatePointerGeometry(window,pointerObservation); };
+                        }
+                        else
+                        {
+                            validate = delegate { Automation.ValidateObservation(window,pointerObservation); };
+                            geometry = validate;
+                        }
+                        // Validate before any pointer move; native input rechecks immediately before pressing.
+                        validate();
+                        if (op == "scroll") return NativeDesktop.Scroll(window,startX,startY,Integer(a,"deltaX",0),Integer(a,"deltaY",0),lease.MovePointer,validate);
+                        return NativeDesktop.Drag(window,startX,startY,endX,endY,Integer(a,"durationMs",500),lease.MovePointer,validate,geometry,cancellation);
+                    }
+                    finally { Visual.Clear(); Automation.Clear(); }
                 case "type_text": return NativeDesktop.TypeText(window, Field(a, "text"));
                 case "shortcut":
                     var keys = ((IEnumerable)a["keys"]).Cast<string>().ToArray();
@@ -127,37 +167,72 @@ namespace AgentOS.Computer
             if (!ScopedWindowBroker.CanRunNormal(parentId)) return 2;
             using (var parent = Process.GetProcessById(parentId))
             using (var lease = new DesktopLease())
-            using (var input = new BlockingCollection<string>())
+            using (var input = new BlockingCollection<PendingInput>())
             {
                 parent.EnableRaisingEvents = true;
-                parent.Exited += delegate { Environment.Exit(0); };
+                parent.Exited += delegate { DesktopLease.BeforeStop(); Environment.Exit(0); };
                 if (parent.HasExited) return 0;
                 NativeDesktop.EnableDpiAwareness();
+                var cancellationLock = new object();
+                PendingInput latest = null;
                 var reader = new Thread(delegate() {
                     string line;
-                    while ((line = Console.ReadLine()) != null) input.Add(line);
+                    while ((line = Console.ReadLine()) != null)
+                    {
+                        lock (cancellationLock)
+                        {
+                            // Private cancellation marker sent by native-connection. It never queues behind the drag.
+                            if (line == "{\"operation\":\"cancel_current\",\"args\":{}}")
+                            {
+                                if (latest != null) latest.Cancellation.Cancel();
+                                // This reader never enters UIA/COM. Revoke before acknowledging so a
+                                // blocked action cannot press late or keep an accepted press held.
+                                bool released = NativeDesktop.StopPointerInput();
+                                Console.WriteLine("{\"cancel_ack\":true,\"pointerReleased\":" + (released ? "true" : "false") + "}");
+                                continue;
+                            }
+                            latest = new PendingInput {Line=line};
+                            input.Add(latest);
+                        }
+                    }
+                    lock (cancellationLock) { if (latest != null) latest.Cancellation.Cancel(); }
+                    // If Windows temporarily denies our up, retain this helper and
+                    // its lease until the owned press can be released safely.
+                    while (!NativeDesktop.StopPointerInput()) Thread.Sleep(100);
                     input.CompleteAdding();
+                    // EOF ends this private connection, including a main thread blocked in COM.
+                    Environment.Exit(0);
                 }) { IsBackground = true };
                 reader.Start();
                 while (!input.IsCompleted)
                 {
                     lease.ReleaseIfIdle();
-                    string line;
-                    if (!input.TryTake(out line, 250)) continue;
+                    PendingInput pending;
+                    if (!input.TryTake(out pending, 250)) continue;
                     string reply;
                     try
                     {
                         IDictionary<string, object> arguments;
-                        string operation = ParseRequest(line, out arguments);
-                        var result = Dispatch(operation, arguments, lease);
+                        string operation = ParseRequest(pending.Line, out arguments);
+                        var result = Dispatch(operation, arguments, lease,pending.Cancellation.Token);
                         lease.NoteActivity();
                         reply = Reply(result);
                     }
                     catch (Exception error) { reply = Error(error); }
+                    finally
+                    {
+                        lock (cancellationLock) { if (latest == pending) latest=null; pending.Cancellation.Dispose(); }
+                    }
                     Console.WriteLine(reply);
                 }
             }
             return 0;
+        }
+
+        sealed class PendingInput
+        {
+            public string Line;
+            public readonly CancellationTokenSource Cancellation = new CancellationTokenSource();
         }
     }
 }

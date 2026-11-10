@@ -29,6 +29,5 @@
 !macroend
 
 !macro customUnInstall
-  ; Stop a running CPA spawned by the app (best effort). Do not delete data.
-  nsExec::ExecToLog 'taskkill /F /IM cli-proxy-api.exe'
+  ; Native Provider services exit with Electron. Preserve all account data.
 !macroend

@@ -3,6 +3,7 @@
 const scopedWrites = new Set(["activate_window","click","invoke_control","select_item"]);
 const scopedReads = new Set(["capture_window","observe_window","observe_target_tree","finish_pointer"]);
 const discovery = new Set(["list_windows","list_displays"]);
+const standardPointerWrites = new Set(["scroll","drag"]);
 
 function windowDriver(standard, openWindow, invalidate) {
   let scope;
@@ -87,12 +88,18 @@ function windowDriver(standard, openWindow, invalidate) {
     }
     let io = standard;
     if (scope) {
+      if (standardPointerWrites.has(op)) throw Error("管理员窗口的临时授权尚不支持滚动或拖拽。请勿绕过窗口授权。");
       if (op === "capture_display") throw Error("此授权仅限窗口自身的画面。请使用 observe_visual 和已授权的 windowId。");
       if (!scope.authorized || !(scopedWrites.has(op) || scopedReads.has(op)))
         throw Error("此窗口的临时授权仅支持观察、激活、点击或选择控件。");
       io = scope.io;
-    } else if (scopedWrites.has(op)) {
+    } else if (scopedWrites.has(op) || standardPointerWrites.has(op)) {
       const access = await standard.request("input_access", {windowId:args.windowId}, signal);
+      if (standardPointerWrites.has(op)) {
+        if (access.level === "higher" || (access.level === "unknown" && access.messageAccessDenied === true))
+          throw Error("管理员窗口尚不支持滚动或拖拽。此操作不能通过提升窗口授权执行。");
+        return standard.request(op,args,signal);
+      }
       if (access.level === "higher" || (access.level === "unknown" && access.messageAccessDenied === true))
         return afterAuthorization(op, args, signal);
       try { return await standard.request(op, args, signal); }

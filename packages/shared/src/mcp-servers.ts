@@ -32,7 +32,7 @@ export type McpHttpConfig = {
 };
 
 export type PlaywrightBrowser = "chrome" | "msedge";
-export type PlaywrightConnection = "extension" | "isolated";
+export type PlaywrightConnection = "extension" | "isolated" | "cdp";
 export type BrowserExtensionSetupRequest = { browser: PlaywrightBrowser; profile?: string };
 export type BrowserAuthorizationRequest = BrowserExtensionSetupRequest & { token: string };
 export type BrowserAuthorizationStatus = {
@@ -49,7 +49,7 @@ export type BrowserExtensionSetupStatus = {
 };
 export type ControlServerConfig =
   | { type: "windows-computer" }
-  | { type: "playwright"; browser: PlaywrightBrowser; connection?: PlaywrightConnection; profile?: string };
+  | { type: "playwright"; browser: PlaywrightBrowser; connection?: PlaywrightConnection; profile?: string; cdpEndpoint?: string };
 
 export type McpServerConfig = McpStdioConfig | McpSseConfig | McpHttpConfig | ControlServerConfig;
 export type McpServersMap = Record<string, McpServerConfig>;
@@ -91,6 +91,19 @@ export function validateMcpServerName(name: string): string | null {
   return null;
 }
 
+/** CDP URLs are persisted in settings; credential values belong in a separate protected transport. */
+export function normalizeCdpEndpoint(value: unknown): string {
+  if (typeof value !== "string" || !value.trim() || value.length > 2048) throw new Error("CDP 地址必须是 HTTP(S) 或 WS(S) URL");
+  const endpoint = value.trim();
+  let url: URL;
+  try { url = new URL(endpoint); } catch { throw new Error("CDP 地址必须是 HTTP(S) 或 WS(S) URL"); }
+  if (!["http:", "https:", "ws:", "wss:"].includes(url.protocol) || !url.hostname ||
+      url.username || url.password || url.search || url.hash || /[\u0000-\u0020\u007f]/.test(endpoint)) {
+    throw new Error("CDP 地址必须是 HTTP(S) 或 WS(S) URL，且不包含账号密码、查询参数或片段");
+  }
+  return endpoint;
+}
+
 /** Validate one server config; returns an error message or null. */
 export function validateMcpServerConfig(
   name: string,
@@ -101,8 +114,11 @@ export function validateMcpServerConfig(
   if (cfg.type === "windows-computer") return null;
   if (cfg.type === "playwright") {
     if (cfg.browser !== "chrome" && cfg.browser !== "msedge") return `"${name}": select Chrome or Edge`;
-    if (cfg.connection !== undefined && cfg.connection !== "extension" && cfg.connection !== "isolated") {
-      return `"${name}": connection must be extension or isolated`;
+    if (cfg.connection !== undefined && cfg.connection !== "extension" && cfg.connection !== "isolated" && cfg.connection !== "cdp") {
+      return `"${name}": connection must be extension, isolated or cdp`;
+    }
+    if (cfg.connection === "cdp") {
+      try { normalizeCdpEndpoint(cfg.cdpEndpoint); } catch (error) { return `"${name}": ${(error as Error).message}`; }
     }
     if (cfg.profile !== undefined && !isSafeBrowserProfile(cfg.profile)) {
       return `"${name}": profile must be a directory name of at most 80 characters (for example Profile 2)`;
@@ -151,13 +167,18 @@ export function sanitizeMcpServers(raw: unknown): McpServersMap {
     } else if (type === "playwright") {
       const connection = c.connection;
       if (c.browser !== "chrome" && c.browser !== "msedge") continue;
-      if (connection !== undefined && connection !== "extension" && connection !== "isolated") continue;
+      if (connection !== undefined && connection !== "extension" && connection !== "isolated" && connection !== "cdp") continue;
+      let cdpEndpoint: string | undefined;
+      if (connection === "cdp") {
+        try { cdpEndpoint = normalizeCdpEndpoint(c.cdpEndpoint); } catch { continue; }
+      }
       if (c.profile !== undefined && !isSafeBrowserProfile(c.profile)) continue;
       const cfg: Extract<McpServerConfig, { type: "playwright" }> = {
         type,
         browser: c.browser,
         ...(connection !== undefined ? { connection } : {}),
-        ...(c.profile !== undefined ? { profile: c.profile } : {}),
+        ...(connection !== "cdp" && c.profile !== undefined ? { profile: c.profile } : {}),
+        ...(cdpEndpoint !== undefined ? { cdpEndpoint } : {}),
       };
       out[name] = cfg;
     } else if (type === "sse" || type === "http") {

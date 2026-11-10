@@ -32,6 +32,8 @@ import { buildMcpServersPatch, controlTarget, mcpServersToDrafts, newMcpRow, set
 import { ControlSettings } from "./settings/ControlSettings";
 import { ProviderSettings } from "./ProviderSettings";
 import { ProviderDashboard } from "./ProviderDashboard";
+import { useModelDisplay } from "../hooks/useModelDisplay";
+import { mergeModelSettingsDraft, subscribeProviderModelUpdates, type ModelSettingsDraft } from "../lib/model-catalog-updates";
 export { buildMcpServersPatch, mcpServersToDrafts, setControlEnabled, suggestMcpServerName } from "./settings/mcp-form";
 
 const MemoryDiagnostics = lazy(() =>
@@ -48,7 +50,7 @@ export type SettingsDrawerProps = {
 type SettingsPage =
   | "general"
   | "room"
-  | "cpa"
+  | "context"
   | "diagnostics"
   | "permissions"
   | "agents"
@@ -75,13 +77,8 @@ function newAgentDraftId(): string {
 }
 
 type FormState = {
-  cpaExePath: string;
-  cpaConfigPath: string;
-  cpaPort: string;
-  token: string;
   modelsCsv: string;
   defaultModel: string;
-  shutdownCpaOnQuit: boolean;
   defaultContextLimit: string;
   /** modelId → override 字符串；缺省或 "" = auto */
   modelContextLimitDraft: Record<string, string>;
@@ -129,13 +126,8 @@ function fromSettings(s: PublicSettings | null): FormState {
     draft[k] = String(v);
   }
   return {
-    cpaExePath: s?.cpaExePath ?? "",
-    cpaConfigPath: s?.cpaConfigPath ?? "",
-    cpaPort: String(s?.cpaPort ?? 8317),
-    token: "",
     modelsCsv: (s?.models ?? []).join(", "),
     defaultModel: s?.defaultModel ?? "",
-    shutdownCpaOnQuit: s?.shutdownCpaOnQuit ?? false,
     defaultContextLimit: String(s?.defaultContextLimit ?? 200_000),
     modelContextLimitDraft: draft,
     mcpServers: mcpServersToDrafts(s?.mcpServers, s?.disabledControlServers),
@@ -242,6 +234,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   );
   const [form, setForm] = useState<FormState>(() => fromSettings(settings));
   const [catalog, setCatalog] = useState<ModelInfo[]>([]);
+  const modelLabel = useModelDisplay();
   const [modelDraft, setModelDraft] = useState("");
   const [saving, setSaving] = useState(false);
   const [savingGalaxyEffects, setSavingGalaxyEffects] = useState(false);
@@ -290,7 +283,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
     if (!open || page !== "control" || !hasDesktopApi("getBrowserAuthorizationStatus")) return;
     let stopped = false;
     for (const row of form.mcpServers) {
-      if (controlTarget(row) !== expandedControl || row.type !== "playwright" || row.connection === "isolated") continue;
+      if (controlTarget(row) !== expandedControl || row.type !== "playwright" || (row.connection ?? "extension") !== "extension") continue;
       const key = browserSetupKey(row);
       void getDesktop().getBrowserAuthorizationStatus({ browser: row.browser ?? "msedge", profile: row.profile?.trim() || undefined })
         .then(status => {
@@ -318,6 +311,8 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   );
   const [closePending, setClosePending] = useState(false);
   const openedRef = useRef(false);
+  const syncedModelsRef = useRef<ModelSettingsDraft | null>(null);
+  const catalogEpoch = useRef(0);
 
   const [savingPhotoFlow, setSavingPhotoFlow] = useState(false);
   async function onPhotoFlowChange(enabled: boolean) {
@@ -397,12 +392,13 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   }
 
   async function refreshCatalog() {
+    const epoch = ++catalogEpoch.current;
     try {
       const desktop = getDesktop();
       const list = await desktop.getModelCatalog();
-      setCatalog(Array.isArray(list) ? list : []);
+      if (epoch === catalogEpoch.current) setCatalog(Array.isArray(list) ? list : []);
     } catch {
-      setCatalog([]);
+      if (epoch === catalogEpoch.current) setCatalog([]);
     }
   }
 
@@ -419,6 +415,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
     if (!open) {
       statusEpoch.current++;
       openedRef.current = false;
+      syncedModelsRef.current = null;
       // Restore live-preview font if user closed without saving
       if (settings) {
         document.documentElement.style.setProperty(
@@ -435,6 +432,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
     openedRef.current = true;
     const initialForm = fromSettings(settings);
     setForm(initialForm);
+    syncedModelsRef.current = { modelsCsv: initialForm.modelsCsv, defaultModel: initialForm.defaultModel };
     setModelDraft("");
     setSavedFingerprint(JSON.stringify(initialForm));
     setClosePending(false);
@@ -445,7 +443,6 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
     setBrowserSetup({});
     setBrowserAuthorization({});
     setMcpLive({});
-    void refreshCatalog();
     void refreshMcpLive();
     void refreshSkills();
     if (hasDesktopApi("getAppVersion")) {
@@ -462,6 +459,24 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, settings]);
+
+  useEffect(() => {
+    if (!open || !settings) return;
+    const next = { modelsCsv: settings.models.join(", "), defaultModel: settings.defaultModel };
+    const previous = syncedModelsRef.current;
+    syncedModelsRef.current = next;
+    if (!previous || (previous.modelsCsv === next.modelsCsv && previous.defaultModel === next.defaultModel)) return;
+    setForm(current => mergeModelSettingsDraft(current, previous, next));
+    // Rebase only the synced fields. Other unsaved preferences remain dirty.
+    setSavedFingerprint(current => JSON.stringify({ ...JSON.parse(current), ...next }));
+  }, [open, settings?.models, settings?.defaultModel]);
+
+  useEffect(() => {
+    if (!open) return;
+    void refreshCatalog();
+    const unsubscribe = subscribeProviderModelUpdates(getDesktop(), refreshCatalog);
+    return () => { catalogEpoch.current++; unsubscribe?.(); };
+  }, [open]);
 
   useEffect(() => {
     if (!savedNote) return;
@@ -593,7 +608,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
       value: "",
       label: configuredModelIds.length ? "选择默认模型…" : "请先添加模型",
     },
-    ...configuredModelIds.map((id) => ({ value: id })),
+    ...configuredModelIds.map((id) => ({ value: id, label: modelLabel(id), title: id })),
   ];
   const modelSuggestions = catalog.filter(
     (model) => !configuredModelIds.includes(model.id),
@@ -655,7 +670,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
       <div className="settings-context-limits">
         <div className="settings-context-limits-title">按模型覆盖上下文窗口</div>
         <p className="settings-hint">
-          留空 = CPA / 内置 / 默认值；下一轮生效。
+          留空使用 Provider 同步值、内置窗口或默认值；下一轮生效。
         </p>
         <div className="settings-context-limits-table-wrap">
           <table className="settings-context-limits-table">
@@ -670,7 +685,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
               {ids.length === 0 ? (
                 <tr>
                   <td colSpan={3} className="settings-hint">
-                    暂无模型 — 请编辑模型列表或从 CPA 同步
+                    暂无模型，请添加模型服务账号后同步模型。
                   </td>
                 </tr>
               ) : (
@@ -682,7 +697,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
                   );
                   return (
                     <tr key={id}>
-                      <td className="settings-context-limits-model">{id}</td>
+                      <td className="settings-context-limits-model" title={id}>{modelLabel(id)}</td>
                       <td>
                         <span className="settings-context-limits-effective">
                           {limitTokens}
@@ -690,14 +705,14 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
                         <span
                           className={`settings-context-limits-source source-${source}`}
                         >
-                          {source}
+                          {source === "cpa" ? "Provider" : source}
                         </span>
                       </td>
                       <td>
                         <input
                           type="number"
                           min={CONTEXT_LIMIT_MIN}
-                          step={1024}
+                          step={1}
                           placeholder="自动"
                           value={form.modelContextLimitDraft[id] ?? ""}
                           onChange={(e) =>
@@ -799,7 +814,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   function renderMcpStatus(row: McpServerDraft) {
     const live = mcpLive[row.name.trim()];
     if (!live) return null;
-    const setupError = row.type === "playwright" && row.connection !== "isolated"
+    const setupError = row.type === "playwright" && (row.connection ?? "extension") === "extension"
       ? browserSetup[browserSetupKey(row)]?.error ?? browserAuthorization[browserSetupKey(row)]?.error : undefined;
     const error = /connection closed/i.test(live.error ?? "") ? setupError ?? live.error : live.error;
     const enabled = live.status !== "disabled";
@@ -1190,18 +1205,26 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
                   onChange={(e) => updateMcpRow(row, { connection: e.target.value as PlaywrightConnection })}>
                   <option value="extension">日常浏览器（复用登录状态）</option>
                   <option value="isolated">独立窗口</option>
+                  <option value="cdp">连接已有浏览器（CDP）</option>
                 </select>
                 <small>{(row.connection ?? "extension") === "extension"
                   ? "连接你日常使用的浏览器，复用登录状态。首次连接时，扩展会请你选择共享的标签页，这是正常步骤。"
-                  : "每个会话打开独立窗口，使用独立的登录状态。"}</small>
+                  : row.connection === "cdp" ? "连接已开启远程调试的浏览器，使用其中已有的页面与登录状态。断开控制会保留浏览器。"
+                    : "每个会话打开独立窗口，使用独立的登录状态。"}</small>
               </label>
-              <label className="settings-field settings-config-wide">
+              {row.connection === "cdp" ? <label className="settings-field settings-config-wide">
+                <span>CDP 连接地址</span>
+                <input aria-label="CDP 连接地址" placeholder="http://127.0.0.1:9222"
+                  value={row.cdpEndpoint ?? ""} maxLength={2048} spellCheck={false}
+                  onChange={e => updateMcpRow(row, { cdpEndpoint: e.target.value })} />
+                <small>支持 HTTP(S) 调试地址或 WS(S) 浏览器连接地址。</small>
+              </label> : <label className="settings-field settings-config-wide">
                 <span>日常浏览器配置目录（可选）</span>
                 <input placeholder="例如 Profile 2（留空使用最近使用的配置）"
                   value={row.profile ?? ""} maxLength={80} spellCheck={false}
                   onChange={(e) => updateMcpRow(row, { profile: e.target.value })} />
                 <small>填写配置目录名称，无需完整路径。历史和书签查询只读此配置；日常模式也连接此配置中的浏览器。</small>
-              </label>
+              </label>}
               {(row.connection ?? "extension") === "extension" ? (
                 <div className="settings-config-wide">
                   <p className="settings-hint">首次连接会自动准备浏览器扩展。浏览器要求确认启用时，在提示中确认即可。</p>
@@ -1360,32 +1383,22 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   const onSave = async () => {
     setLocalError(null);
     setSavedNote(null);
-    const port = Number(form.cpaPort);
-    if (!Number.isFinite(port) || port <= 0 || port > 65535) {
-      setLocalError("Port must be a number between 1 and 65535");
-      return;
-    }
     const models = form.modelsCsv
       .split(",")
       .map((m) => m.trim())
       .filter(Boolean);
-    const configuringServersBeforeModels = (page === "control" || page === "mcp") && !settings?.models.length;
-    if (models.length === 0 && !configuringServersBeforeModels) {
-      setLocalError("Models list cannot be empty");
-      return;
-    }
     const defaultModel = form.defaultModel.trim() || models[0] || "";
     if (defaultModel && !models.includes(defaultModel)) {
       models.unshift(defaultModel);
     }
     const defaultContextLimit = Number(form.defaultContextLimit);
     if (
-      !Number.isFinite(defaultContextLimit) ||
+      !Number.isInteger(defaultContextLimit) ||
       defaultContextLimit < CONTEXT_LIMIT_MIN ||
       defaultContextLimit > CONTEXT_LIMIT_MAX
     ) {
       setLocalError(
-        `Default context limit must be between ${CONTEXT_LIMIT_MIN} and ${CONTEXT_LIMIT_MAX}`,
+        `默认上下文窗口必须是 ${CONTEXT_LIMIT_MIN} 到 ${CONTEXT_LIMIT_MAX} 之间的整数`,
       );
       return;
     }
@@ -1446,16 +1459,11 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
     // `effort: null` clears the override (main-side SettingsStore handles it);
     // the field sits outside AppSettings' own type on purpose.
     const patch: Omit<Partial<AppSettings>, "effort"> & {
-      token?: string;
       effort?: AppSettings["effort"] | null;
     } = {
-      cpaExePath: form.cpaExePath.trim(),
-      cpaConfigPath: form.cpaConfigPath.trim(),
-      cpaPort: port,
       models,
       defaultModel,
-      shutdownCpaOnQuit: form.shutdownCpaOnQuit,
-      defaultContextLimit: Math.floor(defaultContextLimit),
+      defaultContextLimit,
       modelContextLimits: patchLimits.modelContextLimits,
       mcpServers: patchMcp.mcpServers,
       disabledControlServers: patchMcp.disabledControlServers,
@@ -1471,11 +1479,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
       // Effort is no longer configurable here; clear any legacy override.
       effort: null,
     };
-    if (form.token.trim()) {
-      patch.token = form.token.trim();
-    }
-
-    const committedForm: FormState = { ...form, token: "" };
+    const committedForm: FormState = { ...form };
     setSaving(true);
     try {
       await saveSettings(patch);
@@ -1522,8 +1526,8 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   const pages: Array<{ key: SettingsPage; label: string; sub: string }> = [
     { key: "general", label: "通用", sub: "模型 / 语言 / 字体 / 更新" },
     { key: "room", label: "群聊设置", sub: "Mod / 选集 / 制作" },
-    { key: "cpa", label: "CPA 与上下文", sub: "exe / config / 端口 / 窗口" },
-    { key: "providers", label: "Provider 管理", sub: "API Key / OAuth / 配额" },
+    { key: "context", label: "模型与上下文", sub: "默认窗口 / 按模型覆盖" },
+    { key: "providers", label: "Provider 管理", sub: "账号 / API Key / OAuth" },
     { key: "diagnostics", label: "内存诊断", sub: "进程 / 缓存 / JS 堆" },
     { key: "permissions", label: "权限规则", sub: "allow / deny" },
     { key: "agents", label: "自定义 Agents", sub: "Task 子代理" },
@@ -1590,6 +1594,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
             <ThemedSelect
               className="settings-model-select"
               value={form.defaultModel}
+              title={form.defaultModel}
               options={defaultModelOptions}
               disabled={configuredModelIds.length === 0}
               onChange={(value) => setField("defaultModel", value)}
@@ -1617,12 +1622,12 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
                   ) : (
                     configuredModelIds.map((id) => (
                       <div className="settings-model-list-row" key={id}>
-                        <span title={id}>{id}</span>
+                        <span title={id}>{modelLabel(id)}</span>
                         <button
                           type="button"
                           className="settings-model-delete"
-                          aria-label={`删除模型 ${id}`}
-                          title={`删除 ${id}`}
+                          aria-label={`删除模型 ${modelLabel(id)}`}
+                          title={`删除 ${modelLabel(id)}`}
                           onClick={() =>
                             updateModelList(configuredModelIds.filter((model) => model !== id))
                           }
@@ -1650,7 +1655,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
                   />
                   <datalist id="settings-model-catalog">
                     {modelSuggestions.map((model) => (
-                      <option key={model.id} value={model.id} />
+                      <option key={model.id} value={model.id} label={modelLabel(model.id)} />
                     ))}
                   </datalist>
                   <button
@@ -1681,9 +1686,8 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
                   try {
                     await syncCpaModels();
                     const latest = getState().settings;
-                    setForm(fromSettings(latest));
                     setSavedNote(
-                      `Synced ${latest?.models?.length ?? 0} models from CPA`,
+                      `已同步 ${latest?.models?.length ?? 0} 个 Provider 模型`,
                     );
                     void refreshCatalog();
                   } catch (err) {
@@ -1696,24 +1700,9 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
                 })();
               }}
             >
-              {syncing ? "同步中…" : "从 CPA 同步模型"}
+              {syncing ? "同步中…" : "同步 Provider 模型"}
             </button>
           </div>
-
-          <label className="settings-field">
-            网关 Token
-            <input
-              type="password"
-              autoComplete="off"
-              placeholder={
-                settings?.hasToken
-                  ? "••••••••（留空保持不变）"
-                  : "CPA 网关口令"
-              }
-              value={form.token}
-              onChange={(e) => setField("token", e.target.value)}
-            />
-          </label>
 
           <label className="settings-field">
             语言 / Language
@@ -1798,7 +1787,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
           <div className="settings-update">
             <div className="settings-context-limits-title">检查更新</div>
             <p className="settings-hint">
-              热更新只替换程序文件，不会覆盖 CPA / 设置 / 会话。
+              热更新只替换程序文件，不会覆盖账号凭证、设置和会话。
             </p>
 
             {/* Status card */}
@@ -1954,43 +1943,14 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
 
             {page === "room" ? <RoomModsSettings /> : null}
 
-            {page === "cpa" ? (
+            {page === "context" ? (
               <>
-              <label className="settings-field">
-                CPA 可执行文件
-                <input
-                  value={form.cpaExePath}
-                  onChange={(e) => setField("cpaExePath", e.target.value)}
-                  spellCheck={false}
-                />
-              </label>
-
-              <label className="settings-field">
-                CPA config.yaml
-                <input
-                  value={form.cpaConfigPath}
-                  onChange={(e) => setField("cpaConfigPath", e.target.value)}
-                  spellCheck={false}
-                />
-              </label>
-
-              <label className="settings-field">
-                CPA 端口
-                <input
-                  type="number"
-                  min={1}
-                  max={65535}
-                  value={form.cpaPort}
-                  onChange={(e) => setField("cpaPort", e.target.value)}
-                />
-              </label>
-
               <label className="settings-field">
                 默认上下文窗口（tokens）
                 <input
                   type="number"
                   min={1024}
-                  step={1024}
+                  step={1}
                   value={form.defaultContextLimit}
                   onChange={(e) => setField("defaultContextLimit", e.target.value)}
                 />
@@ -2001,17 +1961,6 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
 
               {renderContextLimitsTable()}
 
-              <div className="settings-toggle-row">
-                <div>
-                  <span>退出时关闭 CPA</span>
-                  <small>仅关闭由本应用启动的 CPA 进程</small>
-                </div>
-                <ToggleSwitch
-                  checked={form.shutdownCpaOnQuit}
-                  label={form.shutdownCpaOnQuit ? "停用退出时关闭 CPA" : "启用退出时关闭 CPA"}
-                  onCheckedChange={(on) => setField("shutdownCpaOnQuit", on)}
-                />
-              </div>
             </>
           ) : null}
 

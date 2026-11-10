@@ -38,6 +38,7 @@ function manager(qf: QueryFn = queryFn()): SessionManager {
       buildProcessEnv: vi.fn().mockReturnValue({
         ANTHROPIC_BASE_URL: "http://127.0.0.1:8317",
       }),
+      getModelCatalog: vi.fn().mockReturnValue([]),
     } as unknown as CpaSupervisor,
     settings: {
       get: vi.fn().mockReturnValue({

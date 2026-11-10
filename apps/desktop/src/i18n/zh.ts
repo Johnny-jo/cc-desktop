@@ -312,6 +312,6 @@ export const zh: Messages = {
   onboarding: {
     title: "欢迎",
     welcomeLead:
-      "本应用是非官方桌面壳，通过公开 SDK 驱动 Claude Code，并内置本地 CPA 网关。",
+      "通过公开 SDK 驱动 Claude Code，直接连接你的模型服务账号。先添加账号，或稍后在设置中配置。",
   },
 };

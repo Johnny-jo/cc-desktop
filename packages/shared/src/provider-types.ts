@@ -6,21 +6,22 @@
 export type ProviderType = "claude" | "openai" | "deepseek" | "kimi" | "xai" | "gemini" | "openai-compatible";
 
 export type AuthMethod = "api-key" | "oauth2";
+export type ClaudeApiKeyAuth = "auto" | "x-api-key" | "bearer";
 
 /**
  * 各 Provider 的认证配置
  */
-export type ProviderAuthConfig =
-  // Anthropic 与 OpenAI 都没有可供第三方桌面应用调用的公开 OAuth 授权码端点
-  // （它们只在自家 CLI 内部走各自流程），因此这里只支持 API Key。
+export type ProviderAuthConfig = (
   | {
       type: "claude";
-      authMethod: "api-key";
+      authMethod: "api-key" | "oauth2";
       apiKey?: string; // 加密存储
+      /** 自动模式遵循 CPA：官方 Anthropic 用 x-api-key，自定义服务用 Bearer。 */
+      apiKeyAuth?: ClaudeApiKeyAuth;
     }
   | {
       type: "openai";
-      authMethod: "api-key";
+      authMethod: "api-key" | "oauth2";
       apiKey?: string;
     }
   | {
@@ -49,6 +50,9 @@ export type ProviderAuthConfig =
       authMethod: "api-key";
       apiKey?: string;
       baseUrl: string; // 如 http://127.0.0.1:8317
+    }) & {
+      /** API Key 请求的可选地址；官方类型留空使用默认值。OAuth 使用账号后端。 */
+      baseUrl?: string;
     };
 
 /**
@@ -73,6 +77,10 @@ export type ProviderConfig = {
    * client secret 不放在这里 —— 桌面应用是公共客户端，走 PKCE，不需要也不该保存 secret。
    */
   oauthClientId?: string;
+  /** Google Cloud 配额/计费项目（x-goog-user-project），需启用 Generative Language API。 */
+  oauthProjectId?: string;
+  /** Google 用户自有 OAuth 客户端需要的 scope；留空时请求 Generative Language API。 */
+  oauthScopes?: string[];
 };
 
 /**
@@ -101,6 +109,8 @@ export type ProviderModel = {
   id: string;
   name: string;
   contextLimit?: number;
+  reasoningEfforts?: import("./models").ReasoningEffort[];
+  defaultReasoningEffort?: import("./models").ReasoningEffort;
   costPerMTok?: number; // 百万 token 成本
   supported?: boolean; // 是否在当前配额周期内可用
 };
@@ -114,6 +124,9 @@ export type ProviderStatus = {
   name: string;
   enabled: boolean;
   authenticated: boolean;
+  /** 正在等待系统浏览器授权或手动粘贴回调。 */
+  oauthPending?: boolean;
+  oauthState?: string;
   lastError?: string;
   quota?: QuotaInfo;
   availableModels?: ProviderModel[];
@@ -130,30 +143,60 @@ export type AuthenticationStatus = {
   error?: string;
 };
 
+export type ProviderOAuthConfig = {
+  authorizationUrl?: string;
+  tokenUrl?: string;
+  scope?: string;
+  /** 第一方原生客户端公开 ID，不是 confidential client secret。 */
+  defaultClientId?: string;
+  callbackMode?: "loopback" | "manual";
+  callbackPath?: string;
+  /** 端点有 redirect allow-list 时只能使用这些端口。 */
+  callbackPorts?: number[];
+  manualRedirectUri?: string;
+  tokenEncoding?: "form" | "json";
+  refreshEncoding?: "form" | "json";
+  authorizationParams?: Record<string, string>;
+};
+
 /**
- * OAuth 配置（各 Provider 不同）。
- *
- * 只有确实存在「第三方公共客户端可用」的授权码端点的 provider 才在此登记。
- * claude / openai 没有这样的公开端点（上一版凭猜测写下的 api.anthropic.com/oauth/*
- * 与 platform.openai.com/oauth/* 并不存在），所以留空、仅支持 API Key。
- *
- * clientId 由用户在自己的云控制台注册后填入（见 ProviderConfig.oauthClientId），
- * 这里只放端点与 scope。
+ * 原生账号授权定义。Codex 来自 openai/codex 的 login/src/server.rs 与 auth/manager.rs；
+ * Claude 来自项目锁定的 @anthropic-ai/claude-agent-sdk 0.3.318 登录实现。
+ * 这些订阅凭证必须使用各自的账号后端，不能当作 Platform API key。
+ * Google 使用用户自己注册的 Desktop OAuth client，不包含第三方 secret。
  */
-export const OAuthConfigs: Record<
-  ProviderType,
-  {
-    authorizationUrl?: string;
-    tokenUrl?: string;
-    scope?: string;
-  }
-> = {
-  claude: {}, // 无公开 OAuth 授权码端点，仅支持 API Key
-  openai: {}, // 同上
+export const OAuthConfigs: Record<ProviderType, ProviderOAuthConfig> = {
+  claude: {
+    authorizationUrl: "https://claude.com/cai/oauth/authorize",
+    tokenUrl: "https://platform.claude.com/v1/oauth/token",
+    defaultClientId: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+    scope: "user:profile user:inference user:sessions:claude_code user:mcp_servers",
+    callbackMode: "manual",
+    manualRedirectUri: "https://platform.claude.com/oauth/code/callback",
+    tokenEncoding: "json",
+    refreshEncoding: "json",
+    authorizationParams: { code: "true" },
+  },
+  openai: {
+    authorizationUrl: "https://auth.openai.com/oauth/authorize",
+    tokenUrl: "https://auth.openai.com/oauth/token",
+    defaultClientId: "app_EMoamEEZ73f0CkXaXp7hrann",
+    scope: "openid profile email offline_access api.connectors.read api.connectors.invoke",
+    callbackMode: "loopback",
+    callbackPath: "/auth/callback",
+    callbackPorts: [1455, 1457],
+    tokenEncoding: "form",
+    refreshEncoding: "json",
+    authorizationParams: { id_token_add_organizations: "true", codex_cli_simplified_flow: "true", originator: "codex_cli_rs" },
+  },
   gemini: {
     authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth",
     tokenUrl: "https://oauth2.googleapis.com/token",
-    scope: "https://www.googleapis.com/auth/generative-language",
+    scope: "https://www.googleapis.com/auth/generative-language.retriever",
+    callbackMode: "loopback",
+    callbackPath: "/oauth/callback",
+    tokenEncoding: "form",
+    authorizationParams: { access_type: "offline", prompt: "consent" },
   },
   deepseek: {}, // DeepSeek 仅支持 API Key
   kimi: {}, // Kimi 仅支持 API Key
@@ -238,3 +281,39 @@ export function providerAuthHeaders(
       return { authorization: `Bearer ${credential}` };
   }
 }
+
+export type ProviderUsageRange = "24h" | "7d" | "30d";
+export type ProviderRequestOutcome = "success" | "failure" | "cancelled";
+
+/** Actual reported usage; input excludes separately reported cache reads/creation. */
+export type ProviderUsageMetrics = {
+  requests: number;
+  successes: number;
+  failures: number;
+  cancellations: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  totalTokens: number;
+  unreportedUsageRequests: number;
+  /** Cancellations are excluded. No completed attempts means null, not 0%. */
+  successRate: number | null;
+};
+export type ProviderUsageBucket = ProviderUsageMetrics & { startAt: number };
+export type ProviderUsageProvider = {
+  providerId: string;
+  providerName: string;
+  providerType: ProviderType;
+  metrics: ProviderUsageMetrics;
+};
+export type ProviderUsageDashboard = {
+  range: ProviderUsageRange;
+  startAt: number;
+  endAt: number;
+  bucketMs: number;
+  recordingSince: number;
+  metrics: ProviderUsageMetrics;
+  buckets: ProviderUsageBucket[];
+  providers: ProviderUsageProvider[];
+};

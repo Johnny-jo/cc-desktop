@@ -318,7 +318,7 @@ export const en = {
   onboarding: {
     title: "Welcome",
     welcomeLead:
-      "This app is an unofficial desktop shell that drives Claude Code via the public SDK, with a local CPA gateway.",
+      "Use Claude Code through the public SDK and connect your model service accounts directly. Add an account now or configure one later in Settings.",
   },
 };
 

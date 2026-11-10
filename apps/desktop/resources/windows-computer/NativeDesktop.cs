@@ -18,6 +18,7 @@ namespace AgentOS.Computer
         private const uint KeyInput = 1, KeyExtended = 1, KeyUp = 2, KeyUnicode = 4;
         private const uint LeftDown = 2, LeftUp = 4, RightDown = 8, RightUp = 16;
         private const uint MouseMove = 0x0001, MouseVirtualDesk = 0x4000, MouseAbsolute = 0x8000;
+        private const uint MouseWheel = 0x0800, MouseHorizontalWheel = 0x1000;
         private const int VirtualLeft = 76, VirtualTop = 77, VirtualWidth = 78, VirtualHeight = 79;
         private const int Control = 0x11, Shift = 0x10, Alt = 0x12, Win = 0x5b;
         private const string InputAccessHint = "Use the unlocked interactive desktop. Windows can block input " +
@@ -380,7 +381,7 @@ namespace AgentOS.Computer
             SendInput(1, new[] { new Input { Data = new InputData { Mouse = move } } }, Marshal.SizeOf(typeof(Input)));
         }
 
-        private static bool MoveCursor(string windowId, Point target)
+        private static bool MoveCursor(string windowId, Point target, bool preserveReturn = false)
         {
             int left = GetSystemMetrics(VirtualLeft), top = GetSystemMetrics(VirtualTop);
             int width = GetSystemMetrics(VirtualWidth), height = GetSystemMetrics(VirtualHeight);
@@ -423,7 +424,7 @@ namespace AgentOS.Computer
                 if (actual.X != original.X || actual.Y != original.Y)
                 {
                     RequireCursor(target, actual);
-                    returnPoint = original;
+                    if (!preserveReturn || !returnPoint.HasValue) returnPoint = original;
                     agentPoint = target;
                     return true;
                 }
@@ -508,6 +509,160 @@ namespace AgentOS.Computer
             }
             finally { if (!keepHover) FinishPointer(); }
             return new { windowId = windowId, x = x, y = y, button = button };
+        }
+
+        private static void CheckPointerBounds(string windowId, Point point)
+        {
+            IntPtr hwnd;
+            if (!CaptureBounds(windowId,out hwnd).Contains(point.X,point.Y))
+                throw new InvalidOperationException("The point is outside the target window bounds. Observe again.");
+            CheckPoint(windowId,point);
+        }
+
+        public static object Scroll(string windowId, int x, int y, int deltaX, int deltaY,
+            Action<int,int,bool> movePointer, Action validateObservation)
+        {
+            if (deltaX < -20 || deltaX > 20 || deltaY < -20 || deltaY > 20 || (deltaX == 0 && deltaY == 0))
+                throw new ArgumentException("deltaX and deltaY must be bounded wheel detents, with at least one nonzero axis.");
+            var point = new Point {X=x,Y=y};
+            try
+            {
+                validateObservation();
+                CheckPointerBounds(windowId,point);
+                RequireMouseReleased();
+                MoveCursor(windowId,point);
+                movePointer(x,y,false);
+                validateObservation();
+                CheckPointerBounds(windowId,point);
+                RequireMouseReleased();
+                RequireCursor(point,CursorPosition());
+                var events = new List<Input>();
+                if (deltaY != 0) events.Add(new Input {Data=new InputData {Mouse=new MouseInput {Flags=MouseWheel,Data=unchecked((uint)(deltaY*120))}}});
+                if (deltaX != 0) events.Add(new Input {Data=new InputData {Mouse=new MouseInput {Flags=MouseHorizontalWheel,Data=unchecked((uint)(deltaX*120))}}});
+                uint sent = SendInput((uint)events.Count,events.ToArray(),Marshal.SizeOf(typeof(Input)));
+                if (sent != events.Count) throw new InvalidOperationException("Wheel input was only partially accepted. Inspect the result before retrying.");
+                return new {windowId=windowId,x=x,y=y,deltaX=deltaX,deltaY=deltaY};
+            }
+            finally { FinishPointer(); }
+        }
+
+        static readonly object dragLock = new object();
+        static bool dragHeld;
+        static bool pointerStopped;
+        internal static bool HasOwnedPointer { get { lock (dragLock) return dragHeld; } }
+        internal static bool StopPointerInput()
+        {
+            lock (dragLock) { pointerStopped=true; return ReleaseHeldPointer(); }
+        }
+        // Stop handlers can run on another thread. Release only the press owned by this helper.
+        internal static bool ReleaseHeldPointer()
+        {
+            lock (dragLock)
+            {
+                if (!dragHeld) return true;
+                var up = new Input {Data=new InputData {Mouse=new MouseInput {Flags=LeftUp}}};
+                for (int attempt = 0; attempt < 3; attempt++)
+                    if (SendInput(1,new[] {up},Marshal.SizeOf(typeof(Input))) == 1) { dragHeld=false; return true; }
+                return false;
+            }
+        }
+
+        internal static void RequirePointerReleased()
+        {
+            if (ReleaseHeldPointer()) return;
+            var error = new InvalidOperationException("Windows could not confirm release of the drag button. Stop desktop control and inspect the current state.");
+            error.Data["code"] = "pointer_release_unconfirmed";
+            throw error;
+        }
+
+        static Point DragPoint(Point start, Point end, int step, int steps)
+        {
+            return new Point {X=(int)(start.X+((long)end.X-start.X)*step/steps),Y=(int)(start.Y+((long)end.Y-start.Y)*step/steps)};
+        }
+
+        static void CheckDragPath(string windowId, Point start, Point end, CancellationToken cancellation)
+        {
+            CheckPointerBounds(windowId,start);
+            CheckPointerBounds(windowId,end);
+            var hwnd = RequireForeground(windowId);
+            long distance = Math.Max(Math.Abs((long)end.X-start.X),Math.Abs((long)end.Y-start.Y));
+            if (distance > 65536) throw new ArgumentException("The drag path is outside the supported desktop coordinate range.");
+            int steps = Math.Max(1,(int)distance);
+            // Check every physical pixel along the intended straight path before pressing.
+            for (int step = 0; step <= steps; step++)
+            {
+                cancellation.ThrowIfCancellationRequested();
+                if (GetAncestor(WindowFromPoint(DragPoint(start,end,step,steps)),Root) != hwnd)
+                    throw new InvalidOperationException("The drag path belongs to another window. Observe again.");
+            }
+        }
+
+        public static object Drag(string windowId, int startX, int startY, int endX, int endY, int durationMs,
+            Action<int,int,bool> movePointer, Action validateObservation, Action validateGeometry, CancellationToken cancellation)
+        {
+            if (durationMs < 1 || durationMs > 2000) throw new ArgumentException("durationMs must be between 1 and 2000.");
+            var start = new Point {X=startX,Y=startY};
+            var end = new Point {X=endX,Y=endY};
+            var bounds = WindowBounds(windowId);
+            Action geometry = delegate {
+                if (WindowBounds(windowId) != bounds) throw new InvalidOperationException("The target window moved during drag. Observe again.");
+                if (validateGeometry != null) validateGeometry();
+            };
+            try
+            {
+                cancellation.ThrowIfCancellationRequested();
+                if (validateObservation != null) validateObservation();
+                CheckDragPath(windowId,start,end,cancellation);
+                RequireMouseReleased();
+                MoveCursor(windowId,start);
+                movePointer(startX,startY,false);
+                cancellation.ThrowIfCancellationRequested();
+                if (validateObservation != null) validateObservation();
+                geometry();
+                CheckDragPath(windowId,start,end,cancellation);
+                RequireMouseReleased();
+                RequireCursor(start,CursorPosition());
+                lock (dragLock)
+                {
+                    cancellation.ThrowIfCancellationRequested();
+                    if (pointerStopped) throw new OperationCanceledException("Desktop input was stopped.");
+                    var down = new Input {Data=new InputData {Mouse=new MouseInput {Flags=LeftDown}}};
+                    if (SendInput(1,new[] {down},Marshal.SizeOf(typeof(Input))) != 1)
+                        throw new InvalidOperationException("Windows rejected the drag press. Observe again before retrying.");
+                    dragHeld = true;
+                }
+                movePointer(startX,startY,true);
+                int steps = Math.Max(1,(durationMs+9)/10);
+                Point previous = start;
+                for (int step = 1; step <= steps; step++)
+                {
+                    if (cancellation.WaitHandle.WaitOne(Math.Max(1,durationMs/steps))) cancellation.ThrowIfCancellationRequested();
+                    geometry();
+                    RequireCursor(previous,CursorPosition());
+                    var next = DragPoint(start,end,step,steps);
+                    CheckPointerBounds(windowId,next);
+                    MoveCursor(windowId,next,true);
+                    movePointer(next.X,next.Y,false);
+                    RequireCursor(next,CursorPosition());
+                    CheckPointerBounds(windowId,next);
+                    previous = next;
+                }
+                cancellation.ThrowIfCancellationRequested();
+                geometry();
+                CheckPointerBounds(windowId,end);
+                return new {windowId=windowId,startX=startX,startY=startY,endX=endX,endY=endY,durationMs=durationMs};
+            }
+            finally
+            {
+                RequirePointerReleased();
+                FinishPointer();
+            }
+        }
+
+        static System.Drawing.Rectangle WindowBounds(string windowId)
+        {
+            IntPtr hwnd;
+            return CaptureBounds(windowId,out hwnd);
         }
 
         private static IntPtr KeyboardFocus(string windowId)

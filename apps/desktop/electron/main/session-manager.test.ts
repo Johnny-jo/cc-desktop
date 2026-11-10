@@ -604,6 +604,147 @@ describe("SessionManager", () => {
     vi.clearAllMocks();
   });
 
+  it.each([
+    ["uses medium for a new compatible model", "compatible/custom", "medium", undefined, "high", "medium"],
+    ["uses the upstream model default", "custom/upstream", "high", undefined, "low", "high"],
+    ["prefers an explicit model choice over its default", "compatible/custom", "medium", "max", "low", "max"],
+    ["keeps the legacy fallback when an official model has no default", "openai/gpt-4o", undefined, undefined, "high", "high"],
+    ["omits effort when no choice or default exists", "openai/gpt-4o", undefined, undefined, undefined, undefined],
+  ] as const)("%s in actual SDK query options", async (_name, model, catalogDefault, explicitEffort, legacyEffort, expected) => {
+    let options: Record<string, unknown> = {};
+    const ctx = makeDeps({ queryFn: async function* (args) {
+      options = args.options;
+      await takeFirstUserText(args.prompt);
+      yield { type: "result", subtype: "success", total_cost_usd: 0 };
+    } });
+    vi.mocked(ctx.settings.get).mockReturnValue({
+      ...baseSettings, defaultModel: model, effort: legacyEffort,
+      ...(explicitEffort ? { modelEfforts: { [model]: explicitEffort } } : {}),
+    });
+    vi.mocked(ctx.cpa.getModelCatalog).mockReturnValue([{ id: model, ...(catalogDefault ? { defaultReasoningEffort: catalogDefault } : {}) }]);
+    try {
+      await ctx.manager.start({ text: "hello", attachments: [] }, process.cwd());
+      expect(options.model).toBe(model);
+      expect(options.effort).toBe(expected);
+      if (!expected) expect(options).not.toHaveProperty("effort");
+    } finally { ctx.manager.disposeAll(); }
+  });
+
+  it("reopens a warm query with newly selected effort and resumes its SDK context", async () => {
+    const queryOptions: Record<string, unknown>[] = [];
+    const appliedEfforts: unknown[] = [];
+    const ctx = makeDeps({ queryFn: args => {
+      queryOptions.push(args.options);
+      return (async function* () {
+        for await (const _message of args.prompt as AsyncIterable<unknown>) {
+          appliedEfforts.push(args.options.effort);
+          yield { type: "assistant", session_id: "sdk-effort", message: { content: [{ type: "text", text: "OK" }] } };
+          yield { type: "result", subtype: "success", total_cost_usd: 0 };
+        }
+      })();
+    } });
+    const model = "compatible/custom";
+    const settings: AppSettings = { ...baseSettings, defaultModel: model };
+    vi.mocked(ctx.settings.get).mockImplementation(() => settings);
+    vi.mocked(ctx.cpa.getModelCatalog).mockReturnValue([{ id: model, defaultReasoningEffort: "medium" }]);
+    try {
+      const id = await ctx.manager.start({ text: "first", attachments: [] }, process.cwd());
+      settings.modelEfforts = { [model]: "max" };
+      await ctx.manager.continue(id, { text: "second", attachments: [] });
+      expect(appliedEfforts).toEqual(["medium", "max"]);
+      expect(queryOptions).toHaveLength(2);
+      expect(queryOptions[1].resume).toBe("sdk-effort");
+      expect(ctx.manager.getTranscript(id).filter(item => item.kind === "text" && item.role === "user").map(item => item.kind === "text" ? item.text : "")).toEqual(["first", "second"]);
+    } finally { ctx.manager.disposeAll(); }
+  });
+
+  it("keeps a query warm when its resolved effort is unchanged", async () => {
+    const queryOptions: Record<string, unknown>[] = [];
+    const ctx = makeDeps({ queryFn: args => {
+      queryOptions.push(args.options);
+      return (async function* () {
+        for await (const _message of args.prompt as AsyncIterable<unknown>) yield { type: "result", subtype: "success", total_cost_usd: 0 };
+      })();
+    } });
+    vi.mocked(ctx.cpa.getModelCatalog).mockReturnValue([{ id: baseSettings.defaultModel, defaultReasoningEffort: "medium" }]);
+    try {
+      const id = await ctx.manager.start({ text: "first", attachments: [] }, process.cwd());
+      vi.mocked(ctx.settings.get).mockReturnValue({ ...baseSettings, modelEfforts: { [baseSettings.defaultModel]: "medium" } });
+      await ctx.manager.continue(id, { text: "second", attachments: [] });
+      expect(queryOptions).toHaveLength(1);
+      expect(queryOptions[0].effort).toBe("medium");
+    } finally { ctx.manager.disposeAll(); }
+  });
+
+  it("waits for an active turn before reopening with its next effort", async () => {
+    let finishFirst!: () => void;
+    const firstTurn = new Promise<void>(resolve => { finishFirst = resolve; });
+    const queryOptions: Record<string, unknown>[] = [];
+    let turns = 0;
+    const ctx = makeDeps({ queryFn: args => {
+      queryOptions.push(args.options);
+      return (async function* () {
+        for await (const _message of args.prompt as AsyncIterable<unknown>) {
+          if (++turns === 1) await firstTurn;
+          yield { type: "assistant", session_id: "sdk-effort", message: { content: [{ type: "text", text: "OK" }] } };
+          yield { type: "result", subtype: "success", total_cost_usd: 0 };
+        }
+      })();
+    } });
+    const settings: AppSettings = { ...baseSettings, modelEfforts: { [baseSettings.defaultModel]: "medium" } };
+    vi.mocked(ctx.settings.get).mockImplementation(() => settings);
+    let id = "";
+    try {
+      const start = ctx.manager.start({ text: "first", attachments: [] }, process.cwd(), { onSessionId: value => { id = value; } });
+      await vi.waitFor(() => expect(turns).toBe(1));
+      settings.modelEfforts![baseSettings.defaultModel] = "max";
+      const continuation = ctx.manager.continue(id, { text: "second", attachments: [] });
+      await new Promise(resolve => setTimeout(resolve, 10));
+      expect(queryOptions).toHaveLength(1);
+      finishFirst();
+      await Promise.all([start, continuation]);
+      expect(queryOptions.map(options => options.effort)).toEqual(["medium", "max"]);
+      expect(queryOptions[1].resume).toBe("sdk-effort");
+    } finally { finishFirst(); ctx.manager.disposeAll(); }
+  });
+
+  it("cancels an effort-change wait without interrupting the active turn", async () => {
+    let finishFirst!: () => void;
+    const firstTurn = new Promise<void>(resolve => { finishFirst = resolve; });
+    const queryOptions: Record<string, unknown>[] = [];
+    let turns = 0;
+    const ctx = makeDeps({ queryFn: args => {
+      queryOptions.push(args.options);
+      return (async function* () {
+        for await (const _message of args.prompt as AsyncIterable<unknown>) {
+          if (++turns === 1) await firstTurn;
+          yield { type: "result", subtype: "success", total_cost_usd: 0 };
+        }
+      })();
+    } });
+    const settings: AppSettings = { ...baseSettings, modelEfforts: { [baseSettings.defaultModel]: "medium" } };
+    vi.mocked(ctx.settings.get).mockImplementation(() => settings);
+    let id = "";
+    const controller = new AbortController();
+    try {
+      const start = ctx.manager.start({ text: "first", attachments: [] }, process.cwd(), { onSessionId: value => { id = value; } });
+      await vi.waitFor(() => expect(turns).toBe(1));
+      settings.modelEfforts![baseSettings.defaultModel] = "max";
+      const continuation = ctx.manager.continue(id, { text: "cancelled second", attachments: [] }, { roomAbortSignal: controller.signal }).then(
+        () => ({ status: "resolved" }), error => ({ status: "rejected", error: error.message }),
+      );
+      controller.abort(new Error("cancelled next effort"));
+      const outcome = await Promise.race([continuation, new Promise(resolve => setTimeout(() => resolve({ status: "waiting" }), 75))]);
+      expect(outcome).toEqual({ status: "rejected", error: "cancelled next effort" });
+      expect(queryOptions).toHaveLength(1);
+      expect((queryOptions[0].abortController as AbortController).signal.aborted).toBe(false);
+      expect(ctx.manager.getSummary(id)?.status).toBe("running");
+      expect(ctx.manager.getTranscript(id).filter(item => item.kind === "text" && item.role === "user")).toHaveLength(1);
+      finishFirst();
+      await Promise.all([start, continuation]);
+    } finally { finishFirst(); ctx.manager.disposeAll(); }
+  });
+
   it("start emits normalized events from mock query generator", async () => {
     const ctx = makeDeps();
     const sessionId = await ctx.manager.start({ text: "hello", attachments: [] }, "D:/proj");
@@ -667,6 +808,25 @@ describe("SessionManager", () => {
     vi.mocked(ctx.settings.get).mockReturnValue({ ...baseSettings, mcpServers: { my_desktop: { type: "windows-computer" } } });
     await ctx.manager.start({ text: "click", attachments: [] }, "D:/p");
     expect(close).toHaveBeenCalledOnce();
+  });
+
+  it.each([undefined, "extension", "cdp", "isolated"] as const)("releases attached browser control at turn completion (%s)", async connection => {
+    const close = vi.fn();
+    const queryFn: QueryFn = args => Object.assign((async function* () {
+      await takeFirstUserText(args.prompt);
+      const hooks = args.options.hooks as { PreToolUse: { hooks: ((input: { tool_name: string }) => Promise<unknown>)[] }[] };
+      await hooks.PreToolUse[0]!.hooks[0]!({ tool_name: "mcp__work_browser__browser_navigate" });
+      yield { type: "result", subtype: "success", total_cost_usd: 0 };
+      for await (const _ of args.prompt as AsyncIterable<unknown>) { }
+    })(), { close }) as never;
+    const ctx = makeDeps({ queryFn });
+    vi.mocked(ctx.settings.get).mockReturnValue({ ...baseSettings, mcpServers: {
+      work_browser: { type: "playwright", browser: "chrome", connection,
+        ...(connection === "cdp" ? { cdpEndpoint: "http://127.0.0.1:9222" } : {}) },
+    } });
+    const id = await ctx.manager.start({ text: "read the page", attachments: [] }, "D:/p");
+    expect(close).toHaveBeenCalledTimes(connection === "isolated" ? 0 : 1);
+    ctx.manager.closeSession(id);
   });
 
   it("closes an idle live query when its session is deleted", async () => {

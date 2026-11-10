@@ -1,202 +1,165 @@
-/**
- * Provider IPC 处理器
- */
-
 import { ipcMain, shell } from "electron";
 import type { ProviderConfig } from "@claude-desktop/shared";
-import { IPC } from "@claude-desktop/shared";
+import { IPC, supportsOAuth, normalizeProviderBaseUrl } from "@claude-desktop/shared";
 import type { ProviderManager } from "./provider-manager";
 import { isValidProviderId } from "./provider-manager";
 import type { CredentialManager } from "./credential-manager";
 import type { QuotaManager } from "./provider-quota-manager";
 import type { OAuthHandler } from "./oauth-handler";
+import type { ProviderRuntime } from "./provider-runtime";
 
 export interface ProviderHandlerDeps {
   providerManager: ProviderManager;
   credentials: CredentialManager;
   quotaManager: QuotaManager;
   oauthHandler: OAuthHandler;
-  /** 用于把 OAuth 完成 / 配额告警推给渲染进程 */
+  runtime: ProviderRuntime;
   sendToRenderer: (channel: string, payload: unknown) => void;
 }
 
+/** Validate at the process boundary as well as in the form. */
+export function validateProviderConfig(config: ProviderConfig): void {
+  if (!config || !isValidProviderId(config.id)) throw new Error("Provider ID 无效");
+  if (!config.auth || config.auth.type !== config.type) throw new Error("Provider 类型与认证配置不一致");
+  if (!["claude", "openai", "deepseek", "kimi", "xai", "gemini", "openai-compatible"].includes(config.type)) throw new Error("Provider 类型无效");
+  if (config.auth.authMethod !== "api-key" && config.auth.authMethod !== "oauth2") throw new Error("认证方式无效");
+  const apiKeyAuth = (config.auth as { apiKeyAuth?: unknown }).apiKeyAuth;
+  if (apiKeyAuth !== undefined && (config.type !== "claude" || !["auto", "x-api-key", "bearer"].includes(apiKeyAuth as string))) throw new Error("Claude 服务鉴权方式无效");
+  if (config.auth.authMethod === "oauth2" && !supportsOAuth(config.type)) throw new Error("此 Provider 不支持 OAuth");
+  if (config.contextLimitOverride != null && (!Number.isInteger(config.contextLimitOverride) || config.contextLimitOverride < 1024 || config.contextLimitOverride > 10_000_000)) throw new Error("Context Limit 必须是 1024 到 10000000 之间的整数");
+  if (config.auth.baseUrl != null && typeof config.auth.baseUrl !== "string") throw new Error("Base URL 必须是字符串");
+  if (config.auth.authMethod === "oauth2" && config.auth.baseUrl?.trim()) throw new Error("OAuth 使用官方账号后端，不支持自定义 API Base URL");
+  if (config.type === "openai-compatible" || config.auth.baseUrl?.trim()) normalizeProviderBaseUrl(config.auth.baseUrl);
+}
+
 export function registerProviderHandlers(deps: ProviderHandlerDeps): void {
-  const { providerManager, credentials, quotaManager, oauthHandler } = deps;
-
-  /** 读取可用于请求上游的凭证：优先 API Key，其次 OAuth access token（必要时刷新）。 */
-  const resolveCredential = async (id: string): Promise<string | null> => {
-    const encrypted = providerManager.loadApiKey(id);
-    if (encrypted) {
-      try {
-        return credentials.decrypt(encrypted);
-      } catch (err) {
-        console.warn(`[Provider] Failed to decrypt API key for ${id}:`, err);
-      }
-    }
-    return oauthHandler.ensureFreshToken(id);
+  const { providerManager, credentials, quotaManager, oauthHandler, runtime } = deps;
+  const pending = new Map<string, string>();
+  const launching = new Map<string, symbol>();
+  const generations = new Map<string, number>();
+  const errorText = (error: unknown) => error instanceof Error ? error.message : "Provider 操作失败";
+  const status = async (id: string) => {
+    const snapshot = await runtime.providerStatus(id);
+    return snapshot ? { ...snapshot, oauthPending: pending.has(id), oauthState: pending.get(id) } : null;
   };
-
+  const notify = async (id: string) => deps.sendToRenderer(IPC.providerUpdated, { providerId: id, status: await status(id) });
+  const cancelForProvider = (id: string) => {
+    generations.set(id, (generations.get(id) ?? 0) + 1);
+    const state = pending.get(id);
+    pending.delete(id);
+    if (state) oauthHandler.cancel(state);
+  };
   ipcMain.handle(IPC.providerListConfigs, async () => providerManager.listConfigs());
-
-  ipcMain.handle(
-    IPC.providerAddConfig,
-    async (_e, { config }: { config: ProviderConfig }) => {
-      try {
-        if (config.auth.type !== config.type) {
-          return { ok: false, error: "auth.type must match config.type" };
-        }
-        // 不在调用方的对象上动刀：UI 传进来的 config 可能还会被复用。
-        const stored: ProviderConfig = { ...config, auth: { ...config.auth } };
-        const apiKey = stored.auth.apiKey;
-        if (apiKey) {
-          stored.auth.apiKey = undefined;
-        }
-        const id = providerManager.addConfig(stored);
-        if (apiKey) {
-          providerManager.saveApiKey(id, credentials.encrypt(apiKey));
-        }
-        return { ok: true, id };
-      } catch (err) {
-        return { ok: false, error: String(err) };
-      }
-    },
-  );
-
-  ipcMain.handle(
-    IPC.providerUpdateConfig,
-    async (_e, { id, config }: { id: string; config: Partial<ProviderConfig> }) => {
-      try {
-        if (!isValidProviderId(id)) return { ok: false, error: "Invalid provider id" };
-        const patch: Partial<ProviderConfig> = { ...config };
-        if (config.auth) patch.auth = { ...config.auth };
-        const apiKey = patch.auth?.apiKey;
-        if (apiKey) {
-          providerManager.saveApiKey(id, credentials.encrypt(apiKey));
-          patch.auth = { ...patch.auth!, apiKey: undefined };
-        }
-        const success = providerManager.updateConfig(id, patch);
-        quotaManager.invalidateCache(id);
-        return { ok: success, error: success ? undefined : "Provider not found" };
-      } catch (err) {
-        return { ok: false, error: String(err) };
-      }
-    },
-  );
-
+  ipcMain.handle(IPC.providerAddConfig, async (_e, { config }: { config: ProviderConfig }) => {
+    let wroteKey = false;
+    try {
+      validateProviderConfig(config);
+      if (providerManager.getConfig(config.id)) throw new Error("Provider ID 已存在");
+      const key = config.auth.apiKey?.trim();
+      if (config.auth.authMethod === "api-key" && !key) throw new Error("请输入 API Key");
+      if (key && config.auth.authMethod === "api-key") { providerManager.saveApiKey(config.id, credentials.encrypt(key)); wroteKey = true; }
+      providerManager.addConfig({ ...config, lastAuthenticatedAt: undefined, lastQuotaSyncAt: undefined, auth: { ...config.auth, apiKey: undefined } });
+      if (config.auth.authMethod === "api-key") await runtime.syncProvider(config.id);
+      await notify(config.id);
+      return { ok: true, id: config.id };
+    } catch (error) {
+      if (wroteKey && !providerManager.getConfig(config.id)) providerManager.deleteApiKey(config.id);
+      return { ok: false, error: errorText(error) };
+    }
+  });
+  ipcMain.handle(IPC.providerUpdateConfig, async (_e, { id, config }: { id: string; config: Partial<ProviderConfig> }) => {
+    try {
+      const existing = providerManager.getConfig(id);
+      if (!existing) throw new Error("Provider 不存在");
+      const next = { ...existing, ...config, id, auth: { ...existing.auth, ...config.auth } } as ProviderConfig;
+      if (next.type !== existing.type) throw new Error("修改 Provider 类型需要重新添加");
+      validateProviderConfig(next);
+      const key = config.auth?.apiKey?.trim();
+      if (key) providerManager.saveApiKey(id, credentials.encrypt(key));
+      cancelForProvider(id);
+      providerManager.updateConfig(id, { ...next, lastAuthenticatedAt: undefined, auth: { ...next.auth, apiKey: undefined } });
+      runtime.invalidate(id); await notify(id);
+      return { ok: true };
+    } catch (error) { return { ok: false, error: errorText(error) }; }
+  });
   ipcMain.handle(IPC.providerDeleteConfig, async (_e, { id }: { id: string }) => {
     try {
-      providerManager.deleteApiKey(id);
-      oauthHandler.deleteOAuthToken(id);
-      providerManager.deleteConfig(id);
-      quotaManager.invalidateCache(id);
+      if (!isValidProviderId(id)) throw new Error("Provider ID 无效");
+      cancelForProvider(id); providerManager.deleteConfig(id);
+      providerManager.deleteApiKey(id); oauthHandler.deleteOAuthToken(id);
+      runtime.invalidate(id); await notify(id);
       return { ok: true };
-    } catch (err) {
-      return { ok: false, error: String(err) };
-    }
+    } catch (error) { return { ok: false, error: errorText(error) }; }
   });
-
-  ipcMain.handle(IPC.providerGetStatus, async (_e, { id }: { id: string }) => {
-    const status = providerManager.getStatus(id);
-    if (!status) return null;
-
-    // ProviderManager 不知道配额缓存，这里把上次同步的结果并进去，
-    // 否则 UI 拿到的 quota 永远是 undefined、卡片上一片空白。
-    const cached = quotaManager.peek(id);
-    if (cached) {
-      status.quota = cached.quota ?? undefined;
-      status.availableModels = cached.models;
-      status.lastError = cached.error;
-    }
-    return status;
+  ipcMain.handle(IPC.providerGetStatus, async (_e, { id }: { id: string }) => status(id));
+  ipcMain.handle(IPC.providerGetUsage, async (_e, request: { range: import("@claude-desktop/shared").ProviderUsageRange; providerId?: string }) => {
+    if (!request || !["24h", "7d", "30d"].includes(request.range)) throw new Error("统计时间范围无效");
+    if (request.providerId != null && !isValidProviderId(request.providerId)) throw new Error("Provider ID 无效");
+    return runtime.getUsage(request.range, request.providerId);
   });
-
   ipcMain.handle(IPC.providerSyncQuota, async (_e, { id }: { id: string }) => {
-    try {
-      const config = providerManager.getConfig(id);
-      if (!config) return { ok: false, error: "Provider not found" };
-
-      const credential = await resolveCredential(id);
-      const result = await quotaManager.syncQuota(config, credential ?? undefined);
-      if (result.error) return { ok: false, error: result.error };
-      return { ok: true, quota: result.quota };
-    } catch (err) {
-      return { ok: false, error: String(err) };
-    }
+    const result = await runtime.syncProvider(id); await notify(id);
+    return result.error ? { ok: false, error: result.error } : { ok: true, quota: result.quota ?? undefined };
   });
-
   ipcMain.handle(IPC.providerTestAuth, async (_e, { id }: { id: string }) => {
+    const result = await runtime.syncProvider(id); await notify(id);
+    return result.error ? { ok: false, message: result.error } : { ok: true, message: `连接成功，可见 ${result.models?.length ?? 0} 个模型` };
+  });
+  ipcMain.handle(IPC.providerStartOAuth, async (_e, { id }: { id: string }) => {
+    let started: string | undefined;
+    let launch: symbol | undefined;
     try {
       const config = providerManager.getConfig(id);
-      if (!config) return { ok: false, message: "Provider not found" };
-
-      const credential = await resolveCredential(id);
-      if (!credential) {
-        return { ok: false, message: "未配置凭证（API Key 或 OAuth 登录）" };
-      }
-
-      // 复用配额同步的取数逻辑：拉一次模型列表，既验证凭证也刷新窗口信息。
-      quotaManager.invalidateCache(id);
-      const result = await quotaManager.syncQuota(config, credential);
-      if (result.error) {
-        return { ok: false, message: result.error };
-      }
-      const count = result.models?.length ?? 0;
-      return { ok: true, message: `认证成功，可见 ${count} 个模型` };
-    } catch (err) {
-      return { ok: false, message: String(err) };
-    }
-  });
-
-  // ── OAuth ──────────────────────────────────────────────────────────────
-
-  ipcMain.handle(IPC.providerStartOAuth, async (_e, { id }: { id: string }) => {
-    try {
-      if (!isValidProviderId(id)) return { ok: false, error: "Invalid provider id" };
+      if (!config || !isValidProviderId(id)) throw new Error("Provider 不存在");
+      if (pending.has(id) || launching.has(id)) throw new Error("此 Provider 正在等待授权，请先取消或完成登录");
+      launch = Symbol(id);
+      launching.set(id, launch);
+      const generation = generations.get(id) ?? 0;
       const { authorizationUrl, state, completion } = await oauthHandler.start(id);
-
-      // 在后台等回调：成功则持久化 token 并通知渲染进程，失败则只通知。
-      completion
-        .then((token) => {
-          oauthHandler.saveOAuthToken(id, token);
-          quotaManager.invalidateCache(id);
-          deps.sendToRenderer(IPC.providerUpdated, {
-            providerId: id,
-            status: providerManager.getStatus(id),
-          });
-        })
-        .catch((err: unknown) => {
-          console.warn(`[Provider] OAuth failed for ${id}:`, err);
-        });
-
-      // 授权页必须在系统浏览器里打开：内嵌 webview 会被 Google 等拒绝。
-      await shell.openExternal(authorizationUrl);
+      if ((generations.get(id) ?? 0) !== generation || !providerManager.getConfig(id)) {
+        oauthHandler.cancel(state);
+        throw new Error("Provider 配置已变更，请重新发起授权");
+      }
+      started = state;
+      pending.set(id, state); runtime.setError(id);
+      void completion.then(async token => {
+        if (pending.get(id) !== state || !providerManager.getConfig(id)) return;
+        oauthHandler.saveOAuthToken(id, token);
+        providerManager.updateConfig(id, { lastAuthenticatedAt: undefined, auth: { ...config.auth, authMethod: "oauth2", baseUrl: undefined } as ProviderConfig["auth"] });
+        pending.delete(id); runtime.invalidate(id);
+        await runtime.syncProvider(id); await notify(id);
+      }).catch(async error => {
+        if (pending.get(id) !== state) return;
+        pending.delete(id); runtime.setError(id, errorText(error)); await notify(id);
+      });
+      await shell.openExternal(authorizationUrl); await notify(id);
       return { ok: true, authorizationUrl, state };
-    } catch (err) {
-      return { ok: false, error: String(err) };
-    }
+    } catch (error) {
+      if (started) cancelForProvider(id);
+      runtime.setError(id, errorText(error)); await notify(id);
+      return { ok: false, error: errorText(error) };
+    } finally { if (launch && launching.get(id) === launch) launching.delete(id); }
   });
-
   ipcMain.handle(IPC.providerCancelOAuth, async (_e, { state }: { state: string }) => {
-    oauthHandler.cancel(state);
+    const entry = [...pending].find(([, value]) => value === state);
+    if (entry) { cancelForProvider(entry[0]); runtime.setError(entry[0], "授权已取消"); await notify(entry[0]); }
     return { ok: true };
   });
-
-  ipcMain.handle(
-    IPC.providerSetDefaultContextLimit,
-    async (_e, { providerId, limit }: { providerId: string; limit: number }) => {
-      try {
-        if (!isValidProviderId(providerId)) return { ok: false, error: "Invalid provider id" };
-        if (!Number.isFinite(limit) || limit <= 0) {
-          return { ok: false, error: "limit must be a positive number" };
-        }
-        const ok = providerManager.updateConfig(providerId, {
-          contextLimitOverride: Math.floor(limit),
-        });
-        quotaManager.invalidateCache(providerId);
-        return { ok, error: ok ? undefined : "Provider not found" };
-      } catch (err) {
-        return { ok: false, error: String(err) };
-      }
-    },
-  );
+  ipcMain.handle(IPC.providerSubmitOAuthCallback, async (_e, { state, redirectUrl }: { state: string; redirectUrl: string }) => {
+    try {
+      if (![...pending.values()].includes(state)) throw new Error("授权流程已结束，请重新登录");
+      await oauthHandler.submitCallback(state, redirectUrl);
+      return { ok: true };
+    } catch (error) { return { ok: false, error: errorText(error) }; }
+  });
+  ipcMain.handle(IPC.providerSetDefaultContextLimit, async (_e, { providerId, limit }: { providerId: string; limit: number }) => {
+    try {
+      const config = providerManager.getConfig(providerId);
+      if (!config) throw new Error("Provider 不存在");
+      validateProviderConfig({ ...config, contextLimitOverride: limit });
+      providerManager.updateConfig(providerId, { contextLimitOverride: limit }); quotaManager.invalidateCache(providerId);
+      await runtime.syncProvider(providerId); await notify(providerId);
+      return { ok: true };
+    } catch (error) { return { ok: false, error: errorText(error) }; }
+  });
 }

@@ -19,15 +19,15 @@ export function StatusDot({
   const color = COLOR[status.state] ?? COLOR.unknown;
   const title =
     status.state === "ready"
-      ? `CPA ready :${status.port}${status.managedByApp ? " (managed)" : ""}`
+      ? "Provider 服务已就绪"
       : status.state === "error"
-        ? `CPA error: ${status.message}`
-        : `CPA ${status.state}`;
+        ? `Provider 服务错误：${status.message}`
+        : status.state === "starting" ? "Provider 服务启动中…" : "Provider 服务未启动";
 
   const label =
     status.state === "error"
-      ? "CPA error"
-      : `CPA ${status.state}`;
+      ? "Provider 服务错误"
+      : status.state === "ready" ? "Provider 服务已就绪" : status.state === "starting" ? "Provider 服务启动中…" : "Provider 服务未启动";
 
   return (
     <span className="status-dot-wrap" title={title}>

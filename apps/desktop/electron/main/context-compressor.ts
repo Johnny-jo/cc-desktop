@@ -146,20 +146,20 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null;
 }
 
-function createCpaSummarizer(
-  getSettings: () => AppSettings,
-  getToken: () => string | null,
+function createProviderSummarizer(
+  getSettings: () => Pick<AppSettings, "defaultModel">,
+  getTarget: () => { origin: string; token: string } | null,
 ): (text: string) => Promise<string> {
   return async (text: string) => {
     const settings = getSettings();
-    const token = getToken();
-    if (!token) throw new Error("CPA token not set for summarization");
-    const url = `http://127.0.0.1:${settings.cpaPort}/v1/messages`;
+    const target = getTarget();
+    if (!target) throw new Error("Provider 服务尚未就绪，无法压缩上下文");
+    const url = `${target.origin}/v1/messages`;
     const res = await fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
+        Authorization: `Bearer ${target.token}`,
       },
       body: JSON.stringify({
         model: settings.defaultModel,
@@ -200,11 +200,11 @@ function createCpaSummarizer(
 }
 
 export function createContextCompressor(
-  getSettings: () => AppSettings,
-  getToken: () => string | null,
+  getSettings: () => Pick<AppSettings, "defaultModel">,
+  getTarget: () => { origin: string; token: string } | null,
 ): ContextCompressor {
   return {
     compress: (items: ChatItem[]) =>
-      compressContext(items, { summarize: createCpaSummarizer(getSettings, getToken) }),
+      compressContext(items, { summarize: createProviderSummarizer(getSettings, getTarget) }),
   };
 }

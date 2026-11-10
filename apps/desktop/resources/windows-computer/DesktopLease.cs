@@ -13,6 +13,8 @@ namespace AgentOS.Computer
     // indicator responsive even when an accessibility provider blocks a request.
     internal sealed class DesktopLease : IDisposable
     {
+        internal static Action BeforeStop = delegate { };
+        internal static Func<bool> CanReleaseIdle = delegate { return true; };
         const int WmKeyDown = 0x0100, WmSysKeyDown = 0x0104;
         const int WmKeyUp = 0x0101, WmSysKeyUp = 0x0105;
         const int InjectedKey = 0x10; // LLKHF_INJECTED, including the helper's SendInput
@@ -82,7 +84,7 @@ namespace AgentOS.Computer
                 if (hook != IntPtr.Zero) UnhookWindowsHookEx(hook);
                 if (registered) UnregisterHotKey(Handle, HotkeyId);
                 if (Handle != IntPtr.Zero) DestroyHandle();
-                if (stopping) Environment.Exit(42); // A key consumed during teardown must still revoke the connection.
+                if (stopping) { BeforeStop(); Environment.Exit(42); } // Release owned input before revocation.
             }
         }
 
@@ -160,7 +162,7 @@ namespace AgentOS.Computer
                         while (true)
                         {
                             Application.DoEvents();
-                            if (window.Stopping) Environment.Exit(42);
+                            if (window.Stopping) { BeforeStop(); Environment.Exit(42); }
                             if (ending.WaitOne(0)) break;
                             if (showControl && overlay == null)
                             {
@@ -180,7 +182,7 @@ namespace AgentOS.Computer
             }
             catch (Exception ex)
             {
-                if (!initializing) Environment.Exit(42); // An active connection has lost its stop handler or indicator.
+                if (!initializing) { BeforeStop(); Environment.Exit(42); } // An active connection lost its stop handler or indicator.
                 startupError = ex;
                 ready.Set();
             }
@@ -223,7 +225,7 @@ namespace AgentOS.Computer
         {
             // The bridge finishes the frame after OCR. Its deadline covers both
             // capture and inference; control otherwise survives normal agent think time.
-            if (owned && idle.Elapsed >= TimeSpan.FromSeconds(analyzingFrame ? 75 : 45)) Release();
+            if (owned && idle.Elapsed >= TimeSpan.FromSeconds(analyzingFrame ? 75 : 45) && CanReleaseIdle()) Release();
         }
 
         public void BeginFrame()

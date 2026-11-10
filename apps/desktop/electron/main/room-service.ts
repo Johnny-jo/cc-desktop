@@ -81,7 +81,7 @@ import { RoomAttachmentTransfer } from "./room-attachment-transfer";
 import { readAttachment } from "./attachment-reader";
 import { createRoomChatMcp, type RoomAgentMessage } from "./room-chat-agent";
 import type { SettingsStore } from "./settings-store";
-import type { CpaSupervisor } from "./cpa-supervisor";
+import type { ModelRuntime } from "./model-runtime";
 import {
   buildReqFrames,
   buildResFrames,
@@ -708,7 +708,7 @@ export class RoomService {
    * debug IPC can snapshot them; tests inject a quiet instance.
    */
   readonly metrics: RoomMetrics;
-  private readonly cpa?: CpaSupervisor;
+  private readonly cpa?: ModelRuntime;
   private readonly aiProxies = new Map<string, LoopbackProxy>();
   private readonly aiHttpWait = new Map<
     string,
@@ -756,7 +756,7 @@ export class RoomService {
     cloudflaredPath?: string;
     /** Injectable transport counters (tests pass a silent logger). */
     metrics?: RoomMetrics;
-    cpa?: CpaSupervisor;
+    cpa?: ModelRuntime;
   }) {
     this.hostedTransport = opts.hostedTransport;
     this.getWindow = opts.getWindow;
@@ -4846,7 +4846,7 @@ export function activate(ctx) {
     };
     const target = this.cpa?.getProxyTarget();
     if (!target) {
-      fail(503, "本机 CPA 未就绪，无法出借 AI");
+        fail(503, "本机 Provider 服务未就绪，无法出借 AI");
       return;
     }
     const owner = r.members.find((m) => m.userId === r.localUserId);

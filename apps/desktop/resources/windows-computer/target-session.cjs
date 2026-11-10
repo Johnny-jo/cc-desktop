@@ -85,7 +85,8 @@ function createTargetSession({ request, observePixels }) {
     const windowBounds = ui?.bounds ?? frame.windowBounds;
     const targets = selectTargets(all, {query, action}).filter(t => withinRegion(t, windowBounds, region));
     const sceneId = "scene-" + randomUUID();
-    scene = { id: sceneId, windowId, visualObservationId: frame?.observationId, captureSource:frame?.captureSource,
+    scene = { id: sceneId, windowId, bounds:windowBounds, uiaObservationId:ui?.observationId,
+      visualObservationId: frame?.observationId, captureSource:frame?.captureSource,
       bindings: new Map(targets.map(t => [t.id, bindings.get(t.id)])),
       passwordBounds:(ui?.controls ?? []).filter(row => row.isPassword && row.bounds).map(row => row.bounds) };
     const view = { windowId, sceneId, bounds:windowBounds, targets, visionUsed: Boolean(frame), pagesRead:pages,
@@ -164,6 +165,43 @@ function createTargetSession({ request, observePixels }) {
     return {status:observed ? "not_observed" : "unavailable", ...(warnings.length ? {warnings} : {})};
   }
 
+  async function pointerAction(operation, args, signal) {
+    const {windowId, sceneId, verifyText} = args;
+    if (!scene || scene.id !== sceneId || scene.windowId !== windowId)
+      throw Error("Scene expired or belongs to a different window. Inspect again.");
+    const integer = (value, min, max, label) => {
+      if (!Number.isInteger(value) || value < min || value > max) throw Error("Invalid " + label + ": expected a bounded integer.");
+      return value;
+    };
+    const coordinate = value => integer(value, -2147483648, 2147483647, "coordinate");
+    const point = (x, y) => {
+      coordinate(x); coordinate(y);
+      const b = scene.bounds;
+      if (x < b.x || y < b.y || x >= b.x + b.width || y >= b.y + b.height)
+        throw Error("The point is outside the observed window bounds. Inspect again.");
+    };
+    let input;
+    if (operation === "scroll") {
+      point(args.x, args.y);
+      const deltaX = integer(args.deltaX ?? 0, -20, 20, "deltaX");
+      const deltaY = integer(args.deltaY ?? 0, -20, 20, "deltaY");
+      if (!deltaX && !deltaY) throw Error("Supply a nonzero deltaX or deltaY.");
+      input = {x:args.x,y:args.y,deltaX,deltaY};
+    } else {
+      point(args.startX, args.startY); point(args.endX, args.endY);
+      input = {startX:args.startX,startY:args.startY,endX:args.endX,endY:args.endY,
+        durationMs:integer(args.durationMs ?? 500, 1, 2000, "durationMs")};
+    }
+    const {passwordBounds, captureSource, visualObservationId, uiaObservationId} = scene;
+    invalidate(); // An uncertain write consumes the original observation as well.
+    signal.throwIfAborted();
+    await request(operation, {windowId,observationId:visualObservationId ?? uiaObservationId,...input}, signal);
+    let verification;
+    try { verification = await readback(windowId, verifyText, signal, operation, passwordBounds, captureSource); }
+    catch (error) { verification = signal.aborted ? {status:"interrupted"} : {status:"unavailable",warnings:[message(error)]}; }
+    return {executed:true,windowId,via:operation,verification};
+  }
+
   async function act(args, signal) {
     const {windowId, sceneId, targetId, action, value, verifyText} = args;
     if (!scene || scene.id !== sceneId || scene.windowId !== windowId) throw Error("Scene expired or belongs to a different window. Inspect again.");
@@ -197,7 +235,9 @@ function createTargetSession({ request, observePixels }) {
     }
     return { executed:true, windowId, targetId, via, verification };
   }
-  return { inspect, act, click, invalidate };
+  return { inspect, act, click, invalidate,
+    scroll:(args,signal) => pointerAction("scroll",args,signal),
+    drag:(args,signal) => pointerAction("drag",args,signal) };
 }
 
 module.exports = { createTargetSession };

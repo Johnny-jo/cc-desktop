@@ -283,6 +283,30 @@ namespace AgentOS.Computer
             ComparePatch(pixels, region, patch, now);
         }
 
+        internal void ValidatePointerGeometry(string target, string id)
+        {
+            if (observationId == null || id != observationId || target != windowId)
+                throw new InvalidOperationException("This visual observation expired or belongs to another window. Capture again.");
+            CheckGeometry(target,windowBounds);
+        }
+
+        internal Action ValidatePointerObservation(string target, string id, int x, int y, int endX, int endY)
+        {
+            ValidatePointerGeometry(target,id);
+            var screen = OnScreen(windowBounds,region);
+            if (!screen.Contains(x,y) || !screen.Contains(endX,endY))
+                throw new InvalidOperationException("The pointer endpoints are outside the captured region. Capture the intended path again.");
+            var start = ClickPatch(pixels,screen,new Point(x,y),null);
+            var end = ClickPatch(pixels,screen,new Point(endX,endY),null);
+            start.Offset(-windowBounds.X,-windowBounds.Y);
+            end.Offset(-windowBounds.X,-windowBounds.Y);
+            return delegate {
+                ValidatePointerGeometry(target,id);
+                ValidatePixels(start);
+                if (end != start) ValidatePixels(end);
+            };
+        }
+
         public object Click(string target, string id, int x, int y, string button, Action<int, int, bool> movePointer,
             Rectangle? targetBounds = null, bool requirePointerAtTarget = false)
         {

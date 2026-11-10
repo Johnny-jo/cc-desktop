@@ -11,7 +11,7 @@
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck",
-    "prepare:vendor": "node scripts/prepare-vendor.mjs",
+    "prepare:vendor": "node scripts/prepare-vendor.mjs --claude-only",
     "prepare:vendor:cpa": "node scripts/prepare-vendor.mjs --cpa-only",
     "prepare:vendor:claude": "node scripts/prepare-vendor.mjs --claude-only",
     "verify:vendor:claude": "node scripts/verify-claude-vendor.mjs",

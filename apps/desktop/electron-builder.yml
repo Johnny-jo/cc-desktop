@@ -26,7 +26,7 @@ asar: true
 buildDependenciesFromSource: false
 npmRebuild: false
 
-# Ship Claude Code CLI + CPA outside asar so they can be spawned.
+# Ship Claude Code CLI outside asar so it can be spawned.
 # Populate vendor/ via: node scripts/prepare-vendor.mjs (from monorepo root).
 extraResources:
   - from: resources/windows-computer/dist
@@ -47,14 +47,6 @@ extraResources:
     to: bin/claude
     filter:
       - "**/*"
-  - from: ../../vendor/win-x64/cpa
-    to: bin/cpa
-    filter:
-      - cli-proxy-api.exe
-      - config.template.yaml
-      - static/**
-      - "!config.yaml"
-      - "!config.yml"
   # Optional cloudflared for T2 room tunnels. The dir may stay empty —
   # prepare-vendor.mjs creates it; the binary itself is never committed.
   - from: ../../vendor/win-x64/cloudflared

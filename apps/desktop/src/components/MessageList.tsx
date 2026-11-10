@@ -38,6 +38,7 @@ import { createChatScrollController } from "../lib/chat-scroll-controller";
 import "./ChatProgressLayout.css";
 import { toProjectRel } from "../lib/project-path";
 import { getDesktop } from "../lib/desktop-api";
+import { useModelDisplay } from "../hooks/useModelDisplay";
 
 /** Long skill / system dumps that slipped through as plain text. */
 function looksLikeSkillDump(text: string): boolean {
@@ -562,6 +563,7 @@ function ModelQuotaRail({
   label: string;
   staleLabel: string;
 }) {
+  const modelLabel = useModelDisplay();
   const limiting = quota.windows.reduce((worst, window) =>
     window.usedPercent > worst.usedPercent ? window : worst,
   );
@@ -585,7 +587,7 @@ function ModelQuotaRail({
       </span>
       <span className="model-quota-rail-popover">
         <strong>{Math.round(remaining)}% {label}</strong>
-        <span>{quota.modelId} · {quota.provider}</span>
+        <span title={quota.modelId}>{modelLabel(quota.modelId)} · {quota.provider}</span>
         {quota.stale ? <span>{staleLabel}</span> : null}
         {quota.windows.map((window) => (
           <span key={window.label}>

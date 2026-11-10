@@ -1,6 +1,7 @@
 import type { ContextUsage } from "@claude-desktop/shared";
 import { formatContextUsageLine } from "../lib/format-usage";
 import { useI18n } from "../i18n/useI18n";
+import { useModelDisplay } from "../hooks/useModelDisplay";
 
 const RING_R = 7;
 const RING_C = 2 * Math.PI * RING_R;
@@ -11,6 +12,7 @@ const RING_C = 2 * Math.PI * RING_R;
  */
 export function ContextRing({ usage }: { usage?: ContextUsage | null }) {
   const { t } = useI18n();
+  const modelLabel = useModelDisplay();
   const ratio = usage ? Math.max(0, Math.min(1, usage.ratio)) : 0;
   return (
     <span
@@ -33,7 +35,7 @@ export function ContextRing({ usage }: { usage?: ContextUsage | null }) {
       </svg>
       <span className="context-ring-popover">
         <strong>{usage ? formatContextUsageLine(usage) : "—"}</strong>
-        {usage ? <span>{usage.modelId}</span> : null}
+        {usage ? <span title={usage.modelId}>{modelLabel(usage.modelId)}</span> : null}
       </span>
     </span>
   );

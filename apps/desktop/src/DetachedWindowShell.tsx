@@ -32,7 +32,7 @@ export function DetachedWindowShell({
 }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const settings = useAppStore((state) => state.settings);
-  const needsOnboarding = settings != null && !settings.hasToken;
+  const needsOnboarding = settings != null && !settings.setupCompleted;
 
   useEffect(() => {
     void bootstrapStore();

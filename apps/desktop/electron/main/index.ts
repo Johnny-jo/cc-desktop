@@ -29,8 +29,9 @@ import { DiffTracker } from "./diff-tracker";
 import { SnapshotStore } from "./snapshot-store";
 import { PermissionBroker } from "./permission-broker";
 import { UserPromptBroker } from "./user-prompt-broker";
-import { CpaSupervisor } from "./cpa-supervisor";
-import { applyCpaModelCatalog } from "./cpa-model-sync";
+import { ProviderRuntime } from "./provider-runtime";
+import { ProviderUsageStore } from "./provider-usage-store";
+import { applyProviderModelCatalog } from "./provider-model-sync";
 import { SessionArchive } from "./session-archive";
 import { SessionManager, type QueryFn } from "./session-manager";
 import { PdfCompatibilityProxy } from "./pdf-compatibility-proxy";
@@ -43,10 +44,6 @@ import { CredentialManager } from "./credential-manager";
 import { registerProviderHandlers } from "./provider-ipc-handlers";
 import {
   getClaudeExecutablePath,
-  isPlaceholderCpaConfig,
-  repairCpaManagementConfig,
-  resolveEffectiveCpaPaths,
-  writeCpaConfigWithApiKey,
   type RuntimePathEnv,
 } from "./runtime-paths";
 import { retireBuiltinPathGuardSkill, userSkillsDir } from "./skill-store";
@@ -376,56 +373,13 @@ function bootstrap() {
     decrypt,
   });
 
-  // Resolve bundled Claude + CPA paths (packaged resources/ or vendor/ dev).
+  // Resolve the bundled Claude CLI; model credentials and transport are app-owned.
   const pathEnv: RuntimePathEnv = {
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
     userDataDir,
   };
   const claudeExe = getClaudeExecutablePath(pathEnv);
-  const current = settings.get();
-  const cpaPaths = resolveEffectiveCpaPaths(pathEnv, current, {
-    apiKey: settings.getToken(),
-  });
-  // Seed settings when empty or still on legacy hard-coded paths.
-  if (
-    current.cpaExePath !== cpaPaths.cpaExePath ||
-    current.cpaConfigPath !== cpaPaths.cpaConfigPath
-  ) {
-    settings.update({
-      cpaExePath: cpaPaths.cpaExePath,
-      cpaConfigPath: cpaPaths.cpaConfigPath,
-    });
-  }
-  // Older installs used disable-control-panel: true and empty secret-key,
-  // which makes /management.html fail with a network/404 error even though
-  // GET / still works. Repair is panel-only: never rewrites non-empty keys.
-  repairCpaManagementConfig(cpaPaths.cpaConfigPath, {
-    apiKey: settings.getToken(),
-    port: current.cpaPort,
-  });
-  // Legacy: token exists but wizard flag missing. Mark complete WITHOUT
-  // rewriting CPA config if the user already customized it (providers,
-  // hashed secret-key, non-placeholder api-keys). Full rewrite only when
-  // config still looks like the virgin template.
-  if (settings.getToken() && !settings.get().setupCompleted) {
-    try {
-      const cfgPath = cpaPaths.cpaConfigPath;
-      const body =
-        cfgPath && fs.existsSync(cfgPath)
-          ? fs.readFileSync(cfgPath, "utf8")
-          : "";
-      if (!body || isPlaceholderCpaConfig(body)) {
-        writeCpaConfigWithApiKey(pathEnv, {
-          port: settings.get().cpaPort || 8317,
-          apiKey: settings.getToken()!,
-        });
-      }
-    } catch {
-      // non-fatal — flag still gets set so we never loop rewrite attempts
-    }
-    settings.update({ setupCompleted: true });
-  }
 
   // Fresh machines have no ~/.claude at all. Create the skills root so
   // Settings → Skills「打开目录」always works and the dir is discoverable
@@ -543,47 +497,26 @@ function bootstrap() {
     },
   });
 
-  // Auto-sync CPA's model registry (incl. reasoning efforts of
-  // openai-compatibility keys) whenever CPA transitions into ready — no
-  // more manual Settings → 从 CPA 同步模型 round-trips.
-  let cpaPrevState: CpaStatus["state"] = "unknown";
-  let cpaModelSyncRunning = false;
-  let cpaModelSyncTimer: NodeJS.Timeout | null = null;
-
-  const cpa = new CpaSupervisor({
-    getSettings: () => settings.get(),
-    getToken: () => settings.getToken(),
-    onStatusChange: (status: CpaStatus) => {
-      sendToRenderer(IPC.cpaStatusEvent, status);
-      const becameReady = status.state === "ready" && cpaPrevState !== "ready";
-      cpaPrevState = status.state;
-      if (!becameReady) return;
-      void autoSyncCpaModels();
-      // Providers (esp. openai-compatibility keys) may still be loading
-      // right after the port opens — one delayed pass catches late arrivals.
-      if (cpaModelSyncTimer) clearTimeout(cpaModelSyncTimer);
-      cpaModelSyncTimer = setTimeout(() => {
-        cpaModelSyncTimer = null;
-        void autoSyncCpaModels();
-      }, 15_000);
-      cpaModelSyncTimer.unref?.();
-    },
-  });
-
-  const autoSyncCpaModels = async (): Promise<void> => {
-    if (cpaModelSyncRunning) return;
-    cpaModelSyncRunning = true;
-    try {
-      const catalog = await cpa.listModelCatalog();
-      if (applyCpaModelCatalog(catalog, settings)) {
+  const providerManager = new ProviderManager({ userDataDir });
+  const quotaManager = new QuotaManager();
+  const providerCredentials = new CredentialManager(
+    safeStorage.isEncryptionAvailable() ? { encrypt, decrypt } : null,
+  );
+  const oauthHandler = new OAuthHandler(providerManager, providerCredentials);
+  const providerUsage = ProviderUsageStore.open(userDataDir);
+  const modelRuntime = new ProviderRuntime({
+    providerManager, quotaManager, credentials: providerCredentials, oauthHandler,
+    getDefaultModel: () => settings.get().defaultModel,
+    usageStore: providerUsage,
+    onUsageUpdated: () => sendToRenderer(IPC.providerUsageUpdated, { at: Date.now() }),
+    onStatusChange: (status: CpaStatus) => sendToRenderer(IPC.cpaStatusEvent, status),
+    onCatalogChanged: (validatedProviderId) => {
+      if (applyProviderModelCatalog(modelRuntime.getModelCatalog(), settings, providerManager.listConfigs().filter(c => c.enabled).map(c => c.id), validatedProviderId)) {
         sendToRenderer(IPC.settingsUpdated, settings.getPublic());
       }
-    } catch {
-      // best-effort — CPA may still be warming up its registry
-    } finally {
-      cpaModelSyncRunning = false;
-    }
-  };
+      sendToRenderer(IPC.modelCatalogUpdated, { at: Date.now() });
+    },
+  });
 
   const sessions = new SessionManager({
     pdfCompatibility: new PdfCompatibilityProxy(),
@@ -591,7 +524,7 @@ function bootstrap() {
     permissionBroker: permissions,
     userPromptBroker: userPrompts,
     diffTracker: diffs,
-    cpa,
+    cpa: modelRuntime,
     settings,
     archive,
     snapshots,
@@ -600,7 +533,7 @@ function bootstrap() {
     browserAuthStorePath: path.join(userDataDir, "browser-auth.json"),
     compressor: createContextCompressor(
       () => settings.get(),
-      () => settings.getToken(),
+      () => modelRuntime.getProxyTarget(),
     ),
     emit: (event: SdkNormalizedEvent) => {
       sendToSessionRenderers(event.sessionId, IPC.sessionEvent, event);
@@ -676,7 +609,7 @@ function bootstrap() {
     userDataDir,
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
-    cpa,
+    cpa: modelRuntime,
   });
 
   const applyCliModelToDesktop = (model: string) => {
@@ -703,18 +636,6 @@ function bootstrap() {
   });
   photoFlow.setEnabled(settings.get().photoFlowEnabled !== false);
 
-  // Provider 管理（替代 CLI proxy API）
-  const providerManager = new ProviderManager({
-    userDataDir,
-  });
-  const quotaManager = new QuotaManager();
-  // 凭证加密复用与设置存储同一套 safeStorage 封装：系统加密不可用时明确降级，
-  // 不再像旧实现那样拼 PowerShell 命令串。
-  const providerCredentials = new CredentialManager(
-    safeStorage.isEncryptionAvailable() ? { encrypt, decrypt } : null,
-  );
-  const oauthHandler = new OAuthHandler(providerManager, providerCredentials);
-
   registerIpcHandlers({
     photoFlow,
     window: getMainWindow,
@@ -722,7 +643,7 @@ function bootstrap() {
     permissions,
     userPrompts,
     settings,
-    cpa,
+    cpa: modelRuntime,
     diffs,
     snapshots,
     terminal,
@@ -747,6 +668,7 @@ function bootstrap() {
     credentials: providerCredentials,
     quotaManager,
     oauthHandler,
+    runtime: modelRuntime,
     sendToRenderer,
   });
 
@@ -778,52 +700,27 @@ function bootstrap() {
 
   createWindow();
   createTray();
-  // Hot updates replace app binaries only — never AppData / CPA config.
+  // Hot updates replace app binaries only; account data stays in AppData.
   autoUpdater.start();
-  // NSIS upgrade taskkills cli-proxy-api.exe. Bring bundled CPA back up so
-  // the user is not left with a dead gateway after install/update.
-  void cpa.ensureReady().catch(() => undefined);
+  void modelRuntime.ensureReady().then(() => modelRuntime.listModelCatalog()).catch(() => undefined);
 
   // 启动后台配额同步（1 小时一次）
   // 只同步「已配置凭证」的 provider，并在拿到模型目录后把状态推给渲染进程。
   // 不再做 usedQuota/limitTokens 的 80% 告警：这些上游没有通用的用量接口，
-  // 真正的账号配额由 CPA 侧（cpa-quota.ts）负责。
+  // 模型目录和窗口不是计费额度，拿不到真实用量时不编造数值。
   const quotaSyncInterval = setInterval(async () => {
     for (const config of providerManager.listConfigs()) {
       if (!config.enabled) continue;
 
-      const encrypted = providerManager.loadApiKey(config.id);
-      let credential: string | null = null;
-      if (encrypted) {
-        try {
-          credential = providerCredentials.decrypt(encrypted);
-        } catch (err) {
-          console.warn(`[Provider] Cannot decrypt API key for ${config.id}:`, err);
-        }
-      }
-      if (!credential) {
-        credential = await oauthHandler.ensureFreshToken(config.id);
-      }
-      if (!credential) continue;
-
       try {
-        quotaManager.invalidateCache(config.id);
-        const result = await quotaManager.syncQuota(config, credential);
+        const result = await modelRuntime.syncProvider(config.id);
         if (result.error) {
           console.warn(`[Provider] Quota sync failed for ${config.id}: ${result.error}`);
           continue;
         }
         sendToRenderer(IPC.providerUpdated, {
           providerId: config.id,
-          status: {
-            providerId: config.id,
-            type: config.type,
-            name: config.name,
-            enabled: config.enabled,
-            authenticated: true,
-            quota: result.quota ?? undefined,
-            availableModels: result.models,
-          },
+          status: await modelRuntime.providerStatus(config.id),
         });
       } catch (err) {
         console.warn(`[Provider] Quota sync failed for ${config.id}:`, err);
@@ -834,12 +731,11 @@ function bootstrap() {
   app.on("before-quit", () => {
     isQuitting = true;
     photoFlow.dispose();
-    if (cpaModelSyncTimer) clearTimeout(cpaModelSyncTimer);
+    oauthHandler.cancelAll();
     clearInterval(quotaSyncInterval);
     stopClaudeSettingsWatch();
-    // stopIfManaged is a no-op unless this app spawned CPA.
-    // Always call it so managed children are not orphaned on quit.
-    cpa.stopIfManaged();
+    modelRuntime.stopIfManaged();
+    providerUsage?.close();
     rooms.disposeAll();
     terminal.killAll();
     // Flush delayed archives and close visible + hidden SDK sessions.

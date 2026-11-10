@@ -8,6 +8,7 @@ import type {
   McpServersMap,
   McpSetServersResultDto,
   PermissionMode,
+  ReasoningEffort,
   SdkNormalizedEvent,
   SessionMcpServerStatus,
   SessionSearchHit,
@@ -21,7 +22,7 @@ import type {
 } from "@claude-desktop/shared";
 import type { PermissionBroker } from "./permission-broker";
 import type { DiffTracker } from "./diff-tracker";
-import type { CpaSupervisor } from "./cpa-supervisor";
+import type { ModelRuntime } from "./model-runtime";
 import type { SettingsStore } from "./settings-store";
 import type { UserPromptBroker } from "./user-prompt-broker";
 import {
@@ -122,7 +123,7 @@ export type SessionManagerDeps = {
   permissionBroker: PermissionBroker;
   userPromptBroker?: UserPromptBroker;
   diffTracker: DiffTracker;
-  cpa: CpaSupervisor;
+  cpa: ModelRuntime;
   settings: SettingsStore;
   /** Persist session index + transcripts across restarts */
   archive?: SessionArchive;
@@ -292,6 +293,8 @@ type SessionEntry = {
   extraAllowedTools?: string[];
   /** Snapshot actually attached to the live query, not staged next-turn extras. */
   queryExtras?: QueryExtras;
+  /** Resolved effort actually attached to the live SDK query. */
+  queryEffort?: ReasoningEffort;
   model?: string;
   permissionMode?: PermissionMode;
   /** Room turns only: confine file tools to this root (see SessionRunOpts). */
@@ -308,7 +311,10 @@ type SessionEntry = {
 };
 
 function desktopToolPrefixes(servers: McpServersMap): string[] {
-  return Object.entries(servers).filter(([, config]) => config.type === "windows-computer")
+  // Attached browsers also hold an input lease; release their MCP transport at
+  // the end of a turn. Isolated browser contexts can remain warm independently.
+  return Object.entries(servers).filter(([, config]) => config.type === "windows-computer" ||
+    (config.type === "playwright" && config.connection !== "isolated"))
     .map(([name]) => `mcp__${name}__`);
 }
 
@@ -595,7 +601,7 @@ export class SessionManager {
   private readonly permissionBroker: PermissionBroker;
   private readonly userPromptBroker: UserPromptBroker | undefined;
   private readonly diffTracker: DiffTracker;
-  private readonly cpa: CpaSupervisor;
+  private readonly cpa: ModelRuntime;
   private readonly settings: SettingsStore;
   private readonly archive: SessionArchive | undefined;
   private readonly emit: SessionManagerDeps["emit"];
@@ -775,6 +781,7 @@ export class SessionManager {
     entry.input = undefined;
     entry.query = undefined;
     entry.queryExtras = undefined;
+    entry.queryEffort = undefined;
     entry.consumer = undefined;
   }
 
@@ -783,7 +790,8 @@ export class SessionManager {
     if (!entry.query || entry.turnActive) return;
     if (entry.usedDesktopControl) {
       // Closing this SDK stream closes the MCP's stdin and its native workers,
-      // including the elevated worker. continue() resumes the same SDK session.
+      // including elevated workers and attached browser leases. continue()
+      // resumes the same SDK session without closing the user's browser.
       this.parkSession(entry);
       return;
     }
@@ -1742,6 +1750,7 @@ export class SessionManager {
         entry.input = undefined;
         entry.query = undefined;
         entry.queryExtras = undefined;
+        entry.queryEffort = undefined;
         entry.consumer = undefined;
       }
       entry.resumeAtAnchor = userMessageId;
@@ -1899,6 +1908,7 @@ export class SessionManager {
     entry.input = undefined;
     entry.query = undefined;
     entry.queryExtras = undefined;
+    entry.queryEffort = undefined;
     entry.consumer = undefined;
     this.enforceTranscriptCacheCap();
   }
@@ -2142,6 +2152,10 @@ export class SessionManager {
       throw new Error(`Unknown session: ${sessionId}`);
     }
     opts?.roomAbortSignal?.throwIfAborted();
+    if (entry.turnActive && entry.queryEffort !== this.resolveEffort(entry)) {
+      await this.waitForTurnIdle(sessionId, opts?.roomAbortSignal);
+      opts?.roomAbortSignal?.throwIfAborted();
+    }
     const roomTurn = this.setRoomAbortSignal(entry, opts?.roomAbortSignal);
     this.clearIdleCloseTimer(entry);
     entry.lastQueryUsedAt = Date.now();
@@ -2185,7 +2199,7 @@ export class SessionManager {
 
     // Compare with the query's binding, not a previous attempt's staged extras:
     // CPA preparation can fail after entry was updated, leaving the old query live.
-    reopenForExtras ||= entry.queryExtras?.pathJail !== entry.pathJail || extrasChanged(
+    reopenForExtras ||= entry.queryEffort !== this.resolveEffort(entry) || entry.queryExtras?.pathJail !== entry.pathJail || extrasChanged(
       entry.queryExtras?.servers,
       entry.queryExtras?.allowedTools,
       entry.extraMcpServers ?? {},
@@ -2238,6 +2252,7 @@ export class SessionManager {
         entry.input = undefined;
         entry.query = undefined;
         entry.queryExtras = undefined;
+        entry.queryEffort = undefined;
         entry.consumer = undefined;
         await this.openStreamingSession(sessionId, content, { resume: true });
         return;
@@ -2279,16 +2294,16 @@ export class SessionManager {
     const message =
       status.state === "error"
         ? status.message
-        : `CPA is not ready (state=${status.state})`;
+            : `Provider 服务尚未就绪 (state=${status.state})`;
 
     const sid = sessionId ?? "unknown";
     this.emit({
       type: "result",
       sessionId: sid,
       ok: false,
-      error: `CPA: ${message}`,
+          error: `Provider: ${message}`,
     });
-    throw new Error(`CPA: ${message}`);
+      throw new Error(`Provider: ${message}`);
   }
 
   private resolveClaudePath() {
@@ -2297,6 +2312,11 @@ export class SessionManager {
       resourcesPath: process.resourcesPath,
       userDataDir: "",
     });
+  }
+
+  private resolveEffort(entry: SessionEntry, settings = this.settings.get()): ReasoningEffort | undefined {
+    const model = entry.model || settings.defaultModel;
+    return settings.modelEfforts?.[model] ?? this.cpa.getModelCatalog().find(item => item.id === model)?.defaultReasoningEffort ?? settings.effort;
   }
 
   private buildOptions(
@@ -2325,8 +2345,7 @@ export class SessionManager {
       permissionMode: entry.permissionMode ?? settings.permissionMode,
       model: entry.model || settings.defaultModel,
       ...(() => {
-        const model = entry.model || settings.defaultModel;
-        const effort = settings.modelEfforts?.[model] ?? settings.effort;
+        const effort = this.resolveEffort(entry, settings);
         return effort ? { effort } : {};
       })(),
       ...(claudePath ? { pathToClaudeCodeExecutable: claudePath } : {}),
@@ -2631,6 +2650,7 @@ export class SessionManager {
       });
       entry.query = q as QueryHandle & QueryControl;
       entry.queryExtras = queryExtras;
+      entry.queryEffort = options.effort as ReasoningEffort | undefined;
       this.enforceLiveQueryCap(sessionId);
 
       // Kick off consumer before first push so we don't miss early messages.
@@ -2922,26 +2942,34 @@ export class SessionManager {
     }
   }
 
-  private waitForTurnIdle(sessionId: string): Promise<void> {
+  private waitForTurnIdle(sessionId: string, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.reject(signal.reason);
     const entry = this.sessions.get(sessionId);
     if (!entry) return Promise.resolve();
     if (!entry.turnActive) return Promise.resolve();
 
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       const start = Date.now();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const cleanup = () => { clearTimeout(timer); signal?.removeEventListener("abort", onAbort); };
+      const onAbort = () => { cleanup(); reject(signal?.reason); };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted) { onAbort(); return; }
       const tick = () => {
         const e = this.sessions.get(sessionId);
         if (!e || !e.turnActive) {
+          cleanup();
           resolve();
           return;
         }
         // Safety: don't hang forever (30 min)
         if (Date.now() - start > 30 * 60 * 1000) {
           e.turnActive = false;
+          cleanup();
           resolve();
           return;
         }
-        setTimeout(tick, 50);
+        timer = setTimeout(tick, 50);
       };
       tick();
     });

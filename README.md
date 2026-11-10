@@ -1,6 +1,6 @@
 # CC Desktop
 
-一个面向 Windows 的非官方 Claude Code 桌面客户端。它把 Claude Agent SDK、真实的 Claude Code CLI、代码工作区和本机 CLIProxyAPI（CPA）模型网关整合到同一个 Electron 应用中。
+一个面向 Windows 的非官方 Claude Code 桌面客户端。它把 Claude Agent SDK、真实的 Claude Code CLI、代码工作区和应用自有的 Provider 账号与模型接入整合到同一个 Electron 应用中。
 
 > **非官方项目**：本项目与 Anthropic、OpenAI 或 CLIProxyAPI 没有隶属、赞助或授权关系，也不提供任何模型账号。
 
@@ -13,7 +13,7 @@ Claude Code 的能力很强，但纯终端工作流不适合所有场景：会�
 - 会话、对话和文件变更分栏展示
 - 直接查看、编辑、搜索和回滚项目文件
 - 桌面界面与原生 Claude Code TUI 之间快速切换
-- 从 CPA 同步模型及其真实可用的推理强度
+- 管理各家 API Key 与 OAuth 账号，直接同步上游模型目录
 - 在局域网或中继网络中共享 Agent 会话
 - 在不丢失历史的前提下限制长会话内存和磁盘增长
 
@@ -49,15 +49,19 @@ Claude Code 的能力很强，但纯终端工作流不适合所有场景：会�
 
 按 `Ctrl+Shift+L` 可以切换到 CLI 模式。这里运行的是实际的 `claude` TUI，通过 PTY + xterm.js 承载，不是模拟出来的终端界面；`--resume`、斜杠命令、权限交互和原生快捷键仍由 Claude Code 处理。切入 CLI 后，桌面 SDK 流会暂停，避免同一会话被两条执行链同时占用。
 
-### CPA 模型与配额
+### Provider 账号与模型接入
 
-- 连接本机 CPA 的 OpenAI 兼容端点（默认 `127.0.0.1:8317`）
-- 从 CPA `/v1/models` 自动同步模型目录
-- 读取模型目录公开的 `reasoning_efforts`、`reasoning_levels` 等字段，按模型显示真实可用的 `low`、`medium`、`high`、`max` 等推理强度；不会根据模型名称写死选项
+- 支持 Claude、OpenAI、DeepSeek、Kimi、xAI、Gemini 和 OpenAI 兼容 API
+- Claude、ChatGPT/Codex 和 Google OAuth 由应用管理授权、取消、加密保存和刷新；Claude 支持粘贴完整回调或 `code#state`
+- Google OAuth 需要用户自有 Google Desktop 客户端和已启用 Generative Language API 的 Cloud 项目，使用项目 API 配额
+- 从上游模型目录同步模型，模型标识带 Provider 前缀，避免多个账号的同名模型混用凭证
+- 内置本机环回服务将 Claude Agent SDK 的 Messages 请求转换为对应上游协议，支持文本、图片、工具调用和流式响应；不启动 CPA
 - 桌面选择与 Claude Code TUI 的 `/model` 选择互相同步
-- 配额条显示 CPA 观察到的窗口数据，并可通过订阅凭据主动刷新 Codex、Claude、Kimi、Grok 与 Antigravity 配额；没有真实上游信号时不虚构剩余额度
+- 展示模型目录公开的上下文窗口及用户覆盖值；没有通用上游用量接口时不显示虚构的计费额度
+- Provider 仪表盘记录本地推理请求实际返回的 token 和结果，展示近 24 小时、7 天、30 天用量与成功率曲线，并支持按账号筛选；数据在本地 SQLite 保存，重启后保留
+- 成功率不包含用户取消；缓存与非缓存输入分开统计，失败/取消的未上报用量不估算。统计启用前的历史不会补造
 
-CPA 的真实账号、API Key 和配置文件不会被提交到仓库，也不会由打包脚本复制进发布包。
+账号凭证不会被提交到仓库或复制进发布包。旧 CPA 配置保留在本机供用户自行迁移，新版运行时不读取其中的账号。OpenAI/Claude 的订阅授权使用第一方原生客户端兼容流程；当前尚未注册 CC Desktop 自有 OAuth 身份，真实账号授权与权限仍需登录验证。
 
 ### 协作房间
 
@@ -82,13 +86,13 @@ CPA 的真实账号、API Key 和配置文件不会被提交到仓库，也不�
 - Mod Kernel 提供共享记忆、群词典、入站守卫、心跳等房间扩展
 - 中文、English、跟随系统
 - 浅色、深色、跟随系统主题
-- 会话快速定位、滚动到底部、上下文用量和 CPA 配额提示
+- 会话快速定位、滚动到底部和上下文用量
 
 ## 应用结构
 
 ```text
 apps/desktop/
-├── electron/main/       # Electron 主进程：SDK、CLI、CPA、SQLite、房间和 IPC
+├── electron/main/       # Electron 主进程：SDK、CLI、Provider、SQLite、房间和 IPC
 └── src/                  # React 渲染进程：会话、对话、编辑器、设置和房间 UI
 packages/shared/         # 跨进程类型、IPC 契约、模型、房间协议和加密
 scripts/                 # vendor 准备、发布辅助脚本
@@ -106,7 +110,6 @@ apps/desktop/release/    # 本地构建产物（不提交）
 - pnpm `9.15.0`
 - Claude Code：开发时可使用本机 SDK/`claude.exe`；发布包需准备对应二进制
 - 当前配套版本：Claude Code `2.1.318` / Agent SDK `0.3.318`，固定记录在 `scripts/claude-release.json`
-- CPA：使用 CLIProxyAPI v8；当前固定后端 8.0.43 / 管理页 1.26.7，升级说明见 [CPA v8 升级与验收](docs/cpa-v8-upgrade.md)
 
 ## 开发启动
 
@@ -114,8 +117,7 @@ apps/desktop/release/    # 本地构建产物（不提交）
 git clone <this-repo>
 cd claude-desktop
 pnpm install
-pnpm download:cpa
-pnpm prepare:vendor:cpa
+pnpm prepare:vendor
 pnpm dev
 ```
 
@@ -129,9 +131,9 @@ pnpm typecheck
 pnpm --filter @claude-desktop/desktop dist:dir
 ```
 
-首次启动后，在设置或引导页配置 CPA 地址和网关 Token；默认端口是 `8317`。然后打开一个项目文件夹，并从设置中执行“从 CPA 同步模型”。不使用 CPA 时仍可使用本地 Claude Code 能力，但第三方模型目录和 CPA 配额不可用。
+首次启动后，在引导页或「设置 → Provider 管理」添加 API Key 或 OAuth 账号。连接成功后模型会进入聊天选择器，再打开项目开始对话。无需配置独立代理地址或网关口令。
 
-单独更新项目内的 Claude 可执行文件（保留 CPA）：
+单独更新项目内的 Claude 可执行文件：
 
 ```powershell
 pnpm install --frozen-lockfile
@@ -149,7 +151,7 @@ DeepSeek 的 PDF 兼容链路先提取原文字层，再对扫描页、损坏文
 执行 PP-OCRv5 mobile 本地 CPU 识别。结果保留页码、OCR 来源和低置信度提示。
 模型和字典随应用打包，按需加载，解析子进程空闲 60 秒释放；无需 Python 或 GPU。
 单 PDF 限制 10 MiB、200 页、提取后 30 万字符，整份处理最长 5 分钟。
-图片附件和支持原生 PDF 的模型仍走各自原有通道；OCR 不等同于表格结构或图表理解。
+Claude 直连保留原生文档内容，DeepSeek 走上述文本/OCR 兼容链路。其他协议适配器目前会对未支持的文档块明确报错；图片与截图工具结果已支持。OCR 不等同于表格结构或图表理解。
 
 - 日间照片流缓存：`<userData>/photo-flow/`，JPG 与 `manifest.json`，上限 48 张 / 20 MiB。
 - 粘贴截图：`<temp>/cc-desktop-clipboard/`。

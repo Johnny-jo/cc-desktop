@@ -1,6 +1,7 @@
 import React from "react";
 import type { PermissionMode } from "@claude-desktop/shared";
 import { StatusDot } from "./StatusDot";
+import { useModelDisplay } from "../hooks/useModelDisplay";
 import {
   openProject,
   setModel,
@@ -25,6 +26,7 @@ export function TopBar({
   const projectPath = useAppStore((s) => s.projectPath);
   const cpaStatus = useAppStore((s) => s.cpaStatus);
   const settings = useAppStore((s) => s.settings);
+  const modelLabel = useModelDisplay();
 
   const models = settings?.models?.length
     ? settings.models
@@ -61,7 +63,8 @@ export function TopBar({
         type="button"
         className="btn btn-ghost"
         onClick={() => void startCpa()}
-        title="Start / ensure CPA"
+        title="启动 Provider 服务"
+        disabled={cpaStatus.state === "starting"}
       >
         <StatusDot status={cpaStatus} />
       </button>
@@ -75,8 +78,8 @@ export function TopBar({
           onChange={(e) => void setModel(e.target.value)}
         >
           {models.map((m) => (
-            <option key={m} value={m}>
-              {m}
+            <option key={m} value={m} title={m}>
+              {modelLabel(m)}
             </option>
           ))}
         </select>

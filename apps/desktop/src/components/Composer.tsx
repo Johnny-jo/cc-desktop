@@ -45,6 +45,8 @@ import { ContextRing } from "./ContextRing";
 import { ThemedSelect } from "./Select";
 import { PermissionModal } from "./PermissionModal";
 import { UserPromptModal } from "./UserPromptModal";
+import { useModelDisplay } from "../hooks/useModelDisplay";
+import { subscribeProviderModelUpdates } from "../lib/model-catalog-updates";
 
 /** Join a project-relative path onto the project root, tolerating either separator. */
 function joinProjectPath(root: string, rel: string): string {
@@ -237,6 +239,7 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
       ? [settings.defaultModel]
       : [];
   const selectedModel = settings?.defaultModel ?? "";
+  const modelLabel = useModelDisplay();
   const selectedModelInfo = modelCatalog.find((model) => model.id === selectedModel);
   const availableReasoningEfforts = selectedModelInfo?.reasoningEfforts ?? [];
   const selectedReasoningEffort =
@@ -319,6 +322,8 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
   useEffect(() => {
     void refreshModelCatalog();
   }, [refreshModelCatalog, settings?.models]);
+
+  useEffect(() => subscribeProviderModelUpdates(getDesktopOrNull(), refreshModelCatalog), [refreshModelCatalog]);
 
   useEffect(() => {
     if (!modelMenuOpen) return;
@@ -608,11 +613,12 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
           setText("");
           return;
         }
+        case "provider":
         case "cpa":
           try {
             await startCpa();
             await syncCpaModels();
-            setHelpNote("CPA ready; models synced");
+            setHelpNote("Provider 服务已就绪，模型已同步");
           } catch (err) {
             setHelpNote(err instanceof Error ? err.message : String(err));
           }
@@ -697,7 +703,7 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
     if (errors.length) { setAttachmentError(errors.join("；")); return; }
     const parsed = parseLeadingSlash(text.trim());
     if (parsed && parsed.name) {
-      const known = allSlashCommands.some((c) => c.name === parsed.name);
+      const known = parsed.name === "cpa" || allSlashCommands.some((c) => c.name === parsed.name);
       if (known) {
         void runSlash(parsed.name);
         return;
@@ -946,7 +952,7 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
               <button
                 type="button"
                 className="composer-model-menu-trigger"
-                title={selectedModel ? "模型与推理强度" : "请先配置模型"}
+                title={selectedModel ? `模型与推理强度 · ${selectedModel}` : "请先配置模型"}
                 aria-haspopup="menu"
                 aria-expanded={modelMenuOpen}
                 onClick={() => {
@@ -956,7 +962,7 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
                 }}
               >
                 <span className="composer-model-menu-model">
-                  {selectedModel || "选择模型"}
+                  {modelLabel(selectedModel) || "选择模型"}
                 </span>
                 <span className="composer-model-menu-effort">
                   {selectedReasoningEffortLabel}
@@ -986,7 +992,7 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
                           >
                             <span>模型</span>
                             <span className="composer-model-menu-current" title={selectedModel}>
-                              {selectedModel || "未配置"}
+                              {modelLabel(selectedModel) || "未配置"}
                             </span>
                             <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
                               <path d="M4.5 3 7.5 6 4.5 9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
@@ -1032,7 +1038,7 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
                                     setModelMenuPage("root");
                                   }}
                                 >
-                                  <span title={model}>{model}</span>
+                                  <span title={model}>{modelLabel(model)}</span>
                                   {model === selectedModel ? <span aria-hidden>✓</span> : null}
                                 </button>
                               ))

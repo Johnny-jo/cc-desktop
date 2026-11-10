@@ -36,6 +36,13 @@ function assertProviderId(id: string): string {
 
 type OAuthEndpointConfig = { authorizationUrl?: string; tokenUrl?: string; scope?: string };
 
+function publicConfig(config: ProviderConfig): ProviderConfig {
+  const auth = { ...config.auth } as ProviderConfig["auth"] & { oauthToken?: string };
+  delete auth.apiKey;
+  delete auth.oauthToken;
+  return { ...config, auth };
+}
+
 export class ProviderManager {
   private configDir: string;
   private configFile: string;
@@ -64,7 +71,7 @@ export class ProviderManager {
       for (const cfg of configs) {
         // 不加载 API Key（作为瞬时配置），认证时再从加密存储读取
         if (!cfg || !isValidProviderId(cfg.id)) continue;
-        this.configs.set(cfg.id, { ...cfg, auth: { ...cfg.auth } });
+        this.configs.set(cfg.id, publicConfig(cfg));
       }
     } catch (err) {
       console.warn("Failed to load provider configs:", err);
@@ -82,26 +89,29 @@ export class ProviderManager {
       fs.writeFileSync(tmp, JSON.stringify(configs, null, 2), "utf-8");
       fs.renameSync(tmp, this.configFile);
     } catch (err) {
-      console.error("Failed to save provider configs:", err);
+      throw new Error("Provider 配置保存失败，请检查磁盘空间与目录权限", { cause: err });
     }
   }
 
   /** 列出所有 Provider 配置 */
   listConfigs(): ProviderConfig[] {
-    return Array.from(this.configs.values());
+    return Array.from(this.configs.values()).map(publicConfig);
   }
 
   /** 获取单个 Provider 配置 */
   getConfig(id: string): ProviderConfig | null {
-    return this.configs.get(id) || null;
+    const config = this.configs.get(id);
+    return config ? publicConfig(config) : null;
   }
 
   /** 添加 Provider 配置 */
   addConfig(config: ProviderConfig): string {
     const id = config.id || `${config.type}-${Date.now()}`;
     assertProviderId(id);
-    this.configs.set(id, { ...config, id });
-    this.saveConfigs();
+    const previous = this.configs.get(id);
+    this.configs.set(id, publicConfig({ ...config, id }));
+    try { this.saveConfigs(); }
+    catch (error) { if (previous) this.configs.set(id, previous); else this.configs.delete(id); throw error; }
     return id;
   }
 
@@ -118,16 +128,19 @@ export class ProviderManager {
         ? ({ ...existing.auth, ...authPatch } as ProviderConfig["auth"])
         : existing.auth,
     };
-    this.configs.set(id, updated);
-    this.saveConfigs();
+    this.configs.set(id, publicConfig(updated));
+    try { this.saveConfigs(); }
+    catch (error) { this.configs.set(id, existing); throw error; }
     return true;
   }
 
   /** 删除 Provider 配置 */
   deleteConfig(id: string): boolean {
+    const existing = this.configs.get(id);
     const deleted = this.configs.delete(id);
     if (deleted) {
-      this.saveConfigs();
+      try { this.saveConfigs(); }
+      catch (error) { this.configs.set(id, existing!); throw error; }
     }
     return deleted;
   }

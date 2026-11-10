@@ -10,9 +10,9 @@
     "build": "node ../../scripts/verify-ocr-models.mjs && electron-vite build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "dist:dir": "node ../../scripts/verify-claude-vendor.mjs && node ../../scripts/verify-cpa-vendor.mjs && node ../../scripts/verify-ocr-models.mjs && electron-builder --win dir --config electron-builder.yml",
-    "dist:win": "node ../../scripts/verify-claude-vendor.mjs && node ../../scripts/verify-cpa-vendor.mjs && node ../../scripts/verify-ocr-models.mjs && electron-builder --win --config electron-builder.yml",
-    "package:win": "node ../../scripts/verify-ocr-models.mjs && electron-vite build && node ../../scripts/verify-claude-vendor.mjs && node ../../scripts/verify-cpa-vendor.mjs && electron-builder --win --config electron-builder.yml && node ../../scripts/write-latest-yml.mjs",
+    "dist:dir": "node ../../scripts/verify-claude-vendor.mjs && node ../../scripts/verify-ocr-models.mjs && electron-builder --win dir --config electron-builder.yml",
+    "dist:win": "node ../../scripts/verify-claude-vendor.mjs && node ../../scripts/verify-ocr-models.mjs && electron-builder --win --config electron-builder.yml",
+    "package:win": "node ../../scripts/verify-ocr-models.mjs && electron-vite build && node ../../scripts/verify-claude-vendor.mjs && electron-builder --win --config electron-builder.yml && node ../../scripts/write-latest-yml.mjs",
     "latest-yml": "node ../../scripts/write-latest-yml.mjs"
   },
   "dependencies": {

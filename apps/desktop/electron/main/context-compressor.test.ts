@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildContinuationPrompt,
   compressContext,
+  createContextCompressor,
   KEEP_RECENT_ITEMS,
   splitItemsForCompression,
   transcriptToText,
@@ -16,6 +17,16 @@ function textItems(count: number): ChatItem[] {
     text: `Message ${i}`,
   }));
 }
+
+it("summarizes through the app-owned Provider runtime instead of a configured external port", async () => {
+  const upstream = vi.fn<typeof fetch>(async () => Response.json({ content: [{ type: "text", text: "native summary" }] }));
+  vi.stubGlobal("fetch", upstream);
+  try {
+    const compressor = createContextCompressor(() => ({ defaultModel: "openai-1/gpt-test" }), () => ({ origin: "http://127.0.0.1:41234", token: "ephemeral-local-token" }));
+    expect((await compressor.compress(textItems(KEEP_RECENT_ITEMS + 2))).summaryText).toBe("native summary");
+    expect(upstream).toHaveBeenCalledWith("http://127.0.0.1:41234/v1/messages", expect.objectContaining({ headers: expect.objectContaining({ Authorization: "Bearer ephemeral-local-token" }) }));
+  } finally { vi.unstubAllGlobals(); }
+});
 
 describe("transcriptToText", () => {
   it("renders user and assistant messages", () => {

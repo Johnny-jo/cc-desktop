@@ -4,6 +4,7 @@ import type { RoomAiShare } from "@claude-desktop/shared";
 import { addSeat, updateSeat } from "../state/room-store";
 import { getDesktop, hasDesktopApi } from "../lib/desktop-api";
 import { useI18n } from "../i18n/useI18n";
+import { useModelDisplay } from "../hooks/useModelDisplay";
 
 export type SeatMemberOpt = {
   userId: string;
@@ -45,6 +46,7 @@ export function RoomAddSeatModal({
   onClose: () => void;
 }) {
   const { t } = useI18n();
+  const modelLabel = useModelDisplay();
   const [name, setName] = useState(initial?.name ?? "");
   const [agentName, setAgentName] = useState(initial?.agentName ?? "");
   const [agentPrompt, setAgentPrompt] = useState(initial?.agentPrompt ?? "");
@@ -267,8 +269,8 @@ export function RoomAddSeatModal({
             >
               <option value="">{t.room.addSeatModelDefault}</option>
               {modelList.map((m) => (
-                <option key={m} value={m}>
-                  {m}
+                <option key={m} value={m} title={m}>
+                  {modelLabel(m)}
                 </option>
               ))}
             </select>

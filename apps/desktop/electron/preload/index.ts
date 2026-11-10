@@ -948,6 +948,9 @@ const desktop = {
       import("@claude-desktop/shared").ProviderStatus | null
     >,
 
+  getProviderUsage: (range: import("@claude-desktop/shared").ProviderUsageRange, providerId?: string) =>
+    ipcRenderer.invoke(IPC.providerGetUsage, { range, providerId }) as Promise<import("@claude-desktop/shared").ProviderUsageDashboard>,
+
   testProviderAuth: (id: string) =>
     ipcRenderer.invoke(IPC.providerTestAuth, { id }) as Promise<{
       ok: boolean;
@@ -969,6 +972,9 @@ const desktop = {
 
   cancelProviderOAuth: (state: string) =>
     ipcRenderer.invoke(IPC.providerCancelOAuth, { state }) as Promise<{ ok: boolean }>,
+
+  submitProviderOAuthCallback: (state: string, redirectUrl: string) =>
+    ipcRenderer.invoke(IPC.providerSubmitOAuthCallback, { state, redirectUrl }) as Promise<{ ok: boolean; error?: string }>,
 
   setProviderContextLimit: (providerId: string, limit: number) =>
     ipcRenderer.invoke(IPC.providerSetDefaultContextLimit, { providerId, limit }) as Promise<{

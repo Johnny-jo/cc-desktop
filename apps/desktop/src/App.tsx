@@ -112,7 +112,7 @@ export function App() {
   // 左侧 icon 工具栏：chat = 会话侧栏；rooms = 群聊侧栏（项目行 + 群聊列表）
   const [railMode, setRailMode] = useState<RailMode>("chat");
   const settings = useAppStore((s) => s.settings);
-  const needsOnboarding = settings != null && !settings.hasToken;
+  const needsOnboarding = settings != null && !settings.setupCompleted;
   const activeSessionId = useAppStore((s) => s.activeSessionId);
   const cliMode = useAppStore((s) => s.cliMode);
   const activeRoomId = useRoomStore((s) => s.activeRoomId);
