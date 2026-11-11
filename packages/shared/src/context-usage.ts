@@ -3,7 +3,6 @@ import type {
   ContextUsage,
   ModelInfo,
   ReasoningEffort,
-  TurnUsage,
 } from "./models";
 
 export type ContextLimitSettings = {
@@ -17,24 +16,12 @@ type TokenFields = {
   cacheCreationTokens?: number | null;
 };
 
-/** Prefer input_tokens; else sum of cache fields. */
+/** Input fields normalized to the disjoint Messages API categories. */
 export function extractUsedTokens(source?: TokenFields): number | undefined {
   if (!source) return undefined;
-  if (
-    source.inputTokens != null &&
-    Number.isFinite(source.inputTokens) &&
-    source.inputTokens >= 0
-  ) {
-    return source.inputTokens;
-  }
-  const cacheRead = source.cacheReadTokens;
-  const cacheCreation = source.cacheCreationTokens;
-  const hasCache =
-    (cacheRead != null && Number.isFinite(cacheRead)) ||
-    (cacheCreation != null && Number.isFinite(cacheCreation));
-  if (!hasCache) return undefined;
-  const sum = (cacheRead ?? 0) + (cacheCreation ?? 0);
-  return sum >= 0 && Number.isFinite(sum) ? sum : undefined;
+  const counts = [source.inputTokens, source.cacheReadTokens, source.cacheCreationTokens]
+    .filter((v): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0);
+  return counts.length ? counts.reduce((sum, count) => sum + count, 0) : undefined;
 }
 
 function positiveInt(v: unknown): number | undefined {
@@ -195,29 +182,43 @@ export function resolveContextLimit(
 }
 
 export function computeContextUsage(args: {
-  turn?: TurnUsage;
+  request?: TokenFields;
+  sdk?: { totalTokens: number; rawMaxTokens?: number };
   modelId: string;
+  selectedModelId?: string;
   settings: ContextLimitSettings;
   catalog: ModelInfo[];
   now?: number;
 }): ContextUsage | undefined {
-  // Context occupancy = tokens of the LATEST turn only. The SDK's per-turn
-  // input_tokens already includes the full conversation history that was sent
-  // to the model, so summing across turns would double-count history.
-  const used = extractUsedTokens(args.turn);
+  const used = args.sdk?.totalTokens ?? extractUsedTokens(args.request);
   if (used == null) return undefined;
-  const { limitTokens, source } = resolveContextLimit(
+  let { limitTokens, source } = resolveContextLimit(
     args.modelId,
     args.settings,
     args.catalog,
   );
+  if (args.selectedModelId && args.selectedModelId !== args.modelId) {
+    const selected = resolveContextLimit(args.selectedModelId, args.settings, args.catalog);
+    if (selected.source === "override" || (selected.source === "cpa" && source !== "override")) {
+      ({ limitTokens, source } = selected);
+    }
+  }
+  const sdkWindow = positiveInt(args.sdk?.rawMaxTokens);
+  if (sdkWindow && (source === "builtin" || source === "default" || sdkWindow < limitTokens)) {
+    limitTokens = sdkWindow;
+    source = "sdk";
+  }
   if (limitTokens <= 0) return undefined;
   return {
+    estimated: true,
+    occupancySource: args.sdk ? "sdk" : "request",
+    ...(sdkWindow ? { sdkPolicyWindow: sdkWindow } : {}),
     usedTokens: used,
     limitTokens,
     ratio: used / limitTokens,
     source,
     modelId: args.modelId,
+    ...(args.selectedModelId && args.selectedModelId !== args.modelId ? { selectedModelId: args.selectedModelId } : {}),
     updatedAt: args.now ?? Date.now(),
   };
 }

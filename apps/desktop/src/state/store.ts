@@ -348,9 +348,7 @@ function applySessionEvent(event: SdkNormalizedEvent): void {
         lastError: event.ok || event.outcome === "interrupted" || event.outcome === "cancelled" ? state.lastError : (event.error ?? "Turn failed"),
       });
       if (!state.running && state.queuedPrompts.length > 0) {
-        const summary = state.sessions.find((s) => s.id === sessionId);
-        const ratio = summary?.contextUsage?.ratio ?? 0;
-        if (ratio < AUTO_COMPRESS_RATIO) setTimeout(flushQueuedPrompt, 0);
+        setTimeout(flushQueuedPrompt, 0);
       }
     }
     return;
@@ -366,9 +364,7 @@ function applySessionEvent(event: SdkNormalizedEvent): void {
         lastError: event.ok || event.outcome === "interrupted" || event.outcome === "cancelled" ? state.lastError : (event.error ?? "Turn failed"),
       });
       if (!state.running && state.queuedPrompts.length > 0) {
-        const summary = state.sessions.find((s) => s.id === sessionId);
-        const ratio = summary?.contextUsage?.ratio ?? 0;
-        if (ratio < AUTO_COMPRESS_RATIO) setTimeout(flushQueuedPrompt, 0);
+        setTimeout(flushQueuedPrompt, 0);
       }
     }
     return;
@@ -403,11 +399,7 @@ function applySessionEvent(event: SdkNormalizedEvent): void {
       lastError: event.ok || event.outcome === "interrupted" || event.outcome === "cancelled" ? state.lastError : (event.error ?? "Turn failed"),
     });
     if (!state.running && state.queuedPrompts.length > 0) {
-      const summary = state.sessions.find((s) => s.id === sessionId);
-      const ratio = summary?.contextUsage?.ratio ?? 0;
-      if (ratio < AUTO_COMPRESS_RATIO) {
-        setTimeout(flushQueuedPrompt, 0);
-      }
+      setTimeout(flushQueuedPrompt, 0);
     }
   };
 
@@ -444,16 +436,6 @@ function subscribeDesktopEvents(): void {
     desktop.on(IPC.sessionUpdated, (payload) => {
       const summary = payload as SessionSummary;
       upsertSession(summary);
-
-      // After a turn finishes, main attaches fresh contextUsage here.
-      // Trigger auto-compress only then — and only with live renderer items.
-      if (
-        (summary.status === "idle" || summary.status === "error") &&
-        summary.contextUsage &&
-        summary.contextUsage.ratio >= AUTO_COMPRESS_RATIO
-      ) {
-        maybeAutoCompressAfterResult(summary.id);
-      }
 
       if (summary.status !== "running" && summary.id !== state.activeSessionId) {
         setState(prunedSessionCaches(retainedSessionIds()));
@@ -1246,12 +1228,6 @@ export async function rewindToMessage(
   return { ok: true, filesChanged: res.filesChanged ?? [] };
 }
 
-/** Ratio at which renderer auto-compresses after a turn finishes. */
-const AUTO_COMPRESS_RATIO = 0.75;
-/** Cooldown so we don't thrash compress while usage stays high. */
-const autoCompressedAt = new Map<string, number>();
-const AUTO_COMPRESS_COOLDOWN_MS = 5 * 60 * 1000;
-
 /**
  * Compress the active session. Main process holds the authoritative transcript.
  * Manual /compact does NOT auto-continue — user sends the next message.
@@ -1264,77 +1240,7 @@ export async function compressActiveSession(): Promise<{ ok: boolean; message?: 
   }
   const desktop = getDesktop();
   const res = await desktop.compressSession(id, undefined, { autoContinue: false });
-  if (res.ok) autoCompressedAt.set(id, Date.now());
   return res;
-}
-
-/**
- * Auto-compact after a finished turn when context is high.
- * Uses Claude Code semantics: compact, then immediately continue the last task
- * so work is not abandoned mid-session.
- */
-function maybeAutoCompressAfterResult(sessionId: string): void {
-  const summary = state.sessions.find((s) => s.id === sessionId);
-  const ratio = summary?.contextUsage?.ratio;
-  if (ratio == null || ratio < AUTO_COMPRESS_RATIO) return;
-  // Only auto-compact when the session is idle (turn already finished).
-  if (summary?.status === "running") return;
-  const last = autoCompressedAt.get(sessionId);
-  if (last != null && Date.now() - last < AUTO_COMPRESS_COOLDOWN_MS) return;
-  // Reserve cooldown immediately so concurrent session:updated won't double-fire.
-  autoCompressedAt.set(sessionId, Date.now());
-
-  // Fire-and-forget; items_replaced will update UI when main finishes.
-  // Delay one macrotask so any in-flight session:event (result/usage footer)
-  // is applied before we snapshot the transcript.
-  void (async () => {
-    await new Promise((r) => setTimeout(r, 0));
-    try {
-      // Re-check idle after the tick — a new user send may have started.
-      const latest = state.sessions.find((s) => s.id === sessionId);
-      if (latest?.status === "running" || state.running) {
-        autoCompressedAt.delete(sessionId);
-        return;
-      }
-      // GUI mode: local length gate (KEEP_RECENT_ITEMS = 6). CLI freezes
-      // itemsBySession empty, so skip the gate and let main decide from entry.items.
-      if (!state.cliMode) {
-        const items = getItems(sessionId);
-        if (items.length <= 6) {
-          autoCompressedAt.delete(sessionId);
-          return;
-        }
-      }
-      const desktop = getDesktop();
-      setState({ running: true });
-      const res = await desktop.compressSession(sessionId, undefined, {
-        autoContinue: true,
-      });
-      if (!res.ok) {
-        // Allow retry if compress declined (cooldown / not enough history).
-        autoCompressedAt.delete(sessionId);
-        setState({
-          running: state.sessions.some((s) => s.status === "running"),
-        });
-        if (
-          res.message &&
-          !/cooldown|Not enough|Nothing to compress|still running/i.test(
-            res.message,
-          )
-        ) {
-          setState({ lastError: res.message });
-        }
-      }
-      // On success, main already set status=running and started the continue turn.
-    } catch (err) {
-      autoCompressedAt.delete(sessionId);
-      const message = err instanceof Error ? err.message : String(err);
-      setState({
-        lastError: `Context compression failed: ${message}`,
-        running: state.sessions.some((s) => s.status === "running"),
-      });
-    }
-  })();
 }
 
 export async function setModel(model: string): Promise<void> {
@@ -1483,7 +1389,6 @@ export function __resetStoreForTests(): void {
     changesSessionOverride: null,
   };
   sessionCacheLru = [];
-  autoCompressedAt.clear();
   bootstrapped = false;
   for (const u of unsubs) u();
   unsubs.length = 0;

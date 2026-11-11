@@ -7,7 +7,7 @@ const start = (usage?: unknown) => ({ type: "message_start", message: { type: "m
 const delta = (usage: unknown) => ({ type: "message_delta", delta: { stop_reason: "end_turn" }, usage });
 const stop = { type: "message_stop" };
 const message = (usage?: unknown) => ({ type: "message", role: "assistant", content: [{ type: "text", text: "你好" }], stop_reason: "end_turn", ...(usage === undefined ? {} : { usage }) });
-const result = (values: Record<string, unknown> = {}) => ({ outcome: "success", inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, usageReported: false, ...values });
+const result = (values: Record<string, unknown> = {}) => ({ outcome: "success", inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, usageReported: false, ...(values.usageReported ? { reportedFieldMask: expect.any(Number) } : {}), ...values });
 const streamingResponse = (stream: ReadableStream<Uint8Array> | string) => new Response(stream, { headers: { "content-type": "text/event-stream", "request-id": "request-1" } });
 
 describe("provider response usage observation", () => {

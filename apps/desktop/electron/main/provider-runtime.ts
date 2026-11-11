@@ -1,5 +1,5 @@
 import http from "node:http";
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { CpaStatus, ModelInfo, ProviderConfig, ProviderStatus, ProviderUsageDashboard, ProviderUsageRange } from "@claude-desktop/shared";
@@ -32,6 +32,7 @@ export class ProviderRuntime implements ModelRuntime {
   private starting: Promise<CpaStatus> | null = null;
   private status: CpaStatus = { state: "unknown" };
   private readonly token = randomBytes(32).toString("hex");
+  private readonly cacheSigningKey = randomBytes(32);
   private readonly results = new Map<string, QuotaSyncResult>();
   private readonly errors = new Map<string, string>();
   private readonly epochs = new Map<string, number>();
@@ -74,6 +75,20 @@ export class ProviderRuntime implements ModelRuntime {
   }
   getProxyTarget(): { origin: string; token: string } | null {
     return this.status.state === "ready" ? { origin: `http://127.0.0.1:${this.status.port}`, token: this.token } : null;
+  }
+  cacheSessionHeader(sessionId: string, env: Record<string, string>): string | undefined {
+    const target = this.getProxyTarget();
+    if (!target || env.ANTHROPIC_BASE_URL !== target.origin || env.ANTHROPIC_AUTH_TOKEN !== target.token) return undefined;
+    const id = createHash("sha256").update(sessionId).digest("hex");
+    const signature = createHmac("sha256", this.cacheSigningKey).update(id).digest("hex");
+    return `x-cc-cache-session: ${id}.${signature}`;
+  }
+
+  private verifiedCacheSession(header: string | string[] | undefined): string | undefined {
+    if (typeof header !== "string" || !/^[a-f0-9]{64}\.[a-f0-9]{64}$/.test(header)) return undefined;
+    const [id, signature] = header.split(".");
+    const expected = createHmac("sha256", this.cacheSigningKey).update(id).digest();
+    return timingSafeEqual(expected, Buffer.from(signature, "hex")) ? id : undefined;
   }
   buildProcessEnv(model?: string): Record<string, string> {
     const target = this.getProxyTarget();
@@ -206,7 +221,7 @@ export class ProviderRuntime implements ModelRuntime {
     }
   }
 
-  async message(body: unknown, signal: AbortSignal, transport?: { anthropicBeta?: string; anthropicVersion?: string; userAgent?: string }): Promise<Response> {
+  async message(body: unknown, signal: AbortSignal, transport?: { anthropicBeta?: string; anthropicVersion?: string; userAgent?: string }, cacheSession?: string): Promise<Response> {
     if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("无效的 Messages 请求");
     const input = body as Record<string, unknown>;
     const model = typeof input.model === "string" ? input.model : "";
@@ -233,6 +248,7 @@ export class ProviderRuntime implements ModelRuntime {
     };
     try {
       const response = await (this.deps.forward ?? forwardProviderMessage)(config, credential, { ...input, model: upstreamModel }, {
+        ...(cacheSession ? { promptCacheKey: createHash("sha256").update(JSON.stringify(["cc-v1", config.id, upstreamModel, cacheSession])).digest("hex") } : {}),
         ...transport, signal, oauthToken: config.auth.authMethod === "oauth2" ? this.deps.oauthHandler.loadOAuthToken(config.id) ?? undefined : undefined,
       });
       return observeProviderResponse(response, { signal, onComplete: record });
@@ -269,7 +285,7 @@ export class ProviderRuntime implements ModelRuntime {
         anthropicBeta: typeof req.headers["anthropic-beta"] === "string" ? req.headers["anthropic-beta"] : undefined,
         anthropicVersion: typeof req.headers["anthropic-version"] === "string" ? req.headers["anthropic-version"] : undefined,
         userAgent: req.headers["user-agent"],
-      });
+      }, this.verifiedCacheSession(req.headers["x-cc-cache-session"]));
     }
     catch (error) {
       if (controller.signal.aborted) return;

@@ -66,6 +66,19 @@ describe("SessionArchive", () => {
     expect(mergeTranscriptItems([{ ...user, turnOutcome: "interrupted" }], [user])[0])
       .toMatchObject({ turnOutcome: "interrupted" });
   });
+  it("retains the rewind cost checkpoint when merging an older renderer page", () => {
+    const user = { kind: "text" as const, id: "u", role: "user" as const, text: "Work" };
+    expect(mergeTranscriptItems([{ ...user, sdkCostAtSubmission: 1.5 }], [user])[0]).toMatchObject({ sdkCostAtSubmission: 1.5 });
+  });
+
+  it("loads legacy session totals without reusing an aggregate as current occupancy", () => {
+    const archive = new SessionArchive(tmpDir());
+    archive.upsertSummary({ id: "legacy", title: "Legacy", cwd: ".", status: "idle", updatedAt: 1,
+      usage: { turns: 3, durationMs: 1, inputTokens: 500000, outputTokens: 2, cacheReadTokens: 1, cacheCreationTokens: 0, costUsd: 2 },
+      contextUsage: { modelId: "model", usedTokens: 500000, limitTokens: 100000, ratio: 5, updatedAt: 1, source: "builtin" } });
+    expect(archive.loadIndex()[0].usage?.costUsd).toBe(2);
+    expect(archive.loadIndex()[0].contextUsage).toBeUndefined();
+  });
   const dirs: string[] = [];
 
   afterEach(() => {

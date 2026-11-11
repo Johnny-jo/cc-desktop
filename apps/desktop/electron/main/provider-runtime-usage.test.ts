@@ -28,6 +28,13 @@ beforeEach(() => {
 afterEach(() => { runtime.stopIfManaged(); store.close(); vi.unstubAllGlobals(); vi.restoreAllMocks(); fs.rmSync(dir, { recursive: true, force: true }); });
 const body = { model: "openai-1/model", max_tokens: 100, messages: [{ role: "user", content: "hello" }] };
 describe("Provider inference telemetry integration", () => {
+  it("distinguishes omitted cache counts from explicit zeroes after storage", async () => {
+    for (const usage of [{ input_tokens: 5 }, { input_tokens: 5, cache_read_input_tokens: 0 }, { cache_read_input_tokens: 8, cache_creation_input_tokens: 0 }]) {
+      forward.mockResolvedValueOnce(Response.json({ type: "message", role: "assistant", stop_reason: "end_turn", content: [], usage }));
+      await (await runtime.message(body, new AbortController().signal)).text();
+    }
+    expect(runtime.getUsage("24h").metrics).toMatchObject({ cacheReadReportedRequests: 2, cacheCreationReportedRequests: 1, cacheHitRequests: 1 });
+  });
   it("persists the actual completed JSON response and not model discovery calls", async () => {
     forward.mockResolvedValueOnce(Response.json({ type: "message", role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text: "ok" }], usage: { input_tokens: 12, output_tokens: 5, cache_read_input_tokens: 8 } }));
     const response = await runtime.message(body, new AbortController().signal);

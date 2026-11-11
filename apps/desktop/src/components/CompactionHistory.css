@@ -1,0 +1,13 @@
+.compaction-history {
+  width: min(660px, 90vw);
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  color: var(--text);
+  background: var(--bg-elevated);
+}
+.compaction-history::backdrop { background: rgb(0 0 0 / 50%); }
+.compaction-history .room-modal-body { max-height: 60vh; }
+.compaction-history summary { cursor: pointer; font-weight: 600; }
+.compaction-history pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.compaction-history footer { align-items: center; }

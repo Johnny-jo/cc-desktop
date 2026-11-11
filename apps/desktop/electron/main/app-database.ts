@@ -407,6 +407,17 @@ export class AppDatabase {
     items: ChatItem[],
     firstChanged = 0,
   ): void {
+    this.transaction(() => this.writeSessionItems(sessionId, items, firstChanged));
+  }
+
+  commitCompaction<T extends SessionLike>(summary: T, items: ChatItem[]): void {
+    this.transaction(() => {
+      this.writeSessionItems(summary.id, items, 0);
+      this.upsertSession(summary);
+    });
+  }
+
+  private writeSessionItems(sessionId: string, items: ChatItem[], firstChanged: number): void {
     let start = Math.max(0, Math.min(firstChanged, items.length));
     if (start > 0) {
       const prefix = this.db
@@ -418,28 +429,24 @@ export class AppDatabase {
       if (Number(prefix?.total) !== start) start = 0;
     }
 
-    this.transaction(() => {
-      this.db
-        .prepare(
-          "DELETE FROM session_transcript WHERE session_id = ? AND ordinal >= ?",
-        )
-        .run(sessionId, start);
-      const insert = this.db.prepare(
-        `INSERT INTO session_transcript(
-           session_id, ordinal, item_id, item_text, item_json
-         ) VALUES(?, ?, ?, ?, ?)`,
+    this.db
+      .prepare("DELETE FROM session_transcript WHERE session_id = ? AND ordinal >= ?")
+      .run(sessionId, start);
+    const insert = this.db.prepare(
+      `INSERT INTO session_transcript(
+         session_id, ordinal, item_id, item_text, item_json
+       ) VALUES(?, ?, ?, ?, ?)`,
+    );
+    for (let ordinal = start; ordinal < items.length; ordinal += 1) {
+      const item = items[ordinal]!;
+      insert.run(
+        sessionId,
+        ordinal,
+        item.id,
+        searchableChatText(item),
+        JSON.stringify(item),
       );
-      for (let ordinal = start; ordinal < items.length; ordinal += 1) {
-        const item = items[ordinal]!;
-        insert.run(
-          sessionId,
-          ordinal,
-          item.id,
-          searchableChatText(item),
-          JSON.stringify(item),
-        );
-      }
-    });
+    }
   }
 
   loadSessionChanges(sessionId: string): FileChange[] {

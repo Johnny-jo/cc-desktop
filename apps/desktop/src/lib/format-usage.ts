@@ -16,7 +16,7 @@ export function formatContextPercent(ratio: number): string {
 }
 
 export function formatContextUsageLine(u: ContextUsage): string {
-  return `${formatContextPercent(u.ratio)} · ${formatTokens(u.usedTokens)}/${formatTokens(u.limitTokens)}`;
+  return `${u.estimated ? "≈" : ""}${formatContextPercent(u.ratio)} · ${formatTokens(u.usedTokens)}/${formatTokens(u.limitTokens)}`;
 }
 
 export function contextMeterTitle(u: ContextUsage): string {
@@ -59,11 +59,11 @@ export function formatTurnUsageLine(u: TurnUsage): string {
   const outT = u.outputTokens;
   if (inT != null || outT != null) {
     parts.push(
-      `↑${formatTokens(inT ?? 0)} ↓${formatTokens(outT ?? 0)} tok`,
+      `↑${formatTokens(inT)} ↓${formatTokens(outT)} tok`,
     );
   }
   if (u.costUsd != null && u.costUsd > 0) {
-    parts.push(formatCost(u.costUsd));
+    parts.push(`SDK ≈${formatCost(u.costUsd)}`);
   }
   return parts.join(" · ") || "—";
 }
@@ -78,6 +78,6 @@ export function formatSessionUsageLine(u?: SessionUsage): string | null {
       `↑${formatTokens(u.inputTokens)} ↓${formatTokens(u.outputTokens)}`,
     );
   }
-  if (u.costUsd > 0) parts.push(formatCost(u.costUsd));
+  if (u.costUsd > 0) parts.push(`SDK ≈${formatCost(u.costUsd)}`);
   return parts.join(" · ");
 }

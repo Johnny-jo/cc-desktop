@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import {
   DIFF_MAX_EVENTS_PER_FILE,
   compactFileChange,
@@ -13,13 +14,30 @@ import {
   type FileChange,
   type SessionProgress,
   type SessionSummary,
+  type UserContentBlock,
 } from "@claude-desktop/shared";
 import type { AppDatabase } from "./app-database";
 
 const LEGACY_SESSION_MIGRATION_KEY = "migration.sessions-json-v1";
 
+export type CompactIndex = { revision: string; createdAt: number; model: string; compressedCount: number; sdkMessageCount?: number };
+export type CompactSnapshot = CompactIndex & {
+  sourceSdkSessionId?: string;
+  original: ChatItem[];
+  summaryText: string;
+};
+export type CompactHandoff = { summaryText: string; recentTurns: ChatItem[] };
+
 export type StoredSession = SessionSummary & {
+  resetBoundaryId?: string;
+  /** JSON backend's atomically published active transcript directory. */
+  transcriptRevision?: string;
+  compactions?: CompactIndex[];
+  pendingHandoff?: string;
+  externalSummaryRoute?: boolean;
   sdkSessionId?: string;
+  sessionModel?: string;
+  sdkCostBaseline?: { lineage: string; total: number };
   /** Progress of the compressed prefix, retained for subsequent rewinds. */
   progressBaseline?: SessionProgress;
 };
@@ -178,8 +196,12 @@ export function mergeTranscriptItems(
   for (const item of incoming) {
     const previous = byId.get(item.id);
     const next = stripStreaming(item);
-    byId.set(item.id, previous?.kind === "text" && previous.turnOutcome && next.kind === "text"
-      ? { ...next, turnOutcome: previous.turnOutcome } : next);
+    if (previous?.kind === "text" && next.kind === "text") {
+      byId.set(item.id, { ...next,
+        ...(previous.turnOutcome ? { turnOutcome: previous.turnOutcome } : {}),
+        ...(previous.sdkCostAtSubmission !== undefined ? { sdkCostAtSubmission: previous.sdkCostAtSubmission } : {}),
+      });
+    } else byId.set(item.id, next);
   }
   const diskIds = new Set(disk.map((i) => i.id));
   const out = disk.map((i) => byId.get(i.id) ?? i);
@@ -251,6 +273,7 @@ export class SessionArchive {
    * manager releases these references whenever it evicts a hydrated transcript.
    */
   private readonly saveSnapshots = new Map<string, ChatItem[]>();
+  private readonly fileRevisions = new Map<string, string>();
 
   constructor(
     userDataDir: string,
@@ -259,6 +282,12 @@ export class SessionArchive {
     this.root = path.join(userDataDir, "sessions");
     this.indexPath = path.join(this.root, "index.json");
     fs.mkdirSync(this.root, { recursive: true });
+    if (!this.database || !this.database.getMeta(LEGACY_SESSION_MIGRATION_KEY)) {
+      for (const record of this.loadLegacySummariesForMigration()) {
+        const revision = record.transcriptRevision ?? record.compactions?.at(-1)?.revision;
+        if (revision) this.fileRevisions.set(record.id, revision);
+      }
+    }
     this.migrateLegacySessions();
   }
 
@@ -287,6 +316,15 @@ export class SessionArchive {
             : "idle",
         sdkSessionId:
           typeof s.sdkSessionId === "string" ? s.sdkSessionId : undefined,
+        ...(typeof s.sessionModel === "string" ? { sessionModel: s.sessionModel } : {}),
+        ...(typeof s.resetBoundaryId === "string" ? { resetBoundaryId: s.resetBoundaryId } : {}),
+        ...(typeof s.transcriptRevision === "string" ? { transcriptRevision: s.transcriptRevision } : {}),
+        ...(s.sdkCostBaseline && typeof s.sdkCostBaseline.lineage === "string" &&
+          Number.isFinite(s.sdkCostBaseline.total) && s.sdkCostBaseline.total >= 0
+          ? { sdkCostBaseline: s.sdkCostBaseline } : {}),
+        ...(Array.isArray(s.compactions) ? { compactions: s.compactions } : {}),
+        ...(typeof s.pendingHandoff === "string" ? { pendingHandoff: s.pendingHandoff } : {}),
+        ...(s.externalSummaryRoute === true ? { externalSummaryRoute: true } : {}),
         ...(s.usage && typeof s.usage === "object"
           ? {
               usage: {
@@ -302,14 +340,20 @@ export class SessionArchive {
           : {}),
         ...(s.contextUsage &&
         typeof s.contextUsage === "object" &&
+        (s.contextUsage.occupancySource === "sdk" || s.contextUsage.occupancySource === "request") &&
         Number(s.contextUsage.usedTokens) >= 0 &&
         Number(s.contextUsage.limitTokens) > 0
           ? {
               contextUsage: {
+                occupancySource: s.contextUsage.occupancySource,
+                ...(typeof s.contextUsage.selectedModelId === "string" ? { selectedModelId: s.contextUsage.selectedModelId } : {}),
+                ...(s.contextUsage.estimated ? { estimated: true } : {}),
+                ...(s.contextUsage.sdkPolicyWindow ? { sdkPolicyWindow: s.contextUsage.sdkPolicyWindow } : {}),
                 usedTokens: Number(s.contextUsage.usedTokens) || 0,
                 limitTokens: Number(s.contextUsage.limitTokens) || 0,
                 ratio: Number(s.contextUsage.ratio) || 0,
                 source:
+                  s.contextUsage.source === "sdk" ||
                   s.contextUsage.source === "cpa" ||
                   s.contextUsage.source === "builtin" ||
                   s.contextUsage.source === "override" ||
@@ -343,6 +387,13 @@ export class SessionArchive {
           updatedAt: s.updatedAt,
           status: s.status === "running" ? "idle" : s.status,
           ...(s.sdkSessionId ? { sdkSessionId: s.sdkSessionId } : {}),
+          ...(s.sessionModel ? { sessionModel: s.sessionModel } : {}),
+          ...(s.resetBoundaryId ? { resetBoundaryId: s.resetBoundaryId } : {}),
+          ...(s.transcriptRevision ? { transcriptRevision: s.transcriptRevision } : {}),
+          ...(s.sdkCostBaseline ? { sdkCostBaseline: s.sdkCostBaseline } : {}),
+          ...(s.compactions?.length ? { compactions: s.compactions } : {}),
+          ...(s.pendingHandoff ? { pendingHandoff: s.pendingHandoff } : {}),
+          ...(s.externalSummaryRoute ? { externalSummaryRoute: true } : {}),
           ...(s.usage ? { usage: s.usage } : {}),
           ...(s.contextUsage ? { contextUsage: s.contextUsage } : {}),
           ...(s.progress ? { progress: s.progress } : {}),
@@ -358,7 +409,7 @@ export class SessionArchive {
       return;
     }
     fs.mkdirSync(this.root, { recursive: true });
-    fs.writeFileSync(this.indexPath, JSON.stringify(payload, null, 2), "utf8");
+    this.writeJsonAtomic(this.indexPath, payload);
   }
 
   /** Remove a session from the index and delete its transcript / changes files. */
@@ -370,10 +421,12 @@ export class SessionArchive {
       this.saveIndex(list);
     }
     this.releaseItems(sessionId);
+    this.fileRevisions.delete(sessionId);
     for (const file of [
       this.transcriptPath(sessionId),
       this.changesPath(sessionId),
       this.transcriptDir(sessionId),
+      this.compactionDir(sessionId),
     ]) {
       try {
         fs.rmSync(file, { recursive: true, force: true });
@@ -397,6 +450,79 @@ export class SessionArchive {
     if (idx >= 0) list[idx] = { ...list[idx], ...next };
     else list.unshift(next);
     this.saveIndex(list);
+  }
+
+  listCompactions(sessionId: string): CompactIndex[] {
+    return this.loadIndex().find(row => row.id === sessionId)?.compactions ?? [];
+  }
+
+  loadCompaction(sessionId: string, revision: string): CompactSnapshot | undefined {
+    if (!this.listCompactions(sessionId).some(row => row.revision === revision)) return undefined;
+    const file = path.join(this.compactionDir(sessionId), this.safeId(revision), "source.json");
+    const snapshot = JSON.parse(fs.readFileSync(file, "utf8")) as CompactSnapshot;
+    if (snapshot.revision !== revision || !Array.isArray(snapshot.original)) throw new Error("Invalid compact snapshot");
+    return snapshot;
+  }
+
+  loadHandoff(sessionId: string, revision: string): CompactHandoff {
+    const file = path.join(this.compactionDir(sessionId), this.safeId(revision), "handoff.json");
+    const handoff = JSON.parse(fs.readFileSync(file, "utf8")) as CompactHandoff;
+    if (!handoff.summaryText || !Array.isArray(handoff.recentTurns)) throw new Error("Invalid compact handoff");
+    return handoff;
+  }
+
+  /** Keep the blocks already submitted by the user. Re-reading a path on restart could send a different file. */
+  savePromptAttachments(sessionId: string, itemId: string, blocks: UserContentBlock[]): void {
+    const file = this.attachmentPath(sessionId, itemId);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    this.writeJsonAtomic(file, blocks);
+  }
+
+  loadPromptAttachments(sessionId: string, itemId: string): UserContentBlock[] {
+    const file = this.attachmentPath(sessionId, itemId);
+    if (!fs.existsSync(file)) throw new Error("Original attachment unavailable for the compact handoff");
+    return JSON.parse(fs.readFileSync(file, "utf8")) as UserContentBlock[];
+  }
+
+  compactionSdkFile(sessionId: string, revision: string): string {
+    return path.join(this.compactionDir(sessionId), this.safeId(revision), "sdk-messages.json");
+  }
+
+  commitCompaction(summary: StoredSession, snapshot: CompactSnapshot, items: ChatItem[],
+    sdkMessages?: import("@anthropic-ai/claude-agent-sdk").SessionMessage[]): void {
+    const { id } = summary;
+    const dir = path.join(this.compactionDir(id), this.safeId(snapshot.revision));
+    fs.mkdirSync(dir, { recursive: true });
+    if (sdkMessages) this.writeJsonAtomic(this.compactionSdkFile(id, snapshot.revision), sdkMessages);
+    this.writeJsonAtomic(path.join(dir, "source.json"), snapshot);
+    this.writeJsonAtomic(path.join(dir, "handoff.json"), {
+      summaryText: snapshot.summaryText, recentTurns: snapshot.original.slice(snapshot.compressedCount),
+    } satisfies CompactHandoff);
+    this.commitTranscriptRevision(summary, items, snapshot.revision);
+  }
+
+  /** Publish the visible transcript, active lineage boundary and resume metadata together. */
+  commitTranscriptRevision(summary: StoredSession, items: ChatItem[], revision: string): void {
+    const id = summary.id;
+    if (this.database) {
+      this.database.commitCompaction(summary, items.map(stripStreaming));
+      this.saveSnapshots.set(id, [...items]);
+      return;
+    }
+    // Stage new chunks at an independent path. Replacing the index publishes the
+    // active view, original archive reference, lineage reset and handoff together.
+    const previous = this.fileRevisions.get(id);
+    this.fileRevisions.set(id, revision);
+    this.releaseItems(id);
+    try {
+      this.saveItems(id, items);
+      this.upsertSummary({ ...summary, transcriptRevision: revision });
+    } catch (error) {
+      if (previous) this.fileRevisions.set(id, previous);
+      else this.fileRevisions.delete(id);
+      this.releaseItems(id);
+      throw error;
+    }
   }
 
   loadItems(sessionId: string): ChatItem[] {
@@ -592,7 +718,7 @@ export class SessionArchive {
 
     // Successful v2 save completes transparent migration from the legacy file.
     try {
-      fs.rmSync(this.transcriptPath(sessionId), { force: true });
+      if (!this.fileRevisions.has(sessionId)) fs.rmSync(this.transcriptPath(sessionId), { force: true });
     } catch {
       // best effort
     }
@@ -765,7 +891,18 @@ export class SessionArchive {
   }
 
   private transcriptDir(sessionId: string): string {
+    const revision = this.fileRevisions.get(sessionId);
+    if (revision) return path.join(this.compactionDir(sessionId), this.safeId(revision), "active");
     return path.join(this.root, `${this.safeId(sessionId)}.transcript`);
+  }
+
+  private compactionDir(sessionId: string): string {
+    return path.join(this.root, `${this.safeId(sessionId)}.compactions`);
+  }
+
+  private attachmentPath(sessionId: string, itemId: string): string {
+    const key = createHash("sha256").update(itemId).digest("hex");
+    return path.join(this.compactionDir(sessionId), "attachments", `${key}.json`);
   }
 
   private manifestPath(sessionId: string): string {
@@ -850,7 +987,6 @@ export class SessionArchive {
     const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(payload), "utf8");
     try {
-      fs.rmSync(file, { force: true });
       fs.renameSync(tmp, file);
     } catch (err) {
       try {

@@ -35,6 +35,29 @@ function sdkReplayContent(events: any[]): any[] {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("native provider protocols", () => {
+  it("accounts for disjoint Responses cache reads and writes", async () => {
+    const reply = { type: "response.completed", response: { usage: { input_tokens: 12000, input_tokens_details: { cached_tokens: 4000, cache_write_tokens: 7000 } } } };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(sse(reply), { headers: { "content-type": "text/event-stream" } })));
+    const response = await forwardProviderMessage(config("openai"), "key", { ...request, model: "gpt-6.1-sol" }, { signal });
+    expect((await response.json()).usage).toEqual({ input_tokens: 1000, cache_read_input_tokens: 4000, cache_creation_input_tokens: 7000 });
+  });
+
+  it("does not copy SDK device/account metadata into Chat user", async () => {
+    const fetcher = vi.fn().mockResolvedValue(jsonResponse(chatResult));
+    vi.stubGlobal("fetch", fetcher);
+    await forwardProviderMessage(config("openai-compatible"), "key", { ...request, metadata: { user_id: '{"device_id":"private-device","session_id":"private-session"}' } }, { signal });
+    expect(JSON.parse(fetcher.mock.calls[0][1].body)).not.toHaveProperty("user");
+  });
+
+  it("sets the host cache key only on official public Responses", async () => {
+    const fetcher = vi.fn().mockImplementation(async () => new Response(sse({ type: "response.completed", response: {} }), { headers: { "content-type": "text/event-stream" } }));
+    vi.stubGlobal("fetch", fetcher);
+    const custom = config("openai"); (custom.auth as any).baseUrl = "https://example.test/v1";
+    for (const provider of [config("openai"), custom, config("openai", true)]) {
+      await forwardProviderMessage(provider, "key", { ...request, model: "gpt-6.1-sol" }, { signal, promptCacheKey: "host-derived-key" });
+    }
+    expect(fetcher.mock.calls.map(call => JSON.parse(call[1].body).prompt_cache_key)).toEqual(["host-derived-key", undefined, undefined]);
+  });
   it.each([
     ["claude", "test-model", "messages"], ["openai", "gpt-6.1-sol", "responses"],
     ["openai", "gpt-4.1", "chat/completions"], ["deepseek", "test-model", "chat/completions"],

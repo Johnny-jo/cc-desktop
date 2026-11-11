@@ -1,4 +1,6 @@
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -17,6 +19,10 @@ import { DiffTracker } from "./diff-tracker";
 import type { CpaSupervisor } from "./cpa-supervisor";
 import type { SettingsStore } from "./settings-store";
 import { SessionArchive } from "./session-archive";
+import { AppDatabase } from "./app-database";
+import { compressContext } from "./context-compressor";
+import { ToolOutputStore } from "./tool-output-store";
+import type { ToolOutputBinding } from "./tool-output-policy";
 
 const baseSettings: AppSettings = {
   cpaExePath: "cpa.exe",
@@ -94,6 +100,7 @@ function defaultQueryFn(): QueryFn {
 }
 
 function makeDeps(overrides: {
+  toolOutputDatabasePath?: string;
   pdfCompatibility?: SessionManagerDeps["pdfCompatibility"];
   queryFn?: QueryFn;
   ensureReady?: () => Promise<{ state: string; message?: string; port?: number; managedByApp?: boolean }>;
@@ -163,6 +170,7 @@ function makeDeps(overrides: {
   });
 
   const manager = new SessionManager({
+    toolOutputDatabasePath: overrides.toolOutputDatabasePath,
     pdfCompatibility: overrides.pdfCompatibility,
     queryFn,
     permissionBroker,
@@ -196,6 +204,468 @@ function makeDeps(overrides: {
     capturedQueryArgs: [] as Array<{ prompt: string; options: Record<string, unknown> }>,
   };
 }
+
+describe("SDK session metering", () => {
+  const prompt = { text: "hello", attachments: [] };
+
+  it("uses the latest primary request with cache input, ignoring sidechains and turn totals", async () => {
+    const { manager } = makeDeps({ queryFn: async function* () {
+      for (const tokens of [500, 100]) yield { type: "assistant", message: { content: [], usage: {
+        input_tokens: tokens, cache_read_input_tokens: 190000, cache_creation_input_tokens: 1000,
+      } } };
+      yield { type: "assistant", parent_tool_use_id: "task", message: { content: [], usage: { input_tokens: 15 } } };
+      yield { type: "result", usage: { input_tokens: 600 } };
+    } });
+    const id = await manager.start(prompt, os.tmpdir(), { model: "selected-provider/selected-model" });
+    expect(manager.list().find(item => item.id === id)?.contextUsage).toMatchObject({
+      modelId: "selected-provider/selected-model", usedTokens: 191100, occupancySource: "request", estimated: true,
+    });
+    manager.disposeAll();
+  });
+
+  it("requests only the SDK summary and honors its policy window", async () => {
+    const getContextUsage = vi.fn().mockResolvedValue({ model: "underlying", totalTokens: 125, rawMaxTokens: 1000 });
+    const { manager } = makeDeps({ queryFn: () => Object.assign((async function* () {
+      yield { type: "result", usage: { input_tokens: 30 } };
+    })(), { getContextUsage }) });
+    await manager.start(prompt, os.tmpdir(), { model: "account/underlying" });
+    expect(getContextUsage).toHaveBeenCalledWith({ detail: "summary" });
+    expect(manager.list()[0].contextUsage).toMatchObject({ modelId: "account/underlying", usedTokens: 125, limitTokens: 1000, source: "sdk", occupancySource: "sdk" });
+    manager.disposeAll();
+  });
+
+  it.each(["override", "default"])("ignores another model's occupancy when the %s selection changes", async change => {
+    const oldModel = "account-a/small";
+    const newModel = "account-b/large";
+    const ctx = makeDeps({ queryFn: ({ prompt: stream }) => (async function* () {
+      for await (const _ of stream as AsyncIterable<unknown>) {
+        yield { type: "assistant", context_usage: { model: "resolved-model", total_tokens: 900, raw_max_tokens: 1000 }, message: { content: [] } };
+        yield { type: "result", session_id: "same-sdk-session" };
+      }
+    })() });
+    vi.mocked(ctx.settings.get).mockReturnValue({ ...baseSettings, defaultModel: oldModel });
+    const id = await ctx.manager.start(prompt, os.tmpdir(), change === "override" ? { model: oldModel } : undefined);
+    const compact = vi.spyOn(ctx.manager, "compressSession");
+    if (change === "default") vi.mocked(ctx.settings.get).mockReturnValue({ ...baseSettings, defaultModel: newModel });
+    await ctx.manager.continue(id, { text: "next", attachments: [] }, change === "override" ? { model: newModel } : undefined);
+    expect(compact).not.toHaveBeenCalled();
+    await ctx.manager.continue(id, { text: "same model", attachments: [] });
+    expect(compact).toHaveBeenCalledOnce();
+    ctx.manager.disposeAll();
+  });
+
+  it("never treats result-only aggregate input as context occupancy", async () => {
+    const { manager } = makeDeps({ queryFn: async function* () {
+      yield { type: "result", usage: { input_tokens: 300, output_tokens: 60 } };
+    } });
+    await manager.start(prompt, os.tmpdir());
+    expect(manager.list()[0].contextUsage).toBeUndefined();
+    manager.disposeAll();
+  });
+
+  it("refreshes an SDK estimate after a later real request in the same turn", async () => {
+    const getContextUsage = vi.fn().mockResolvedValue({ totalTokens: 720, rawMaxTokens: 1000 });
+    const { manager } = makeDeps({ queryFn: () => Object.assign((async function* () {
+      yield { type: "assistant", context_usage: { total_tokens: 310, raw_max_tokens: 1000 }, message: { id: "a", content: [] } };
+      yield { type: "stream_event", event: { type: "message_start", message: { id: "b", usage: { input_tokens: 83 } } } };
+      yield { type: "result" };
+    })(), { getContextUsage }) });
+    await manager.start(prompt, os.tmpdir());
+    expect(manager.list()[0].contextUsage?.usedTokens).toBe(720);
+    expect(getContextUsage).toHaveBeenCalledOnce();
+    manager.disposeAll();
+  });
+
+  it("rebases on an explicit SDK conversation reset even when the next snapshot grows", async () => {
+    let turns = 0;
+    const { manager } = makeDeps({ queryFn: async function* ({ prompt: stream }) {
+      for await (const _ of stream as AsyncIterable<unknown>) {
+        if (++turns === 2) yield { type: "conversation_reset", session_id: "lineage", new_conversation_id: "new", trigger: "clear" };
+        yield { type: "result", ...(turns === 1 ? { session_id: "lineage" } : {}), total_cost_usd: turns === 1 ? 1 : 3 };
+      }
+    } });
+    const id = await manager.start(prompt, os.tmpdir());
+    await manager.continue(id, { text: "/clear", attachments: [] });
+    expect(manager.list()[0].usage?.costUsd).toBe(4);
+    manager.disposeAll();
+  });
+
+  it("preserves the SDK cost baseline across reopen, restart, an error zero and a reset", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "session-meter-"));
+    const archive = new SessionArchive(dir);
+    const values = [1, 2, 0, 3, 0.5, 1.5];
+    const queryFn: QueryFn = async function* ({ prompt: stream }) {
+      for await (const _ of stream as AsyncIterable<unknown>) {
+        const cost = values.shift();
+        yield { type: "result", session_id: "lineage", is_error: cost === 0, total_cost_usd: cost };
+      }
+    };
+    let ctx = makeDeps({ archive, queryFn });
+    try {
+      const id = await ctx.manager.start(prompt, os.tmpdir());
+      await ctx.manager.continue(id, prompt);
+      expect(ctx.manager.list()[0].usage?.costUsd).toBe(2);
+      ctx.manager.disposeAll();
+      ctx = makeDeps({ archive, queryFn });
+      for (const expected of [2, 3, 3.5, 4.5]) {
+        await ctx.manager.continue(id, prompt);
+        expect(ctx.manager.list()[0].usage?.costUsd).toBe(expected);
+      }
+    } finally {
+      ctx.manager.disposeAll();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["sqlite", "json"])("keeps pre-clear history read-only and out of the next handoff after restarting %s", async backend => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sdk-clear-"));
+    const db = backend === "sqlite" ? AppDatabase.open(dir)! : undefined;
+    const reset = { type: "conversation_reset", trigger: "clear", session_id: randomUUID(), new_conversation_id: randomUUID(),
+      uuid: randomUUID(), user_message_uuid: randomUUID(), timestamp: "2026-11-11T12:00:00Z" } satisfies import("@anthropic-ai/claude-agent-sdk").SDKConversationResetMessage;
+    const rewindFiles = vi.fn(async () => ({ canRewind: true }));
+    let lineage = reset.session_id;
+    const prompts: string[] = [];
+    const resume: unknown[] = [];
+    let failedHandoff = false;
+    const queryFn: QueryFn = ({ prompt: stream, options }) => {
+      resume.push(options.resume);
+      return Object.assign((async function* () {
+        for await (const message of stream as AsyncIterable<unknown>) {
+          const text = userTextFromPrompt(message);
+          prompts.push(text);
+          if (text.includes("after compact") && !failedHandoff) {
+            failedHandoff = true;
+            yield { type: "result", subtype: "error_during_execution", session_id: "failed-fresh", is_error: true };
+            continue;
+          }
+          if (text === "/clear") {
+            lineage = reset.new_conversation_id;
+            yield reset;
+            yield { type: "user", session_id: reset.session_id, uuid: reset.user_message_uuid, message: { role: "user", content: "/clear" } };
+          } else {
+            yield { type: "user", session_id: lineage, uuid: "checkpoint-" + prompts.length, message: { role: "user", content: text } };
+            yield { type: "assistant", session_id: lineage, message: { content: [{ type: "text", text: "answer " + text }] } };
+          }
+          yield { type: "result", subtype: "success", session_id: text === "/clear" ? reset.session_id : lineage, total_cost_usd: text === "/clear" ? 0 : 1 };
+        }
+      })(), { rewindFiles });
+    };
+    const summarize = vi.fn(async () => "summary of new work");
+    const open = () => makeDeps({ archive: new SessionArchive(dir, db), queryFn,
+      compressor: { compress: (items, options) => compressContext(items, { summarize }, options) } });
+    let ctx = open();
+    try {
+      const id = await ctx.manager.start({ text: "PRIVATE_BEFORE_CLEAR", attachments: [] }, dir);
+      const stalePage = ctx.manager.getTranscript(id);
+      const store = (ctx.manager as unknown as { toolOutputStore: import("./tool-output-store").ToolOutputStore }).toolOutputStore;
+      const handle = store.save(id, "old-call", "old tool body")!;
+      await ctx.manager.continue(id, { text: "/clear", attachments: [] });
+      ctx.manager.saveTranscript(id, stalePage, { replace: true });
+      ctx.manager.saveTranscript(id, stalePage);
+      expect(store.read(id, "old-call", handle, 0, 20)).toBeUndefined();
+      expect(ctx.manager.getTranscript(id).find(i => i.kind === "text" && i.text === "PRIVATE_BEFORE_CLEAR")).toMatchObject({ historicalTurn: true });
+      expect((await ctx.manager.rewindToUserMessage(id, "checkpoint-1")).ok).toBe(false);
+      expect(rewindFiles).not.toHaveBeenCalled();
+      await ctx.manager.continue(id, { text: "new turn 1", attachments: [] });
+      expect(resume).toEqual([undefined, reset.new_conversation_id]);
+      ctx.manager.disposeAll();
+      ctx = open();
+      await ctx.manager.continue(id, { text: "new turn 2", attachments: [] });
+      for (let n = 3; n <= 5; n++) await ctx.manager.continue(id, { text: "new turn " + n, attachments: [] });
+      expect((await ctx.manager.rewindToUserMessage(id, "checkpoint-1")).ok).toBe(false);
+      expect(ctx.manager.getTranscript(id)).toContainEqual(expect.objectContaining({ text: "new turn 1", sdkMsgId: "checkpoint-3" }));
+      expect((await ctx.manager.compressSession(id)).ok).toBe(true);
+      expect(summarize.mock.calls.flat().join(" ")).not.toContain("PRIVATE_BEFORE_CLEAR");
+      ctx.manager.disposeAll();
+      ctx = open();
+      await ctx.manager.continue(id, { text: "after compact", attachments: [] });
+      expect(prompts.at(-1)).toContain("new turn 5");
+      expect(prompts.at(-1)).not.toContain("PRIVATE_BEFORE_CLEAR");
+      await ctx.manager.continue(id, { text: "retry handoff", attachments: [] });
+      expect(prompts.at(-1)).toContain("after compact");
+      expect(prompts.at(-1)).not.toContain("PRIVATE_BEFORE_CLEAR");
+      expect(ctx.manager.getTranscript(id)).toContainEqual(expect.objectContaining({ text: "PRIVATE_BEFORE_CLEAR" }));
+    } finally { ctx.manager.disposeAll(); db?.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("charges only new spend after resuming at an earlier user checkpoint", async () => {
+    let ordinal = 0;
+    const costs = [1, 2, 3, 2.5];
+    const { manager } = makeDeps({ queryFn: ({ prompt: stream }) => Object.assign((async function* () {
+      for await (const message of stream as AsyncIterable<unknown>) {
+        yield { type: "user", session_id: "sdk", uuid: "uuid-" + ordinal, message: { role: "user", content: userTextFromPrompt(message) } };
+        yield { type: "result", session_id: "sdk", total_cost_usd: costs[ordinal++] };
+      }
+    })(), { rewindFiles: async () => ({ canRewind: true }) }) });
+    const id = await manager.start(prompt, os.tmpdir());
+    await manager.continue(id, { text: "second", attachments: [] });
+    await manager.continue(id, { text: "third", attachments: [] });
+    expect((await manager.rewindToUserMessage(id, "uuid-1")).ok).toBe(true);
+    await manager.continue(id, { text: "new work", attachments: [] });
+    expect(manager.list()[0].usage?.costUsd).toBe(4.5);
+    manager.disposeAll();
+  });
+});
+
+describe("compaction handoff", () => {
+  it("lets SDK compaction own the live query and shares its cooldown with manual compact", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "native-compact-"));
+    type Hooks = Record<"PreCompact" | "PostCompact", Array<{ hooks: Array<() => Promise<unknown>> }>>;
+    let hooks: Hooks;
+    const compress = vi.fn();
+    const ctx = makeDeps({ archive: new SessionArchive(dir), compressor: { compress }, queryFn: args => {
+      hooks = args.options.hooks as Hooks;
+      return (async function* () {
+        for await (const _ of args.prompt as AsyncIterable<unknown>) yield { type: "result", subtype: "success" };
+      })();
+    } });
+    try {
+      const id = await ctx.manager.start({ text: "fixture", attachments: [] }, dir);
+      await hooks!.PreCompact[0].hooks[0]();
+      expect((await ctx.manager.compressSession(id)).message).toMatch(/running/i);
+      await hooks!.PostCompact[0].hooks[0]();
+      expect((await ctx.manager.compressSession(id)).message).toMatch(/cooldown/i);
+      expect(compress).not.toHaveBeenCalled();
+    } finally {
+      ctx.manager.disposeAll();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  const history: ChatItem[] = Array.from({ length: 10 }, (_, i) => ({
+    kind: "text", role: i % 2 ? "assistant" : "user", id: String(i), text: `sentinel-${i}`,
+  }));
+  history.splice(9, 0, { kind: "tool", id: "read", tool: {
+    id: "call-1", name: "Read", summary: "answer.txt", resultPreview: "final-tool-result", status: "done",
+  } });
+  const compressor = { compress: (items: ChatItem[]) => compressContext(items, { summarize: async () => "prefix summary" }) };
+  it.each(["compact", "rewind"])("reauthorizes only the %s branch's retained full tool result", async (branch) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tool-branch-"));
+    const dbPath = path.join(dir, "tool.sqlite3");
+    const store = new ToolOutputStore(dbPath);
+    const archive = new SessionArchive(dir);
+    const handles: string[] = [], replies: boolean[] = [], prompts: string[] = [];
+    const queryFn: QueryFn = args => Object.assign((async function* () {
+      for await (const msg of args.prompt as AsyncIterable<unknown>) {
+        prompts.push(userTextFromPrompt(msg));
+        if (handles.length) {
+          const server = (args.options.mcpServers as Record<string, ToolOutputBinding["server"]>)["agentos-results"];
+          const req = createRequire(createRequire(import.meta.url).resolve("@anthropic-ai/claude-agent-sdk"));
+          const { Client } = req("@modelcontextprotocol/sdk/client/index.js");
+          const client = new Client({ name: "test", version: "1" });
+          const [a, b] = req("@modelcontextprotocol/sdk/inMemory.js").InMemoryTransport.createLinkedPair();
+          await server.instance.connect(b); await client.connect(a);
+          try {
+            for (const handle of handles) {
+              const result = await client.callTool({ name: "result_read", arguments: { handle } });
+              replies.push(!result.isError);
+            }
+          } finally { await client.close(); await server.instance.close(); }
+        }
+        yield { type: "result", subtype: "success", session_id: "sdk-lineage" };
+      }
+    })(), { rewindFiles: async () => ({ canRewind: true, filesChanged: [] }) });
+    const ctx = makeDeps({ archive, compressor, queryFn, toolOutputDatabasePath: dbPath });
+    try {
+      const id = await ctx.manager.start({ text: "start", attachments: [] }, dir);
+      const items: ChatItem[] = [];
+      for (let n = 0; n < 5; n++) {
+        items.push({ kind: "text", id: "u" + n, role: "user", text: "turn " + n, sdkMsgId: "anchor" + n });
+        if (n === 0 || n === 4) {
+          const call = "call" + n;
+          const handle = store.save(id, call, "full text for " + call)!;
+          handles.push(handle);
+          items.push({ kind: "tool", id: call, tool: { id: call, name: "mcp__browser__browser_console_messages",
+            status: "done", summary: "", resultPreview: "preview lacking any handle", outputHandle: handle } });
+        }
+      }
+      ctx.manager.saveTranscript(id, items, { replace: true });
+      if (branch === "compact") expect((await ctx.manager.compressSession(id)).ok).toBe(true);
+      else expect((await ctx.manager.rewindToUserMessage(id, "anchor2")).ok).toBe(true);
+      await ctx.manager.continue(id, { text: "continue", attachments: [] });
+      expect(replies).toEqual(branch === "compact" ? [false, true] : [true, false]);
+      if (branch === "compact") {
+        expect(prompts.at(-1)).toContain(handles[1]);
+        expect(prompts.at(-1)).not.toContain(handles[0]);
+      }
+    } finally { ctx.manager.disposeAll(); store.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+  it.each(["json", "sqlite"])("sends the retained turns on a fresh query after restart (%s)", async (backend) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "compact-restart-"));
+    const db = backend === "sqlite" ? AppDatabase.open(dir)! : null;
+    if (backend === "sqlite") expect(db).toBeTruthy();
+    const archive = new SessionArchive(dir, db);
+    const messages: string[] = [];
+    const options: Record<string, unknown>[] = [];
+    const queryFn: QueryFn = args => (async function* () {
+      options.push(args.options);
+      for await (const msg of args.prompt as AsyncIterable<unknown>) {
+        messages.push(userTextFromPrompt(msg));
+        yield { type: "result", subtype: "success", session_id: "lineage-" + options.length };
+      }
+    })();
+    let ctx = makeDeps({ archive, queryFn, compressor });
+    try {
+      const id = await ctx.manager.start({ text: "initial", attachments: [] }, dir);
+      ctx.manager.saveTranscript(id, history, { replace: true });
+      expect((await ctx.manager.compressSession(id)).ok).toBe(true);
+      expect(messages).toHaveLength(1);
+      ctx.manager.disposeAll();
+      const reopened = new SessionArchive(dir, db);
+      ctx = makeDeps({ archive: reopened, queryFn, compressor });
+      await ctx.manager.continue(id, { text: "new question", attachments: [] });
+      expect(options[1].resume).toBeUndefined();
+      for (const part of ["prefix summary", "sentinel-8", "Read", "answer.txt", "final-tool-result", "sentinel-9", "new question"]) {
+        expect(messages[1]).toContain(part);
+      }
+      expect(messages[1]).not.toContain("sentinel-0");
+      const [snapshot] = reopened.listCompactions(id);
+      expect(reopened.loadCompaction(id, snapshot.revision)?.original).toEqual(history);
+      ctx.manager.closeSession(id);
+      await ctx.manager.continue(id, { text: "ordinary", attachments: [] });
+      expect(options[2].resume).toBe("lineage-2");
+      expect(messages[2]).toBe("ordinary");
+    } finally {
+      ctx.manager.disposeAll(); db?.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  it.each(["abort", "new prompt", "close", "model", "rewind"])("discards a pending summary on %s", async action => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "compact-fence-"));
+    const archive = new SessionArchive(dir);
+    const summary = roomDeferred<string>();
+    const ctx = makeDeps({ archive, compressor: { compress: items => compressContext(items, { summarize: () => summary.promise }) } });
+    try {
+      const id = await ctx.manager.start({ text: "initial", attachments: [] }, dir);
+      ctx.manager.saveTranscript(id, history, { replace: true });
+      const compact = ctx.manager.compressSession(id, undefined, { autoContinue: true });
+      if (action === "abort") ctx.manager.abort(id);
+      if (action === "new prompt") await ctx.manager.continue(id, { text: "newer", attachments: [] });
+      if (action === "close") ctx.manager.closeSession(id);
+      if (action === "model") vi.mocked(ctx.settings.get).mockReturnValue({ ...baseSettings, defaultModel: "new-model" });
+      if (action === "rewind") await ctx.manager.rewindToUserMessage(id, "anchor");
+      summary.resolve("late summary");
+      expect((await compact).ok).toBe(false);
+      expect(ctx.manager.getTranscript(id)[0]).toEqual(history[0]);
+      expect(archive.listCompactions(id)).toHaveLength(0);
+    } finally { ctx.manager.disposeAll(); fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+  it.each(["json", "sqlite"])("retains the original transcript and lineage when publication fails (%s)", async backend => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "compact-rollback-"));
+    const db = backend === "sqlite" ? AppDatabase.open(dir)! : null;
+    const archive = new SessionArchive(dir, db);
+    const ctx = makeDeps({ archive, compressor });
+    try {
+      const id = await ctx.manager.start({ text: "go", attachments: [] }, dir);
+      ctx.manager.saveTranscript(id, history, { replace: true });
+      ctx.manager.flushPendingPersistence();
+      const fail = () => { throw new Error("Cannot publish index"); };
+      const fault = db ? vi.spyOn(db, "upsertSession").mockImplementationOnce(fail)
+        : vi.spyOn(archive, "upsertSummary").mockImplementationOnce(fail);
+      expect((await ctx.manager.compressSession(id)).ok).toBe(false);
+      fault.mockRestore();
+      const reopened = new SessionArchive(dir, db);
+      expect(reopened.loadItems(id).map(i => i.id)).toEqual(history.map(i => i.id));
+      expect(reopened.listCompactions(id)).toEqual([]);
+      expect(reopened.loadIndex()[0].sdkSessionId).toBe("sdk-session-1");
+    } finally { ctx.manager.disposeAll(); db?.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("folds high occupancy into the next requested turn and retries a failed fresh launch", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "compact-next-"));
+    const archive = new SessionArchive(dir);
+    archive.upsertSummary({ id: "id", title: "session", cwd: dir, status: "idle", sdkSessionId: "old", updatedAt: 1,
+      contextUsage: { modelId: baseSettings.defaultModel, ratio: 0.9, usedTokens: 180_000, limitTokens: 200_000, updatedAt: 1, source: "default", occupancySource: "request", estimated: true } });
+    archive.saveItems("id", history);
+    const messages: string[] = [];
+    const resumes: unknown[] = [];
+    const queryFn: QueryFn = args => (async function* () {
+      resumes.push(args.options.resume);
+      for await (const msg of args.prompt as AsyncIterable<unknown>) {
+        messages.push(userTextFromPrompt(msg));
+        if (messages.length === 1) {
+          yield { type: "assistant", session_id: "bad", isApiErrorMessage: true, message: { model: "<synthetic>", content: [{ type: "text", text: "API Error" }] } };
+          yield { type: "result", subtype: "error_during_execution", session_id: "bad", is_error: true };
+        } else yield { type: "result", subtype: "success", session_id: "good" };
+      }
+    })();
+    const ctx = makeDeps({ archive, compressor, queryFn });
+    try {
+      await ctx.manager.continue("id", { text: "first attempt", attachments: [] });
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toContain("prefix summary");
+      expect(archive.loadIndex()[0].pendingHandoff).toBeTruthy();
+      expect(archive.loadIndex()[0].sdkSessionId).toBeUndefined();
+      await ctx.manager.continue("id", { text: "second attempt", attachments: [] });
+      expect(resumes).toEqual([undefined, undefined]);
+      for (const content of ["prefix summary", "sentinel-9", "first attempt", "second attempt"]) expect(messages[1]).toContain(content);
+      expect(archive.loadIndex()[0]).toMatchObject({ sdkSessionId: "good" });
+      expect(archive.loadIndex()[0].pendingHandoff).toBeUndefined();
+    } finally { ctx.manager.disposeAll(); fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it.each(["default", "summary"])("sends a waiting prompt exactly once when the %s model changes during the auxiliary request", async setting => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "compact-settings-"));
+    const archive = new SessionArchive(dir);
+    const summary = roomDeferred<string>();
+    const summarize = vi.fn(() => summary.promise);
+    const calls: Array<{ model: unknown; text: string }> = [];
+    const queryFn: QueryFn = ({ prompt, options }) => (async function* () {
+      for await (const msg of prompt as AsyncIterable<unknown>) {
+        calls.push({ model: options.model, text: userTextFromPrompt(msg) });
+        yield { type: "assistant", context_usage: { total_tokens: 900, raw_max_tokens: 1000 }, message: { content: [] } };
+        yield { type: "result", subtype: "success", session_id: "lineage" };
+      }
+    })();
+    const ctx = makeDeps({ archive, queryFn, compressor: { compress: (items, opts) => compressContext(items, { summarize }, opts) } });
+    try {
+      const id = await ctx.manager.start({ text: "first", attachments: [] }, dir);
+      ctx.manager.saveTranscript(id, history, { replace: true });
+      const pending = ctx.manager.continue(id, { text: "original question", attachments: [] });
+      await vi.waitFor(() => expect(summarize).toHaveBeenCalledOnce());
+      const model = setting === "default" ? "new-model" : baseSettings.defaultModel;
+      vi.mocked(ctx.settings.get).mockReturnValue({ ...baseSettings, defaultModel: model, tokenSavings: { mode: "balanced", summaryModel: "other" } });
+      ctx.manager.cancelPendingCompressions();
+      summary.resolve("obsolete");
+      await pending;
+      expect(calls.filter(item => item.text === "original question")).toEqual([{ model, text: "original question" }]);
+      expect(archive.listCompactions(id)).toEqual([]);
+      expect(ctx.manager.getSummary(id)?.status).toBe("idle");
+    } finally { summary.resolve("late"); ctx.manager.disposeAll(); fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it.each(["text", "missing", "image", "oversized"])("preflights the original %s attachment of an older turn", async kind => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "compact-attachment-"));
+    const archive = new SessionArchive(dir);
+    const file = path.join(dir, kind === "image" ? "fixture.png" : "fixture.txt");
+    fs.writeFileSync(file, kind === "oversized" ? "large".repeat(6800) : "ORIGINAL_ATTACHMENT_RULE");
+    const summarize = vi.fn(async (_text: string) => "summary");
+    const ctx = makeDeps({ archive, compressor: { compress: (items, opts) => compressContext(items, { summarize }, opts) } });
+    try {
+      const id = await ctx.manager.start({ text: "earlier request", attachments: [{
+        name: path.basename(file), path: file, size: fs.statSync(file).size, kind: kind === "image" ? "image" : "text",
+        mimeType: kind === "image" ? "image/png" : "text/plain",
+      }] }, dir);
+      const [user] = ctx.manager.getTranscript(id);
+      fs.writeFileSync(file, "DIFFERENT_CONTENT_AT_PATH");
+      const source = [{ ...user, id: kind === "missing" ? "legacy-with-no-saved-bytes" : user.id }, ...history];
+      ctx.manager.saveTranscript(id, source, { replace: true });
+      const result = await ctx.manager.compressSession(id);
+      if (kind === "text") {
+        expect(result.ok).toBe(true);
+        expect(summarize.mock.calls[0][0]).toContain("ORIGINAL_ATTACHMENT_RULE");
+        expect(summarize.mock.calls[0][0]).not.toContain("DIFFERENT_CONTENT_AT_PATH");
+        const [index] = archive.listCompactions(id);
+        expect(JSON.stringify(archive.loadCompaction(id, index.revision)?.original)).not.toContain("ORIGINAL_ATTACHMENT_RULE");
+        expect(JSON.stringify(ctx.manager.getTranscript(id))).not.toContain("ORIGINAL_ATTACHMENT_RULE");
+      } else {
+        expect(result.ok).toBe(false);
+        expect(summarize).not.toHaveBeenCalled();
+        expect(archive.listCompactions(id)).toEqual([]);
+        expect(ctx.manager.getTranscript(id)).toEqual(source);
+      }
+    } finally { ctx.manager.disposeAll(); fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+});
 
 describe("attachment validation", () => {
   it("wraps the final model endpoint, including borrowed-room endpoints, and disposes it", async () => {
@@ -1526,6 +1996,54 @@ describe("SessionManager", () => {
     expect(captured[0]?.options.mcpServers).toEqual({
       fs: { command: "node", args: ["srv.js"] },
     });
+  });
+
+  it.each(["balanced", "standard"] as const)("applies the %s SDK shell budget and browser result policy", async (mode) => {
+    let captured: Record<string, unknown> = {};
+    const ctx = makeDeps({ queryFn: async function* (args) {
+      captured = args.options;
+      await takeFirstUserText(args.prompt);
+      yield { type: "result", subtype: "success", total_cost_usd: 0 };
+    } });
+    vi.mocked(ctx.settings.get).mockReturnValue({
+      ...baseSettings, tokenSavings: { mode },
+      mcpServers: { browser: { type: "playwright", browser: "chrome", connection: "isolated" } },
+    });
+    await ctx.manager.start({ text: "fixture", attachments: [] }, "D:/p");
+    expect(captured.settings).toEqual(mode === "balanced" ? { bashOutputMaxChars: 16000 } : undefined);
+    const hooks = captured.hooks as Record<string, unknown>;
+    const servers = captured.mcpServers as Record<string, unknown>;
+    if (mode === "balanced") {
+      expect(servers["agentos-results"]).toMatchObject({ type: "sdk" });
+      expect(hooks.PostToolUse).toHaveLength(1);
+      // Name-based auto-approve would outlive a dynamically replaced server.
+      expect(captured.allowedTools).not.toContain("mcp__agentos-results__result_read");
+    } else {
+      expect(servers["agentos-results"]).toBeUndefined();
+      expect(hooks.PostToolUse).toBeUndefined();
+    }
+    ctx.manager.disposeAll();
+  });
+
+  it.each([
+    { hiddenFromList: true }, { pathJail: "D:/p" }, { roomAbortSignal: new AbortController().signal },
+    { roomReadOnly: true }, { extraMcpServers: { browser: { command: "fixture-server" } } },
+    { extraMcpServers: { "agentos-results": { command: "user-reader" } } },
+  ])("keeps outputs exact without a personal, host-owned browser and reader binding", async (opts) => {
+    let captured: Record<string, unknown> = {};
+    const ctx = makeDeps({ queryFn: async function* (args) {
+      captured = args.options;
+      await takeFirstUserText(args.prompt);
+      yield { type: "result", subtype: "success", total_cost_usd: 0 };
+    } });
+    vi.mocked(ctx.settings.get).mockReturnValue({ ...baseSettings, mcpServers: {
+      browser: { type: "playwright", browser: "chrome", connection: "isolated" },
+    } });
+    await ctx.manager.start({ text: "fixture", attachments: [] }, "D:/p", opts);
+    if (opts.pathJail) expect(captured.settings).toBeUndefined();
+    expect((captured.hooks as Record<string, unknown>).PostToolUse).toBeUndefined();
+    expect((captured.mcpServers as Record<string, unknown>)?.["agentos-results"]).toEqual(opts.extraMcpServers?.["agentos-results"]);
+    ctx.manager.disposeAll();
   });
 
   it("mcp control requests route to the live query handle", async () => {

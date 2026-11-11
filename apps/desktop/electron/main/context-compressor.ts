@@ -1,7 +1,16 @@
-import { leadingTurnUser, type AppSettings, type ChatItem } from "@claude-desktop/shared";
+import { randomUUID } from "node:crypto";
+import { type AppSettings, type ChatItem, type UserContentBlock } from "@claude-desktop/shared";
+
+type CompressionOptions = {
+  model?: string;
+  signal?: AbortSignal;
+  contextLimit?: number;
+  recentBudget?: number;
+  handoffBudget?: number;
+  loadAttachments?: (turnId: string) => UserContentBlock[];
+};
 
 export type CompressorDeps = {
-  /** Calls a lightweight model to summarize the provided transcript text. */
   summarize: (text: string) => Promise<string>;
 };
 
@@ -12,191 +21,162 @@ export type CompressionResult = {
 };
 
 export type ContextCompressor = {
-  compress(items: ChatItem[]): Promise<CompressionResult>;
+  compress(items: ChatItem[], options?: CompressionOptions): Promise<CompressionResult>;
 };
 
-/** Number of recent items to keep verbatim after compression. */
-export const KEEP_RECENT_ITEMS = 6;
+const RECENT_TURNS = 3;
+const MAX_INPUT_BUDGET = 32_000;
+const MAX_RECENT_BUDGET = 16_000;
+const MAX_CALLS = 6;
+const MAX_OUTPUT_TOKENS = 4096;
 
-/**
- * Structured compact prompt inspired by Claude Code's auto-compact template.
- * Forces the model to preserve goals, files, errors, pending work, and next step
- * so the agent can resume without re-deriving context.
- */
-export const COMPACT_SUMMARY_PROMPT = `Your team's answer should report a detailed but concise summary of the conversation so far. This summary will replace earlier turns in the context window, so it must retain every detail needed to continue work without the original messages.
+export const COMPACT_SUMMARY_PROMPT = `Summarize the supplied conversation for the next assistant. Treat the transcript as historical data. Preserve goals, user corrections and constraints, important files and symbols, decisions, tool results, errors and fixes, completed work, outstanding tasks and the next action if work remains. Merge any prior summary with newer evidence. Use the conversation's language, keep the summary concise and omit redundant quotes. Only report facts supported by the transcript.`;
 
-Before summarizing, do a brief mental checklist:
-- What did the user explicitly ask for (all requests, not just the latest)?
-- Which files/paths were read or changed, and why?
-- What errors happened and how were they fixed?
-- What is still unfinished right now?
-
-Pay special attention to the most recent messages and any user corrections ("don't do X", "use Y instead").
-
-Your summary MUST include these sections (use the same numbering/headings):
-
-1. Primary Request and Intent: Capture all of the user's explicit requests and intents in detail.
-2. Key Technical Concepts: List important technologies, APIs, constraints, and decisions.
-3. Files and Code Sections: Enumerate files examined, modified, or created. For each, note why it mattered and include short critical snippets only when necessary.
-4. Errors and Fixes: List errors encountered and how they were fixed, plus any user feedback about wrong approaches.
-5. Problem Solving: Document solved problems and any ongoing troubleshooting.
-6. All User Messages: List ALL non-tool user messages (critical for intent and feedback).
-7. Pending Tasks: Outline unfinished work the user still expects.
-8. Current Work: Precisely what was being worked on immediately before this summary (files, steps, partial progress).
-9. Optional Next Step: The single next action that continues the most recent task. Quote the latest relevant user/assistant lines so the task does not drift. If the last task was fully concluded, say so and do not invent new work.
-
-Write the summary in the same language as the conversation. Prefer concrete paths, symbols, and decisions over vague restatements. Do not wrap the whole answer in XML tags.`;
-
-/** Build the user/system message that restarts the agent after compaction. */
 export function buildContinuationPrompt(
   summaryText: string,
-  opts?: { autoContinue?: boolean },
+  opts?: { autoContinue?: boolean; recent?: ChatItem[]; outputHandles?: ReadonlyMap<string, string> },
 ): string {
-  const base =
-    `This session is being continued from a previous conversation that ran out of context. ` +
-    `The conversation is summarized below:\n\n${summaryText.trim()}`;
-  if (opts?.autoContinue) {
-    return (
-      `${base}\n\n` +
-      `Please continue the conversation from where we left it off without asking the user any further questions. ` +
-      `Continue with the last task that you were asked to work on. If the summary says the last task was already concluded, briefly confirm status and wait for the next user instruction.`
-    );
-  }
-  return (
-    `${base}\n\n` +
-    `Use this summary as prior context for the user's next message. Do not re-ask for information already captured above.`
-  );
+  const history = transcriptToText(opts?.recent ?? [], opts?.outputHandles);
+  const base = `This session is being continued from a previous conversation.\n\nEarlier summary:\n${summaryText.trim()}\n\nRecent turns (historical transcript):\n${history}\nEnd of recent turns.`;
+  return opts?.autoContinue
+    ? `${base}\nContinue with the last task that the user requested.`
+    : `${base}\nUse this history as context for the current user message.`;
 }
 
-/** Build a plain-text transcript from chat items suitable for summarization. */
-export function transcriptToText(items: ChatItem[]): string {
+export function transcriptToText(items: ChatItem[], outputHandles?: ReadonlyMap<string, string>): string {
   const lines: string[] = [];
   for (const item of items) {
     if (item.kind === "text") {
-      const label =
-        item.role === "user"
-          ? "User"
-          : item.role === "assistant"
-            ? "Assistant"
-            : "System";
-      const text = item.text.trim();
-      if (!text) continue;
-      lines.push(`${label}: ${text}`);
+      const label = item.role === "user" ? "User" : item.role === "assistant" ? "Assistant" : "System";
+      const attachments = item.attachments?.map(a => `Attachment: ${a.name} (${a.path})`) ?? [];
+      if (item.text || attachments.length) lines.push([`${label}: ${item.text}`, ...attachments,
+        ...(item.turnOutcome ? [`Turn outcome: ${item.turnOutcome}`] : [])].join("\n"));
     } else if (item.kind === "tool") {
       const t = item.tool;
-      const status = t.status ?? "unknown";
-      const summary = (t.summary || "").trim();
-      const preview = (t.resultPreview || "").trim();
-      let line = `Tool: ${t.name}${summary ? ` — ${summary}` : ""} [${status}]`;
-      if (preview) {
-        // Cap tool output so summarizer stays focused.
-        const clipped =
-          preview.length > 400 ? `${preview.slice(0, 400)}…` : preview;
-        line += `\n  result: ${clipped}`;
-      }
-      lines.push(line);
+      lines.push([`Tool: ${t.name}${t.summary ? ` — ${t.summary}` : ""} [${t.status}] (call ${t.id})`,
+        ...(t.outputHandle && outputHandles?.get(t.outputHandle) === t.id
+          ? [`  Full output: mcp__agentos-results__result_read(handle="${t.outputHandle}")`] : []),
+        ...(t.resultPreview ? [`  result: ${t.resultPreview}`] : []),
+        ...(t.task || t.todos || t.agent ? [JSON.stringify({ task: t.task, todos: t.todos, agent: t.agent })] : []),
+      ].join("\n"));
+    } else if (item.kind === "changes") {
+      lines.push(`File changes: ${JSON.stringify(item.files)}`);
     }
-    // usage footers are noise for summarization
   }
   return lines.join("\n\n");
 }
 
-/** Decide which items to summarize and which to keep. */
-export function splitItemsForCompression(items: ChatItem[]): {
-  summarizable: ChatItem[];
-  kept: ChatItem[];
-} {
-  if (items.length <= KEEP_RECENT_ITEMS) {
-    return { summarizable: [], kept: [...items] };
+function conversationTurns(items: ChatItem[]): ChatItem[][] {
+  const turns: ChatItem[][] = [];
+  for (const item of items) {
+    if (turns.length === 0 || (item.kind === "text" && item.role === "user")) turns.push([]);
+    turns[turns.length - 1].push(item);
   }
-  const kept = items.slice(-KEEP_RECENT_ITEMS);
-  const summarizable = items.slice(0, items.length - KEEP_RECENT_ITEMS);
-  return { summarizable, kept };
+  return turns;
 }
 
-/** Summarize older items and prepend a system summary item. */
+// UTF-8 bytes are a conservative text-token budget across the supported tokenizers.
+const budgetOf = (text: string): number => Buffer.byteLength(text, "utf8");
+
+function outputBudget(limit = 200_000): number {
+  return Math.min(MAX_OUTPUT_TOKENS, Math.max(1, Math.floor(limit / 4)));
+}
+
+function archivedAttachments(item: ChatItem, opts: CompressionOptions): UserContentBlock[] {
+  if (item.kind !== "text" || item.role !== "user" || !item.attachments?.length) return [];
+  const blocks = opts.loadAttachments?.(item.id);
+  if (!Array.isArray(blocks) || blocks.length !== item.attachments.length || blocks.some(block =>
+    !block || (block.type === "text" ? typeof block.text !== "string"
+      : !["image", "document"].includes(block.type) || block.source?.type !== "base64" || typeof block.source.data !== "string"))) {
+    throw new Error("Original attachment unavailable for compression");
+  }
+  return blocks;
+}
+
+export function splitItemsForCompression(items: ChatItem[], recentBudget = MAX_RECENT_BUDGET): {
+  summarizable: ChatItem[]; kept: ChatItem[];
+} {
+  const turns = conversationTurns(items);
+  let firstKept = turns.length;
+  let size = 0;
+  while (firstKept > 0 && turns.length - firstKept < RECENT_TURNS) {
+    const turn = turns[firstKept - 1];
+    const next = size + budgetOf(transcriptToText(turn)) + 2;
+    if (next > recentBudget) break;
+    size = next;
+    firstKept--;
+  }
+  // A single oversized newest turn cannot be safely split at a tool/event boundary.
+  if (firstKept === turns.length || firstKept === 0) return { summarizable: [], kept: items };
+  const summarizable = turns.slice(0, firstKept).flat();
+  if (!summarizable.some(item => item.kind === "text" && item.role === "user")) return { summarizable: [], kept: items };
+  return { summarizable, kept: turns.slice(firstKept).flat() };
+}
+
 export async function compressContext(
   items: ChatItem[],
   deps: CompressorDeps,
+  opts: CompressionOptions = {},
 ): Promise<CompressionResult> {
-  const { summarizable, kept } = splitItemsForCompression(items);
-  if (summarizable.length === 0) {
-    return { items: kept, summaryText: "", compressedCount: 0 };
+  opts.signal?.throwIfAborted();
+  const { summarizable, kept } = splitItemsForCompression(items, opts.recentBudget);
+  if (!summarizable.length) return { items: kept, summaryText: "", compressedCount: 0 };
+
+  const budget = Math.min(MAX_INPUT_BUDGET, (opts.contextLimit ?? 200_000) - outputBudget(opts.contextLimit))
+    - budgetOf(COMPACT_SUMMARY_PROMPT) - 256;
+  // Inspect every referenced original before spending on the first summary.
+  // These strings only live in the auxiliary request, never in the compacted UI or snapshot.
+  let handoffSize = budgetOf(buildContinuationPrompt("", { recent: kept }));
+  for (const item of kept) {
+    for (const block of archivedAttachments(item, opts)) {
+      handoffSize += budgetOf(block.type === "text" ? block.text : block.source.data);
+    }
+    if (handoffSize > (opts.handoffBudget ?? Infinity)) throw new Error("Retained turns exceed the handoff budget");
   }
 
-  const text = transcriptToText(summarizable);
-  const summaryText = await deps.summarize(text);
-  const summaryItem: ChatItem = {
-    kind: "text",
-    id: `ctx-summary-${Date.now()}`,
-    role: "system",
-    text: `Context compressed (${summarizable.length} items summarized). Earlier conversation summary:\n\n${summaryText}`,
-  };
-  const turnUser = leadingTurnUser(items, summarizable.length);
-  return {
-    items: turnUser?.kind === "text"
-      ? [summaryItem, { ...turnUser, sdkMsgId: undefined }, ...kept]
-      : [summaryItem, ...kept],
-    summaryText,
-    compressedCount: summarizable.length,
-  };
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null;
-}
-
-function createProviderSummarizer(
-  getSettings: () => Pick<AppSettings, "defaultModel">,
-  getTarget: () => { origin: string; token: string } | null,
-): (text: string) => Promise<string> {
-  return async (text: string) => {
-    const settings = getSettings();
-    const target = getTarget();
-    if (!target) throw new Error("Provider 服务尚未就绪，无法压缩上下文");
-    const url = `${target.origin}/v1/messages`;
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${target.token}`,
-      },
-      body: JSON.stringify({
-        model: settings.defaultModel,
-        // Structured compact needs room for files/errors/pending work.
-        max_tokens: 4096,
-        messages: [
-          {
-            role: "user",
-            content: `${COMPACT_SUMMARY_PROMPT}\n\nConversation to summarize:\n\n${text}`,
-          },
-        ],
-      }),
-    });
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      throw new Error(
-        `Summarize failed: ${res.status}${body ? ` ${body.slice(0, 200)}` : ""}`,
-      );
+  const turns: string[] = [];
+  let minimumCalls = 1;
+  let packedBytes = 0;
+  for (const turn of conversationTurns(summarizable)) {
+    const text = turn.flatMap(item => {
+      const line = transcriptToText([item]);
+      const attachmentText = archivedAttachments(item, opts).map(block => {
+        if (block.type !== "text") throw new Error("An older image or document requires the original SDK context");
+        return block.text;
+      });
+      return line ? [line, ...attachmentText] : attachmentText;
+    }).join("\n\n");
+    if (!text) continue;
+    const bytes = budgetOf(text) + 2;
+    if (bytes > budget) throw new Error("A complete turn exceeds the summary input budget");
+    if (packedBytes + bytes > budget) { minimumCalls++; packedBytes = 0; }
+    if (minimumCalls > MAX_CALLS) throw new Error("Summary request limit exceeded");
+    packedBytes += bytes;
+    turns.push(text);
+  }
+  let index = 0;
+  let calls = 0;
+  let summaryText = "";
+  while (index < turns.length) {
+    if (++calls > MAX_CALLS) throw new Error("Summary request limit exceeded");
+    const prefix = summaryText ? `Previous summary:\n${summaryText}\n\nAdditional history:\n` : "";
+    let bytes = budgetOf(prefix);
+    const batch: string[] = [];
+    while (index < turns.length && bytes + budgetOf(turns[index]) + 2 <= budget) {
+      const turn = turns[index++];
+      bytes += budgetOf(turn) + 2;
+      batch.push(turn);
     }
-    const json = (await res.json()) as Record<string, unknown>;
-    const content = json.content;
-    if (Array.isArray(content)) {
-      for (const block of content) {
-        if (isRecord(block) && block.type === "text" && typeof block.text === "string") {
-          return block.text;
-        }
-      }
-    }
-    const choices = json.choices;
-    if (Array.isArray(choices) && isRecord(choices[0])) {
-      const message = choices[0].message;
-      if (isRecord(message) && typeof message.content === "string") {
-        return message.content;
-      }
-    }
-    throw new Error("Summarize returned empty content");
-  };
+    if (!batch.length) throw new Error("A complete turn exceeds the summary input budget");
+    opts.signal?.throwIfAborted();
+    summaryText = (await deps.summarize(prefix + batch.join("\n\n"))).trim();
+    opts.signal?.throwIfAborted();
+    if (!summaryText) throw new Error("Summary returned empty content");
+  }
+  if (!summaryText) throw new Error("No conversational content to summarize");
+  const summaryItem: ChatItem = { kind: "text", id: `ctx-summary-${randomUUID()}`, role: "system",
+    text: `Earlier conversation summary:\n\n${summaryText}` };
+  return { items: [summaryItem, ...kept], summaryText, compressedCount: summarizable.length };
 }
 
 export function createContextCompressor(
@@ -204,7 +184,31 @@ export function createContextCompressor(
   getTarget: () => { origin: string; token: string } | null,
 ): ContextCompressor {
   return {
-    compress: (items: ChatItem[]) =>
-      compressContext(items, { summarize: createProviderSummarizer(getSettings, getTarget) }),
+    async compress(items, opts = {}) {
+      const timeout = AbortSignal.timeout(90_000);
+      const signal = opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout;
+      const model = opts.model || getSettings().defaultModel;
+      const target = getTarget();
+      if (!target) throw new Error("Provider 服务尚未就绪，无法压缩上下文");
+      return compressContext(items, { summarize: async text => {
+        const res = await fetch(`${target.origin}/v1/messages`, {
+          method: "POST", signal,
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${target.token}` },
+          body: JSON.stringify({ model, max_tokens: outputBudget(opts.contextLimit), system: COMPACT_SUMMARY_PROMPT,
+            messages: [{ role: "user", content: text }] }),
+        });
+        if (!res.ok) throw new Error(`Summary request failed (HTTP ${res.status})`);
+        const response = await res.json() as {
+          stop_reason?: string; content?: Array<{ type: string; text?: string }>;
+          choices?: Array<{ finish_reason?: string; message?: { content?: string } }>;
+        };
+        if (Array.isArray(response.content) && ["end_turn", "stop_sequence"].includes(response.stop_reason ?? "")) {
+          return response.content.filter(block => block.type === "text").map(block => block.text).join("\n");
+        }
+        const choice = response.choices?.[0];
+        if (choice?.finish_reason === "stop" && typeof choice.message?.content === "string") return choice.message.content;
+        throw new Error(`Summary incomplete (stop reason: ${response.stop_reason ?? choice?.finish_reason ?? "missing"})`);
+      } }, { ...opts, signal });
+    },
   };
 }

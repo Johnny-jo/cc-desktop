@@ -10,14 +10,14 @@ import {
 import type { TurnUsage } from "./models";
 
 describe("extractUsedTokens", () => {
-  it("prefers inputTokens", () => {
+  it("counts ordinary, read and written input once", () => {
     expect(
       extractUsedTokens({
         inputTokens: 1000,
         cacheReadTokens: 50,
         cacheCreationTokens: 10,
       }),
-    ).toBe(1000);
+    ).toBe(1060);
   });
 
   it("falls back to cache sum when input missing", () => {
@@ -125,7 +125,7 @@ describe("computeContextUsage", () => {
   it("builds ratio and drops when used unknown", () => {
     const turn: TurnUsage = { inputTokens: 160_000 };
     const u = computeContextUsage({
-      turn,
+      request: turn,
       modelId: "kimi-for-coding",
       settings: { defaultContextLimit: 200_000, modelContextLimits: {} },
       catalog: [],
@@ -142,7 +142,7 @@ describe("computeContextUsage", () => {
 
     expect(
       computeContextUsage({
-        turn: { durationMs: 1 },
+        request: {},
         modelId: "x",
         settings: { defaultContextLimit: 200_000, modelContextLimits: {} },
         catalog: [],

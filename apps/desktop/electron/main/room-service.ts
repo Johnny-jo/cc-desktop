@@ -253,7 +253,6 @@ const EXEC_HEARTBEAT_TIMEOUT_MS = 60_000;
 /** 单轮总时长上限。 */
 const EXEC_TOTAL_TIMEOUT_MS = 10 * 60_000;
 /** 席位会话上下文占用超过这个比例就自动压缩（与渲染端主会话的 0.75 一致）。 */
-const ROOM_AUTO_COMPACT_RATIO = 0.75;
 
 type RemoteTurnState =
   | "dispatched"
@@ -4666,7 +4665,7 @@ export function activate(ctx) {
     sessionId: string | null | undefined,
     cu: { ratio: number } | undefined,
   ): Promise<boolean> {
-    if (!sessionId || !cu || cu.ratio < ROOM_AUTO_COMPACT_RATIO) return false;
+    if (!sessionId || !cu || cu.ratio < (this.settings.get().tokenSavings?.autoCompactRatio ?? 0.75)) return false;
     if (typeof this.sessions.compressSession !== "function") return false;
     const res = await this.sessions.compressSession(sessionId, undefined, {
       autoContinue: false,

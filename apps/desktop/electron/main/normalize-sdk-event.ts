@@ -572,91 +572,97 @@ function num(v: unknown): number | undefined {
   return typeof v === "number" && Number.isFinite(v) ? v : undefined;
 }
 
-/** Pull token/cost/timing fields from an SDK result message (success or error). */
-export function extractTurnUsage(msg: UnknownRecord): {
-  costUsd?: number;
-  usage?: import("@claude-desktop/shared").TurnUsage;
-} {
-  const costUsd =
-    num(msg.total_cost_usd) ?? num(msg.totalCostUsd) ?? undefined;
+type TurnUsage = import("@claude-desktop/shared").TurnUsage;
 
-  const usageObj = isRecord(msg.usage) ? msg.usage : null;
-  // Anthropic-style snake_case on NonNullableUsage / BetaUsage
-  const inputTokens =
-    num(usageObj?.input_tokens) ??
-    num(usageObj?.inputTokens) ??
-    num(usageObj?.prompt_tokens) ??
-    num(usageObj?.promptTokens) ??
-    undefined;
-  const outputTokens =
-    num(usageObj?.output_tokens) ??
-    num(usageObj?.outputTokens) ??
-    num(usageObj?.completion_tokens) ??
-    num(usageObj?.completionTokens) ??
-    undefined;
-  const cacheReadTokens =
-    num(usageObj?.cache_read_input_tokens) ??
-    num(usageObj?.cacheReadInputTokens) ??
-    undefined;
-  const cacheCreationTokens =
-    num(usageObj?.cache_creation_input_tokens) ??
-    num(usageObj?.cacheCreationInputTokens) ??
-    undefined;
+function nonnegative(value: unknown): number | undefined {
+  const n = num(value);
+  return n !== undefined && n >= 0 ? n : undefined;
+}
 
-  // Also sum modelUsage map if present (camelCase ModelUsage entries)
-  let modelIn = 0;
-  let modelOut = 0;
-  let modelCost = 0;
-  const modelUsage = isRecord(msg.modelUsage)
-    ? msg.modelUsage
-    : isRecord(msg.model_usage)
-      ? msg.model_usage
-      : null;
-  if (modelUsage) {
-    for (const v of Object.values(modelUsage)) {
-      if (!isRecord(v)) continue;
-      modelIn +=
-        num(v.inputTokens) ??
-        num(v.input_tokens) ??
-        num(v.promptTokens) ??
-        num(v.prompt_tokens) ??
-        0;
-      modelOut +=
-        num(v.outputTokens) ??
-        num(v.output_tokens) ??
-        num(v.completionTokens) ??
-        num(v.completion_tokens) ??
-        0;
-      modelCost += num(v.costUSD) ?? num(v.cost_usd) ?? 0;
+function token(value: unknown): number | undefined {
+  const n = nonnegative(value);
+  return Number.isSafeInteger(n) ? n : undefined;
+}
+
+/** SDK cost and modelUsage snapshots share the same cumulative lifecycle. */
+export function sdkCostSnapshot(msg: unknown): number | undefined {
+  if (!isRecord(msg)) return undefined;
+  const explicit = nonnegative(msg.total_cost_usd) ?? nonnegative(msg.totalCostUsd);
+  if (explicit !== undefined) return explicit;
+  const models = msg.modelUsage ?? msg.model_usage;
+  if (!isRecord(models)) return undefined;
+  const costs = Object.values(models).map(v => isRecord(v) ? nonnegative(v.costUSD ?? v.cost_usd) : undefined);
+  if (!costs.length || costs.some(v => v === undefined)) return undefined;
+  return costs.reduce<number>((sum, cost) => sum + cost!, 0);
+}
+
+function tokenFields(value: unknown): TurnUsage {
+  if (!isRecord(value)) return {};
+  const details = isRecord(value.prompt_tokens_details) ? value.prompt_tokens_details : {};
+  const cached = token(value.cache_read_input_tokens ?? value.cacheReadInputTokens ?? details.cached_tokens);
+  const created = token(value.cache_creation_input_tokens ?? value.cacheCreationInputTokens ?? details.cache_write_tokens);
+  const inclusive = token(value.prompt_tokens ?? value.promptTokens);
+  const ordinary = token(value.input_tokens ?? value.inputTokens)
+    ?? (inclusive === undefined ? undefined : Math.max(0, inclusive - (cached ?? 0) - (created ?? 0)));
+  const output = token(value.output_tokens ?? value.outputTokens ?? value.completion_tokens ?? value.completionTokens);
+  return {
+    ...(ordinary !== undefined ? { inputTokens: ordinary } : {}),
+    ...(output !== undefined ? { outputTokens: output } : {}),
+    ...(cached !== undefined ? { cacheReadTokens: cached } : {}),
+    ...(created !== undefined ? { cacheCreationTokens: created } : {}),
+  };
+}
+
+type SdkContextEstimate = { totalTokens: number; rawMaxTokens?: number; model?: string };
+
+export function sdkContextEstimate(value: unknown): SdkContextEstimate | undefined {
+  if (!isRecord(value)) return undefined;
+  const totalTokens = token(value.total_tokens ?? value.totalTokens);
+  if (totalTokens === undefined) return undefined;
+  return { totalTokens, rawMaxTokens: token(value.raw_max_tokens ?? value.rawMaxTokens), model: nonemptyString(value.model) };
+}
+
+/** One turn on the main thread. Input belongs only to the latest API request. */
+export class SdkTurnContext {
+  sdk?: SdkContextEstimate;
+  request?: TurnUsage;
+  model?: string;
+  private messageId?: string;
+
+  observe(raw: unknown): void {
+    if (!isRecord(raw) || raw.parent_tool_use_id || raw.agent_id) return;
+    if (raw.type === "assistant") {
+      if (isRecord(raw.message) && raw.message.model !== "<synthetic>" && !raw.isSynthetic) {
+        this.observeMessage(raw.message, false);
+      }
+      this.sdk = sdkContextEstimate(raw.context_usage) ?? this.sdk;
+    } else if (raw.type === "stream_event" && isRecord(raw.event)) {
+      const event = raw.event;
+      if (event.type === "message_start" && isRecord(event.message)) this.observeMessage(event.message, true);
+      if (event.type === "message_delta") this.request = { ...this.request, ...tokenFields(event.usage) };
     }
   }
 
-  const durationMs = num(msg.duration_ms) ?? num(msg.durationMs);
-  const durationApiMs = num(msg.duration_api_ms) ?? num(msg.durationApiMs);
-  const numTurns = num(msg.num_turns) ?? num(msg.numTurns);
-
-  const rawUsage = {
-    durationMs,
-    durationApiMs,
-    inputTokens: inputTokens ?? (modelIn || undefined),
-    outputTokens: outputTokens ?? (modelOut || undefined),
-    cacheReadTokens,
-    cacheCreationTokens,
-    costUsd: costUsd ?? (modelCost || undefined),
-    numTurns,
-  };
-
-  // Drop undefined keys so snapshots / equality checks stay clean.
-  const usage: import("@claude-desktop/shared").TurnUsage = {};
-  for (const [k, v] of Object.entries(rawUsage)) {
-    if (v != null) (usage as Record<string, number>)[k] = v;
+  private observeMessage(message: UnknownRecord, start: boolean): void {
+    const id = nonemptyString(message.id);
+    const sameRequest = !start && id !== undefined && this.messageId === id;
+    if (!sameRequest) this.sdk = undefined;
+    this.request = { ...(sameRequest ? this.request : {}), ...tokenFields(message.usage) };
+    this.model = nonemptyString(message.model) ?? (sameRequest ? this.model : undefined);
+    this.messageId = id;
   }
+}
 
-  const hasAny = Object.keys(usage).length > 0;
-  return {
-    costUsd: usage.costUsd,
-    usage: hasAny ? usage : undefined,
-  };
+/** Result.usage is per-turn. modelUsage and total_cost_usd are cumulative. */
+function extractTurnUsage(msg: UnknownRecord): TurnUsage | undefined {
+  const usage = tokenFields(msg.usage);
+  const durationMs = nonnegative(msg.duration_ms ?? msg.durationMs);
+  const durationApiMs = nonnegative(msg.duration_api_ms ?? msg.durationApiMs);
+  const numTurns = token(msg.num_turns ?? msg.numTurns);
+  if (durationMs !== undefined) usage.durationMs = durationMs;
+  if (durationApiMs !== undefined) usage.durationApiMs = durationApiMs;
+  if (numTurns !== undefined) usage.numTurns = numTurns;
+  return Object.keys(usage).length ? usage : undefined;
 }
 
 function normalizeResult(
@@ -668,7 +674,7 @@ function normalizeResult(
     msg.subtype === "error" ||
     (typeof msg.subtype === "string" && msg.subtype.startsWith("error"));
 
-  const { costUsd, usage } = extractTurnUsage(msg);
+  const usage = extractTurnUsage(msg);
 
   if (isError) {
     let error: string | undefined;
@@ -681,8 +687,8 @@ function normalizeResult(
     } else {
       error = "SDK result error";
     }
-    return [{ type: "result", sessionId, ok: false, costUsd, error, usage }];
+    return [{ type: "result", sessionId, ok: false, error, usage }];
   }
 
-  return [{ type: "result", sessionId, ok: true, costUsd, usage }];
+  return [{ type: "result", sessionId, ok: true, usage }];
 }

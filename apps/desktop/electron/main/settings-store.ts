@@ -3,6 +3,17 @@ import path from "node:path";
 import type { AppSettings, PermissionMode, PublicSettings } from "@claude-desktop/shared";
 import { normalizeRuleString, sanitizeMcpServers } from "@claude-desktop/shared";
 
+function sanitizeTokenSavings(raw: unknown): NonNullable<AppSettings["tokenSavings"]> {
+  const value = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+  const summaryModel = typeof value.summaryModel === "string" ? value.summaryModel.trim() : "";
+  const ratio = value.autoCompactRatio;
+  return {
+    mode: value.mode === "standard" ? "standard" : "balanced",
+    ...(summaryModel ? { summaryModel } : {}),
+    ...(typeof ratio === "number" && ratio >= 0.5 && ratio <= 0.95 ? { autoCompactRatio: ratio } : {}),
+  };
+}
+
 function sanitizeDisabledControlServers(raw: unknown): NonNullable<AppSettings["disabledControlServers"]> {
   const profiles: NonNullable<AppSettings["disabledControlServers"]> = {};
   for (const [name, config] of Object.entries(sanitizeMcpServers(raw))) {
@@ -101,6 +112,7 @@ const DEFAULTS: AppSettings = {
   permissionMode: "default",
   shutdownCpaOnQuit: false,
   defaultContextLimit: 200_000,
+  tokenSavings: { mode: "balanced" },
   modelContextLimits: {},
   modelEfforts: {},
   mcpServers: {},
@@ -149,6 +161,7 @@ export class SettingsStore {
   get(): AppSettings {
     return {
       ...this.settings,
+      tokenSavings: sanitizeTokenSavings(this.settings.tokenSavings),
       models: [...this.settings.models],
       modelContextLimits: { ...this.settings.modelContextLimits },
       mcpServers: { ...this.settings.mcpServers },
@@ -184,6 +197,9 @@ export class SettingsStore {
     }
     if (publicPatch.modelContextLimits) {
       publicPatch.modelContextLimits = { ...publicPatch.modelContextLimits };
+    }
+    if (publicPatch.tokenSavings !== undefined) {
+      publicPatch.tokenSavings = sanitizeTokenSavings(publicPatch.tokenSavings);
     }
     if (publicPatch.modelEfforts !== undefined) {
       publicPatch.modelEfforts = sanitizeModelEfforts(publicPatch.modelEfforts);
@@ -327,6 +343,7 @@ export class SettingsStore {
         ...rest,
         models: rest.models ? [...rest.models] : [...DEFAULTS.models],
         defaultContextLimit,
+        tokenSavings: sanitizeTokenSavings(rest.tokenSavings),
         modelContextLimits: limits,
         modelEfforts: sanitizeModelEfforts(rest.modelEfforts) ?? {},
         mcpServers: sanitizeMcpServers(rest.mcpServers),

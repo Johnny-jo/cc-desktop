@@ -124,7 +124,6 @@ describe("normalizeSdkEvent", () => {
     expect(events[0]).toMatchObject({
       type: "result",
       ok: true,
-      costUsd: 0.0123,
       usage: {
         durationMs: 4200,
         durationApiMs: 3100,
@@ -132,7 +131,6 @@ describe("normalizeSdkEvent", () => {
         outputTokens: 340,
         cacheReadTokens: 100,
         cacheCreationTokens: 50,
-        costUsd: 0.0123,
         numTurns: 2,
       },
     });
@@ -257,8 +255,7 @@ describe("normalizeSdkEvent", () => {
         type: "result",
         sessionId,
         ok: true,
-        costUsd: 0.012,
-        usage: { costUsd: 0.012 },
+        usage: undefined,
       },
     ]);
   });

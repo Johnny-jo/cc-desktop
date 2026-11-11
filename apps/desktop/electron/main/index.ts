@@ -11,7 +11,7 @@ import {
   safeStorage,
   Tray,
 } from "electron";
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { getSessionMessages, query } from "@anthropic-ai/claude-agent-sdk";
 import { IPC } from "@claude-desktop/shared";
 import type {
   CpaStatus,
@@ -519,6 +519,8 @@ function bootstrap() {
   });
 
   const sessions = new SessionManager({
+    readSdkMessages: (id, dir) => getSessionMessages(id, { dir, includeSystemMessages: true }),
+    toolOutputDatabasePath: path.join(userDataDir, "tool-output.sqlite3"),
     pdfCompatibility: new PdfCompatibilityProxy(),
     queryFn: realQueryFn,
     permissionBroker: permissions,

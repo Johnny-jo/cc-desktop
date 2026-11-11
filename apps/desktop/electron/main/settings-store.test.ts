@@ -66,6 +66,18 @@ describe("SettingsStore", () => {
     expect(again.getPublic().defaultContextLimit).toBe(256_000);
   });
 
+  it("loads a balanced output budget for old settings and round-trips the summary model", () => {
+    const create = () => new SettingsStore({ userDataDir: dir, encrypt: s => s, decrypt: s => s });
+    fs.writeFileSync(path.join(dir, "settings.json"), JSON.stringify({ models: ["work/fast"] }));
+    const store = create();
+    expect(store.get().tokenSavings).toEqual({ mode: "balanced" });
+    store.update({ tokenSavings: { mode: "standard", summaryModel: " work/fast " } });
+    const saved = create().getPublic();
+    expect(saved.tokenSavings).toEqual({ mode: "standard", summaryModel: "work/fast" });
+    store.update({ tokenSavings: { mode: "balanced" } });
+    expect(create().getPublic().tokenSavings).toEqual({ mode: "balanced" });
+  });
+
   it("defaults galaxy effects to enabled for fresh and legacy settings", () => {
     const deps = { userDataDir: dir, encrypt: (s: string) => s, decrypt: (s: string) => s };
     expect(new SettingsStore(deps).getPublic().galaxyEffectsEnabled).toBe(true);

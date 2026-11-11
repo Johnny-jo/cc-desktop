@@ -42,6 +42,9 @@ export const IPC = {
   sessionLoadNewer: "session:load-newer",
   sessionSaveTranscript: "session:save-transcript",
   sessionCompress: "session:compress",
+  sessionCompactionHistory: "session:compactionHistory",
+  sessionCompactionPage: "session:compactionPage",
+  sessionExportCompactionSdk: "session:exportCompactionSdk",
   /** Pin / unpin a session to the top of the sidebar list */
   sessionSetPinned: "session:set-pinned",
   sessionSetTaskPlanClosed: "session:set-task-plan-closed",
@@ -395,6 +398,18 @@ export type IpcInvokeMap = {
       },
     ];
     result: { ok: boolean; message?: string };
+  };
+  [IPC.sessionCompactionHistory]: {
+    args: [{ sessionId: string }];
+    result: Array<{ revision: string; createdAt: number; model: string; compressedCount: number; sdkMessageCount?: number }>;
+  };
+  [IPC.sessionExportCompactionSdk]: {
+    args: [{ sessionId: string; revision: string }];
+    result: { saved: boolean };
+  };
+  [IPC.sessionCompactionPage]: {
+    args: [{ sessionId: string; revision: string; offset: number }];
+    result: { items: import("./models").ChatItem[]; total: number };
   };
   [IPC.sessionSetPinned]: {
     args: [{ sessionId: string; pinned: boolean }];

@@ -748,6 +748,20 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
       });
     },
   );
+  ipcMain.handle(IPC.sessionCompactionHistory, (_e, { sessionId }) => ctx.sessions.listCompactionHistory(sessionId));
+  ipcMain.handle(IPC.sessionCompactionPage, (_e, { sessionId, revision, offset }) =>
+    ctx.sessions.getCompactionPage(sessionId, revision, offset));
+  ipcMain.handle(IPC.sessionExportCompactionSdk, async (event, { sessionId, revision }) => {
+    const source = ctx.sessions.compactionSdkFile(sessionId, revision);
+    if (!source) throw new Error("没有可导出的 SDK 记录");
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const options = { title: "导出 SDK 消息记录", defaultPath: `sdk-messages-${revision}.json`,
+      filters: [{ name: "JSON", extensions: ["json"] }] };
+    const selected = win ? await dialog.showSaveDialog(win, options) : await dialog.showSaveDialog(options);
+    if (selected.canceled || !selected.filePath) return { saved: false };
+    await fs.promises.copyFile(source, selected.filePath);
+    return { saved: true };
+  });
 
   ipcMain.handle(
     IPC.permissionRespond,
@@ -783,7 +797,12 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
   ipcMain.handle(
     IPC.settingsSet,
     async (_e, patch: Partial<AppSettings> & { token?: string }) => {
+      const previous = ctx.settings.get();
       ctx.settings.update(patch);
+      if ((patch.defaultModel && patch.defaultModel !== previous.defaultModel) ||
+          (patch.tokenSavings && patch.tokenSavings.summaryModel !== previous.tokenSavings?.summaryModel)) {
+        ctx.sessions.cancelPendingCompressions();
+      }
       ctx.photoFlow?.setEnabled(ctx.settings.get().photoFlowEnabled !== false);
       ctx.onSettingsSynced?.();
       if (typeof patch.defaultModel === "string" && patch.defaultModel.trim()) {
@@ -852,6 +871,7 @@ export function registerIpcHandlers(ctx: IpcHandlerContext): void {
   });
 
   ipcMain.handle(IPC.modelSet, async (_e, { model }: { model: string }) => {
+    if (ctx.settings.get().defaultModel !== model) ctx.sessions.cancelPendingCompressions();
     ctx.settings.update({ defaultModel: model });
     if (model.trim()) ctx.onDesktopModelChanged?.(model.trim());
     return { model };

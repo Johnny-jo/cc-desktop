@@ -30,6 +30,9 @@ import {
   pageTranscriptItems,
   pageTranscriptTurns,
   type SessionArchive,
+  type CompactIndex,
+  type CompactHandoff,
+  type CompactSnapshot,
   type StoredSession,
   type TranscriptPage,
 } from "./session-archive";
@@ -38,6 +41,7 @@ import {
   appendUserItem,
   bindSdkUserMsgIds,
   computeContextUsage,
+  resolveContextLimit,
   createIdFactory,
   shouldPersistTranscript,
   rebuildSessionProgress,
@@ -49,16 +53,17 @@ import {
   type UserPrompt,
   type UserContentBlock,
 } from "@claude-desktop/shared";
-import { normalizeSdkEvent } from "./normalize-sdk-event";
+import { normalizeSdkEvent, sdkCostSnapshot, sdkContextEstimate, SdkTurnContext } from "./normalize-sdk-event";
 import { MessageStream } from "./message-stream";
 import { buildUserContent } from "./attachment-reader";
 import {
   buildContinuationPrompt,
-  KEEP_RECENT_ITEMS,
   type ContextCompressor,
 } from "./context-compressor";
 import { getClaudeExecutablePath } from "./runtime-paths";
 import { resolveMcpServers } from "./playwright-mcp";
+import { browserOutputSources, createToolOutputBinding, RESULT_SERVER, RESULT_TOOL, shellOutputBudget, type ToolOutputBinding } from "./tool-output-policy";
+import { ToolOutputStore } from "./tool-output-store";
 import path from "node:path";
 
 /**
@@ -114,6 +119,8 @@ export type SessionRunOpts = {
 };
 
 export type SessionManagerDeps = {
+  /** Host-private SQLite location for recoverable personal-session tool results. */
+  toolOutputDatabasePath?: string;
   /** Normalize outbound PDFs, including SDK resume history, before provider translation. */
   pdfCompatibility?: {
     environment: (env: Record<string, string>) => Promise<Record<string, string>>;
@@ -127,12 +134,13 @@ export type SessionManagerDeps = {
   settings: SettingsStore;
   /** Persist session index + transcripts across restarts */
   archive?: SessionArchive;
+  readSdkMessages?: (id: string, cwd: string) => Promise<import("@anthropic-ai/claude-agent-sdk").SessionMessage[]>;
   emit: (event: SdkNormalizedEvent) => void;
   emitSession: (s: SessionSummary) => void;
   emitDiff: (sessionId: string, changes: FileChange[]) => void;
   /** Optional: notify UI when SDK slash/skills list is refreshed */
   emitSlashCommands?: (sessionId: string, commands: SlashCommandItem[]) => void;
-  /** Optional: context compressor for /compact and renderer-driven auto-compress */
+  /** Optional: context compressor for /compact and idle fallback before the next turn. */
   compressor?: ContextCompressor;
   /** Optional: surface SDK Notification hook events (desktop notifications) */
   onNotification?: (n: {
@@ -161,6 +169,7 @@ export type SessionManagerDeps = {
 };
 
 type QueryControl = {
+  getContextUsage?: (options: { detail: "summary" }) => Promise<unknown>;
   initializationResult?: () => Promise<{
     models?: Array<{
       value?: string;
@@ -232,6 +241,9 @@ type RoomAbortTurn = {
 };
 
 type QueryExtras = {
+  personalOutputs?: boolean;
+  toolOutput?: ToolOutputBinding;
+  tokenSavingsMode?: "standard" | "balanced";
   servers: Record<string, unknown>;
   allowedTools: string[];
   /** Root bound when the CLI was started; sandbox options cannot change live. */
@@ -239,6 +251,9 @@ type QueryExtras = {
 };
 
 type SessionEntry = {
+  resetBoundaryId?: string;
+  sdkCostBaseline?: StoredSession["sdkCostBaseline"];
+  queryModel?: string;
   summary: SessionSummary;
   /** Progress before the retained transcript; never exposed in SessionSummary. */
   progressBaseline?: SessionProgress;
@@ -265,20 +280,22 @@ type SessionEntry = {
    * captures the value at start and ignores late events from a dead stream.
    */
   streamGen: number;
-  /** True if context has already been auto-compressed this session */
-  compressed: boolean;
+  /** SDK compaction owns the live query until its PostCompact hook or turn result. */
+  nativeCompactQueryGen?: number;
+  compactions?: CompactIndex[];
+  pendingHandoff?: string;
+  externalSummaryRoute?: boolean;
+  syntheticHandoffUser?: boolean;
+  compressing?: AbortController;
+  rewindPending?: boolean;
+  /** Changes at the start of a new prompt or an explicit lifecycle operation. */
+  promptRevision?: number;
   /** SDK uuids of real user turns (persisted user messages, in order) */
   sdkUserMsgIds?: string[];
   /** After rewind: next fresh query resumes at this assistant message uuid */
   resumeAtAnchor?: string;
   /** Timestamp of last auto-compression (for cooldown) */
   lastCompressedAt?: number;
-  /**
-   * Pending context to prepend on the next fresh query after compression.
-   * When set, the next continue() starts a NEW SDK session (no resume) and
-   * prepends this summary so the model retains continuity without full history.
-   */
-  pendingSummaryPrefix?: string;
   /** In-memory transcript authority (hydrated from disk on demand). */
   items: ChatItem[];
   itemsHydrated: boolean;
@@ -316,6 +333,10 @@ function desktopToolPrefixes(servers: McpServersMap): string[] {
   return Object.entries(servers).filter(([, config]) => config.type === "windows-computer" ||
     (config.type === "playwright" && config.connection !== "isolated"))
     .map(([name]) => `mcp__${name}__`);
+}
+
+function isPersonalOutputSession(entry: SessionEntry): boolean {
+  return !entry.summary.hiddenFromList && !entry.pathJail && !entry.roomAbortTurn && !entry.roomReadOnlyTurn;
 }
 
 /** Keep only a very small warm-query set; resume reopens parked sessions. */
@@ -537,6 +558,7 @@ function pageChatItems(
 function extractSdkSessionId(msg: unknown): string | undefined {
   if (typeof msg !== "object" || msg === null) return undefined;
   const rec = msg as Record<string, unknown>;
+  if (rec.parent_tool_use_id || rec.agent_id) return undefined;
   if (typeof rec.session_id === "string" && rec.session_id.length > 0) {
     return rec.session_id;
   }
@@ -596,6 +618,7 @@ function isSdkPersistedUserTurn(msg: unknown): boolean {
 }
 
 export class SessionManager {
+  private readonly toolOutputStore: ToolOutputStore;
   private readonly queryFn: QueryFn;
   private readonly pdfCompatibility: SessionManagerDeps["pdfCompatibility"];
   private readonly permissionBroker: PermissionBroker;
@@ -604,6 +627,7 @@ export class SessionManager {
   private readonly cpa: ModelRuntime;
   private readonly settings: SettingsStore;
   private readonly archive: SessionArchive | undefined;
+  private readonly readSdkMessages: SessionManagerDeps["readSdkMessages"];
   private readonly emit: SessionManagerDeps["emit"];
   private readonly emitSession: SessionManagerDeps["emitSession"];
   private readonly emitDiff: SessionManagerDeps["emitDiff"];
@@ -635,6 +659,7 @@ export class SessionManager {
   private changesAccessSeq = 0;
 
   constructor(deps: SessionManagerDeps) {
+    this.toolOutputStore = new ToolOutputStore(deps.toolOutputDatabasePath);
     this.queryFn = deps.queryFn;
     this.pdfCompatibility = deps.pdfCompatibility;
     this.permissionBroker = deps.permissionBroker;
@@ -643,6 +668,7 @@ export class SessionManager {
     this.cpa = deps.cpa;
     this.settings = deps.settings;
     this.archive = deps.archive;
+    this.readSdkMessages = deps.readSdkMessages;
     this.emit = deps.emit;
     this.emitSession = deps.emitSession;
     this.emitDiff = deps.emitDiff;
@@ -676,12 +702,18 @@ export class SessionManager {
           },
           abortController: null,
           sdkSessionId: stored.sdkSessionId,
+          resetBoundaryId: stored.resetBoundaryId,
+          model: stored.sessionModel,
+          sdkCostBaseline: stored.sdkCostBaseline,
           progressBaseline: stored.progressBaseline,
           slashCommands: [],
           turnActive: false,
           lastQueryUsedAt: 0,
           streamGen: 0,
-          compressed: false,
+          compactions: stored.compactions,
+          pendingHandoff: stored.pendingHandoff,
+          externalSummaryRoute: stored.externalSummaryRoute,
+          lastCompressedAt: stored.compactions?.at(-1)?.createdAt,
           items: [],
           itemsHydrated: false,
           lastTranscriptAccessAt: 0,
@@ -707,6 +739,28 @@ export class SessionManager {
   getSummary(sessionId: string): SessionSummary | undefined {
     const e = this.sessions.get(sessionId);
     return e ? { ...e.summary } : undefined;
+  }
+
+  /** Read-only access for the visible chat's local history viewer. */
+  listCompactionHistory(sessionId: string) {
+    const session = this.sessions.get(sessionId);
+    if (!session || session.summary.hiddenFromList) return [];
+    return [...(session.compactions ?? [])].reverse();
+  }
+
+  getCompactionPage(sessionId: string, revision: string, offset: number) {
+    const session = this.sessions.get(sessionId);
+    if (!session || session.summary.hiddenFromList || !Number.isSafeInteger(offset) || offset < 0 ||
+        typeof revision !== "string" || !this.archive) return { items: [], total: 0 };
+    const snapshot = this.archive.loadCompaction(sessionId, revision);
+    return { items: snapshot?.original.slice(offset, offset + 25) ?? [], total: snapshot?.original.length ?? 0 };
+  }
+
+  compactionSdkFile(sessionId: string, revision: string): string | undefined {
+    const session = this.sessions.get(sessionId);
+    if (!session || session.summary.hiddenFromList || typeof revision !== "string") return;
+    if (!session.compactions?.some(item => item.revision === revision && item.sdkMessageCount)) return;
+    return this.archive?.compactionSdkFile(sessionId, revision);
   }
 
   /** Pin / unpin a session to the top of the sidebar list. */
@@ -763,6 +817,7 @@ export class SessionManager {
    */
   private parkSession(entry: SessionEntry, force = false): void {
     if (!force && entry.turnActive) return;
+    if (force) this.invalidateCompression(entry);
     this.settleLiveAgents(entry, "unknown");
     entry.roomAbortTurn?.detach?.();
     this.clearIdleCloseTimer(entry);
@@ -844,6 +899,7 @@ export class SessionManager {
     else this.parkSession(entry, true);
     this.cancelPendingPersistence(sessionId);
     this.sessions.delete(sessionId);
+    this.toolOutputStore.remove(sessionId);
     this.diffTracker.clearSession(sessionId);
     this.snapshots?.dropAll(sessionId);
     this.archive?.remove(sessionId);
@@ -943,11 +999,24 @@ export class SessionManager {
   ): void {
     const entry = this.sessions.get(sessionId);
     if (entry) {
+      if (entry.resetBoundaryId) {
+        this.hydrateItems(entry);
+        const start = this.activeTranscriptStart(entry);
+        const boundary = items.findIndex(item => item.id === entry.resetBoundaryId);
+        if (boundary >= 0) {
+          items = opts?.replace ? [...entry.items.slice(0, start), ...items.slice(boundary + 1)] : items.slice(boundary + 1);
+        } else {
+          // A delayed renderer page cannot publish or replace history across a reset.
+          if (opts?.replace) return;
+          const activeIds = new Set(entry.items.slice(start).map(item => item.id));
+          items = items.filter(item => activeIds.has(item.id));
+        }
+      }
       if (opts?.replace) {
         entry.items = items.slice();
         entry.itemsHydrated = true;
         entry.progressBaseline = undefined;
-        this.setProgress(entry, rebuildSessionProgress(entry.items) ?? { tasks: [], agents: [] });
+        this.setProgress(entry, rebuildSessionProgress(entry.items.slice(this.activeTranscriptStart(entry))) ?? { tasks: [], agents: [] });
       } else {
         this.hydrateItems(entry);
         entry.items = mergeTranscriptItems(entry.items, items);
@@ -969,6 +1038,10 @@ export class SessionManager {
       const items = this.archive?.loadItems(entry.summary.id) ?? [];
       this.restoreProgress(entry, items);
       entry.items = this.restoreTranscriptAgents(entry, items);
+      if (!entry.sdkUserMsgIds && entry.resetBoundaryId) {
+        entry.sdkUserMsgIds = items.slice(this.activeTranscriptStart(entry, items)).flatMap(item =>
+          item.kind === "text" && item.role === "user" && !item.historicalTurn && item.sdkMsgId ? [item.sdkMsgId] : []);
+      }
       entry.itemsHydrated = true;
     }
     this.touchTranscript(entry);
@@ -977,6 +1050,12 @@ export class SessionManager {
   private touchTranscript(entry: SessionEntry): void {
     entry.lastTranscriptAccessAt = Date.now();
     this.enforceTranscriptCacheCap(entry.summary.id);
+  }
+
+  private activeTranscriptStart(entry: SessionEntry, items: ChatItem[] = entry.items): number {
+    if (!entry.resetBoundaryId) return 0;
+    const index = items.findIndex(item => item.id === entry.resetBoundaryId);
+    return index < 0 ? items.length : index + 1;
   }
 
   private enforceTranscriptCacheCap(preferredSessionId?: string): void {
@@ -1119,15 +1198,24 @@ export class SessionManager {
   }
 
   private persistSummary(entry: SessionEntry): void {
-    if (!this.archive) return;
-    const stored: StoredSession = {
+    this.archive?.upsertSummary(this.storedSummary(entry));
+  }
+
+  private storedSummary(entry: SessionEntry): StoredSession {
+    return {
       ...entry.summary,
       // Legacy JSON archives merge summaries; explicitly clear a reopened plan.
       taskPlan: entry.summary.taskPlan,
+      sessionModel: entry.model,
+      sdkCostBaseline: entry.sdkCostBaseline,
+      resetBoundaryId: entry.resetBoundaryId,
+      contextUsage: entry.summary.contextUsage,
       progressBaseline: entry.progressBaseline,
-      ...(entry.sdkSessionId ? { sdkSessionId: entry.sdkSessionId } : {}),
+      sdkSessionId: entry.pendingHandoff ? undefined : entry.sdkSessionId,
+      externalSummaryRoute: entry.externalSummaryRoute || Boolean(entry.skipCpa || entry.extraEnv?.ANTHROPIC_BASE_URL),
+      pendingHandoff: entry.pendingHandoff,
+      compactions: entry.compactions,
     };
-    this.archive.upsertSummary(stored);
   }
 
   /** Cache even an empty backfill; subsequent pages must not rescan history. */
@@ -1515,6 +1603,7 @@ export class SessionManager {
       return { ok: false, error: "No live session query" };
     }
     try {
+      if (name === RESULT_SERVER && !enabled) entry.queryExtras?.toolOutput?.sources.clear();
       await entry.query.toggleMcpServer(name, enabled);
       return { ok: true };
     } catch (err) {
@@ -1539,9 +1628,18 @@ export class SessionManager {
       return { ok: false, error: "No live session query" };
     }
     try {
-      const result = await entry.query.setMcpServers(
-        resolveMcpServers(servers, this.isPackaged, !entry.pathJail && !entry.roomReadOnlyTurn, entry.summary.title, this.browserAuthStorePath),
-      );
+      const resolved: Record<string, unknown> = resolveMcpServers(servers, this.isPackaged, !entry.pathJail && !entry.roomReadOnlyTurn, entry.summary.title, this.browserAuthStorePath);
+      const extras = entry.queryExtras;
+      const binding = extras?.toolOutput;
+      // Stop classifying results while live transports are changing. A replacement
+      // server with an old browser name cannot inherit the old output policy.
+      binding?.sources.clear();
+      if (binding) {
+        if (RESULT_SERVER in resolved) binding.revoke();
+        else resolved[RESULT_SERVER] = binding.server;
+      }
+      const result = await entry.query.setMcpServers(resolved);
+      if (extras) extras.tokenSavingsMode = undefined; // rebuild host bindings on the next turn
       entry.desktopToolPrefixes = desktopToolPrefixes(servers);
       this.settings.update({ mcpServers: servers });
       return {
@@ -1656,6 +1754,7 @@ export class SessionManager {
   }> {
     const entry = this.sessions.get(sessionId);
     if (!entry) return { ok: false, error: `Unknown session: ${sessionId}` };
+    if (!opts?.dryRun) this.invalidateCompression(entry);
     if (!entry.sdkSessionId) {
       return { ok: false, error: "Session has no SDK state to rewind" };
     }
@@ -1663,6 +1762,16 @@ export class SessionManager {
       return { ok: false, error: "Wait for the current turn to finish" };
     }
 
+    if (entry.resetBoundaryId) {
+      this.hydrateItems(entry);
+      const active = entry.items.slice(this.activeTranscriptStart(entry));
+      if (!active.some(item => item.kind === "text" && !item.historicalTurn && item.sdkMsgId === userMessageId)) {
+        return { ok: false, error: "This checkpoint is outside the current SDK conversation" };
+      }
+    }
+
+    if (entry.rewindPending) return { ok: false, error: "A rewind is already pending" };
+    entry.rewindPending = true;
     try {
       // Prefer the live query (has checkpoints in memory); otherwise open a
       // throwaway resumed query purely to run the rewind.
@@ -1780,8 +1889,8 @@ export class SessionManager {
           persist: true,
           replace: true,
         });
-        this.setProgress(entry, rebuildSessionProgress(entry.items, entry.progressBaseline));
-      }
+        this.setProgress(entry, rebuildSessionProgress(entry.items.slice(this.activeTranscriptStart(entry)), entry.progressBaseline));
+      } else this.toolOutputStore.remove(sessionId); // No verified local anchor can authorize an older result.
       return {
         ok: true,
         canRewind: true,
@@ -1791,6 +1900,8 @@ export class SessionManager {
       };
     } catch (err) {
       return { ok: false, error: errMessage(err) };
+    } finally {
+      entry.rewindPending = false;
     }
   }
 
@@ -1844,6 +1955,7 @@ export class SessionManager {
   abort(sessionId: string): void {
     const entry = this.sessions.get(sessionId);
     if (!entry) return;
+    this.invalidateCompression(entry);
     const wasRunning = entry.turnActive || entry.summary.status === "running";
     this.settleLiveAgents(entry, "stopped");
     if (entry.roomAbortTurn) {
@@ -1925,17 +2037,10 @@ export class SessionManager {
     for (const entry of this.sessions.values()) this.parkSession(entry, true);
     this.flushPendingPersistence();
     this.pdfCompatibility?.dispose();
+    this.toolOutputStore.close();
   }
 
-  /**
-   * Compress a session's transcript (user /compact or renderer auto-compress).
-   * Prefer in-memory items once hydrated; fall back to renderer items / disk
-   * only when memory is empty.
-   *
-   * When `autoContinue` is true (auto-compact path), immediately starts a fresh
-   * SDK turn with the summary + "continue last task" instruction — matching
-   * Claude Code so work is not abandoned after compaction.
-   */
+  /** Publish an idle session's summary and retained turns for the next fresh SDK query. */
   async compressSession(
     sessionId: string,
     items?: import("@claude-desktop/shared").ChatItem[],
@@ -1951,133 +2056,168 @@ export class SessionManager {
       return { ok: false, message: "Compression not available" };
     }
 
-    // Don't interrupt an active turn — wait until the agent is idle.
-    if (entry.turnActive || entry.summary.status === "running") {
+    if (entry.externalSummaryRoute || entry.skipCpa || entry.extraEnv?.ANTHROPIC_BASE_URL) {
+      return { ok: false, message: "This session uses another resource owner's model route" };
+    }
+    if (entry.turnActive || entry.rewindPending || entry.resumeAtAnchor || entry.summary.status === "running" || entry.nativeCompactQueryGen === entry.streamGen) {
       return { ok: false, message: "Session is still running; compress after the turn finishes" };
     }
-
-    // Cooldown shared with auto-compress path.
-    const now = Date.now();
-    if (
-      entry.lastCompressedAt != null &&
-      now - entry.lastCompressedAt < 5 * 60 * 1000
-    ) {
+    if (entry.compressing || entry.pendingHandoff) return { ok: false, message: "Compression already pending" };
+    if (entry.lastCompressedAt && Date.now() - entry.lastCompressedAt < 5 * 60 * 1000) {
       return { ok: false, message: "Compression cooldown — try again shortly" };
     }
 
     this.hydrateItems(entry);
-    const current =
-      entry.items.length > 0
-        ? entry.items
-        : Array.isArray(items)
-          ? items
-          : this.archive.loadItems(sessionId);
-
-    if (current.length <= KEEP_RECENT_ITEMS) {
-      return { ok: false, message: "Not enough history to compress" };
-    }
-
+    const originalItems = entry.items;
+    const visible = originalItems.length ? originalItems : items ?? [];
+    const start = this.activeTranscriptStart(entry, visible);
+    const current = visible.slice(start);
+    const settings = this.settings.get();
+    const model = entry.model || settings.defaultModel;
+    const summaryModel = this.summaryModel(entry);
+    const catalog = this.cpa.getModelCatalog();
+    const mainLimit = resolveContextLimit(model, settings, catalog).limitTokens;
+    const controller = new AbortController();
+    entry.compressing = controller;
+    const gen = entry.streamGen;
+    const signal = roomTurn ? AbortSignal.any([controller.signal, roomTurn.signal]) : controller.signal;
     try {
-      const result = await this.compressor.compress(current);
-      // Cancellation or a newer room turn must also fence transcript replacement.
+      const result = await this.compressor.compress(current, {
+        signal, model: summaryModel, contextLimit: resolveContextLimit(summaryModel, settings, catalog).limitTokens,
+        recentBudget: Math.min(16_000, Math.floor(mainLimit / 4)), handoffBudget: Math.floor(mainLimit * 0.75),
+        loadAttachments: turnId => this.archive!.loadPromptAttachments(sessionId, turnId),
+      });
+      signal.throwIfAborted();
+      // The SDK journal retains content blocks and tool pairs that compact UI cards omit.
+      // Hidden seat transcripts can contain private views intentionally omitted from ChatItems.
+      const sourceSdkSessionId = entry.sdkSessionId;
+      const sdkMessages = this.readSdkMessages && sourceSdkSessionId && !entry.summary.hiddenFromList && result.compressedCount
+        ? await this.readSdkMessages(sourceSdkSessionId, entry.summary.cwd) : undefined;
+      signal.throwIfAborted();
+      if (sdkMessages && !sdkMessages.length) {
+        return { ok: false, message: "The SDK transcript is unavailable for this conversation" };
+      }
       this.throwIfRoomTurnCancelled(entry, roomTurn);
-      if (result.compressedCount === 0) {
-        return { ok: false, message: "Nothing to compress" };
+      if (gen !== entry.streamGen || sourceSdkSessionId !== entry.sdkSessionId || originalItems !== entry.items || this.sessions.get(sessionId) !== entry ||
+          model !== (entry.model || this.settings.get().defaultModel) || summaryModel !== this.summaryModel(entry)) {
+        return { ok: false, message: "Session changed during compression" };
       }
-      if (!entry.summary.hiddenFromList) {
-        // Keep the removed prefix's state, so rewinds within the retained tail
-        // do not inherit task changes that happened after their checkpoint.
-        entry.progressBaseline = restoreSessionProgress(rebuildSessionProgress(
-          current.slice(0, result.compressedCount), entry.progressBaseline,
-        )) ?? { tasks: [], agents: [] };
-        this.persistSummary(entry);
+      if (!result.compressedCount || !result.summaryText.trim()) return { ok: false, message: "Nothing to compress" };
+
+      const index: CompactIndex = {
+        revision: randomUUID(), createdAt: Date.now(), model, compressedCount: result.compressedCount,
+        ...(sdkMessages ? { sdkMessageCount: sdkMessages.length } : {}),
+      };
+      const snapshot: CompactSnapshot = { ...index, summaryText: result.summaryText, original: current, sourceSdkSessionId: entry.sdkSessionId };
+      // Verify every retained attachment before switching lineages. Historic
+      // sessions without the sent bytes can still resume their original SDK.
+      const handoff = this.handoffContent(sessionId, {
+        summaryText: snapshot.summaryText, recentTurns: current.slice(result.compressedCount),
+      }, opts?.autoContinue);
+      const handoffBytes = handoff.reduce((size, block) => size + Buffer.byteLength(
+        block.type === "text" ? block.text : block.source.data, "utf8",
+      ), 0);
+      if (handoffBytes > mainLimit * 0.75) {
+        return { ok: false, message: "Retained turns and attachments exceed the handoff budget" };
       }
-      this.replaceTranscript(entry, result.items, {
-        persist: true,
-        replace: true,
-      });
-      entry.compressed = true;
-      entry.lastCompressedAt = now;
-      // Close the live stream so the next turn starts a fresh SDK session
-      // without the old (now compressed) history.
-      this.closeSession(sessionId);
+      const progressBaseline = entry.summary.hiddenFromList ? entry.progressBaseline : restoreSessionProgress(
+        rebuildSessionProgress(current.slice(0, result.compressedCount), entry.progressBaseline),
+      ) ?? { tasks: [], agents: [] };
+      const compactions = [...(entry.compactions ?? []), index];
+      const summary = { ...entry.summary, contextUsage: undefined, updatedAt: index.createdAt };
+      const compacted = [...visible.slice(0, start), ...result.items.map(item => item.kind === "text" && item.role === "user"
+        ? { ...item, sdkMsgId: undefined, historicalTurn: true as const } : item)];
+      this.archive.commitCompaction({
+        ...this.storedSummary(entry), ...summary, compactions, pendingHandoff: index.revision,
+        sdkSessionId: undefined, progressBaseline,
+      }, snapshot, compacted, sdkMessages);
+
+      this.pendingTranscriptSaves.delete(sessionId);
+      entry.compactions = compactions;
+      entry.pendingHandoff = index.revision;
+      entry.lastCompressedAt = index.createdAt;
+      entry.summary = summary;
+      entry.progressBaseline = progressBaseline;
       entry.sdkSessionId = undefined;
-
-      this.emit({
-        type: "items_replaced",
-        sessionId,
-        items: result.items,
-      });
-
-      if (opts?.autoContinue) {
-        // Claude Code style: after auto-compact, immediately resume the last task
-        // with the structured summary as context — don't leave the agent idle.
-        entry.pendingSummaryPrefix = undefined;
-        const continueText = buildContinuationPrompt(result.summaryText, {
-          autoContinue: true,
-        });
-        // Show a system note so the user sees why work is continuing.
-        const continueNote: import("@claude-desktop/shared").ChatItem = {
-          kind: "text",
-          id: `ctx-continue-${Date.now()}`,
-          role: "system",
-          text: "Context compacted — continuing previous task…",
-        };
-        const withNote = [...result.items, continueNote];
-        this.replaceTranscript(entry, withNote, {
-          persist: true,
-          replace: true,
-        });
-        this.emit({
-          type: "items_replaced",
-          sessionId,
-          items: withNote,
-        });
-
-        entry.summary = {
-          ...entry.summary,
-          status: "running",
-          updatedAt: Date.now(),
-        };
-        entry.turnActive = true;
-        // Compaction starts a fresh SDK session — rewind anchors/uuids reset.
-        entry.resumeAtAnchor = undefined;
-        entry.sdkUserMsgIds = [];
-        this.emitSession({ ...entry.summary });
-        this.persistSummary(entry);
-
-        // Fire-and-forget the continuation turn so IPC can return promptly.
-        void this.openStreamingSession(
-          sessionId,
-          [{ type: "text", text: continueText }],
-          { resume: false },
-        ).catch((err) => {
-          if (this.roomTurnCancelled(entry, roomTurn)) return;
-          const message = err instanceof Error ? err.message : String(err);
-          this.emit({
-            type: "result",
-            sessionId,
-            ok: false,
-            error: `Post-compact continue failed: ${message}`,
-          });
-        });
-
-        return {
-          ok: true,
-          message: `Compressed ${result.compressedCount} items; continuing task`,
-        };
-      }
-
-      // Manual /compact: stash summary for the *next* user message only.
-      entry.pendingSummaryPrefix = result.summaryText;
-      // Compaction starts a fresh SDK session — rewind anchors/uuids no longer apply.
-      entry.resumeAtAnchor = undefined;
       entry.sdkUserMsgIds = [];
+      entry.resumeAtAnchor = undefined;
+      this.replaceTranscript(entry, compacted, { persist: false });
+      this.parkSession(entry);
+      this.emit({ type: "items_replaced", sessionId, items: entry.items });
+      if (!entry.summary.hiddenFromList) this.emitSession({ ...summary });
+      if (opts?.autoContinue) {
+        entry.syntheticHandoffUser = true;
+        entry.summary = { ...summary, status: "running" };
+        this.emitSession({ ...entry.summary });
+        void this.openStreamingSession(sessionId, handoff, { resume: false }).catch(() => {
+          // The stream reports its own error; a failed launch keeps the handoff available.
+        });
+      }
       return { ok: true, message: `Compressed ${result.compressedCount} items` };
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return { ok: false, message: `Compression failed: ${message}` };
+    } catch (error) {
+      return { ok: false, message: `Compression failed: ${errMessage(error)}` };
+    } finally {
+      if (entry.compressing === controller) entry.compressing = undefined;
     }
+  }
+
+  private invalidateCompression(entry: SessionEntry): void {
+    entry.promptRevision = (entry.promptRevision ?? 0) + 1;
+    entry.compressing?.abort();
+  }
+
+  private resetSdkConversation(entry: SessionEntry, newId: string): void {
+    this.invalidateCompression(entry);
+    this.hydrateItems(entry);
+    entry.queryExtras?.toolOutput?.revoke();
+    // A warm SDK stream has closures bound to the old reader. Reopen on next input.
+    entry.queryModel = undefined;
+    entry.sdkSessionId = newId;
+    entry.sdkCostBaseline = { lineage: newId, total: 0 };
+    entry.sdkUserMsgIds = [];
+    entry.resumeAtAnchor = undefined;
+    entry.syntheticHandoffUser = false;
+    entry.pendingHandoff = undefined;
+    entry.lastCompressedAt = undefined;
+    entry.nativeCompactQueryGen = undefined;
+    entry.progressBaseline = undefined;
+    entry.summary = { ...entry.summary, contextUsage: undefined, progress: { tasks: [], agents: [] }, taskPlan: undefined };
+    entry.resetBoundaryId = "sdk-reset-" + newId;
+    const items: ChatItem[] = entry.items.map(item =>
+      item.kind === "text" && item.role === "user" ? { ...item, sdkMsgId: undefined, historicalTurn: true } : item);
+    items.push({ kind: "text", id: entry.resetBoundaryId, role: "system", text: "已开始新的 SDK 对话，此前的记录仅供回看。" });
+    this.pendingTranscriptSaves.delete(entry.summary.id);
+    this.replaceTranscript(entry, items, { persist: false });
+    this.archive?.commitTranscriptRevision(this.storedSummary(entry), items, randomUUID());
+    this.toolOutputStore.remove(entry.summary.id);
+    this.emit({ type: "items_replaced", sessionId: entry.summary.id, items });
+    this.emitSession({ ...entry.summary });
+  }
+
+  cancelPendingCompressions(): void {
+    for (const entry of this.sessions.values()) {
+      entry.compressing?.abort();
+    }
+  }
+
+  private summaryModel(entry: SessionEntry): string {
+    const settings = this.settings.get();
+    const model = entry.model || settings.defaultModel;
+    if (entry.summary.hiddenFromList || entry.roomAbortTurn) return model;
+    return settings.tokenSavings?.summaryModel?.trim() || model;
+  }
+
+  private handoffContent(sessionId: string, handoff: CompactHandoff, autoContinue = false, attempts: ChatItem[] = []): UserContentBlock[] {
+    const recent = [...handoff.recentTurns, ...attempts];
+    const outputHandles = this.toolOutputStore.retained(sessionId, recent);
+    const blocks: UserContentBlock[] = [{ type: "text", text: buildContinuationPrompt(handoff.summaryText, { recent, autoContinue, outputHandles }) }];
+    for (const item of recent) {
+      if (item.kind === "text" && item.role === "user" && item.attachments?.length) {
+        blocks.push({ type: "text", text: `Historical attachments for turn ${item.id}: ${item.attachments.map(a => a.name).join(", ")}` },
+          ...this.archive!.loadPromptAttachments(sessionId, item.id));
+      }
+    }
+    return blocks;
   }
 
   async start(
@@ -2111,7 +2251,6 @@ export class SessionManager {
       turnActive: true,
       lastQueryUsedAt: now,
       streamGen: 0,
-      compressed: false,
       items: [],
       itemsHydrated: true,
       lastTranscriptAccessAt: now,
@@ -2134,7 +2273,7 @@ export class SessionManager {
     opts?.onSessionId?.(sessionId);
     this.throwIfRoomTurnCancelled(entry);
     this.persistSummary(entry);
-    const first = this.recordUserPrompt(entry, prompt, opts?.persistText);
+    const first = this.recordUserPrompt(entry, prompt, content, opts?.persistText);
     if (!summary.hiddenFromList) this.emitSession({ ...summary });
     this.emit(first);
 
@@ -2152,6 +2291,9 @@ export class SessionManager {
       throw new Error(`Unknown session: ${sessionId}`);
     }
     opts?.roomAbortSignal?.throwIfAborted();
+    const wasCompressing = Boolean(entry.compressing);
+    this.invalidateCompression(entry);
+    const promptRevision = entry.promptRevision;
     if (entry.turnActive && entry.queryEffort !== this.resolveEffort(entry)) {
       await this.waitForTurnIdle(sessionId, opts?.roomAbortSignal);
       opts?.roomAbortSignal?.throwIfAborted();
@@ -2197,20 +2339,15 @@ export class SessionManager {
     }
     this.throwIfRoomTurnCancelled(entry, roomTurn);
 
-    // Compare with the query's binding, not a previous attempt's staged extras:
-    // CPA preparation can fail after entry was updated, leaving the old query live.
-    reopenForExtras ||= entry.queryEffort !== this.resolveEffort(entry) || entry.queryExtras?.pathJail !== entry.pathJail || extrasChanged(
-      entry.queryExtras?.servers,
-      entry.queryExtras?.allowedTools,
-      entry.extraMcpServers ?? {},
-      entry.extraAllowedTools ?? [],
-    );
-
     // Never retain a prior room approval/callback in a reused query. Omitting
     // roomReadOnly returns this turn to ordinary session behavior.
     entry.roomReadOnlyTurn = opts?.roomReadOnly
       ? { requestWriteAccess: opts.requestRoomWriteAccess, writeApproved: false }
       : undefined;
+    if (entry.queryExtras?.toolOutput && entry.queryExtras.personalOutputs !== isPersonalOutputSession(entry)) {
+      entry.queryExtras.toolOutput.revoke();
+      reopenForExtras = true;
+    }
 
     const { content, errors } = buildUserContent(prompt);
     if (errors.length) {
@@ -2219,7 +2356,35 @@ export class SessionManager {
     }
 
     this.hydrateItems(entry);
-    const submitted = this.recordUserPrompt(entry, prompt, opts?.persistText);
+    const settings = this.settings.get();
+    const occupancy = entry.summary.contextUsage;
+    if (occupancy && !wasCompressing && !entry.summary.hiddenFromList && !entry.pendingHandoff && !entry.turnActive &&
+        (occupancy.selectedModelId ?? occupancy.modelId) === (entry.model || settings.defaultModel) &&
+        occupancy.ratio >= (settings.tokenSavings?.autoCompactRatio ?? 0.75)) {
+      // The user already requested this turn. A failed optional compaction falls
+      // back to the existing SDK lineage. A superseded prompt must never launch.
+      await this.compressSession(sessionId);
+      if (entry.promptRevision !== promptRevision) throw new DOMException("Prompt superseded", "AbortError");
+      this.throwIfRoomTurnCancelled(entry, roomTurn);
+    }
+    // Settings can change while CPA or the optional summary request is pending.
+    // Compare the live query's binding only after both asynchronous steps.
+    const launchSettings = this.settings.get();
+    reopenForExtras ||= entry.queryExtras?.tokenSavingsMode !== (launchSettings.tokenSavings?.mode ?? "balanced");
+    reopenForExtras ||= entry.queryModel !== (entry.model || launchSettings.defaultModel) ||
+      entry.queryEffort !== this.resolveEffort(entry, launchSettings) || entry.queryExtras?.pathJail !== entry.pathJail ||
+      extrasChanged(entry.queryExtras?.servers, entry.queryExtras?.allowedTools, entry.extraMcpServers ?? {}, entry.extraAllowedTools ?? []);
+    let handoff: UserContentBlock[] | undefined;
+    if (entry.pendingHandoff) {
+      const seed = this.archive?.loadHandoff(sessionId, entry.pendingHandoff);
+      if (!seed) throw new Error("Compact handoff is missing");
+      const active = entry.items.slice(this.activeTranscriptStart(entry));
+      const attemptStart = active.findIndex(item => item.kind === "text" && item.role === "user" && !item.historicalTurn);
+      handoff = this.handoffContent(sessionId, seed, false, attemptStart < 0 ? [] : active.slice(attemptStart));
+      handoff.push({ type: "text", text: "Current user message:" },
+        ...(typeof content === "string" ? [{ type: "text" as const, text: content }] : content));
+    }
+    const submitted = this.recordUserPrompt(entry, prompt, content, opts?.persistText);
 
     entry.summary = {
       ...entry.summary,
@@ -2232,6 +2397,12 @@ export class SessionManager {
 
     // Live streaming session: just push the next user message.
     this.emit(submitted);
+    if (handoff) {
+      entry.syntheticHandoffUser = false;
+      entry.sdkSessionId = undefined;
+      await this.openStreamingSession(sessionId, handoff, { resume: false });
+      return;
+    }
     // Skipped when a rewind anchor is pending — the conversation must be
     // re-opened truncated at the anchor, so force the resume path below.
     // Also skip if the stream was torn down by abort() (input closed / cleared).
@@ -2259,27 +2430,6 @@ export class SessionManager {
       }
       // Wait until this turn's result (or error) so IPC still "awaits the turn".
       await this.waitForTurnIdle(sessionId);
-      return;
-    }
-
-    // After manual /compact, start a fresh SDK session (no resume) and prepend
-    // the structured summary so continuity is preserved without full history.
-    if (entry.pendingSummaryPrefix) {
-      const prefix = entry.pendingSummaryPrefix;
-      entry.pendingSummaryPrefix = undefined;
-      const summaryBlock = buildContinuationPrompt(prefix, {
-        autoContinue: false,
-      });
-      const userPart = Array.isArray(content)
-        ? content
-        : [{ type: "text" as const, text: String(content) }];
-      const freshContent: UserContentBlock[] = [
-        { type: "text", text: `${summaryBlock}\n\nCurrent user message:` },
-        ...userPart,
-      ];
-      await this.openStreamingSession(sessionId, freshContent, {
-        resume: false,
-      });
       return;
     }
 
@@ -2333,13 +2483,45 @@ export class SessionManager {
       ...this.cpa.buildProcessEnv(entry.model || settings.defaultModel),
       ...(entry.extraEnv ?? {}),
     };
+    const cwd = queryExtras.pathJail ?? entry.summary.cwd;
+    queryExtras.tokenSavingsMode = settings.tokenSavings?.mode ?? "balanced";
+    const balanced = queryExtras.tokenSavingsMode === "balanced";
+    // SDK shell overflow is stored outside cwd. A jailed Read cannot recover a
+    // newly shortened result there, so let the SDK keep the room's existing limit.
+    const bashOutputMaxChars = balanced && !queryExtras.pathJail ? shellOutputBudget(cwd, env) : undefined;
+    const servers: Record<string, unknown> = {
+      ...resolveMcpServers(settings.mcpServers ?? {}, this.isPackaged, !entry.pathJail && !entry.roomReadOnlyTurn, entry.summary.title, this.browserAuthStorePath),
+      ...queryExtras.servers,
+    };
+    queryExtras.personalOutputs = isPersonalOutputSession(entry);
+    const sources = balanced ? browserOutputSources(settings.mcpServers ?? {}, queryExtras.servers) : new Set<string>();
+    // A room task does not expose a durable room/seat authorization identity to
+    // this layer. Keep its output exact. Parked personal queries can reauthorize
+    // the same session's unexpired handles, including after restarting the app.
+    if (queryExtras.personalOutputs && !(RESULT_SERVER in servers)) {
+      try {
+        const retained = this.toolOutputStore.retained(sessionId, entry.items.slice(this.activeTranscriptStart(entry)));
+        if (sources.size || retained.size) {
+          queryExtras.toolOutput = createToolOutputBinding({
+            store: this.toolOutputStore, sessionId, sources, retained, isActive: () =>
+              this.sessions.get(sessionId) === entry && isPersonalOutputSession(entry) && entry.turnActive &&
+              entry.streamGen === queryGen && entry.abortController === abortController && !abortController.signal.aborted,
+          });
+          servers[RESULT_SERVER] = queryExtras.toolOutput.server;
+        }
+      } catch { /* Without a usable reader, pass the original tool result through. */ }
+    }
+    const binding = queryExtras.toolOutput;
+    const cacheHeader = !entry.skipCpa && this.cpa.cacheSessionHeader?.(sessionId, env);
+    if (cacheHeader) env.ANTHROPIC_CUSTOM_HEADERS = [env.ANTHROPIC_CUSTOM_HEADERS, cacheHeader].filter(Boolean).join("\n");
     // Prefer the bundled / vendor Claude Code binary so the app does not
     // require a global `claude` on PATH (packaged installs ship claude.exe).
     const claudePath = this.resolveClaudePath();
 
     return {
       // The official sandbox derives its default writable workspace from cwd.
-      cwd: queryExtras.pathJail ?? entry.summary.cwd,
+      cwd,
+      ...(bashOutputMaxChars ? { settings: { bashOutputMaxChars } } : {}),
       ...(queryExtras.pathJail ? { sandbox: roomSandboxSettings() } : {}),
       includePartialMessages: true,
       permissionMode: entry.permissionMode ?? settings.permissionMode,
@@ -2375,15 +2557,7 @@ export class SessionManager {
       // config shape matches the SDK. Kept out of `env` so the CPA token is
       // never leaked into MCP server subprocesses.
       // Per-session extras (in-process room_mod_act) merge on top.
-      ...(Object.keys(settings.mcpServers ?? {}).length ||
-      Object.keys(queryExtras.servers).length
-        ? {
-            mcpServers: {
-              ...resolveMcpServers(settings.mcpServers ?? {}, this.isPackaged, !entry.pathJail && !entry.roomReadOnlyTurn, entry.summary.title, this.browserAuthStorePath),
-              ...queryExtras.servers,
-            },
-          }
-        : {}),
+      ...(Object.keys(servers).length ? { mcpServers: servers } : {}),
       // Only use the MCP servers this app passes in — ignore project
       // .mcp.json, user settings, and plugin-declared servers so desktop
       // sessions have a single, explicit MCP surface (Settings → MCP servers).
@@ -2423,6 +2597,18 @@ export class SessionManager {
       // Surface SDK Notification events (permission needed, idle, task done)
       // for desktop notifications.
       hooks: {
+        ...(binding && sources.size ? { PostToolUse: [{ hooks: [binding.post] }] } : {}),
+        PreCompact: [{ hooks: [async () => {
+          if (!abortController.signal.aborted && entry.streamGen === queryGen) entry.nativeCompactQueryGen = queryGen;
+          return {};
+        }] }],
+        PostCompact: [{ hooks: [async () => {
+          if (!abortController.signal.aborted && entry.streamGen === queryGen) {
+            entry.nativeCompactQueryGen = undefined;
+            entry.lastCompressedAt = Date.now();
+          }
+          return {};
+        }] }],
         PostToolUseFailure: [{ hooks: [fileEditRecovery] }],
         // 路径围栏必须挂在 PreToolUse：canUseTool 只管需要授权的工具，
         // Read/Glob/Grep 等只读工具在多数权限模式下根本不进 canUseTool，
@@ -2431,7 +2617,7 @@ export class SessionManager {
           {
             hooks: [
               async (
-                input: { tool_name?: string; tool_input?: unknown },
+                input: { tool_name?: string; tool_input?: unknown; agent_id?: string; mcp_server?: { name: string; source: string } },
                 _toolUseId?: string,
                 hookOptions?: { signal?: AbortSignal },
               ) => {
@@ -2454,6 +2640,11 @@ export class SessionManager {
                   hookOptions?.signal?.aborted
                 )) {
                   return deny("已拒绝：群聊轮次已取消或结束");
+                }
+                if (name === RESULT_TOOL && binding?.active() && input.mcp_server?.name === RESULT_SERVER &&
+                    ["sdk", "dynamic"].includes(input.mcp_server.source)) {
+                  if (input.agent_id || hookOptions?.signal?.aborted) return deny("此归档仅限当前主会话读取");
+                  return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow" } };
                 }
                 // Preserve the jail's immediate-deny behavior: an out-of-root
                 // write cannot even request a room permission upgrade.
@@ -2626,6 +2817,7 @@ export class SessionManager {
 
     const queryExtras = snapshotQueryExtras(entry);
     const options = this.buildOptions(sessionId, entry, abortController, queryExtras);
+    const startingCost = opts.resume ? this.costAtTip(entry) : 0;
     if (opts.resume) {
       options.resume = entry.sdkSessionId ?? sessionId;
       // After a rewind: resume the SDK session truncated at the anchor
@@ -2636,25 +2828,27 @@ export class SessionManager {
       }
     }
 
-    const settings = this.settings.get();
-
     try {
       this.throwIfRoomTurnCancelled(entry, roomTurn);
       if (this.pdfCompatibility) {
         options.env = await this.pdfCompatibility.environment(options.env as Record<string, string>);
         this.throwIfRoomTurnCancelled(entry, roomTurn);
       }
+      if (entry.streamGen !== myGen || abortController.signal.aborted) {
+        throw new DOMException("Session superseded", "AbortError");
+      }
       const q = this.queryFn({
         prompt: input as AsyncIterable<unknown>,
         options,
       });
       entry.query = q as QueryHandle & QueryControl;
+      entry.queryModel = String(options.model);
       entry.queryExtras = queryExtras;
       entry.queryEffort = options.effort as ReasoningEffort | undefined;
       this.enforceLiveQueryCap(sessionId);
 
       // Kick off consumer before first push so we don't miss early messages.
-      entry.consumer = this.consumeQuery(sessionId, q, settings.defaultModel);
+      entry.consumer = this.consumeQuery(sessionId, q, entry.queryModel, startingCost);
 
       input.push(content, entry.sdkSessionId);
 
@@ -2668,12 +2862,12 @@ export class SessionManager {
       }, 2500);
       await this.waitForTurnIdle(sessionId);
     } catch (err) {
-      if (this.roomTurnCancelled(entry, roomTurn)) {
+      if (entry.streamGen !== myGen || this.roomTurnCancelled(entry, roomTurn)) {
         input.end();
         throw err;
       }
       const raw = err instanceof Error ? err.message : String(err);
-      const message = humanizeAgentError(raw, settings.defaultModel);
+      const message = humanizeAgentError(raw, String(options.model));
       this.emit({
         type: "result",
         sessionId,
@@ -2696,12 +2890,32 @@ export class SessionManager {
     }
   }
 
-  private recordUserPrompt(entry: SessionEntry, prompt: UserPrompt, persistText?: string): SdkNormalizedEvent {
+  private costAtTip(entry: SessionEntry): number | undefined {
+    if (entry.pendingHandoff) return 0;
+    if (entry.resumeAtAnchor) {
+      const anchor = entry.items.find(item => item.kind === "text" && item.sdkMsgId === entry.resumeAtAnchor);
+      return anchor?.kind === "text" ? anchor.sdkCostAtSubmission : undefined;
+    }
+    if (entry.sdkCostBaseline?.lineage === (entry.sdkSessionId ?? entry.summary.id)) return entry.sdkCostBaseline.total;
+    return entry.sdkSessionId || entry.summary.usage ? undefined : 0;
+  }
+
+  private recordUserPrompt(entry: SessionEntry, prompt: UserPrompt, content: string | UserContentBlock[], persistText?: string): SdkNormalizedEvent {
     const text = persistText ?? displayPrompt(prompt);
-    const next = appendUserItem(this.transcriptOf(entry), text, { nextId: entry.nextId, attachments: prompt.attachments });
-    this.replaceTranscript(entry, next.items, { persist: true });
+    const next = appendUserItem(this.transcriptOf(entry), text, {
+      nextId: entry.nextId, attachments: prompt.attachments, sdkCostAtSubmission: this.costAtTip(entry),
+    });
     const submittedItem = next.items[next.items.length - 1];
     if (submittedItem.kind !== "text" || submittedItem.role !== "user") throw new Error("Missing submitted user message");
+    if (prompt.attachments.length && Array.isArray(content) && persistText === undefined) {
+      try {
+        this.archive?.savePromptAttachments(entry.summary.id, submittedItem.id, content.slice(-prompt.attachments.length));
+      } catch {
+        // The live query already owns the supplied bytes. Compaction will decline
+        // if this attachment is still needed and no durable copy was available.
+      }
+    }
+    this.replaceTranscript(entry, next.items, { persist: true });
     return { type: "user_message", sessionId: entry.summary.id, text, submittedItem };
   }
 
@@ -2709,6 +2923,7 @@ export class SessionManager {
     entry: SessionEntry,
     event: SdkNormalizedEvent,
     model: string,
+    context?: SdkTurnContext,
   ): void {
     if (event.type === "result" && !event.ok && event.error) {
       event = { ...event, error: humanizeAgentError(event.error, model) };
@@ -2721,27 +2936,28 @@ export class SessionManager {
     });
     this.emit(transcriptIds.length ? { ...event, transcriptIds } : event);
     if (event.type !== "result") return;
+    entry.nativeCompactQueryGen = undefined;
 
     const settings = this.settings.get();
     const catalog = this.cpa.getModelCatalog();
     const usage = accumulateUsage(entry.summary.usage, event.usage);
-    const contextUsage =
-      computeContextUsage({
-        turn: event.usage,
-        modelId: model || settings.defaultModel,
-        settings: {
-          defaultContextLimit: settings.defaultContextLimit,
-          modelContextLimits: settings.modelContextLimits,
-        },
-        catalog,
-      }) ?? entry.summary.contextUsage;
+    const reportedModel = context?.sdk?.model ?? context?.model;
+    const modelId = !reportedModel || model.endsWith("/" + reportedModel) ? model : reportedModel;
+    const contextUsage = computeContextUsage({
+      request: context?.request,
+      sdk: context?.sdk,
+      modelId,
+      selectedModelId: model,
+      settings,
+      catalog,
+    });
 
     entry.summary = {
       ...entry.summary,
       status: event.ok ? "idle" : "error",
       updatedAt: Date.now(),
       usage,
-      ...(contextUsage ? { contextUsage } : {}),
+      contextUsage,
     };
     entry.turnActive = false;
     entry.roomAbortTurn?.detach?.();
@@ -2754,11 +2970,19 @@ export class SessionManager {
     sessionId: string,
     stream: QueryHandle,
     model: string,
+    startingCost: number | undefined,
   ): Promise<void> {
     const entry = this.sessions.get(sessionId);
     if (!entry) return;
     // Capture generation so a later abort/reopen can make us stop mutating state.
     const myGen = entry.streamGen;
+    let context = new SdkTurnContext();
+    let canReadSummary = typeof entry.query?.getContextUsage === "function";
+    // Imported histories and truncated transcripts may lack a comparable baseline.
+    let lastCost = startingCost;
+    let costLineage: string | undefined;
+    const retiredLineages = new Set<string>();
+    let resetCommandUuid: unknown;
     let pendingText = "";
     let textTimer: ReturnType<typeof setTimeout> | undefined;
     const pendingToolProgress = new Map<string, SdkNormalizedEvent>();
@@ -2816,7 +3040,7 @@ export class SessionManager {
       if (event.type === "tool_end" || event.type === "result") {
         flushToolProgress();
       }
-      this.dispatchNormalizedEvent(entry, event, model);
+      this.dispatchNormalizedEvent(entry, event, model, context);
     };
 
     try {
@@ -2825,15 +3049,40 @@ export class SessionManager {
         if (entry.abortController?.signal.aborted) break;
 
         const sdkId = extractSdkSessionId(msg);
-        if (sdkId) {
-          entry.sdkSessionId = sdkId;
+        if (typeof msg === "object" && msg !== null && "type" in msg && msg.type === "conversation_reset" &&
+            "new_conversation_id" in msg && typeof msg.new_conversation_id === "string" && msg.new_conversation_id) {
+          if (entry.resetBoundaryId === "sdk-reset-" + msg.new_conversation_id) continue;
+          flushText();
+          flushToolProgress();
+          if (entry.sdkSessionId && entry.sdkSessionId !== msg.new_conversation_id) retiredLineages.add(entry.sdkSessionId);
+          if (sdkId && sdkId !== msg.new_conversation_id) retiredLineages.add(sdkId);
+          resetCommandUuid = "user_message_uuid" in msg ? msg.user_message_uuid : undefined;
+          this.resetSdkConversation(entry, msg.new_conversation_id);
+          costLineage = msg.new_conversation_id;
+          lastCost = 0;
+          context = new SdkTurnContext();
+          continue;
+        }
+        // Some CLIs echo /clear or its terminal result with the discarded ID.
+        const retired = Boolean(sdkId && retiredLineages.has(sdkId));
+        if (retired && !isResultMessage(msg)) continue;
+        if (resetCommandUuid && typeof msg === "object" && msg && "uuid" in msg && msg.uuid === resetCommandUuid) continue;
+        if (sdkId && !retired) entry.sdkSessionId = sdkId;
+        context.observe(msg);
+        if (entry.pendingHandoff && entry.sdkSessionId && typeof msg === "object" && msg !== null && isResultMessage(msg) &&
+            "subtype" in msg && msg.subtype === "success" && !("is_error" in msg && msg.is_error)) {
+          // The fresh SDK accepted the seed. Persist its new lineage and consume
+          // the handoff together. Init and failed launches leave it retryable.
+          entry.pendingHandoff = undefined;
+          this.persistSummary(entry);
         }
 
         // Track SDK-persisted user message uuids (real user turns only) for
         // message-level rewind. Apply + emit so main-process items stay bound.
         if (isSdkPersistedUserTurn(msg)) {
+          if (entry.syntheticHandoffUser) { entry.syntheticHandoffUser = false; continue; }
           const uuid = (msg as { uuid?: unknown }).uuid;
-          if (typeof uuid === "string" && uuid) {
+          if (typeof uuid === "string" && uuid && !entry.sdkUserMsgIds?.includes(uuid)) {
             entry.sdkUserMsgIds = [...(entry.sdkUserMsgIds ?? []), uuid];
             const idsEvent: SdkNormalizedEvent = {
               type: "user_msg_ids",
@@ -2847,18 +3096,46 @@ export class SessionManager {
         this.handleToolUseForDiff(sessionId, msg);
 
         const events = normalizeSdkEvent(msg, sessionId, (id) => this.resolveTool(entry, id));
-        for (const event of events) {
+        for (let event of events) {
+          if (event.type === "tool_end") {
+            const handle = entry.queryExtras?.toolOutput?.takeOutputHandle(event.tool.id);
+            if (handle && event.tool.status === "done") event = { ...event, tool: { ...event.tool, outputHandle: handle } };
+          }
           // File mutation snapshots are captured at tool_use time for rewind,
           // but workspace/Git scanning and renderer updates happen once here,
           // at the turn boundary.
           if (event.type === "result") {
             await this.finalizeTurnDiff(sessionId, myGen);
+            if (!retired && !context.sdk && canReadSummary && event.ok && canDispatch()) {
+              let timer: ReturnType<typeof setTimeout> | undefined;
+              try {
+                const summary = await Promise.race([
+                  entry.query!.getContextUsage!({ detail: "summary" }),
+                  new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), 1500); }),
+                ]);
+                context.sdk = sdkContextEstimate(summary);
+                if (!context.sdk) canReadSummary = false;
+              } catch { canReadSummary = false; }
+              finally { clearTimeout(timer); }
+            }
+            if (!canDispatch()) break;
+            const snapshot = retired ? undefined : sdkCostSnapshot(msg);
+            if (snapshot !== undefined && (event.ok || snapshot > 0)) {
+              const lineage = entry.sdkSessionId ?? sessionId;
+              if (costLineage !== undefined && lineage !== costLineage) lastCost = 0;
+              const delta = lastCost === undefined ? undefined : snapshot < lastCost ? snapshot : snapshot - lastCost;
+              lastCost = snapshot;
+              costLineage = lineage;
+              entry.sdkCostBaseline = { lineage, total: snapshot };
+              if (delta !== undefined) event = { ...event, costUsd: delta, usage: { ...event.usage, costUsd: delta } };
+            }
           }
           queueEvent(event);
+          if (event.type === "result") context = new SdkTurnContext();
         }
 
         // Also mark idle on bare result messages if normalize missed fields
-        if (isResultMessage(msg) && entry.turnActive) {
+        if (canDispatch() && isResultMessage(msg) && entry.turnActive) {
           entry.turnActive = false;
           entry.roomAbortTurn?.detach?.();
           if (entry.summary.status === "running") {

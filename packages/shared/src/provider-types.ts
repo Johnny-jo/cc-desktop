@@ -297,6 +297,9 @@ export type ProviderUsageMetrics = {
   cacheCreationTokens: number;
   totalTokens: number;
   unreportedUsageRequests: number;
+  cacheReadReportedRequests: number;
+  cacheCreationReportedRequests: number;
+  cacheHitRequests: number;
   /** Cancellations are excluded. No completed attempts means null, not 0%. */
   successRate: number | null;
 };

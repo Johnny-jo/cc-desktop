@@ -80,6 +80,9 @@ type FormState = {
   modelsCsv: string;
   defaultModel: string;
   defaultContextLimit: string;
+  outputMode: "standard" | "balanced";
+  summaryModel: string;
+  compactPercent: string;
   /** modelId → override 字符串；缺省或 "" = auto */
   modelContextLimitDraft: Record<string, string>;
   mcpServers: McpServerDraft[];
@@ -129,6 +132,9 @@ function fromSettings(s: PublicSettings | null): FormState {
     modelsCsv: (s?.models ?? []).join(", "),
     defaultModel: s?.defaultModel ?? "",
     defaultContextLimit: String(s?.defaultContextLimit ?? 200_000),
+    outputMode: s?.tokenSavings?.mode ?? "balanced",
+    summaryModel: s?.tokenSavings?.summaryModel ?? "",
+    compactPercent: String(Math.round((s?.tokenSavings?.autoCompactRatio ?? 0.75) * 100)),
     modelContextLimitDraft: draft,
     mcpServers: mcpServersToDrafts(s?.mcpServers, s?.disabledControlServers),
     permissionAllowText: (s?.permissionAllow ?? []).join("\n"),
@@ -1404,6 +1410,11 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
     }
 
     const visibleIds = visibleModelIds(form.modelsCsv, catalog);
+    const compactPercent = Number(form.compactPercent);
+    if (!Number.isInteger(compactPercent) || compactPercent < 50 || compactPercent > 95) {
+      setLocalError("自动压缩阈值需为 50 到 95 之间的整数");
+      return;
+    }
     const patchLimits = buildModelContextLimitsPatch({
       existing: settings?.modelContextLimits ?? {},
       visibleIds,
@@ -1465,6 +1476,11 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
       defaultModel,
       defaultContextLimit,
       modelContextLimits: patchLimits.modelContextLimits,
+      tokenSavings: {
+        mode: form.outputMode,
+        ...(form.summaryModel ? { summaryModel: form.summaryModel } : {}),
+        ...(compactPercent === 75 ? {} : { autoCompactRatio: compactPercent / 100 }),
+      },
       mcpServers: patchMcp.mcpServers,
       disabledControlServers: patchMcp.disabledControlServers,
       permissionAllow: allowRules.rules,
@@ -1960,6 +1976,32 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
               </p>
 
               {renderContextLimitsTable()}
+
+              <label className="settings-field">
+                工具输出预算
+                <select className="select" aria-label="工具输出预算" value={form.outputMode}
+                  onChange={e => setField("outputMode", e.target.value === "standard" ? "standard" : "balanced")}>
+                  <option value="balanced">均衡 · 缩短长输出，可按需读取全文</option>
+                  <option value="standard">标准 · 使用 SDK 默认预算</option>
+                </select>
+              </label>
+              <label className="settings-field">
+                自动压缩阈值（上下文占用 %）
+                <input type="number" min={50} max={95} step={1} value={form.compactPercent}
+                  onChange={e => setField("compactPercent", e.target.value)} />
+              </label>
+              <label className="settings-field">
+                摘要模型
+                <select className="select" aria-label="摘要模型" value={form.summaryModel}
+                  onChange={e => setField("summaryModel", e.target.value)}>
+                  <option value="">跟随当前会话</option>
+                  {form.summaryModel && !catalog.some(model => model.id === form.summaryModel) && (
+                    <option value={form.summaryModel}>{form.summaryModel}（目录中暂不可用）</option>
+                  )}
+                  {catalog.map(model => <option key={model.id} value={model.id}>{model.id}</option>)}
+                </select>
+              </label>
+              <p className="settings-hint">单聊的旧对话会发给所选模型生成摘要。群聊跟随席位模型。</p>
 
             </>
           ) : null}

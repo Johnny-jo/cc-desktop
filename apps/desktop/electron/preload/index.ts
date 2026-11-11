@@ -261,6 +261,15 @@ const desktop = {
       message?: string;
     }>,
 
+  listCompactionHistory: (sessionId: string) =>
+    ipcRenderer.invoke(IPC.sessionCompactionHistory, { sessionId }) as Promise<
+      import("@claude-desktop/shared").IpcInvokeMap[typeof IPC.sessionCompactionHistory]["result"]>,
+  getCompactionPage: (sessionId: string, revision: string, offset: number) =>
+    ipcRenderer.invoke(IPC.sessionCompactionPage, { sessionId, revision, offset }) as Promise<
+      import("@claude-desktop/shared").IpcInvokeMap[typeof IPC.sessionCompactionPage]["result"]>,
+  exportCompactionSdk: (sessionId: string, revision: string) =>
+    ipcRenderer.invoke(IPC.sessionExportCompactionSdk, { sessionId, revision }) as Promise<{ saved: boolean }>,
+
   respondPermission: (requestId: string, decision: PermissionDecision) =>
     ipcRenderer.invoke(IPC.permissionRespond, {
       requestId,

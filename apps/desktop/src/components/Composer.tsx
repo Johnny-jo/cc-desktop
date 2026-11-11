@@ -45,6 +45,7 @@ import { ContextRing } from "./ContextRing";
 import { ThemedSelect } from "./Select";
 import { PermissionModal } from "./PermissionModal";
 import { UserPromptModal } from "./UserPromptModal";
+import { CompactionHistory } from "./CompactionHistory";
 import { useModelDisplay } from "../hooks/useModelDisplay";
 import { subscribeProviderModelUpdates } from "../lib/model-catalog-updates";
 
@@ -186,6 +187,7 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
   const [text, setText] = useState("");
   const [slashIndex, setSlashIndex] = useState(0);
   const [helpNote, setHelpNote] = useState<string | null>(null);
+  const [historySession, setHistorySession] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [lightbox, setLightbox] = useState<{ url: string; name: string } | null>(
@@ -219,6 +221,7 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
   );
   const projectPath = useAppStore((s) => s.projectPath);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
+  useEffect(() => { setHistorySession(null); }, [activeSessionId]);
   const settings = useAppStore((s) => s.settings);
   const slashBySession = useAppStore((s) => s.slashBySession);
   const queuedPrompts = useAppStore((s) => s.queuedPrompts);
@@ -624,6 +627,11 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
           }
           setText("");
           return;
+        case "compact-history":
+          setText("");
+          if (activeSessionId) setHistorySession(activeSessionId);
+          else setHelpNote("请先选择一个会话");
+          return;
         case "compact": {
           if (!activeSessionId) {
             setHelpNote("No active session to compress");
@@ -784,6 +792,9 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
 
   return (
     <div className="composer-shell">
+      {historySession && historySession === activeSessionId && (
+        <CompactionHistory key={historySession} sessionId={historySession} onClose={() => setHistorySession(null)} />
+      )}
       {slashOpen && slashMatches.length > 0 ? (
         <ul className="slash-menu" role="listbox">
           {slashMatches.map((cmd, i) => (

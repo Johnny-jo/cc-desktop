@@ -7,13 +7,15 @@ import { hasCustomProviderApi } from "./provider-model-capabilities";
 type Wire = Record<string, any>;
 type Protocol = "chat" | "responses" | "gemini";
 type ForwardOptions = {
+  /** Opaque accounting identity issued by the local host. */
+  promptCacheKey?: string;
   signal: AbortSignal;
   oauthToken?: { account_id?: string; id_token?: string };
   anthropicBeta?: string;
   anthropicVersion?: string;
   userAgent?: string;
 };
-type Usage = { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number };
+type Usage = { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number };
 type Block = { index: number; value: Wire; closed: boolean };
 const encoder = new TextEncoder();
 
@@ -226,7 +228,6 @@ function chatRequest(body: Wire, config: ProviderConfig): Wire {
   if (tools.length) result.tools = tools.map((tool) => ({ type: "function", function: tool }));
   for (const key of ["temperature", "top_p"]) if (body[key] !== undefined) result[key] = body[key];
   if (body.stop_sequences?.length) result.stop = body.stop_sequences;
-  if (body.metadata?.user_id) result.user = body.metadata.user_id;
   if (body.tool_choice) {
     const choice = body.tool_choice;
     if (choice.type === "tool") result.tool_choice = { type: "function", function: { name: string(choice.name, "tool_choice.name") } };
@@ -407,10 +408,16 @@ function usage(value: Wire | undefined, protocol: Protocol): Usage {
     if (thoughts !== undefined) output = tokenCount((output ?? 0) + thoughts);
   }
   const cached = tokenCount(protocol === "gemini" ? value.cachedContentTokenCount : protocol === "chat" ? value.prompt_tokens_details?.cached_tokens ?? value.prompt_cache_hit_tokens : value.input_tokens_details?.cached_tokens);
+  const written = tokenCount(protocol === "responses" ? value.input_tokens_details?.cache_write_tokens : protocol === "chat" ? value.prompt_tokens_details?.cache_write_tokens : undefined);
   // OpenAI/Gemini prompt totals already include cached input. Anthropic counts
   // uncached input and cache reads separately; output totals already include
   // OpenAI reasoning, while Gemini reports thoughts as a separate output count.
-  return { ...(input !== undefined ? { input_tokens: Math.max(0, input - (cached ?? 0)) } : {}), ...(output !== undefined ? { output_tokens: output } : {}), ...(cached !== undefined ? { cache_read_input_tokens: cached } : {}) };
+  return {
+    ...(input !== undefined ? { input_tokens: Math.max(0, input - (cached ?? 0) - (written ?? 0)) } : {}),
+    ...(output !== undefined ? { output_tokens: output } : {}),
+    ...(cached !== undefined ? { cache_read_input_tokens: cached } : {}),
+    ...(written !== undefined ? { cache_creation_input_tokens: written } : {}),
+  };
 }
 function reason(value: string | undefined, hasTools: boolean): string {
   if (hasTools) return "tool_use";
@@ -480,7 +487,9 @@ class MessageEvents {
     const fields = protocol === "gemini" ? ["promptTokenCount", "cachedContentTokenCount", "candidatesTokenCount", "thoughtsTokenCount"] : protocol === "chat" ? ["prompt_tokens", "completion_tokens", "prompt_cache_hit_tokens"] : ["input_tokens", "output_tokens"];
     for (const field of fields) if (tokenCount(value[field]) !== undefined) this.rawUsage[field] = value[field];
     for (const field of ["prompt_tokens_details", "input_tokens_details"]) {
-      if (tokenCount(value[field]?.cached_tokens) !== undefined) this.rawUsage[field] = { cached_tokens: value[field].cached_tokens };
+      for (const key of ["cached_tokens", "cache_write_tokens"]) {
+        if (tokenCount(value[field]?.[key]) !== undefined) (this.rawUsage[field] ??= {})[key] = value[field][key];
+      }
     }
     this.tokenUsage = usage(this.rawUsage, protocol);
   }
@@ -745,6 +754,9 @@ export async function forwardProviderMessage(config: ProviderConfig, credential:
     protocol = "responses"; upstreamBody = responsesRequest(body, oauth);
     if (oauth) limitations.push("max_tokens is controlled by the ChatGPT Codex backend");
     url = oauth ? "https://chatgpt.com/backend-api/codex/responses" : apiUrl(config, "responses");
+    if (options.promptCacheKey && !oauth && url === "https://api.openai.com/v1/responses") {
+      upstreamBody.prompt_cache_key = options.promptCacheKey;
+    }
     headers.authorization = `Bearer ${credential}`; headers.accept = "text/event-stream";
     if (oauth) {
       headers.originator = "codex_cli_rs";

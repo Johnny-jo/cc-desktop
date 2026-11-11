@@ -45,7 +45,7 @@ export function bindSdkUserMsgIds(items: ChatItem[], uuids: string[]): ChatItem[
   const userIdxs: number[] = [];
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
-    if (item.kind === "text" && item.role === "user") userIdxs.push(i);
+    if (item.kind === "text" && item.role === "user" && !item.historicalTurn) userIdxs.push(i);
   }
   if (!userIdxs.length) return items;
   const offset = Math.max(0, uuids.length - userIdxs.length);
@@ -78,6 +78,7 @@ export function appendUserItem(
   opts: ApplySdkEventOptions & {
     optimistic?: boolean;
     attachments?: Attachment[];
+    sdkCostAtSubmission?: number;
   },
 ): TranscriptState {
   const last = state.items[state.items.length - 1];
@@ -95,6 +96,7 @@ export function appendUserItem(
       id: opts.nextId("user"),
       role: "user",
       text,
+      ...(opts.sdkCostAtSubmission !== undefined ? { sdkCostAtSubmission: opts.sdkCostAtSubmission } : {}),
       ...(opts.attachments?.length
         ? { attachments: opts.attachments }
         : {}),

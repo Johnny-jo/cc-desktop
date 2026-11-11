@@ -95,6 +95,22 @@ afterEach(() => vi.unstubAllGlobals());
 
 describe("live settings model refresh", () => {
   function flushEffects() { for (const effect of hooks.effects.splice(0)) effect(); }
+  it("saves the tool output policy and an explicitly selected auxiliary model", async () => {
+    render(); flushEffects();
+    await vi.waitFor(() => expect(actions.catalog).toHaveBeenCalled());
+    clickButton(render(), /^<span[^>]*>模型与上下文</);
+    function choose(label: string, value: string) {
+      const select = elements(render()).find(n => n.type === "select" && n.props["aria-label"] === label);
+      expect(select).toBeDefined();
+      (select!.props.onChange as (e: unknown) => void)({ target: { value } });
+    }
+    choose("工具输出预算", "standard");
+    choose("摘要模型", "old/model");
+    clickButton(render(), /^保存更改$/);
+    await vi.waitFor(() => expect(actions.save).toHaveBeenCalledWith(expect.objectContaining({
+      tokenSavings: { mode: "standard", summaryModel: "old/model" },
+    })));
+  });
   it("updates the open configured-model list without discarding an unsaved context limit", async () => {
     Object.assign(state.settings, { models: ["old/model"], defaultModel: "old/model" });
     render(); flushEffects();

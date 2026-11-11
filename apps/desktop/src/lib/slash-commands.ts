@@ -39,6 +39,10 @@ export const APP_SLASH_COMMANDS: SlashCommandItem[] = [
     description: "Compress conversation history to reduce context usage",
   },
   {
+    name: "compact-history",
+    description: "查看压缩前的本地对话记录",
+  },
+  {
     name: "mcp",
     description: "List configured MCP servers (and live status if a session is running)",
   },

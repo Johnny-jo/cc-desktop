@@ -124,6 +124,8 @@ export type ToolCardState = {
   summary: string;
   status: "running" | "done" | "error" | "stopped";
   resultPreview?: string;
+  /** Host-issued full result reference, bound to this tool call in this session. */
+  outputHandle?: string;
   /** Elapsed seconds while running (from tool_progress heartbeats) */
   elapsedSeconds?: number;
   /** True when this tool call ran inside a Task/Agent subagent (parent_tool_use_id set) */
@@ -159,10 +161,16 @@ export type SessionUsage = {
   turns: number;
 };
 
-export type ContextLimitSource = "cpa" | "builtin" | "override" | "default";
+export type ContextLimitSource = "cpa" | "builtin" | "override" | "default" | "sdk";
 
 /** Latest context-window occupancy (not billing totals) */
 export type ContextUsage = {
+  /** Query's selected route when the SDK reports a different resolved model. */
+  selectedModelId?: string;
+  /** Optional for archives created before single-request metering. */
+  occupancySource?: "sdk" | "request";
+  estimated?: boolean;
+  sdkPolicyWindow?: number;
   usedTokens: number;
   limitTokens: number;
   ratio: number;
@@ -267,6 +275,10 @@ export type ChatItem =
        * rewind (code checkpoint + conversation truncation).
        */
       sdkMsgId?: string;
+      /** SDK cumulative estimate immediately before this user turn, for rewind. */
+      sdkCostAtSubmission?: number;
+      /** This turn belongs to a compacted SDK lineage and has no live rewind anchor. */
+      historicalTurn?: true;
       /** Files/images attached via the composer (in-session rich display). */
       attachments?: Attachment[];
     }
@@ -364,6 +376,13 @@ export type AppSettings = {
   lastProjectPath?: string | null;
   /** Fallback window when model unknown (tokens) */
   defaultContextLimit: number;
+  tokenSavings?: {
+    mode: "balanced" | "standard";
+    /** Omit to use the model selected for the current conversation. */
+    summaryModel?: string;
+    /** Start an idle compaction before the next turn; default 0.75. */
+    autoCompactRatio?: number;
+  };
   /** Per-model id overrides for context window */
   modelContextLimits: Record<string, number>;
   /** Configured MCP servers (JSON-safe), passed to the SDK on session start */

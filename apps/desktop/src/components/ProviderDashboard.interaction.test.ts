@@ -78,10 +78,12 @@ function deferred<T>() {
 const zero = {
   requests: 0, successes: 0, failures: 0, cancellations: 0, inputTokens: 0, outputTokens: 0,
   cacheReadTokens: 0, cacheCreationTokens: 0, totalTokens: 0, unreportedUsageRequests: 0, successRate: null as number | null,
+  cacheReadReportedRequests: 0, cacheCreationReportedRequests: 0, cacheHitRequests: 0,
 };
 const metrics = {
   ...zero, requests: 10, successes: 6, failures: 2, cancellations: 2,
   inputTokens: 500, outputTokens: 400, cacheReadTokens: 500, cacheCreationTokens: 100, totalTokens: 1500,
+  cacheReadReportedRequests: 6, cacheCreationReportedRequests: 2, cacheHitRequests: 4,
   successRate: 0.75,
 };
 const startAt = new Date("2026-11-09T00:00:00Z").getTime();

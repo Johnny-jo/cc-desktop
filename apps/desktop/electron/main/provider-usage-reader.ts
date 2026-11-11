@@ -5,6 +5,7 @@ export type ProviderResponseObservation = {
   cacheReadTokens: number;
   cacheCreationTokens: number;
   usageReported: boolean;
+  reportedFieldMask?: number;
 };
 
 const usageFields = {
@@ -14,6 +15,7 @@ const usageFields = {
   cache_creation_input_tokens: "cacheCreationTokens",
 } as const;
 type UsageField = keyof typeof usageFields;
+export const usageFieldBits = { inputTokens: 1, outputTokens: 2, cacheReadTokens: 4, cacheCreationTokens: 8 } as const;
 type UsageState = Omit<ProviderResponseObservation, "outcome">;
 type Observer = { push(text: string): void; finish(): boolean };
 const maxEventLength = 8 * 1024 * 1024;
@@ -21,7 +23,9 @@ const maxEventLength = 8 * 1024 * 1024;
 function reportField(state: UsageState, field: string, value: unknown) {
   if (!Object.hasOwn(usageFields, field) || typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) return;
   // Messages usage fields are cumulative, including output_tokens in deltas.
-  state[usageFields[field as UsageField]] = value;
+  const name = usageFields[field as UsageField];
+  state[name] = value;
+  state.reportedFieldMask = (state.reportedFieldMask ?? 0) | usageFieldBits[name];
   state.usageReported = true;
 }
 function reportUsage(state: UsageState, value: unknown) {

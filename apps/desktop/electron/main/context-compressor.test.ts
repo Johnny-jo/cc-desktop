@@ -3,7 +3,6 @@ import {
   buildContinuationPrompt,
   compressContext,
   createContextCompressor,
-  KEEP_RECENT_ITEMS,
   splitItemsForCompression,
   transcriptToText,
 } from "./context-compressor";
@@ -19,11 +18,11 @@ function textItems(count: number): ChatItem[] {
 }
 
 it("summarizes through the app-owned Provider runtime instead of a configured external port", async () => {
-  const upstream = vi.fn<typeof fetch>(async () => Response.json({ content: [{ type: "text", text: "native summary" }] }));
+  const upstream = vi.fn<typeof fetch>(async () => Response.json({ stop_reason: "end_turn", content: [{ type: "text", text: "native summary" }] }));
   vi.stubGlobal("fetch", upstream);
   try {
     const compressor = createContextCompressor(() => ({ defaultModel: "openai-1/gpt-test" }), () => ({ origin: "http://127.0.0.1:41234", token: "ephemeral-local-token" }));
-    expect((await compressor.compress(textItems(KEEP_RECENT_ITEMS + 2))).summaryText).toBe("native summary");
+    expect((await compressor.compress(textItems(8))).summaryText).toBe("native summary");
     expect(upstream).toHaveBeenCalledWith("http://127.0.0.1:41234/v1/messages", expect.objectContaining({ headers: expect.objectContaining({ Authorization: "Bearer ephemeral-local-token" }) }));
   } finally { vi.unstubAllGlobals(); }
 });
@@ -55,18 +54,17 @@ describe("transcriptToText", () => {
 
 describe("splitItemsForCompression", () => {
   it("keeps all items when below threshold", () => {
-    const items = textItems(KEEP_RECENT_ITEMS);
+    const items = textItems(6);
     const { summarizable, kept } = splitItemsForCompression(items);
     expect(summarizable.length).toBe(0);
-    expect(kept.length).toBe(KEEP_RECENT_ITEMS);
+    expect(kept).toEqual(items);
   });
 
   it("summarizes older items and keeps recent ones", () => {
-    const items = textItems(KEEP_RECENT_ITEMS + 3);
+    const items = textItems(9);
     const { summarizable, kept } = splitItemsForCompression(items);
-    expect(summarizable.length).toBe(3);
-    expect(kept.length).toBe(KEEP_RECENT_ITEMS);
-    expect(kept[0]?.id).toBe(`item-${items.length - KEEP_RECENT_ITEMS}`);
+    expect(summarizable.length).toBe(4);
+    expect(kept[0]).toMatchObject({ id: "item-4", role: "user" });
   });
 });
 
@@ -76,14 +74,15 @@ describe("compressContext", () => {
       ...Array.from({ length: 12 }, (_, i): ChatItem => ({ kind: "text", id: String(i), role: "assistant", text: String(i) }))];
     const result = await compressContext(items, { summarize: async () => "Summary" });
     expect(result.items.filter(row => row.id === "first")).toHaveLength(1);
-    expect(result.items[1]).toMatchObject({ role: "user", text: "Original request" });
+    expect(result.compressedCount).toBe(0);
+    expect(result.items).toEqual(items);
   });
   it("returns kept items and summary when there are older items", async () => {
-    const items = textItems(KEEP_RECENT_ITEMS + 2);
+    const items = textItems(8);
     const summarize = vi.fn().mockResolvedValue("Summary of older messages.");
     const result = await compressContext(items, { summarize });
     expect(result.compressedCount).toBe(2);
-    expect(result.items.length).toBe(KEEP_RECENT_ITEMS + 1);
+    expect(result.items.length).toBe(7);
     expect(result.items[0]?.kind).toBe("text");
     if (result.items[0]?.kind === "text") {
       expect(result.items[0].role).toBe("system");
@@ -92,13 +91,59 @@ describe("compressContext", () => {
   });
 
   it("does nothing when no items are old enough", async () => {
-    const items = textItems(KEEP_RECENT_ITEMS - 1);
+    const items = textItems(5);
     const summarize = vi.fn();
     const result = await compressContext(items, { summarize });
     expect(summarize).not.toHaveBeenCalled();
     expect(result.compressedCount).toBe(0);
-    expect(result.items.length).toBe(KEEP_RECENT_ITEMS - 1);
+    expect(result.items).toEqual(items);
   });
+});
+
+it("rejects a truncated auxiliary response and uses the requested model", async () => {
+  const fetcher = vi.fn<typeof fetch>(async () => Response.json({
+    content: [{ type: "text", text: "unfinished" }], stop_reason: "max_tokens",
+  }));
+  vi.stubGlobal("fetch", fetcher);
+  try {
+    const compressor = createContextCompressor(() => ({ defaultModel: "desktop" }), () => ({ origin: "http://localhost", token: "token" }));
+    await expect(compressor.compress(textItems(10), { model: "seat" })).rejects.toThrow(/truncat|incomplete/i);
+    expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body)).model).toBe("seat");
+  } finally { vi.unstubAllGlobals(); }
+});
+
+it("merges whole-turn batches within a small context budget and propagates a later failure", async () => {
+  const history: ChatItem[] = Array.from({ length: 9 }, (_, i) => ({
+    id: "u" + i, kind: "text", role: "user", text: `turn-${i}:${"界".repeat(260)}:end-${i}`,
+  }));
+  const calls: string[] = [];
+  const summarize = async (text: string) => {
+    calls.push(text);
+    if (calls.length === 3) throw new Error("temporary provider failure");
+    return "prior summary " + calls.length;
+  };
+  await expect(compressContext(history, { summarize }, { contextLimit: 3200 })).rejects.toThrow("temporary provider failure");
+  expect(calls[1]).toContain("prior summary 1");
+  expect(calls.join("")).not.toContain("turn-8");
+  for (const text of calls) {
+    expect(Buffer.byteLength(text)).toBeLessThan(2400);
+    for (const [, id] of text.matchAll(/turn-(\d+):/g)) expect(text).toContain(":end-" + id);
+  }
+});
+
+it("stops a pending auxiliary request when the session cancels", async () => {
+  const controller = new AbortController();
+  const fetcher = vi.fn<typeof fetch>((_, init) => new Promise((_, reject) => {
+    init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason), { once: true });
+  }));
+  vi.stubGlobal("fetch", fetcher);
+  try {
+    const compressor = createContextCompressor(() => ({ defaultModel: "desktop" }), () => ({ origin: "http://localhost", token: "token" }));
+    const compressing = compressor.compress(textItems(10), { signal: controller.signal });
+    controller.abort();
+    await expect(compressing).rejects.toMatchObject({ name: "AbortError" });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  } finally { vi.unstubAllGlobals(); }
 });
 
 describe("buildContinuationPrompt", () => {

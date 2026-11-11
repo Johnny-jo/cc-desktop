@@ -80,7 +80,7 @@ function UsageChart({ data, kind, width }: { data: ProviderUsageDashboard; kind:
             const recorded = isRecorded(bucket);
             const detail = !recorded ? ["尚未开始统计"] : isRate
               ? [`成功率 ${value === null ? "无已完成请求" : percent(value)}`, `成功 ${number(bucket.successes)} · 失败 ${number(bucket.failures)} · 取消 ${number(bucket.cancellations)}`]
-              : [`总计 ${number(bucket.totalTokens)} tokens`, `输入 ${number(bucket.inputTokens)} · 输出 ${number(bucket.outputTokens)}`, `缓存读取 ${number(bucket.cacheReadTokens)} · 创建 ${number(bucket.cacheCreationTokens)}`];
+              : [`总计 ${number(bucket.totalTokens)} tokens`, `输入 ${number(bucket.inputTokens)} · 输出 ${number(bucket.outputTokens)}`, `缓存读取 ${bucket.cacheReadReportedRequests ? number(bucket.cacheReadTokens) : "—"} · 创建 ${bucket.cacheCreationReportedRequests ? number(bucket.cacheCreationTokens) : "—"}`];
             const tooltipX = Math.min(width - 256, Math.max(4, pointX - 124));
             const requestDetail = recorded ? `${number(bucket.requests)} 次请求，` : "";
             return (
@@ -196,7 +196,7 @@ export function ProviderDashboard() {
         </div>
         <dl className={styles.tokenBreakdown}>
           <div><dt>输入</dt><dd>{number(metrics.inputTokens)}</dd></div><div><dt>输出</dt><dd>{number(metrics.outputTokens)}</dd></div>
-          <div><dt>缓存读取</dt><dd>{number(metrics.cacheReadTokens)}</dd></div><div><dt>缓存创建</dt><dd>{number(metrics.cacheCreationTokens)}</dd></div>
+          <div><dt>缓存读取</dt><dd>{metrics.cacheReadReportedRequests ? number(metrics.cacheReadTokens) : "—"}</dd></div><div><dt>缓存创建</dt><dd>{metrics.cacheCreationReportedRequests ? number(metrics.cacheCreationTokens) : "—"}</dd></div>
         </dl>
         {metrics.requests === 0 ? <div className={styles.empty}><strong>此时间范围内还没有请求记录</strong><span>使用 Provider 发起请求后，这里会逐步显示真实用量和成功率。</span></div> : <div className={styles.charts} ref={chartContainer}>
           <UsageChart data={data} kind="tokens" width={chartWidth} /><UsageChart data={data} kind="success" width={chartWidth} />
@@ -214,6 +214,7 @@ export function ProviderDashboard() {
         <div className={styles.notes}>
           <p>{`统计从 ${dateTime(data.recordingSince)} 开始积累，更早的历史不会补算。`}</p>
           <p>仅统计上游已报告用量，失败/取消请求可能不完整。成功率不包含取消的请求。</p>
+          {metrics.requests > 0 && <p>{`缓存读取由 ${number(metrics.cacheReadReportedRequests)} 个请求报告，其中 ${number(metrics.cacheHitRequests)} 个请求命中。缓存创建由 ${number(metrics.cacheCreationReportedRequests)} 个请求报告。`}</p>}
           {metrics.unreportedUsageRequests > 0 && <p className={styles.usageWarning}>{`有 ${number(metrics.unreportedUsageRequests)} 个请求完全未上报用量。`}</p>}
         </div>
       </>}

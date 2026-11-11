@@ -27,6 +27,25 @@ function setup(native = false) {
   return { credentials, oauth, forward, changed };
 }
 describe("native ProviderRuntime", () => {
+  it("accepts only host-issued cache identity on its authenticated loopback route", async () => {
+    const { credentials, forward } = setup();
+    manager.addConfig(config()); manager.saveApiKey("openai-1", credentials.encrypt("key"));
+    await runtime.ensureReady();
+    const env = runtime.buildProcessEnv();
+    const signed = runtime.cacheSessionHeader("desktop-session", env)!.split(": ")[1];
+    expect(runtime.cacheSessionHeader("desktop-session", { ...env, ANTHROPIC_BASE_URL: "http://127.0.0.1:9999" })).toBeUndefined();
+    for (const identity of [signed, signed, signed.slice(0, -64) + "0".repeat(64)]) {
+      const response = await fetch(env.ANTHROPIC_BASE_URL + "/v1/messages", {
+        method: "POST", body: JSON.stringify({ model: "openai-1/gpt-test", messages: [] }),
+        headers: { authorization: "Bearer " + env.ANTHROPIC_AUTH_TOKEN, "x-cc-cache-session": identity },
+      });
+      await response.text();
+    }
+    const keys = forward.mock.calls.map(call => call[3].promptCacheKey);
+    expect(keys[0]).toMatch(/^[a-f0-9]{64}$/);
+    expect(keys[1]).toBe(keys[0]);
+    expect(keys[2]).toBeUndefined();
+  });
   it("removes host cloud authentication modes so the SDK cannot bypass native routing", async () => {
     setup();
     for (const key of ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"]) vi.stubEnv(key, "host-secret-or-flag");
