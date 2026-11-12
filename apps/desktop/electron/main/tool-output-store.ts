@@ -5,6 +5,9 @@ import type { DatabaseSync } from "node:sqlite";
 import type { ChatItem } from "@claude-desktop/shared";
 
 export const MAX_PAGE_CHARS = 4000;
+export const MAX_QUERY_CHARS = 256;
+const MAX_SEARCH_MATCHES = 5;
+const CONTEXT_CHARS = 64;
 const limits = {
   ttlMs: 24 * 60 * 60 * 1000,
   maxItemBytes: 512 * 1024,
@@ -84,15 +87,45 @@ export class ToolOutputStore {
     } catch (error) { db.exec("ROLLBACK"); throw error; }
   }
 
-  read(session: string, call: string, handle: string, offset: number, limit: number) {
-    if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) ||
-        limit < 1 || limit > MAX_PAGE_CHARS || !this.exists()) return;
+  private bodyAt(session: string, call: string, handle: string, offset: number): string | undefined {
+    if (!Number.isSafeInteger(offset) || offset < 0 || !this.exists()) return;
     const row = this.open().prepare(
       "SELECT body FROM tool_output WHERE handle = ? AND session_id = ? AND tool_use_id = ? AND expires > ?",
     ).get(handle, session, call, this.limits.now());
-    if (typeof row?.body !== "string" || offset > row.body.length) return;
-    const end = Math.min(row.body.length, offset + limit);
-    return { text: row.body.slice(offset, end), nextOffset: end < row.body.length ? end : null, totalChars: row.body.length };
+    if (typeof row?.body === "string" && offset <= row.body.length) return row.body;
+  }
+
+  read(session: string, call: string, handle: string, offset: number, limit: number) {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_PAGE_CHARS) return;
+    const body = this.bodyAt(session, call, handle, offset);
+    if (body === undefined) return;
+    const end = Math.min(body.length, offset + limit);
+    return { text: body.slice(offset, end), nextOffset: end < body.length ? end : null, totalChars: body.length };
+  }
+
+  search(session: string, call: string, handle: string, query: string, offset: number) {
+    if (query.length > MAX_QUERY_CHARS || !query.trim()) return;
+    const body = this.bodyAt(session, call, handle, offset);
+    if (body === undefined) return;
+    const matches: Array<{ offset: number; snippetOffset: number; text: string }> = [];
+    let totalMatches = 0;
+    let nextOffset: number | null = null;
+    // Count the whole result so totalMatches is stable across pages. Only materialize this page.
+    for (let hit = body.indexOf(query); hit !== -1; hit = body.indexOf(query, hit + query.length)) {
+      totalMatches++;
+      if (hit < offset) continue;
+      if (matches.length === MAX_SEARCH_MATCHES) {
+        nextOffset ??= hit;
+        continue;
+      }
+      let start = Math.max(0, hit - CONTEXT_CHARS);
+      let end = Math.min(body.length, hit + query.length + CONTEXT_CHARS);
+      // Offsets are UTF-16; expand a boundary that would split a surrogate pair.
+      if (start > 0 && /[\uDC00-\uDFFF]/.test(body.charAt(start))) start--;
+      if (/[\uDC00-\uDFFF]/.test(body.charAt(end))) end++;
+      matches.push({ offset: hit, snippetOffset: start, text: body.slice(start, end) });
+    }
+    return { matches, totalMatches, nextOffset, totalChars: body.length };
   }
 
   remove(session: string) {

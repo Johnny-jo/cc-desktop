@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { type AppSettings, type ChatItem, type UserContentBlock } from "@claude-desktop/shared";
+import { createSummaryDedupeState, projectSummaryTools, protectedSummaryToolCalls, summaryDuplicatePreviewBytes } from "./summary-tool-dedup";
 
 type CompressionOptions = {
   model?: string;
@@ -11,6 +12,8 @@ type CompressionOptions = {
   force?: boolean;
   onProgress?: (progress: { batch: number }) => void;
   loadAttachments?: (turnId: string) => UserContentBlock[];
+  /** Project only proven duplicate reads in old summary input; leave all stored items intact. */
+  deduplicateTools?: boolean;
 };
 
 export type CompressorDeps = {
@@ -21,6 +24,7 @@ export type CompressionResult = {
   items: ChatItem[];
   summaryText: string;
   compressedCount: number;
+  summaryStats?: { inputTextBytes: number; calls: number; deduplicatedToolResults: number; savedPreviewBytes: number };
 };
 
 export type ContextCompressor = {
@@ -138,6 +142,9 @@ export async function compressContext(
   if (budget <= 0) throw new Error("Summary model context window is too small");
   // Read immutable submitted bytes, never a potentially modified original path.
   const originals = new Map(items.map(item => [item.id, archivedAttachments(item, opts)]));
+  const summaryStats = opts.deduplicateTools
+    ? { inputTextBytes: 0, calls: 0, deduplicatedToolResults: 0, savedPreviewBytes: 0 } : undefined;
+  const protectedCalls = opts.deduplicateTools ? protectedSummaryToolCalls(items) : new Set<string>();
   const retainedBlocks = (kept: ChatItem[]): UserContentBlock[] => [
     { type: "text", text: buildContinuationPrompt("", { recent: kept }) },
     ...kept.flatMap(item => originals.get(item.id) ?? []),
@@ -156,13 +163,14 @@ export async function compressContext(
     summarizable = [...summarizable, ...oldest];
     kept = kept.slice(oldest.length);
   }
-  if (!summarizable.length) return { items: kept, summaryText: "", compressedCount: 0 };
+  if (!summarizable.length) return { items: kept, summaryText: "", compressedCount: 0, ...(summaryStats ? { summaryStats } : {}) };
 
-  const units: Array<{ text: string; media: UserContentBlock[] }> = [];
+  const renderTurn = (turn: readonly ChatItem[]) => turn.flatMap(item => [transcriptToText([item]), ...(originals.get(item.id) ?? [])
+    .flatMap(block => block.type === "text" ? [block.text] : [])]).filter(Boolean).join("\n\n");
+  const units: Array<{ text: string; media: UserContentBlock[]; items?: ChatItem[] }> = [];
   for (const turn of conversationTurns(summarizable)) {
-    const text = turn.flatMap(item => [transcriptToText([item]), ...(originals.get(item.id) ?? [])
-      .flatMap(block => block.type === "text" ? [block.text] : [])]).filter(Boolean).join("\n\n");
-    if (text) units.push({ text, media: [] });
+    const text = renderTurn(turn);
+    if (text) units.push({ text, media: [], ...(opts.deduplicateTools ? { items: turn } : {}) });
     for (const item of turn) {
       (originals.get(item.id) ?? []).forEach((block, index) => {
         if (block.type === "text") return;
@@ -178,7 +186,12 @@ export async function compressContext(
       throw new Error("Summary model context window is too small for an original attachment");
     }
   }
-  if (units.reduce((size, unit) => size + budgetOf(unit.text) + contentContextBudget(unit.media), 0) > budget * MAX_CALLS) {
+  // Potential duplicates may save at most their complete preview bytes. This is
+  // rejection-only, never submitted text: actual batches retain anchors and
+  // reference text, whose costs depend on call IDs and batch boundaries.
+  const minimumInput = units.reduce((size, unit) => size + budgetOf(unit.text) + contentContextBudget(unit.media), 0)
+    - (opts.deduplicateTools ? summaryDuplicatePreviewBytes(summarizable, protectedCalls) : 0);
+  if (minimumInput > budget * MAX_CALLS) {
     throw new Error("Summary request limit exceeded");
   }
 
@@ -191,13 +204,25 @@ export async function compressContext(
     let bytes = budgetOf(prefix);
     const batch: string[] = [];
     const media: UserContentBlock[] = [];
+    // An anchor must be present in this request, not only in a previous summary.
+    let dedupeState = createSummaryDedupeState();
     while (index < units.length) {
       const unit = units[index];
-      const size = budgetOf(unit.text) + contentContextBudget(unit.media) + 2;
+      const projection = unit.items ? projectSummaryTools(unit.items, dedupeState, protectedCalls) : undefined;
+      const text = projection ? renderTurn(projection.items) : unit.text;
+      const size = budgetOf(text) + contentContextBudget(unit.media) + 2;
       if (bytes + size <= budget && mediaBytes([...media, ...unit.media]) <= MAX_MEDIA_BYTES) {
-        batch.push(unit.text); media.push(...unit.media); bytes += size; index++;
+        batch.push(text); media.push(...unit.media); bytes += size; index++;
+        if (projection) {
+          dedupeState = projection.state;
+          summaryStats!.deduplicatedToolResults += projection.deduplicatedCalls;
+          summaryStats!.savedPreviewBytes += projection.savedBytes;
+        }
       } else {
         if (batch.length || unit.media.length) break;
+        // Oversized units retain raw text. Rebuilding a projected unit after a
+        // slice could refer to an anchor omitted from this or the next request.
+        unit.items = undefined;
         const encoded = Buffer.from(unit.text, "utf8");
         let end = Math.max(0, budget - bytes - 2);
         while (end > 0 && (encoded[end] & 0xc0) === 0x80) end--;
@@ -210,14 +235,16 @@ export async function compressContext(
     if (!batch.length) throw new Error("Summary and original attachment exceed the summary model context window");
     opts.signal?.throwIfAborted();
     opts.onProgress?.({ batch: calls });
-    summaryText = (await deps.summarize(prefix + batch.join("\n\n"), media)).trim();
+    const input = prefix + batch.join("\n\n");
+    if (summaryStats) { summaryStats.calls = calls; summaryStats.inputTextBytes += budgetOf(input); }
+    summaryText = (await deps.summarize(input, media)).trim();
     opts.signal?.throwIfAborted();
     if (!summaryText) throw new Error("Summary returned empty content");
   }
   if (!summaryText) throw new Error("No conversational content to summarize");
   const summaryItem: ChatItem = { kind: "text", id: `ctx-summary-${randomUUID()}`, role: "system",
     text: `Earlier conversation summary:\n\n${summaryText}` };
-  return { items: [summaryItem, ...kept], summaryText, compressedCount: summarizable.length };
+  return { items: [summaryItem, ...kept], summaryText, compressedCount: summarizable.length, ...(summaryStats ? { summaryStats } : {}) };
 }
 
 export function createContextCompressor(

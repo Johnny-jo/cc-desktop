@@ -63,8 +63,10 @@ import {
 } from "./context-compressor";
 import { getClaudeExecutablePath } from "./runtime-paths";
 import { resolveMcpServers } from "./playwright-mcp";
+import { createCodeSymbolBinding, symbolProjectRoot, SYMBOL_SERVER, SYMBOL_TOOL, type CodeSymbolBinding } from "./code-symbol-tool";
 import { browserOutputSources, createToolOutputBinding, RESULT_SERVER, RESULT_TOOL, shellOutputBudget, type ToolOutputBinding } from "./tool-output-policy";
 import { ToolOutputStore } from "./tool-output-store";
+import { createSummaryReadTracker } from "./summary-read-tracker";
 import path from "node:path";
 
 /**
@@ -170,6 +172,8 @@ export type SessionManagerDeps = {
 };
 
 type QueryControl = {
+  // SDK 0.3.318 exposes this live CLI control on Query at runtime.
+  listPermissionRules?: () => Promise<import("@anthropic-ai/claude-agent-sdk").SDKControlListPermissionRulesResponse>;
   getContextUsage?: (options: { detail: "summary" }) => Promise<unknown>;
   initializationResult?: () => Promise<{
     models?: Array<{
@@ -244,6 +248,8 @@ type RoomAbortTurn = {
 type QueryExtras = {
   personalOutputs?: boolean;
   toolOutput?: ToolOutputBinding;
+  codeSymbols?: CodeSymbolBinding;
+  summaryReads?: ReturnType<typeof createSummaryReadTracker>;
   tokenSavingsMode?: "standard" | "balanced";
   servers: Record<string, unknown>;
   allowedTools: string[];
@@ -486,6 +492,15 @@ function isSdkMcpServer(
     server != null && typeof server === "object" &&
     "type" in server && server.type === "sdk"
   );
+}
+
+function deliveredToolResult(message: unknown, call: string): unknown {
+  if (!message || typeof message !== "object") return;
+  const content = (message as { message?: { content?: unknown } }).message?.content;
+  if (!Array.isArray(content)) return;
+  const results = content.filter(block => block && typeof block === "object" &&
+    block.type === "tool_result" && (block.tool_use_id ?? block.toolUseId) === call);
+  return results.length === 1 ? results[0].content : undefined;
 }
 
 function snapshotQueryExtras(entry: SessionEntry): QueryExtras {
@@ -829,6 +844,8 @@ export class SessionManager {
     entry.roomAbortTurn?.detach?.();
     this.clearIdleCloseTimer(entry);
     entry.streamGen += 1;
+    entry.queryExtras?.codeSymbols?.revoke();
+    entry.queryExtras?.summaryReads?.revoke();
     try {
       entry.input?.end();
     } catch {
@@ -1611,7 +1628,9 @@ export class SessionManager {
     }
     try {
       if (name === RESULT_SERVER && !enabled) entry.queryExtras?.toolOutput?.sources.clear();
+      const resume = name === SYMBOL_SERVER ? entry.queryExtras?.codeSymbols?.suspend() : undefined;
       await entry.query.toggleMcpServer(name, enabled);
+      if (enabled) resume?.();
       return { ok: true };
     } catch (err) {
       return { ok: false, error: errMessage(err) };
@@ -1638,6 +1657,14 @@ export class SessionManager {
       const resolved: Record<string, unknown> = resolveMcpServers(servers, this.isPackaged, !entry.pathJail && !entry.roomReadOnlyTurn, entry.summary.title, this.browserAuthStorePath);
       const extras = entry.queryExtras;
       const binding = extras?.toolOutput;
+      if (extras?.codeSymbols) {
+        if (SYMBOL_SERVER in servers) {
+          extras.codeSymbols.revoke();
+          extras.codeSymbols = undefined;
+        } else {
+          resolved[SYMBOL_SERVER] = extras.codeSymbols.server;
+        }
+      }
       // Stop classifying results while live transports are changing. A replacement
       // server with an old browser name cannot inherit the old output policy.
       binding?.sources.clear();
@@ -1852,6 +1879,7 @@ export class SessionManager {
       // Real rewind: tear down the live stream so the next continue() opens
       // a fresh query resuming AT the rewound user message.
       if (!ownQuery) {
+        entry.queryExtras?.codeSymbols?.revoke();
         try {
           entry.input?.end();
           entry.query?.close?.();
@@ -1963,6 +1991,7 @@ export class SessionManager {
     const entry = this.sessions.get(sessionId);
     if (!entry) return;
     this.invalidateCompression(entry);
+    entry.queryExtras?.codeSymbols?.revoke();
     const wasRunning = entry.turnActive || entry.summary.status === "running";
     this.settleLiveAgents(entry, "stopped");
     if (entry.roomAbortTurn) {
@@ -2095,6 +2124,7 @@ export class SessionManager {
     try {
       const result = await this.compressor.compress(current, {
         signal, force: true, model: summaryModel, contextLimit: resolveContextLimit(summaryModel, settings, catalog).limitTokens,
+        deduplicateTools: (settings.tokenSavings?.mode ?? "balanced") === "balanced" && isPersonalOutputSession(entry),
         recentBudget: Math.min(16_000, Math.floor(mainLimit / 4)), handoffBudget: Math.floor(mainLimit * 0.75),
         loadAttachments: turnId => this.archive!.loadPromptAttachments(sessionId, turnId),
         onProgress: ({ batch }) => {
@@ -2245,6 +2275,7 @@ export class SessionManager {
     this.invalidateCompression(entry);
     this.hydrateItems(entry);
     entry.queryExtras?.toolOutput?.revoke();
+    entry.queryExtras?.codeSymbols?.revoke();
     // A warm SDK stream has closures bound to the old reader. Reopen on next input.
     entry.queryModel = undefined;
     entry.sdkSessionId = newId;
@@ -2367,6 +2398,7 @@ export class SessionManager {
     }
     opts?.roomAbortSignal?.throwIfAborted();
     const wasCompressing = Boolean(entry.compressing);
+    entry.queryExtras?.codeSymbols?.cancelPending();
     this.invalidateCompression(entry);
     const promptRevision = entry.promptRevision;
     if (entry.turnActive && entry.queryEffort !== this.resolveEffort(entry)) {
@@ -2419,8 +2451,12 @@ export class SessionManager {
     entry.roomReadOnlyTurn = opts?.roomReadOnly
       ? { requestWriteAccess: opts.requestRoomWriteAccess, writeApproved: false }
       : undefined;
-    if (entry.queryExtras?.toolOutput && entry.queryExtras.personalOutputs !== isPersonalOutputSession(entry)) {
-      entry.queryExtras.toolOutput.revoke();
+    if (entry.queryExtras && entry.queryExtras.personalOutputs !== isPersonalOutputSession(entry) &&
+        (entry.queryExtras.toolOutput || entry.queryExtras.codeSymbols ||
+          (isPersonalOutputSession(entry) && symbolProjectRoot(entry.summary.cwd)))) {
+      entry.queryExtras.toolOutput?.revoke();
+      entry.queryExtras.codeSymbols?.revoke();
+      entry.queryExtras.summaryReads?.revoke();
       reopenForExtras = true;
     }
 
@@ -2565,6 +2601,21 @@ export class SessionManager {
       ...queryExtras.servers,
     };
     queryExtras.personalOutputs = isPersonalOutputSession(entry);
+    if (queryExtras.personalOutputs && !(SYMBOL_SERVER in (settings.mcpServers ?? {})) && !(SYMBOL_SERVER in servers)) {
+      const root = symbolProjectRoot(cwd);
+      if (root) {
+        try {
+          queryExtras.codeSymbols = createCodeSymbolBinding({
+            root, requestedRoot: cwd, desktopDeny: () => this.settings.get().permissionDeny ?? [],
+            listRules: async () => entry.query?.listPermissionRules?.(),
+            isActive: () => this.sessions.get(sessionId) === entry && isPersonalOutputSession(entry) &&
+              entry.turnActive && entry.streamGen === queryGen && entry.abortController === abortController &&
+              !abortController.signal.aborted,
+          });
+          servers[SYMBOL_SERVER] = queryExtras.codeSymbols.server;
+        } catch { /* The standard file tools remain available if the SDK reader cannot initialize. */ }
+      }
+    }
     const sources = balanced ? browserOutputSources(settings.mcpServers ?? {}, queryExtras.servers) : new Set<string>();
     // A room task does not expose a durable room/seat authorization identity to
     // this layer. Keep its output exact. Parked personal queries can reauthorize
@@ -2583,6 +2634,13 @@ export class SessionManager {
       } catch { /* Without a usable reader, pass the original tool result through. */ }
     }
     const binding = queryExtras.toolOutput;
+    const summaryRoot = balanced && queryExtras.personalOutputs ? symbolProjectRoot(cwd) : undefined;
+    const summaryReads = summaryRoot ? createSummaryReadTracker({ root: summaryRoot, isActive: () =>
+      this.sessions.get(sessionId) === entry && isPersonalOutputSession(entry) && entry.turnActive &&
+      entry.streamGen === queryGen && entry.abortController === abortController && !abortController.signal.aborted &&
+      (this.settings.get().tokenSavings?.mode ?? "balanced") === "balanced",
+    }) : undefined;
+    queryExtras.summaryReads = summaryReads;
     const cacheHeader = !entry.skipCpa && this.cpa.cacheSessionHeader?.(sessionId, env);
     if (cacheHeader) env.ANTHROPIC_CUSTOM_HEADERS = [env.ANTHROPIC_CUSTOM_HEADERS, cacheHeader].filter(Boolean).join("\n");
     // Prefer the bundled / vendor Claude Code binary so the app does not
@@ -2668,7 +2726,9 @@ export class SessionManager {
       // Surface SDK Notification events (permission needed, idle, task done)
       // for desktop notifications.
       hooks: {
-        ...(binding && sources.size ? { PostToolUse: [{ hooks: [binding.post] }] } : {}),
+        ...(summaryReads || (binding && sources.size) ? { PostToolUse: [{ hooks: [
+          ...(summaryReads ? [summaryReads.post] : []), ...(binding && sources.size ? [binding.post] : []),
+        ] }] } : {}),
         PreCompact: [{ hooks: [async () => {
           if (!abortController.signal.aborted && entry.streamGen === queryGen) entry.nativeCompactQueryGen = queryGen;
           return {};
@@ -2680,7 +2740,7 @@ export class SessionManager {
           }
           return {};
         }] }],
-        PostToolUseFailure: [{ hooks: [fileEditRecovery] }],
+        PostToolUseFailure: [{ hooks: [fileEditRecovery, ...(summaryReads ? [summaryReads.failure] : [])] }],
         // 路径围栏必须挂在 PreToolUse：canUseTool 只管需要授权的工具，
         // Read/Glob/Grep 等只读工具在多数权限模式下根本不进 canUseTool，
         // 而 PreToolUse 对每一次工具调用都会触发（含只读、含 bypass 模式）。
@@ -2705,6 +2765,9 @@ export class SessionManager {
                   },
                 });
                 const abortTurn = entry.roomAbortTurn;
+                if (name === SYMBOL_TOOL && queryExtras.codeSymbols && input.agent_id) {
+                  return deny("Project-wide symbol lookup is limited to the main session.");
+                }
                 if (abortTurn && (
                   this.roomTurnCancelled(entry, abortTurn) || !entry.turnActive ||
                   entry.streamGen !== queryGen || abortController.signal.aborted ||
@@ -2776,6 +2839,7 @@ export class SessionManager {
                 // a room write grant is never an unconditional tool allow.
                 return violation ? deny(violation) : {};
               },
+              ...(summaryReads ? [summaryReads.pre] : []),
             ],
           },
         ],
@@ -2871,6 +2935,8 @@ export class SessionManager {
 
     // Tear down any previous stream and invalidate its consumer via streamGen.
     entry.streamGen += 1;
+    entry.queryExtras?.codeSymbols?.revoke();
+    entry.queryExtras?.summaryReads?.revoke();
     try {
       entry.input?.end();
       entry.query?.close?.();
@@ -3032,6 +3098,7 @@ export class SessionManager {
       contextUsage,
     };
     entry.turnActive = false;
+    entry.queryExtras?.codeSymbols?.cancelPending();
     entry.roomAbortTurn?.detach?.();
     this.emitSession({ ...entry.summary });
     this.persistSummary(entry);
@@ -3173,6 +3240,11 @@ export class SessionManager {
           if (event.type === "tool_end") {
             const handle = entry.queryExtras?.toolOutput?.takeOutputHandle(event.tool.id);
             if (handle && event.tool.status === "done") event = { ...event, tool: { ...event.tool, outputHandle: handle } };
+            if (event.tool.name === "Read") {
+              const proof = event.tool.status === "done" && !event.tool.isSubagent && !event.tool.parentToolUseId
+                ? entry.queryExtras?.summaryReads?.take(event.tool.id, event.tool.resultPreview, deliveredToolResult(msg, event.tool.id)) : undefined;
+              event = { ...event, tool: { ...event.tool, summaryRead: proof } };
+            }
           }
           // File mutation snapshots are captured at tool_use time for rewind,
           // but workspace/Git scanning and renderer updates happen once here,
@@ -3210,6 +3282,7 @@ export class SessionManager {
         // Also mark idle on bare result messages if normalize missed fields
         if (canDispatch() && isResultMessage(msg) && entry.turnActive) {
           entry.turnActive = false;
+          entry.queryExtras?.codeSymbols?.cancelPending();
           entry.roomAbortTurn?.detach?.();
           if (entry.summary.status === "running") {
             entry.summary = {
@@ -3282,6 +3355,8 @@ export class SessionManager {
       pendingToolProgress.clear();
       // Only clear abortController if this consumer still owns the stream.
       if (entry.streamGen === myGen && entry.abortController) {
+        entry.queryExtras?.codeSymbols?.revoke();
+        entry.queryExtras?.summaryReads?.revoke();
         entry.abortController = null;
       }
       if (entry.streamGen === myGen) {

@@ -15,6 +15,8 @@ const { renameSessionTabGroup } = require("./extension-branding.cjs");
 const { browserResource, createCallQueue, createOwnership, withTimeout } = require("./control-runtime.cjs");
 const { acquireBrowserLease } = require("./browser-lease.cjs");
 const { verifyPage, withScreenshotMetadata } = require("./browser-observation.cjs");
+const { createTargetDiscovery } = require("./browser-targets.cjs");
+const { withTargetDiscovery } = require("./browser-target-tools.cjs");
 
 const cancelledMessage = "用户已取消 AgentOS 浏览器控制。此连接中的浏览器和资料查询工具已停用。";
 
@@ -93,7 +95,10 @@ async function start(channel, connection = "isolated", title, profileName, cdpEn
       ))),
     },
   ];
-  const definitions = [...tools.filteredTools(config).map(withScreenshotMetadata), ...dataTools, ...controlTools];
+  const targetDiscovery = createTargetDiscovery({ isActive: () => !revoked && !closing });
+  const definitions = [...withTargetDiscovery(tools.filteredTools(config).map(withScreenshotMetadata), {
+    z, discovery: targetDiscovery, isActive: () => !revoked && !closing,
+  }), ...dataTools, ...controlTools];
 
   async function releaseIndicators(context) {
     if (!context) return;
@@ -108,6 +113,7 @@ async function start(channel, connection = "isolated", title, profileName, cdpEn
 
   async function revoke() {
     revoked = true;
+    targetDiscovery.revoke();
     await Promise.allSettled([...sessions].map(session => session.release()));
   }
 

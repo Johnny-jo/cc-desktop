@@ -118,6 +118,9 @@ importers:
       remark-gfm:
         specifier: ^4.0.1
         version: 4.0.1
+      typescript:
+        specifier: ^5.8.2
+        version: 5.9.3
       ws:
         specifier: ^8.21.3
         version: 8.21.3
@@ -155,9 +158,6 @@ importers:
       sharp:
         specifier: ^0.35.3
         version: 0.35.3(@types/node@24.13.3)
-      typescript:
-        specifier: ^5.8.2
-        version: 5.9.3
       vite:
         specifier: ^6.0.0
         version: 6.4.3(@types/node@24.13.3)(yaml@2.9.1)

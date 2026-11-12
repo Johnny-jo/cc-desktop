@@ -205,6 +205,111 @@ function makeDeps(overrides: {
   };
 }
 
+describe("project symbol MCP", () => {
+  const name = "agentos-code";
+  const tool = "mcp__agentos-code__read_symbol";
+  const prompt = { text: "find a symbol", attachments: [] };
+  const serverOf = (options: Record<string, unknown>) =>
+    (options.mcpServers as Record<string, ToolOutputBinding["server"]> | undefined)?.[name];
+
+  it("attaches to an unmarked project, keeps broker denial and skips room and jail queries", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cc-symbol-session-"));
+    const calls: Record<string, unknown>[] = [];
+    const canUseTool = vi.fn().mockResolvedValue({ behavior: "deny", message: "user declined" });
+    const { manager } = makeDeps({ canUseTool, queryFn: ({ options }) => {
+      calls.push(options);
+      return (async function* () { yield { type: "result" }; })();
+    } });
+    try {
+      const id = await manager.start(prompt, root);
+      const own = serverOf(calls[0]);
+      expect(own?.type).toBe("sdk");
+      expect(calls[0].allowedTools).not.toContain(tool);
+      const check = calls[0].canUseTool as (...args: unknown[]) => Promise<unknown>;
+      expect(await check(tool, { name: "target" }, { signal: new AbortController().signal }))
+        .toMatchObject({ behavior: "deny", message: "user declined" });
+      await manager.continue(id, prompt, { roomReadOnly: true });
+      expect(serverOf(calls[1])).toBeUndefined();
+      await manager.start(prompt, root, { pathJail: root });
+      expect(serverOf(calls[2])).toBeUndefined();
+      await manager.start(prompt, root, { hiddenFromList: true });
+      expect(serverOf(calls[3])).toBeUndefined();
+    } finally { manager.disposeAll(); fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("keeps the host reader through a live MCP reload and gives a same-name server ordinary permissions", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cc-symbol-reload-"));
+    let options: Record<string, unknown> = {};
+    const setMcpServers = vi.fn(async (_servers: Record<string, unknown>) => ({ added: [], removed: [], errors: {} }));
+    const { manager, settings } = makeDeps({ queryFn: args => {
+      options = args.options;
+      return Object.assign((async function* () {
+        for await (const _ of args.prompt as AsyncIterable<unknown>) yield { type: "result" };
+      })(), { setMcpServers });
+    } });
+    const update = vi.fn((patch: Partial<AppSettings>) => vi.mocked(settings.get).mockReturnValue({ ...baseSettings, ...patch }));
+    settings.update = update as unknown as SettingsStore["update"];
+    try {
+      const id = await manager.start(prompt, root);
+      const own = serverOf(options);
+      expect(own?.type).toBe("sdk");
+      expect((await manager.setMcpServers(id, {})).ok).toBe(true);
+      expect(setMcpServers.mock.calls[0][0][name]).toBe(own);
+      const external = { type: "stdio", command: "fixture" } as const;
+      expect((await manager.setMcpServers(id, { [name]: external })).ok).toBe(true);
+      expect(setMcpServers.mock.calls[1][0][name]).toEqual(external);
+      await manager.continue(id, prompt);
+      expect(serverOf(options)).toEqual(external);
+      const hooks = options.hooks as { PreToolUse: { hooks: ((input: unknown) => Promise<unknown>)[] }[] };
+      const decision = await hooks.PreToolUse[0].hooks[0]({ tool_name: tool, mcp_server: { name, source: "dynamic" } });
+      expect(decision).toEqual({});
+    } finally { manager.disposeAll(); fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("binds the MCP call to the active query and aborts its worker with the session", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cc-symbol-active-"));
+    const optionsReady = roomDeferred<Record<string, unknown>>();
+    const finishTurn = roomDeferred<void>();
+    const canRead = vi.fn(async () => ({ state: { rules: [] } }));
+    const { manager } = makeDeps({ queryFn: args => Object.assign((async function* () {
+      for await (const _ of args.prompt as AsyncIterable<unknown>) {
+        optionsReady.resolve(args.options);
+        await finishTurn.promise;
+        yield { type: "result" };
+      }
+    })(), { listPermissionRules: canRead }) });
+    const worker = await import("./code-symbol-runner");
+    const lookup = vi.spyOn(worker, "runCodeSymbolLookup").mockResolvedValue({ status: "found" });
+    let id = "";
+    const session = manager.start(prompt, root, { onSessionId: value => { id = value; } });
+    const options = await optionsReady.promise;
+    const req = createRequire(createRequire(import.meta.url).resolve("@anthropic-ai/claude-agent-sdk"));
+    const client = new (req("@modelcontextprotocol/sdk/client/index.js").Client)({ name: "test", version: "1" });
+    const [a, b] = req("@modelcontextprotocol/sdk/inMemory.js").InMemoryTransport.createLinkedPair();
+    const server = serverOf(options)!;
+    try {
+      await server.instance.connect(b);
+      await client.connect(a);
+      const read = () => client.callTool({ name: "read_symbol", arguments: { name: "target" } });
+      expect((await read()).content).toEqual([{ type: "text", text: '{"status":"found"}' }]);
+      const pendingWorker = roomDeferred<unknown>();
+      lookup.mockImplementationOnce(() => pendingWorker.promise);
+      const pendingRead = read();
+      await vi.waitFor(() => expect(lookup).toHaveBeenCalledTimes(2));
+      manager.abort(id);
+      expect(lookup.mock.calls[1][2]?.aborted).toBe(true);
+      pendingWorker.resolve("old result");
+      expect((await pendingRead).isError).toBe(true);
+      expect((await read()).isError).toBe(true);
+      expect(lookup).toHaveBeenCalledTimes(2);
+    } finally {
+      finishTurn.resolve(); await session;
+      await client.close(); await server.instance.close();
+      lookup.mockRestore(); manager.disposeAll(); fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("SDK session metering", () => {
   const prompt = { text: "hello", attachments: [] };
 
@@ -457,6 +562,8 @@ describe("compaction handoff", () => {
           try {
             for (const handle of handles) {
               const result = await client.callTool({ name: "result_read", arguments: { handle } });
+              const search = await client.callTool({ name: "result_read", arguments: { handle, query: "fixture" } });
+              expect(Boolean(search.isError)).toBe(Boolean(result.isError));
               replies.push(!result.isError);
             }
           } finally { await client.close(); await server.instance.close(); }

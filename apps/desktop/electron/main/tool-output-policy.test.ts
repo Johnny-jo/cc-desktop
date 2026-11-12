@@ -77,14 +77,37 @@ describe("browser tool output", () => {
     expect(resumed.retained("s1", [{ kind: "tool", id: "c", tool: { ...tool, id: "c" } }]).get(handle)).toBe("c");
     expect(resumed.read("s1", "c", handle, 0, 3)).toEqual({ text: "abc", nextOffset: 3, totalChars: 5 });
     expect(resumed.read("s1", "c", handle, 3, 2)).toEqual({ text: "测试", nextOffset: null, totalChars: 5 });
+    expect(resumed.search("s1", "c", handle, "测试", 0)?.totalMatches).toBe(1);
+    expect(resumed.search("s1", "different-call", handle, "测试", 0)).toBeUndefined();
     expect(resumed.read("s1", "c", handle, -1, 2)).toBeUndefined();
     now += 101;
+    expect(resumed.search("s1", "c", handle, "测试", 0)).toBeUndefined();
     expect(resumed.read("s1", "c", handle, 0, 2)).toBeUndefined();
     expect(resumed.save("s1", "c2", "123")).toBeDefined();
     resumed.remove("s1");
     expect(resumed.read("s1", "c", handle, 0, 3)).toBeUndefined();
     resumed.close();
     rmSync(file);
+  });
+  it("finds literal phrases across page boundaries with reproducible UTF-16 offsets and bounded snippets", () => {
+    const store = new ToolOutputStore();
+    try {
+      const query = "失败 [ID.*]";
+      const first = "x".repeat(3933) + "🪻" + "x".repeat(63);
+      const content = first + query + "y".repeat(63) + "🪻" + ("\n" + query).repeat(6);
+      const handle = store.save("s", "call", content)!;
+      const page = store.search("s", "call", handle, query, 0)!;
+      expect(page.totalMatches).toBe(7);
+      expect(page.matches).toHaveLength(5);
+      expect(page.matches[0]).toEqual({ offset: 3998, snippetOffset: 3933,
+        text: "🪻" + "x".repeat(63) + query + "y".repeat(63) + "🪻" });
+      const more = store.search("s", "call", handle, query, page.nextOffset!)!;
+      expect(more).toMatchObject({ totalMatches: 7, nextOffset: null, totalChars: content.length });
+      const offsets = [...page.matches, ...more.matches].map(hit => hit.offset);
+      expect(offsets).toEqual(Array.from(content.matchAll(/失败 \[ID\.\*\]/g), m => m.index));
+      expect(store.read("s", "call", handle, offsets[5], query.length)?.text).toBe(query);
+      expect(store.search("s", "call", handle, "失败 [id.*]", 0)).toMatchObject({ matches: [], totalMatches: 0, nextOffset: null });
+    } finally { store.close(); }
   });
   it("binds MCP page access to a live query and rejects caller-supplied identities", async () => {
     const req = createRequire(createRequire(import.meta.url).resolve("@anthropic-ai/claude-agent-sdk"));
@@ -112,9 +135,17 @@ describe("browser tool output", () => {
       const args = { handle, offset: 0, limit: 100 };
       const call = (index: number, parameters: object) => clients[index].callTool({ name: "result_read", arguments: parameters });
       expect(JSON.parse((await call(0, args)).content[0].text).text).toBe(source.slice(0, 100));
+      const find = { handle, query: "中间" };
+      expect(JSON.parse((await call(0, find)).content[0].text).matches[0].text).toContain("中间🪻");
       old.revoke();
       expect(await old.post(input)).toEqual({});
       expect((await call(0, args)).isError).toBe(true);
+      expect((await call(0, find)).isError).toBe(true);
+      expect((await call(2, find)).isError).toBe(true);
+      for (const invalid of [{ query: " " }, { query: "x".repeat(257) }, { query: 7 }, { offset: -1 },
+        { offset: source.length + 1 }, { limit: 100 }, { sessionId: "session-B" }]) {
+        expect((await call(1, { ...find, ...invalid })).isError).toBe(true);
+      }
       expect((await call(1, args)).isError).not.toBe(true);
       expect((await call(2, args)).isError).toBe(true);
       expect((await call(2, { ...args, sessionId: "session-A" })).isError).toBe(true);

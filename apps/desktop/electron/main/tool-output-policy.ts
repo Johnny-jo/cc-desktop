@@ -4,7 +4,7 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import type { McpServersMap } from "@claude-desktop/shared";
 import type { createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
-import { MAX_PAGE_CHARS, type ToolOutputStore } from "./tool-output-store";
+import { MAX_PAGE_CHARS, MAX_QUERY_CHARS, type ToolOutputStore } from "./tool-output-store";
 
 export const RESULT_SERVER = "agentos-results";
 export const RESULT_TOOL = `mcp__${RESULT_SERVER}__result_read`;
@@ -99,10 +99,11 @@ export function createToolOutputBinding(options: {
   )("@modelcontextprotocol/sdk/types.js");
   const server = sdk.createSdkMcpServer({ name: RESULT_SERVER, tools: [] });
   server.instance.server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{
-    name: "result_read", description: "Read a page of complete archived tool text using a handle from this conversation. Offsets count UTF-16 characters.",
+    name: "result_read", description: "Read archived tool text by handle. Search with query for up to 5 snippets, or page by offset and limit. Continue either mode at nextOffset. Offsets are UTF-16.",
     inputSchema: { type: "object", additionalProperties: false, required: ["handle"], properties: {
       handle: { type: "string", format: "uuid" }, offset: { type: "integer", minimum: 0, default: 0 },
-      limit: { type: "integer", minimum: 1, maximum: MAX_PAGE_CHARS, default: MAX_PAGE_CHARS },
+      limit: { type: "integer", minimum: 1, maximum: MAX_PAGE_CHARS, description: "Page length when query is omitted (default 4000)." },
+      query: { type: "string", minLength: 1, maxLength: MAX_QUERY_CHARS, description: "Case-sensitive literal keyword or phrase." },
     } }, annotations: { readOnlyHint: true },
   }] }));
   let enabled = true;
@@ -110,15 +111,18 @@ export function createToolOutputBinding(options: {
   server.instance.server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const params = request.params as { name: string; arguments?: Record<string, unknown> };
     const args = params.arguments;
-    const failure = { isError: true, content: [{ type: "text", text: "Result unavailable or invalid page." }] };
+    const failure = { isError: true, content: [{ type: "text", text: "Result unavailable or invalid read arguments." }] };
     if (!active() || params.name !== "result_read" || !args || typeof args.handle !== "string" ||
-      !/^[\da-f-]{36}$/.test(args.handle) || Object.keys(args).some(k => !["handle", "offset", "limit"].includes(k))) return failure;
-    const { offset = 0, limit = MAX_PAGE_CHARS } = args;
-    if (typeof offset !== "number" || typeof limit !== "number") return failure;
+      !/^[\da-f-]{36}$/.test(args.handle) || Object.keys(args).some(k => !["handle", "offset", "limit", "query"].includes(k))) return failure;
+    const { offset = 0, limit = MAX_PAGE_CHARS, query } = args;
+    if (typeof offset !== "number" || typeof limit !== "number" ||
+      (query !== undefined && (typeof query !== "string" || args.limit !== undefined))) return failure;
     try {
       const call = grants.get(args.handle);
       if (!call) return failure;
-      const page = store.read(sessionId, call, args.handle, offset, limit);
+      const page = query === undefined
+        ? store.read(sessionId, call, args.handle, offset, limit)
+        : store.search(sessionId, call, args.handle, query, offset);
       return page ? { content: [{ type: "text", text: JSON.stringify(page) }] } : failure;
     } catch { return failure; }
   });

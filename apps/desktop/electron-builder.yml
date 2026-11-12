@@ -12,6 +12,13 @@ files:
   - package.json
   # Native PTY module (externalized by electron-vite, not bundled into out/)
   - node_modules/node-pty/**
+  # The dependency collector normally drops .d.ts. The symbol index uses the
+  # bundled ES declarations to resolve calls through Map, Array and Promise.
+  - from: node_modules/typescript/lib
+    to: node_modules/typescript/lib
+    filter:
+      - lib.es*.d.ts
+      - lib.decorators*.d.ts
 
 # Workspace package is bundled into out/ by electron-vite; no asarUnpack of node_modules required for shared.
 asar: true

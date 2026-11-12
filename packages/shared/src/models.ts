@@ -118,12 +118,24 @@ export type ToolTaskUpdate = {
 
 export type AgentProgressUpdate = Pick<ProgressAgent, "id"> & Partial<Omit<ProgressAgent, "id">>;
 
+/** Host evidence for summary-input optimization only; never grants file access. */
+export type SummaryReadProof = {
+  format: 1;
+  scope: string;
+  inputHash: string;
+  targetVersion: string;
+  resultHash: string;
+  previewHash: string;
+};
+
 export type ToolCardState = {
   id: string;
   name: string;
   summary: string;
   status: "running" | "done" | "error" | "stopped";
   resultPreview?: string;
+  /** Optional full-read evidence, bound to resultPreview; does not alter history. */
+  summaryRead?: SummaryReadProof;
   /** Host-issued full result reference, bound to this tool call in this session. */
   outputHandle?: string;
   /** Elapsed seconds while running (from tool_progress heartbeats) */

@@ -13,14 +13,14 @@ import { RESULT_TOOL } from "./tool-output-policy";
 
 const model = "claude-sonnet-4-6";
 const browser = "mcp__browser__browser_console_messages";
-const middle = "MIDDLE-SENTINEL";
+const middle = "MIDDLE-59302684";
 const shellOutput = "SHELL-START\n" + "A".repeat(9000) + "\nSHELL-MIDDLE\n" + "B".repeat(9000) + "\nSHELL-END";
 const consoleOutput = "### Result\nTotal messages: 1 (Errors: 0, Warnings: 0)\n\n[LOG] HEAD " +
   "A".repeat(6000) + middle + "B".repeat(6000) + " TAIL @ about:blank:1";
 const consoleTool = { name: "browser_console_messages", description: "Read fixture logs", inputSchema: { type: "object", properties: {} } };
 
 type ToolCall = { name: string; input: Record<string, unknown> };
-function reply(res: http.ServerResponse, index: number, call?: ToolCall) {
+function reply(res: http.ServerResponse, index: number, call?: ToolCall, answer = "") {
   res.writeHead(200, { "content-type": "text/event-stream" });
   const event = (type: string, data: object) => res.write("event: " + type + "\ndata: " + JSON.stringify({ type, ...data }) + "\n\n");
   const message = { type: "message", role: "assistant", id: "msg_" + index, model, content: [],
@@ -29,14 +29,14 @@ function reply(res: http.ServerResponse, index: number, call?: ToolCall) {
   const content_block = call ? { type: "tool_use", id: "toolu_" + index, name: call.name, input: {} } : { type: "text", text: "" };
   event("content_block_start", { index: 0, content_block });
   event("content_block_delta", { index: 0, delta: call ?
-    { type: "input_json_delta", partial_json: JSON.stringify(call.input) } : { type: "text_delta", text: middle } });
+    { type: "input_json_delta", partial_json: JSON.stringify(call.input) } : { type: "text_delta", text: answer } });
   event("content_block_stop", { index: 0 });
   event("message_delta", { delta: { stop_reason: call ? "tool_use" : "end_turn", stop_sequence: null }, usage: { output_tokens: 5 } });
   event("message_stop", {}); res.end();
 }
 
 // Opt in with CC_TEST_BUNDLED_SDK=1. No real model, browser profile or application data.
-it.runIf(process.env.CC_TEST_BUNDLED_SDK === "1")("compares the actual Messages shell/browser results and reads an archived page", async () => {
+it.runIf(process.env.CC_TEST_BUNDLED_SDK === "1")("recovers an unknown browser marker through the SDK using either sequential pages or a keyword", async () => {
   const usePowerShell = process.env.CC_TOOL_OUTPUT_SHELL === "PowerShell";
   const shellName = usePowerShell ? "PowerShell" : "Bash";
   const command = usePowerShell ? "Get-Content -Raw -LiteralPath fixture.txt" : "cat fixture.txt";
@@ -54,9 +54,11 @@ it.runIf(process.env.CC_TEST_BUNDLED_SDK === "1")("compares the actual Messages 
       process.stdout.write(JSON.stringify({jsonrpc:"2.0",id:x.id,result})+"\\n"); });`);
   const reports = [];
   try {
-    for (const mode of ["standard", "balanced"] as const) {
+    for (const strategy of ["standard", "paged", "keyword"] as const) {
+      const mode = strategy === "standard" ? "standard" : "balanced";
       let calls = 0;
-      let shell = "", browserText = "", page = "";
+      let shell = "", browserText = "", handle = "", answer = "";
+      let recoveredTextChars = 0, readerResponseChars = 0;
       let errors: unknown;
       const server = http.createServer(async (req, res) => {
         const chunks: Buffer[] = [];
@@ -81,20 +83,34 @@ it.runIf(process.env.CC_TEST_BUNDLED_SDK === "1")("compares the actual Messages 
           if (calls === 2) { shell = text; next = { name: browser, input: {} }; }
           if (calls === 3) {
             browserText = text;
+            answer = text.match(/MIDDLE-\d{8}/)?.[0] ?? "";
             if (mode === "balanced") {
               const match = /with handle ([\da-f-]{36})/.exec(text);
               if (!match) throw Error("Missing archive handle in browser tool result");
-              next = { name: RESULT_TOOL, input: { handle: match[1], offset: consoleOutput.indexOf(middle), limit: middle.length } };
+              handle = match[1];
+              next = { name: RESULT_TOOL, input: strategy === "keyword" ? { handle, query: "MIDDLE-" } : { handle } };
             }
           }
-          if (calls === 4) page = JSON.parse(text.trim()).text;
-          reply(res, calls, next);
+          if (calls > 3) {
+            readerResponseChars += text.length;
+            const result = JSON.parse(text);
+            const evidence: string = strategy === "keyword"
+              ? result.matches.map((hit: { text: string }) => hit.text).join("\n")
+              : result.text;
+            recoveredTextChars += evidence.length;
+            answer = evidence.match(/MIDDLE-\d{8}/)?.[0] ?? "";
+            if (!answer && strategy === "paged" && result.nextOffset !== null && calls < 7) {
+              next = { name: RESULT_TOOL, input: { handle, offset: result.nextOffset } };
+            }
+          }
+          if (!next && !answer) throw Error("No marker in observed tool results");
+          reply(res, calls, next, answer);
         } catch (error) { errors = error; reply(res, calls); }
       });
       await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
       const address = server.address();
       if (!address || typeof address === "string") throw Error("Missing loopback port");
-      const root = path.join(dir, mode);
+      const root = path.join(dir, strategy);
       fs.mkdirSync(root);
       const settings = new SettingsStore({ userDataDir: root, encrypt: s => s, decrypt: s => s });
       settings.update({ defaultModel: model, models: [model], tokenSavings: { mode },
@@ -123,7 +139,7 @@ it.runIf(process.env.CC_TEST_BUNDLED_SDK === "1")("compares the actual Messages 
         },
       });
       try {
-        const session = await manager.start({ text: "Find the middle fixture marker", attachments: [] }, dir);
+        const session = await manager.start({ text: "Report the full MIDDLE- marker including its eight-digit suffix", attachments: [] }, dir);
         expect(errors).toBeUndefined();
         expect(manager.getSummary(session)?.status).toBe("idle");
         expect(shell).toContain("SHELL-START");
@@ -131,13 +147,16 @@ it.runIf(process.env.CC_TEST_BUNDLED_SDK === "1")("compares the actual Messages 
         expect(browserText).toContain("HEAD"); expect(browserText).toContain("TAIL");
         expect(browserText.includes(middle)).toBe(mode === "standard");
         if (mode === "balanced") {
-          expect(page).toBe(middle);
+          expect(recoveredTextChars).toBe(strategy === "paged" ? 8000 : 135);
           const card = manager.getTranscript(session).find(item => item.kind === "tool" && item.tool.name === browser);
           expect(card?.kind === "tool" && card.tool.outputHandle).toBe(/with handle ([\da-f-]{36})/.exec(browserText)?.[1]);
         }
-        expect(calls).toBe(mode === "balanced" ? 4 : 3);
-        reports.push({ mode, shellName, messagesRequests: calls, toolCalls: calls - 1, shellResultChars: shell.length,
-          browserResultChars: browserText.length, recoveredPageChars: page.length });
+        expect(answer).toBe(middle);
+        expect(manager.getTranscript(session).some(item =>
+          item.kind === "text" && item.role === "assistant" && item.text.includes(middle))).toBe(true);
+        expect(calls).toBe({ standard: 3, paged: 5, keyword: 4 }[strategy]);
+        reports.push({ strategy, shellName, messagesRequests: calls, toolCalls: calls - 1, shellResultChars: shell.length,
+          browserResultChars: browserText.length, recoveredTextChars, readerResponseChars });
       } finally {
         manager.disposeAll();
         server.closeAllConnections();

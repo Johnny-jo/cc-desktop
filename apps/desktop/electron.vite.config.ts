@@ -16,6 +16,7 @@ export default defineConfig({
           "mod-host-worker": resolve("electron/main/mod-host-worker.ts"),
           "pdf-text-worker": resolve("electron/main/pdf-text-worker.ts"),
           "desktop-vision-worker": resolve("electron/main/desktop-vision-worker.ts"),
+          "code-symbol-worker": resolve("electron/main/code-symbol-worker.ts"),
         },
       },
     },
