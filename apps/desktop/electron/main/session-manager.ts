@@ -58,6 +58,7 @@ import { MessageStream } from "./message-stream";
 import { buildUserContent } from "./attachment-reader";
 import {
   buildContinuationPrompt,
+  contentContextBudget,
   type ContextCompressor,
 } from "./context-compressor";
 import { getClaudeExecutablePath } from "./runtime-paths";
@@ -287,6 +288,7 @@ type SessionEntry = {
   externalSummaryRoute?: boolean;
   syntheticHandoffUser?: boolean;
   compressing?: AbortController;
+  autoCompactTimer?: ReturnType<typeof setTimeout>;
   rewindPending?: boolean;
   /** Changes at the start of a new prompt or an explicit lifecycle operation. */
   promptRevision?: number;
@@ -695,6 +697,9 @@ export class SessionManager {
             ...(stored.contextUsage
               ? { contextUsage: stored.contextUsage }
               : {}),
+            ...(stored.contextCompression ? { contextCompression: stored.contextCompression.state === "running"
+              ? { state: "failed" as const, updatedAt: Date.now(), message: "Compression was interrupted when the application closed" }
+              : stored.contextCompression } : {}),
             ...(stored.hiddenFromList ? { hiddenFromList: true } : {}),
             ...(stored.pinned ? { pinned: true } : {}),
             ...(stored.progress ? { progress: stored.progress } : {}),
@@ -818,6 +823,8 @@ export class SessionManager {
   private parkSession(entry: SessionEntry, force = false): void {
     if (!force && entry.turnActive) return;
     if (force) this.invalidateCompression(entry);
+    clearTimeout(entry.autoCompactTimer);
+    entry.autoCompactTimer = undefined;
     this.settleLiveAgents(entry, "unknown");
     entry.roomAbortTurn?.detach?.();
     this.clearIdleCloseTimer(entry);
@@ -2045,7 +2052,7 @@ export class SessionManager {
     sessionId: string,
     items?: import("@claude-desktop/shared").ChatItem[],
     opts?: { autoContinue?: boolean },
-  ): Promise<{ ok: boolean; message?: string }> {
+  ): Promise<{ ok: boolean; message?: string; cancelled?: boolean }> {
     const entry = this.sessions.get(sessionId);
     if (!entry) return { ok: false, message: "Session not found" };
     const roomTurn = entry.roomAbortTurn;
@@ -2081,11 +2088,20 @@ export class SessionManager {
     entry.compressing = controller;
     const gen = entry.streamGen;
     const signal = roomTurn ? AbortSignal.any([controller.signal, roomTurn.signal]) : controller.signal;
+    let failure = "Compression did not complete";
+    let committed = false;
+    const fail = (message: string) => { failure = message; return { ok: false, message, cancelled: signal.aborted || gen !== entry.streamGen }; };
+    this.publishCompression(entry, { state: "running", updatedAt: Date.now() }, false);
     try {
       const result = await this.compressor.compress(current, {
-        signal, model: summaryModel, contextLimit: resolveContextLimit(summaryModel, settings, catalog).limitTokens,
+        signal, force: true, model: summaryModel, contextLimit: resolveContextLimit(summaryModel, settings, catalog).limitTokens,
         recentBudget: Math.min(16_000, Math.floor(mainLimit / 4)), handoffBudget: Math.floor(mainLimit * 0.75),
         loadAttachments: turnId => this.archive!.loadPromptAttachments(sessionId, turnId),
+        onProgress: ({ batch }) => {
+          if (entry.compressing === controller && !signal.aborted && entry.streamGen === gen) {
+            this.publishCompression(entry, { state: "running", updatedAt: Date.now(), batch }, false);
+          }
+        },
       });
       signal.throwIfAborted();
       // The SDK journal retains content blocks and tool pairs that compact UI cards omit.
@@ -2095,14 +2111,14 @@ export class SessionManager {
         ? await this.readSdkMessages(sourceSdkSessionId, entry.summary.cwd) : undefined;
       signal.throwIfAborted();
       if (sdkMessages && !sdkMessages.length) {
-        return { ok: false, message: "The SDK transcript is unavailable for this conversation" };
+        return fail("The SDK transcript is unavailable for this conversation");
       }
       this.throwIfRoomTurnCancelled(entry, roomTurn);
       if (gen !== entry.streamGen || sourceSdkSessionId !== entry.sdkSessionId || originalItems !== entry.items || this.sessions.get(sessionId) !== entry ||
           model !== (entry.model || this.settings.get().defaultModel) || summaryModel !== this.summaryModel(entry)) {
-        return { ok: false, message: "Session changed during compression" };
+        return fail("Session changed during compression");
       }
-      if (!result.compressedCount || !result.summaryText.trim()) return { ok: false, message: "Nothing to compress" };
+      if (!result.compressedCount || !result.summaryText.trim()) return fail("Nothing to compress");
 
       const index: CompactIndex = {
         revision: randomUUID(), createdAt: Date.now(), model, compressedCount: result.compressedCount,
@@ -2114,17 +2130,15 @@ export class SessionManager {
       const handoff = this.handoffContent(sessionId, {
         summaryText: snapshot.summaryText, recentTurns: current.slice(result.compressedCount),
       }, opts?.autoContinue);
-      const handoffBytes = handoff.reduce((size, block) => size + Buffer.byteLength(
-        block.type === "text" ? block.text : block.source.data, "utf8",
-      ), 0);
-      if (handoffBytes > mainLimit * 0.75) {
-        return { ok: false, message: "Retained turns and attachments exceed the handoff budget" };
+      if (contentContextBudget(handoff) > mainLimit * 0.75) {
+        return fail("Retained turns and attachments exceed the handoff budget");
       }
       const progressBaseline = entry.summary.hiddenFromList ? entry.progressBaseline : restoreSessionProgress(
         rebuildSessionProgress(current.slice(0, result.compressedCount), entry.progressBaseline),
       ) ?? { tasks: [], agents: [] };
       const compactions = [...(entry.compactions ?? []), index];
-      const summary = { ...entry.summary, contextUsage: undefined, updatedAt: index.createdAt };
+      const summary: SessionSummary = { ...entry.summary, contextUsage: undefined, updatedAt: index.createdAt,
+        contextCompression: { state: "completed", updatedAt: index.createdAt } };
       const compacted = [...visible.slice(0, start), ...result.items.map(item => item.kind === "text" && item.role === "user"
         ? { ...item, sdkMsgId: undefined, historicalTurn: true as const } : item)];
       this.archive.commitCompaction({
@@ -2137,6 +2151,7 @@ export class SessionManager {
       entry.pendingHandoff = index.revision;
       entry.lastCompressedAt = index.createdAt;
       entry.summary = summary;
+      committed = true;
       entry.progressBaseline = progressBaseline;
       entry.sdkSessionId = undefined;
       entry.sdkUserMsgIds = [];
@@ -2155,15 +2170,75 @@ export class SessionManager {
       }
       return { ok: true, message: `Compressed ${result.compressedCount} items` };
     } catch (error) {
-      return { ok: false, message: `Compression failed: ${errMessage(error)}` };
+      return fail(`Compression failed: ${errMessage(error)}`);
     } finally {
-      if (entry.compressing === controller) entry.compressing = undefined;
+      if (entry.compressing === controller) {
+        entry.compressing = undefined;
+        if (!committed) this.publishCompression(entry, signal.aborted || gen !== entry.streamGen
+          ? undefined : { state: "failed", updatedAt: Date.now(), message: failure });
+      }
     }
   }
 
   private invalidateCompression(entry: SessionEntry): void {
     entry.promptRevision = (entry.promptRevision ?? 0) + 1;
+    clearTimeout(entry.autoCompactTimer);
+    entry.autoCompactTimer = undefined;
     entry.compressing?.abort();
+  }
+
+  private publishCompression(entry: SessionEntry, status: SessionSummary["contextCompression"], persist = true): void {
+    entry.summary = { ...entry.summary, contextCompression: status };
+    if (!entry.summary.hiddenFromList) this.emitSession({ ...entry.summary });
+    if (persist) {
+      try { this.persistSummary(entry); }
+      catch (error) {
+        entry.summary = { ...entry.summary, contextCompression: { state: "failed", updatedAt: Date.now(),
+          message: `${status?.message ?? "Compression status could not be saved"}: ${errMessage(error)}` } };
+        if (!entry.summary.hiddenFromList) this.emitSession({ ...entry.summary });
+      }
+    }
+  }
+
+  private shouldAutoCompress(entry: SessionEntry): boolean {
+    const occupancy = entry.summary.contextUsage;
+    const settings = this.settings.get();
+    return Boolean(occupancy && (occupancy.selectedModelId ?? occupancy.modelId) === (entry.model || settings.defaultModel) &&
+      occupancy.ratio >= (settings.tokenSavings?.autoCompactRatio ?? 0.75) && !entry.summary.hiddenFromList &&
+      !entry.externalSummaryRoute && !entry.skipCpa && !entry.extraEnv?.ANTHROPIC_BASE_URL &&
+      !entry.turnActive && entry.summary.status !== "running" && !entry.pendingHandoff && !entry.compressing &&
+      !entry.rewindPending && !entry.resumeAtAnchor && entry.nativeCompactQueryGen !== entry.streamGen &&
+      (!entry.lastCompressedAt || Date.now() - entry.lastCompressedAt >= 5 * 60 * 1000));
+  }
+
+  private async autoCompress(entry: SessionEntry): Promise<void> {
+    if (!this.shouldAutoCompress(entry)) return;
+    const revision = entry.promptRevision;
+    try {
+      const result = await this.compressSession(entry.summary.id);
+      if (!result.ok && !result.cancelled && entry.promptRevision === revision && !entry.turnActive &&
+          entry.summary.contextCompression?.state !== "failed") {
+        this.publishCompression(entry, { state: "failed", updatedAt: Date.now(), message: result.message });
+      }
+    } catch (error) {
+      if (entry.promptRevision === revision && !entry.turnActive) {
+        this.publishCompression(entry, { state: "failed", updatedAt: Date.now(), message: errMessage(error) });
+      }
+    }
+  }
+
+  private scheduleAutoCompression(entry: SessionEntry): void {
+    if (!this.compressor || !this.archive || !this.shouldAutoCompress(entry)) return;
+    clearTimeout(entry.autoCompactTimer);
+    const revision = entry.promptRevision;
+    const generation = entry.streamGen;
+    entry.autoCompactTimer = setTimeout(() => {
+      entry.autoCompactTimer = undefined;
+      if (this.sessions.get(entry.summary.id) === entry && entry.promptRevision === revision && entry.streamGen === generation) {
+        void this.autoCompress(entry);
+      }
+    }, 0);
+    entry.autoCompactTimer.unref?.();
   }
 
   private resetSdkConversation(entry: SessionEntry, newId: string): void {
@@ -2181,7 +2256,7 @@ export class SessionManager {
     entry.lastCompressedAt = undefined;
     entry.nativeCompactQueryGen = undefined;
     entry.progressBaseline = undefined;
-    entry.summary = { ...entry.summary, contextUsage: undefined, progress: { tasks: [], agents: [] }, taskPlan: undefined };
+    entry.summary = { ...entry.summary, contextUsage: undefined, contextCompression: undefined, progress: { tasks: [], agents: [] }, taskPlan: undefined };
     entry.resetBoundaryId = "sdk-reset-" + newId;
     const items: ChatItem[] = entry.items.map(item =>
       item.kind === "text" && item.role === "user" ? { ...item, sdkMsgId: undefined, historicalTurn: true } : item);
@@ -2356,14 +2431,10 @@ export class SessionManager {
     }
 
     this.hydrateItems(entry);
-    const settings = this.settings.get();
-    const occupancy = entry.summary.contextUsage;
-    if (occupancy && !wasCompressing && !entry.summary.hiddenFromList && !entry.pendingHandoff && !entry.turnActive &&
-        (occupancy.selectedModelId ?? occupancy.modelId) === (entry.model || settings.defaultModel) &&
-        occupancy.ratio >= (settings.tokenSavings?.autoCompactRatio ?? 0.75)) {
+    if (!wasCompressing && this.shouldAutoCompress(entry)) {
       // The user already requested this turn. A failed optional compaction falls
       // back to the existing SDK lineage. A superseded prompt must never launch.
-      await this.compressSession(sessionId);
+      await this.autoCompress(entry);
       if (entry.promptRevision !== promptRevision) throw new DOMException("Prompt superseded", "AbortError");
       this.throwIfRoomTurnCancelled(entry, roomTurn);
     }
@@ -2901,6 +2972,7 @@ export class SessionManager {
   }
 
   private recordUserPrompt(entry: SessionEntry, prompt: UserPrompt, content: string | UserContentBlock[], persistText?: string): SdkNormalizedEvent {
+    if (entry.summary.contextCompression?.state === "completed") entry.summary = { ...entry.summary, contextCompression: undefined };
     const text = persistText ?? displayPrompt(prompt);
     const next = appendUserItem(this.transcriptOf(entry), text, {
       nextId: entry.nextId, attachments: prompt.attachments, sdkCostAtSubmission: this.costAtTip(entry),
@@ -2964,6 +3036,7 @@ export class SessionManager {
     this.emitSession({ ...entry.summary });
     this.persistSummary(entry);
     this.scheduleIdleClose(entry);
+    if (event.ok && event.outcome !== "interrupted" && event.outcome !== "cancelled") this.scheduleAutoCompression(entry);
   }
 
   private async consumeQuery(

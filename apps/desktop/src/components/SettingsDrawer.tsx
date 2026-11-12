@@ -1195,24 +1195,26 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
           {!target && (
             <label className="settings-field">
               <span>连接方式</span>
-              <select className="select" value={row.type}
-                onChange={e => updateMcpRow(row, { type: e.target.value as McpServerDraft["type"] })}>
-                <option value="stdio">本地命令 · stdio</option>
-                <option value="http">远程服务 · HTTP</option>
-                <option value="sse">远程服务 · SSE</option>
-              </select>
+              <ThemedSelect variant="settings" ariaLabel="连接方式" value={row.type}
+                onChange={value => updateMcpRow(row, { type: value as McpServerDraft["type"] })}
+                options={[
+                  { value: "stdio", label: "本地命令 · stdio" },
+                  { value: "http", label: "远程服务 · HTTP" },
+                  { value: "sse", label: "远程服务 · SSE" },
+                ]} />
             </label>
           )}
           {row.type === "playwright" ? (
             <>
               <label className="settings-field">
                 <span>浏览器模式</span>
-                <select className="select" value={row.connection ?? "extension"}
-                  onChange={(e) => updateMcpRow(row, { connection: e.target.value as PlaywrightConnection })}>
-                  <option value="extension">日常浏览器（复用登录状态）</option>
-                  <option value="isolated">独立窗口</option>
-                  <option value="cdp">连接已有浏览器（CDP）</option>
-                </select>
+                <ThemedSelect variant="settings" ariaLabel="浏览器模式" value={row.connection ?? "extension"}
+                  onChange={value => updateMcpRow(row, { connection: value as PlaywrightConnection })}
+                  options={[
+                    { value: "extension", label: "日常浏览器（复用登录状态）" },
+                    { value: "isolated", label: "独立窗口" },
+                    { value: "cdp", label: "连接已有浏览器（CDP）" },
+                  ]} />
                 <small>{(row.connection ?? "extension") === "extension"
                   ? "连接你日常使用的浏览器，复用登录状态。首次连接时，扩展会请你选择共享的标签页，这是正常步骤。"
                   : row.connection === "cdp" ? "连接已开启远程调试的浏览器，使用其中已有的页面与登录状态。断开控制会保留浏览器。"
@@ -1608,7 +1610,8 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
           <label className="settings-field">
             默认模型
             <ThemedSelect
-              className="settings-model-select"
+              variant="settings"
+              ariaLabel="默认模型"
               value={form.defaultModel}
               title={form.defaultModel}
               options={defaultModelOptions}
@@ -1654,10 +1657,25 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
                     ))
                   )}
                 </div>
+                {modelSuggestions.length > 0 && (
+                  <label className="settings-field">
+                    模型目录
+                    <ThemedSelect
+                      variant="settings"
+                      ariaLabel="模型目录"
+                      value={modelSuggestions.some(model => model.id === modelDraft) ? modelDraft : ""}
+                      onChange={setModelDraft}
+                      options={[
+                        { value: "", label: "从目录选择模型…" },
+                        ...modelSuggestions.map(model => ({ value: model.id, label: modelLabel(model.id), title: model.id })),
+                      ]}
+                    />
+                  </label>
+                )}
                 <div className="settings-model-add-row">
                   <input
                     type="text"
-                    list="settings-model-catalog"
+                    aria-label="模型 ID"
                     value={modelDraft}
                     placeholder="输入模型 ID"
                     spellCheck={false}
@@ -1669,11 +1687,6 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
                       }
                     }}
                   />
-                  <datalist id="settings-model-catalog">
-                    {modelSuggestions.map((model) => (
-                      <option key={model.id} value={model.id} label={modelLabel(model.id)} />
-                    ))}
-                  </datalist>
                   <button
                     type="button"
                     className="btn btn-sm"
@@ -1722,15 +1735,17 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
 
           <label className="settings-field">
             语言 / Language
-            <select
-              className="select"
+            <ThemedSelect
+              variant="settings"
+              ariaLabel="语言 / Language"
               value={form.locale}
-              onChange={(e) => setField("locale", e.target.value)}
-            >
-              <option value="system">跟随系统 / Follow system</option>
-              <option value="zh">中文</option>
-              <option value="en">English</option>
-            </select>
+              onChange={value => setField("locale", value)}
+              options={[
+                { value: "system", label: "跟随系统 / Follow system" },
+                { value: "zh", label: "中文" },
+                { value: "en", label: "English" },
+              ]}
+            />
             <p className="settings-hint">界面语言（保存后生效）</p>
           </label>
           <div className="settings-toggle-row">
@@ -1979,11 +1994,12 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
 
               <label className="settings-field">
                 工具输出预算
-                <select className="select" aria-label="工具输出预算" value={form.outputMode}
-                  onChange={e => setField("outputMode", e.target.value === "standard" ? "standard" : "balanced")}>
-                  <option value="balanced">均衡 · 缩短长输出，可按需读取全文</option>
-                  <option value="standard">标准 · 使用 SDK 默认预算</option>
-                </select>
+                <ThemedSelect variant="settings" ariaLabel="工具输出预算" value={form.outputMode}
+                  onChange={value => setField("outputMode", value === "standard" ? "standard" : "balanced")}
+                  options={[
+                    { value: "balanced", label: "均衡 · 缩短长输出，可按需读取全文" },
+                    { value: "standard", label: "标准 · 使用 SDK 默认预算" },
+                  ]} />
               </label>
               <label className="settings-field">
                 自动压缩阈值（上下文占用 %）
@@ -1992,14 +2008,14 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
               </label>
               <label className="settings-field">
                 摘要模型
-                <select className="select" aria-label="摘要模型" value={form.summaryModel}
-                  onChange={e => setField("summaryModel", e.target.value)}>
-                  <option value="">跟随当前会话</option>
-                  {form.summaryModel && !catalog.some(model => model.id === form.summaryModel) && (
-                    <option value={form.summaryModel}>{form.summaryModel}（目录中暂不可用）</option>
-                  )}
-                  {catalog.map(model => <option key={model.id} value={model.id}>{model.id}</option>)}
-                </select>
+                <ThemedSelect variant="settings" ariaLabel="摘要模型" value={form.summaryModel}
+                  onChange={value => setField("summaryModel", value)}
+                  options={[
+                    { value: "", label: "跟随当前会话" },
+                    ...(form.summaryModel && !catalog.some(model => model.id === form.summaryModel)
+                      ? [{ value: form.summaryModel, label: `${form.summaryModel}（目录中暂不可用）` }] : []),
+                    ...catalog.map(model => ({ value: model.id, label: model.id, title: model.id })),
+                  ]} />
               </label>
               <p className="settings-hint">单聊的旧对话会发给所选模型生成摘要。群聊跟随席位模型。</p>
 

@@ -21,6 +21,7 @@ export type SelectOption = {
  * would lose its frosted blur). Closes on outside click / Escape.
  */
 export function ThemedSelect({
+  id,
   value,
   options,
   onChange,
@@ -33,6 +34,7 @@ export function ThemedSelect({
   align = "left",
   stretchOnOpen = false,
 }: {
+  id?: string;
   value: string;
   options: SelectOption[];
   onChange: (value: string) => void;
@@ -40,7 +42,7 @@ export function ThemedSelect({
   title?: string;
   ariaLabel?: string;
   className?: string;
-  variant?: "default" | "field";
+  variant?: "default" | "field" | "settings";
   menuMaxHeight?: number;
   /** Which edge of the button the menu aligns with. */
   align?: "left" | "right";
@@ -183,9 +185,10 @@ export function ThemedSelect({
   return (
     <div
       ref={rootRef}
-      className={`themed-select${variant === "field" ? " themed-select-field" : ""}${open ? " open" : ""}${className ? ` ${className}` : ""}`}
+      className={`themed-select${variant !== "default" ? ` themed-select-${variant}` : ""}${open ? " open" : ""}${className ? ` ${className}` : ""}`}
     >
       <button
+        id={id}
         type="button"
         className="themed-select-btn"
         disabled={disabled}
@@ -225,11 +228,11 @@ export function ThemedSelect({
         ? createPortal(
             <ul
               ref={menuRef}
-              className={`themed-select-menu${variant === "field" ? " themed-select-field-menu" : ""}${dropUp ? " drop-up" : ""}${open ? "" : " closing"}`}
+              className={`themed-select-menu${variant !== "default" ? ` themed-select-${variant}-menu` : ""}${dropUp ? " drop-up" : ""}${open ? "" : " closing"}`}
               role="listbox"
               aria-label={ariaLabel}
               inert={!open || disabled}
-              style={{ ...menuPos, maxHeight: menuMaxHeight }}
+              style={{ ...menuPos, ...(variant === "settings" ? { width: menuPos.minWidth } : {}), maxHeight: menuMaxHeight }}
               tabIndex={-1}
             >
               {options.map((o, i) => (

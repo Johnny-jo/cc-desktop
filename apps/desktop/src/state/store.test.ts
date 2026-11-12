@@ -3,16 +3,99 @@ import {
   __applySessionEventForTests,
   __resetStoreForTests,
   __upsertSessionForTests,
+  clearComposerDraftRequest,
+  compressActiveSession,
   dequeuePrompt,
   enterCliMode,
   exitCliMode,
   getState,
   loadNewerMessages,
   loadOlderMessages,
+  requestUserMessageDraft,
   selectSession,
   sendMessage,
 } from "./store";
 import { TRANSCRIPT_TURN_WINDOW, type ChatItem } from "@claude-desktop/shared";
+
+describe("user message drafts", () => {
+  const attachment = { name: "notes.md", path: "D:/p/notes.md", size: 32, mimeType: "text/markdown", kind: "text" as const };
+  beforeEach(() => {
+    __resetStoreForTests();
+    Object.assign(getState(), {
+      activeSessionId: "s1",
+      sessions: [{ id: "s1", title: "one", cwd: "D:/p", updatedAt: 1, status: "idle" }],
+      itemsBySession: { s1: [
+        { kind: "text", id: "old-user", role: "user", text: "Original\n\n[Attached: notes.md]", attachments: [attachment] },
+        { kind: "text", id: "answer", role: "assistant", text: "Answer" },
+        { kind: "text", id: "new-user", role: "user", text: "Latest question" },
+      ] },
+    });
+  });
+
+  it("prefills the original text and attachments without changing conversation history", () => {
+    const history = getState().itemsBySession.s1;
+    expect(requestUserMessageDraft("s1", "old-user")).toBe(true);
+    expect(getState().composerDraftRequest).toMatchObject({ sessionId: "s1", text: "Original", attachments: [attachment] });
+    expect(getState().composerDraftRequest?.attachments[0]).not.toBe(attachment);
+    expect(getState().itemsBySession.s1).toBe(history);
+    expect(getState().queuedPrompts).toEqual([]);
+  });
+
+  it("blocks every user message while any turn in that conversation is running", () => {
+    getState().sessions[0].status = "running";
+    expect(requestUserMessageDraft("s1", "old-user")).toBe(false);
+    expect(requestUserMessageDraft("s1", "new-user")).toBe(false);
+    expect(getState().composerDraftRequest).toBeNull();
+    getState().sessions[0].status = "idle";
+    expect(requestUserMessageDraft("s1", "old-user")).toBe(true);
+  });
+
+  it("allows a draft when a different conversation is running", () => {
+    getState().sessions.push({ id: "s2", title: "two", cwd: "D:/p", updatedAt: 2, status: "running" });
+    getState().running = true;
+    expect(requestUserMessageDraft("s1", "old-user")).toBe(true);
+  });
+
+  it("allows manual compression when a different conversation is running", async () => {
+    getState().sessions.push({ id: "s2", title: "two", cwd: "D:/p", updatedAt: 2, status: "running" });
+    getState().running = true;
+    const compressSession = vi.fn(async () => ({ ok: true }));
+    const previousWindow = (globalThis as unknown as { window?: unknown }).window;
+    Object.assign(globalThis, { window: { desktop: { compressSession } } });
+    try {
+      expect(await compressActiveSession()).toEqual({ ok: true });
+      expect(compressSession).toHaveBeenCalledWith("s1", undefined, { autoContinue: false });
+    } finally { Object.assign(globalThis, { window: previousWindow }); }
+  });
+
+  it("blocks manual compression while this conversation is running", async () => {
+    getState().sessions[0].status = "running";
+    expect(await compressActiveSession()).toMatchObject({ ok: false });
+  });
+
+  it("can prefill the leading user message outside a paged history window", () => {
+    getState().leadingUserBySession.s1 = { kind: "text", id: "leading", role: "user", text: "Earlier question" };
+    expect(requestUserMessageDraft("s1", "leading")).toBe(true);
+    expect(getState().composerDraftRequest?.text).toBe("Earlier question");
+  });
+
+  it("rejects non-user messages and stale requests from another conversation", () => {
+    expect(requestUserMessageDraft("s1", "answer")).toBe(false);
+    getState().activeSessionId = "s2";
+    expect(requestUserMessageDraft("s1", "old-user")).toBe(false);
+    expect(getState().composerDraftRequest).toBeNull();
+  });
+
+  it("does not let an older consumer clear a newer draft", () => {
+    requestUserMessageDraft("s1", "old-user");
+    const oldNonce = getState().composerDraftRequest!.nonce;
+    requestUserMessageDraft("s1", "new-user");
+    clearComposerDraftRequest(oldNonce);
+    expect(getState().composerDraftRequest?.text).toBe("Latest question");
+    clearComposerDraftRequest(getState().composerDraftRequest!.nonce);
+    expect(getState().composerDraftRequest).toBeNull();
+  });
+});
 
 function runningSession(id: string) {
   __upsertSessionForTests({

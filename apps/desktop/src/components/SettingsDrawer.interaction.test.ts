@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { zh } from "../i18n/zh";
 import { SettingsDrawer } from "./SettingsDrawer";
+import { ThemedSelect } from "./Select";
 import { ControlSettings } from "./settings/ControlSettings";
 import { IPC, type McpServersMap } from "@claude-desktop/shared";
 
@@ -100,9 +101,9 @@ describe("live settings model refresh", () => {
     await vi.waitFor(() => expect(actions.catalog).toHaveBeenCalled());
     clickButton(render(), /^<span[^>]*>模型与上下文</);
     function choose(label: string, value: string) {
-      const select = elements(render()).find(n => n.type === "select" && n.props["aria-label"] === label);
+      const select = elements(render()).find(n => n.type === ThemedSelect && n.props.ariaLabel === label);
       expect(select).toBeDefined();
-      (select!.props.onChange as (e: unknown) => void)({ target: { value } });
+      (select!.props.onChange as (value: string) => void)(value);
     }
     choose("工具输出预算", "standard");
     choose("摘要模型", "old/model");

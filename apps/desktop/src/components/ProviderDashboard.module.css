@@ -30,7 +30,7 @@
 }
 .refreshBtn:hover:not(:disabled), .error button:hover:not(:disabled) { background: var(--bg-hover); border-color: var(--border-strong); }
 .refreshBtn:disabled, .error button:disabled { opacity: 0.5; cursor: not-allowed; }
-.section button:focus-visible, .section select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.section button:focus-visible:not(:global(.themed-select-btn)) { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .filters { flex-wrap: wrap; }
 .ranges { display: inline-flex; padding: 3px; gap: 3px; border: 1px solid var(--border-soft); border-radius: 9px; background: var(--bg-app); }
@@ -38,7 +38,7 @@
 .ranges button:hover { color: var(--text); background: var(--bg-hover); }
 .ranges button[aria-pressed="true"] { border-color: var(--border); color: var(--text); background: var(--bg-panel); box-shadow: 0 1px 3px rgb(0 0 0 / 6%); }
 .providerFilter { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--text-faint); font-size: 0.8125rem; }
-.providerFilter select { min-width: 120px; max-width: 240px; padding: 7px 28px 7px 9px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg-panel); color: var(--text); font: inherit; text-overflow: ellipsis; }
+.providerFilter .providerSelect { width: 200px; min-width: 120px; max-width: 240px; }
 .scope { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 2px 0 0; color: var(--text); font-size: 0.846rem; font-weight: 600; overflow-wrap: anywhere; }
 .scope span { color: var(--text-faint); font-size: 0.769rem; font-weight: 400; }
 
@@ -105,7 +105,7 @@
 @media (max-width: 700px) {
   .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .providerFilter { flex: 1 1 auto; }
-  .providerFilter select { flex: 1; max-width: 100%; }
+  .providerFilter .providerSelect { flex: 1; max-width: 100%; }
   .chartCard, .providerCard { padding-inline: 10px; }
   .providerTable tbody th { max-width: 170px; }
 }

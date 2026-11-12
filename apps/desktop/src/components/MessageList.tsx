@@ -39,6 +39,8 @@ import "./ChatProgressLayout.css";
 import { toProjectRel } from "../lib/project-path";
 import { getDesktop } from "../lib/desktop-api";
 import { useModelDisplay } from "../hooks/useModelDisplay";
+import { UserMessageActions } from "./UserMessageActions";
+import { userMessageText } from "../lib/user-message";
 
 /** Long skill / system dumps that slipped through as plain text. */
 function looksLikeSkillDump(text: string): boolean {
@@ -85,6 +87,7 @@ function CollapsedTextCard({ text }: { text: string }) {
 
 /** Rewind affordance on user bubbles that carry an SDK checkpoint id. */
 function RewindButton({ sdkMsgId }: { sdkMsgId: string }) {
+  const { t } = useI18n();
   const activeSessionId = useAppStore((s) => s.activeSessionId);
   const running = useAppStore((s) =>
     s.activeSessionId
@@ -94,7 +97,7 @@ function RewindButton({ sdkMsgId }: { sdkMsgId: string }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  if (!activeSessionId) return null;
+  if (!activeSessionId || running) return null;
 
   const onClick = async () => {
     if (
@@ -120,12 +123,13 @@ function RewindButton({ sdkMsgId }: { sdkMsgId: string }) {
     <>
       <button
         type="button"
-        className="rewind-btn"
-        disabled={busy || running}
-        title="Rewind files + conversation to this message"
+        className="user-message-action"
+        disabled={busy}
+        title={t.chat.rewindMessage}
+        aria-label={t.chat.rewindMessage}
         onClick={() => void onClick()}
       >
-        {busy ? "…" : "↩ rewind"}
+        {busy ? "…" : <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 4v5h5M5 9a6 6 0 1 1-.5 5" /></svg>}
       </button>
       {error ? (
         <span className="rewind-error" title={error}>
@@ -135,10 +139,6 @@ function RewindButton({ sdkMsgId }: { sdkMsgId: string }) {
     </>
   );
 }
-
-/** Trailing "[Attached: a, b]" marker embedded in display text by sendMessage;
- * stripped when we render rich chips instead. */
-const ATTACHED_TAIL = /\n\n\[Attached: [^\]]*\]\s*$/;
 
 function TurnChangesCard({
   files,
@@ -414,12 +414,14 @@ const MessageRow = memo(function MessageRow({
   onOpenFile,
   projectPath,
   editorPath,
+  running,
 }: {
   item: ChatItem;
   sessionId: string | null;
   onOpenFile?: (rel: string, line?: number) => void;
   projectPath: string | null;
   editorPath: string | null;
+  running: boolean;
 }) {
   if (item.kind === "tool") {
     return null;
@@ -456,15 +458,17 @@ const MessageRow = memo(function MessageRow({
       data-item-id={item.id}
     >
       {role === "user" ? (
-        <div className="bubble bubble-user" title={item.text}>
-          {item.attachments?.length
-            ? item.text.replace(ATTACHED_TAIL, "")
-            : item.text}
-          {item.streaming ? <span className="cursor">▍</span> : null}
-          {item.sdkMsgId ? <RewindButton sdkMsgId={item.sdkMsgId} /> : null}
-          {item.attachments?.length ? (
-            <AttachmentChips attachments={item.attachments} onOpenFile={onOpenFile} />
-          ) : null}
+        <div className="user-message">
+          <div className="bubble bubble-user" title={userMessageText(item)}>
+            {userMessageText(item)}
+            {item.streaming ? <span className="cursor">▍</span> : null}
+            {item.attachments?.length ? (
+              <AttachmentChips attachments={item.attachments} onOpenFile={onOpenFile} />
+            ) : null}
+          </div>
+          <UserMessageActions item={item} sessionId={sessionId} running={running}>
+            {item.sdkMsgId ? <RewindButton sdkMsgId={item.sdkMsgId} /> : null}
+          </UserMessageActions>
         </div>
       ) : role === "system" ? (
         <div className="bubble bubble-system">{item.text}</div>
@@ -960,6 +964,7 @@ export function MessageList({
                   onOpenFile={onOpenFile}
                   projectPath={projectPath}
                   editorPath={editorPath}
+                  running={Boolean(running)}
                 />
               )}
               {userItem ? (

@@ -28,6 +28,7 @@ import {
 } from "@claude-desktop/shared";
 import { getDesktop } from "../lib/desktop-api";
 import { isActiveRoomSeatSession } from "./room-changes-bridge";
+import { userMessageText } from "../lib/user-message";
 
 export type AppState = {
   projectPath: string | null;
@@ -77,6 +78,12 @@ export type AppState = {
    * 变更栏回退到这个 sessionId（无 activeSession 时生效）。
    */
   changesSessionOverride: string | null;
+  composerDraftRequest: {
+    sessionId: string;
+    text: string;
+    attachments: Attachment[];
+    nonce: number;
+  } | null;
 };
 
 type Listener = () => void;
@@ -106,6 +113,7 @@ let state: AppState = {
   revealChangeRequest: null,
   fsChangeTick: 0,
   changesSessionOverride: null,
+  composerDraftRequest: null,
 };
 
 const listeners = new Set<Listener>();
@@ -1235,7 +1243,7 @@ export async function rewindToMessage(
 export async function compressActiveSession(): Promise<{ ok: boolean; message?: string }> {
   const id = state.activeSessionId;
   if (!id) return { ok: false, message: "No active session" };
-  if (state.running) {
+  if (state.sessions.some(session => session.id === id && session.status === "running")) {
     return { ok: false, message: "Wait for the current turn to finish before /compact" };
   }
   const desktop = getDesktop();
@@ -1345,6 +1353,27 @@ export function clearUserPromptRequest(): void {
 }
 
 let revealNonce = 0;
+let composerDraftNonce = 0;
+
+/** Prefill a new prompt without changing the original message or its history. */
+export function requestUserMessageDraft(sessionId: string, itemId: string): boolean {
+  if (state.activeSessionId !== sessionId ||
+      state.sessions.some(session => session.id === sessionId && session.status === "running")) return false;
+  const item = (state.itemsBySession[sessionId] ?? []).find(row => row.id === itemId) ??
+    (state.leadingUserBySession[sessionId]?.id === itemId ? state.leadingUserBySession[sessionId] : undefined);
+  if (item?.kind !== "text" || item.role !== "user") return false;
+  composerDraftNonce += 1;
+  setState({ composerDraftRequest: {
+    sessionId, text: userMessageText(item),
+    attachments: (item.attachments ?? []).map(attachment => ({ ...attachment })),
+    nonce: composerDraftNonce,
+  } });
+  return true;
+}
+
+export function clearComposerDraftRequest(nonce: number): void {
+  if (state.composerDraftRequest?.nonce === nonce) setState({ composerDraftRequest: null });
+}
 
 /** Chat tool card → changes panel: reveal the matching change record. */
 export function requestRevealChange(req: {
@@ -1387,6 +1416,7 @@ export function __resetStoreForTests(): void {
     revealChangeRequest: null,
     fsChangeTick: 0,
     changesSessionOverride: null,
+    composerDraftRequest: null,
   };
   sessionCacheLru = [];
   bootstrapped = false;

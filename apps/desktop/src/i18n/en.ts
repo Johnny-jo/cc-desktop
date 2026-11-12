@@ -10,6 +10,7 @@ export const en = {
     error: "Error",
     copy: "Copy",
     copied: "Copied",
+    copyFailed: "Could not copy. Please try again.",
   },
   prompts: {
     editFile: "Request to edit file",
@@ -89,6 +90,13 @@ export const en = {
     chats: "Chats",
   },
   chat: {
+    editMessage: "Edit message",
+    rewindMessage: "Rewind files and conversation",
+    contextCompressing: "Compressing conversation history… You can send a new message to interrupt it.",
+    contextCompressed: "Conversation history compressed. Your next message will use the summary.",
+    contextCompressionFailed: "Conversation history was not compressed. The original history is intact.",
+    contextCompressionRetry: "Retry compression",
+    contextCompressionBatch: "Processing summary batch {batch}",
     composerPlaceholder: "Message…  (type / for commands, drop files)",
     composerPlaceholderNew: "Start a new session…  (type / for commands, drop files)",
     pickProject: "Pick folder",

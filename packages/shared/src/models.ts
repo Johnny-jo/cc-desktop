@@ -258,6 +258,8 @@ export type ChatItem =
       id: string;
       role: ChatRole;
       text: string;
+      /** Original submission time in milliseconds since the Unix epoch. */
+      at?: number;
       streaming?: boolean;
       /** Persisted on the user message that owns this turn. */
       turnOutcome?: TurnOutcome;
@@ -326,6 +328,12 @@ export type SessionSummary = {
   usage?: SessionUsage;
   /** Latest context-window occupancy (not billing totals) */
   contextUsage?: ContextUsage;
+  contextCompression?: {
+    state: "running" | "completed" | "failed";
+    updatedAt: number;
+    batch?: number;
+    message?: string;
+  };
   /** Structured progress for the complete retained session, independent of paging. */
   progress?: SessionProgress;
   taskPlan?: TaskPlan;
@@ -380,7 +388,7 @@ export type AppSettings = {
     mode: "balanced" | "standard";
     /** Omit to use the model selected for the current conversation. */
     summaryModel?: string;
-    /** Start an idle compaction before the next turn; default 0.75. */
+    /** Compact after a completed turn or before the next turn; default 0.75. */
     autoCompactRatio?: number;
   };
   /** Per-model id overrides for context window */

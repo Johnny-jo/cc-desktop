@@ -38,7 +38,7 @@ describe("applySdkEvent", () => {
       text: "hi",
     });
     expect(next.items).toEqual([
-      { kind: "text", id: "user-fixed-1", role: "user", text: "hi" },
+      { kind: "text", id: "user-fixed-1", role: "user", text: "hi", at: expect.any(Number) },
     ]);
   });
 

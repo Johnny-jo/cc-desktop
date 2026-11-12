@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import type { ClaudeApiKeyAuth, ProviderConfig, ProviderStatus, ProviderType } from "@claude-desktop/shared";
 import { IPC, supportsOAuth, ProviderEndpoints, normalizeProviderBaseUrl } from "@claude-desktop/shared";
 import styles from "./ProviderSettings.module.css";
+import { ThemedSelect } from "./Select";
 
 function formatTokens(n?: number): string {
   if (!n || !Number.isFinite(n)) return "未知";
@@ -246,19 +247,23 @@ function AddProviderModal({ isOpen, onClose, onSubmit }: AddProviderModalProps) 
           <fieldset disabled={loading} className={styles.formFields}>
           <div className={styles.formGroup}>
             <label htmlFor="provider-type">Provider 类型</label>
-            <select
+            <ThemedSelect
               id="provider-type"
+              variant="settings"
+              ariaLabel="Provider 类型"
+              disabled={loading}
               value={providerType}
-              onChange={(e) => handleProviderTypeChange(e.target.value as ProviderType)}
-            >
-              <option value="claude">Claude (Anthropic)</option>
-              <option value="openai">OpenAI</option>
-              <option value="deepseek">DeepSeek</option>
-              <option value="kimi">Kimi (Moonshot)</option>
-              <option value="xai">xAI (Grok)</option>
-              <option value="gemini">Gemini (Google)</option>
-              <option value="openai-compatible">OpenAI 兼容</option>
-            </select>
+              onChange={value => handleProviderTypeChange(value as ProviderType)}
+              options={[
+                { value: "claude", label: "Claude (Anthropic)" },
+                { value: "openai", label: "OpenAI" },
+                { value: "deepseek", label: "DeepSeek" },
+                { value: "kimi", label: "Kimi (Moonshot)" },
+                { value: "xai", label: "xAI (Grok)" },
+                { value: "gemini", label: "Gemini (Google)" },
+                { value: "openai-compatible", label: "OpenAI 兼容" },
+              ]}
+            />
           </div>
 
           <div className={styles.formGroup}>
@@ -275,14 +280,18 @@ function AddProviderModal({ isOpen, onClose, onSubmit }: AddProviderModalProps) 
           {providerType !== "openai-compatible" && oauthAvailable && (
             <div className={styles.formGroup}>
               <label htmlFor="provider-auth">认证方式</label>
-              <select
+              <ThemedSelect
                 id="provider-auth"
+                variant="settings"
+                ariaLabel="认证方式"
+                disabled={loading}
                 value={authMethod}
-                onChange={(e) => setAuthMethod(e.target.value as "api-key" | "oauth2")}
-              >
-                <option value="api-key">API Key</option>
-                <option value="oauth2">OAuth 2.0</option>
-              </select>
+                onChange={value => setAuthMethod(value as "api-key" | "oauth2")}
+                options={[
+                  { value: "api-key", label: "API Key" },
+                  { value: "oauth2", label: "OAuth 2.0" },
+                ]}
+              />
             </div>
           )}
 
@@ -303,11 +312,13 @@ function AddProviderModal({ isOpen, onClose, onSubmit }: AddProviderModalProps) 
           {providerType === "claude" && authMethod === "api-key" && (
             <div className={styles.formGroup}>
               <label htmlFor="provider-key-auth">服务鉴权</label>
-              <select id="provider-key-auth" value={apiKeyAuth} onChange={e => setApiKeyAuth(e.target.value as ClaudeApiKeyAuth)}>
-                <option value="auto">自动（官方 API Key，中转服务 Bearer）</option>
-                <option value="x-api-key">API Key（x-api-key）</option>
-                <option value="bearer">Bearer / Auth Token</option>
-              </select>
+              <ThemedSelect id="provider-key-auth" variant="settings" ariaLabel="服务鉴权"
+                disabled={loading} value={apiKeyAuth} onChange={value => setApiKeyAuth(value as ClaudeApiKeyAuth)}
+                options={[
+                  { value: "auto", label: "自动（官方 API Key，中转服务 Bearer）" },
+                  { value: "x-api-key", label: "API Key（x-api-key）" },
+                  { value: "bearer", label: "Bearer / Auth Token" },
+                ]} />
               <p className={styles.hint}>中转服务生成的 API Key 通常选择自动；如服务商指定鉴权方式，可在此切换。调用仍使用 Claude Messages 协议。</p>
             </div>
           )}

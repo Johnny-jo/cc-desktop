@@ -2,6 +2,7 @@ import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IPC } from "@claude-desktop/shared";
 import { ProviderDashboard } from "./ProviderDashboard";
+import { ThemedSelect } from "./Select";
 
 type EffectSlot = { deps?: unknown[]; cleanup?: () => void };
 const hooks = vi.hoisted(() => ({
@@ -34,13 +35,13 @@ vi.mock("react", async original => ({
 
 function elements(tree: React.ReactNode): React.ReactElement<Record<string, unknown>>[] {
   return React.Children.toArray(tree).flatMap(child => React.isValidElement<Record<string, unknown>>(child)
-    ? [child, ...elements(typeof child.type === "function"
+    ? [child, ...elements(typeof child.type === "function" && child.type !== ThemedSelect
       ? (child.type as (props: unknown) => React.ReactNode)(child.props)
       : child.props.children as React.ReactNode)] : []);
 }
 function text(tree: React.ReactNode): string {
   return React.Children.toArray(tree).map(child => React.isValidElement<Record<string, unknown>>(child)
-    ? text(typeof child.type === "function" ? (child.type as (props: unknown) => React.ReactNode)(child.props) : child.props.children as React.ReactNode)
+    ? text(typeof child.type === "function" && child.type !== ThemedSelect ? (child.type as (props: unknown) => React.ReactNode)(child.props) : child.props.children as React.ReactNode)
     : String(child)).join(" ");
 }
 function render() {
@@ -148,14 +149,15 @@ describe("Provider usage dashboard", () => {
     expect(desktop.getProviderUsage).toHaveBeenLastCalledWith("7d", undefined);
     click(render(), "一个月"); render(); await settle();
     expect(desktop.getProviderUsage).toHaveBeenLastCalledWith("30d", undefined);
-    const select = elements(render()).find(n => n.type === "select")!;
-    expect(text(select)).toContain("全部 Provider");
-    expect(text(select)).toContain("Personal Claude");
-    expect(text(select)).not.toContain("long-provider-account-identifier");
-    (select.props.onChange as (event: unknown) => void)({ target: { value: "claude-long-provider-account-identifier" } });
+    const select = elements(render()).find(n => n.type === ThemedSelect)!;
+    const labels = (select.props.options as Array<{ label: string }>).map(option => option.label).join(" ");
+    expect(labels).toContain("全部 Provider");
+    expect(labels).toContain("Personal Claude");
+    expect(labels).not.toContain("long-provider-account-identifier");
+    (select.props.onChange as (value: string) => void)("claude-long-provider-account-identifier");
     render(); await settle();
     expect(desktop.getProviderUsage).toHaveBeenLastCalledWith("30d", "claude-long-provider-account-identifier");
-    expect(elements(render()).find(n => n.type === "select")?.props.value).toBe("claude-long-provider-account-identifier");
+    expect(elements(render()).find(n => n.type === ThemedSelect)?.props.value).toBe("claude-long-provider-account-identifier");
   });
 
   it("leaves success-rate gaps for buckets without completed requests and offers keyboard-readable details", async () => {

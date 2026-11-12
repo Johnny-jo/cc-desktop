@@ -13,6 +13,7 @@ import {
   formatTokens,
 } from "../lib/format-usage";
 import { getDesktop, hasDesktopApi } from "../lib/desktop-api";
+import { ContextCompressionNotice } from "./ContextCompressionNotice";
 
 const EMPTY_ITEMS: ChatItem[] = [];
 
@@ -56,6 +57,7 @@ export function ChatPanel({ onOpenSettings, onOpenFile }: ChatPanelProps) {
     Boolean(activeSessionId) &&
     Boolean(ctx) &&
     ctx!.ratio >= 0.8 &&
+    active?.contextCompression?.state !== "running" &&
     !bannerDismissed[activeSessionId!];
 
   const quotaRequestId = useRef(0);
@@ -126,6 +128,7 @@ export function ChatPanel({ onOpenSettings, onOpenFile }: ChatPanelProps) {
       {!activeSessionId && settings?.photoFlowEnabled !== false ? <PhotoFlow english={t.common.ok === "OK"} /> : null}
       <div className="chat-body">
         <div className="chat-inner">
+          {activeSessionId && <ContextCompressionNotice key={activeSessionId} sessionId={activeSessionId} status={active?.contextCompression} running={activeRunning} />}
           {showBanner && ctx ? (
             <div
               className={`context-banner context-banner-${level}`}

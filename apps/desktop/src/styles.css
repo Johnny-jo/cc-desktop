@@ -3493,6 +3493,21 @@ body.session-detaching {
   line-height: 1.4;
 }
 
+.context-compression-notice {
+  flex: 0 0 auto;
+  margin-block: 8px;
+}
+
+.context-compression-notice .context-banner-text { flex: 1; }
+.context-compression-notice button { flex: 0 0 auto; }
+.context-compression-reason {
+  display: block;
+  margin-top: 3px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+  font-size: 0.846rem;
+}
+
 .chat-body {
   flex: 1 1 0;
   overflow: hidden;
@@ -4536,42 +4551,107 @@ button.activity-step-main:not(:disabled):hover .activity-step-name {
   position: relative;
 }
 
-/* Rewind affordance on checkpointed user messages */
-.rewind-btn {
-  display: inline-block;
-  margin-left: 8px;
-  padding: 1px 8px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: transparent;
+.user-message {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  max-width: min(560px, 72%);
+  min-width: 0;
+}
+
+.user-message > .bubble-user {
+  max-width: 100%;
+}
+
+.user-message-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-height: 32px;
+  max-width: 100%;
+  padding: 4px 4px 0;
   color: var(--text-faint);
-  font-size: 0.808rem;
-  cursor: pointer;
   opacity: 0;
-  transition: opacity 0.12s ease;
+  pointer-events: none;
+  transition: opacity 120ms ease;
 }
 
-.bubble-user:hover .rewind-btn,
-.rewind-btn:focus-visible {
+.user-message:hover .user-message-actions,
+.user-message:focus-within .user-message-actions {
   opacity: 1;
+  pointer-events: auto;
 }
 
-.rewind-btn:hover {
-  color: var(--warn);
-  border-color: var(--warn);
+.user-message-time {
+  margin-right: 4px;
+  font-size: 0.846rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
-.rewind-btn:disabled {
+.user-message-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  padding: 5px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.user-message-action svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.user-message-action:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.user-message-action:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.user-message-action.copied {
+  color: var(--ok);
+}
+
+.user-message-action:disabled {
   cursor: default;
   color: var(--text-faint);
-  border-color: var(--border);
 }
 
-.rewind-error {
+.rewind-error,
+.user-message-copy-error {
   display: block;
-  margin-top: 4px;
   color: var(--danger);
   font-size: 0.846rem;
+  overflow-wrap: anywhere;
+}
+
+@media (hover: none) {
+  .user-message-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .user-message-actions { transition: none; }
 }
 
 /* Queued prompts (type-ahead while a turn runs) */
@@ -9021,11 +9101,11 @@ button.activity-step-main:not(:disabled):hover .activity-step-name {
   min-width: 58px;
 }
 
-.settings-model-select {
+.themed-select-settings {
   width: 100%;
 }
 
-.settings-model-select .themed-select-btn {
+.themed-select-settings .themed-select-btn {
   width: 100%;
   min-height: 38px;
   justify-content: space-between;
@@ -9035,13 +9115,22 @@ button.activity-step-main:not(:disabled):hover .activity-step-name {
   background: var(--bg-input);
 }
 
-.settings-model-select .themed-select-btn:hover:not(:disabled) {
+.themed-select-settings .themed-select-btn:hover:not(:disabled) {
   border-color: var(--border-strong);
 }
 
-.settings-model-select .themed-select-btn:focus-visible {
+.themed-select-settings .themed-select-btn:focus-visible {
   border-color: var(--accent);
   box-shadow: var(--focus-ring);
+}
+
+.themed-select-settings .themed-select-value {
+  flex: 1;
+  text-align: left;
+}
+
+.themed-select-settings-menu {
+  max-width: calc(100vw - 16px);
 }
 
 .room-settings-modal {

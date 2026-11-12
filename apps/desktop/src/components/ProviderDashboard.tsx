@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { IPC, type ProviderUsageDashboard, type ProviderUsageRange } from "@claude-desktop/shared";
 import styles from "./ProviderDashboard.module.css";
+import { ThemedSelect } from "./Select";
 
 const RANGES: Array<{ value: ProviderUsageRange; label: string }> = [
   { value: "24h", label: "24 小时" }, { value: "7d", label: "7 天" }, { value: "30d", label: "一个月" },
@@ -176,11 +177,13 @@ export function ProviderDashboard() {
         </div>
         <label className={styles.providerFilter}>
           <span>Provider</span>
-          <select aria-label="筛选 Provider" value={providerId} onChange={event => setProviderId(event.target.value)}>
-            <option value="">全部 Provider</option>
-            {providers.map(provider => <option key={provider.providerId} value={provider.providerId}>{provider.providerName}</option>)}
-            {providerId && !selectedProvider && <option value={providerId}>所选 Provider</option>}
-          </select>
+          <ThemedSelect variant="settings" className={styles.providerSelect} ariaLabel="筛选 Provider"
+            value={providerId} onChange={setProviderId}
+            options={[
+              { value: "", label: "全部 Provider" },
+              ...providers.map(provider => ({ value: provider.providerId, label: provider.providerName })),
+              ...(providerId && !selectedProvider ? [{ value: providerId, label: "所选 Provider" }] : []),
+            ]} />
         </label>
       </div>
 

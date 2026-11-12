@@ -1,6 +1,7 @@
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ProviderSettings } from "./ProviderSettings";
+import { ThemedSelect } from "./Select";
 import { IPC, type ProviderConfig, type ProviderStatus } from "@claude-desktop/shared";
 
 const hooks = vi.hoisted(() => ({ cursor: 0, slots: [] as unknown[], effects: [] as Array<() => void | (() => void)> }));
@@ -33,7 +34,8 @@ function field(tree: React.ReactNode, id: string) {
   return element;
 }
 function change(tree: React.ReactNode, id: string, value: string) {
-  (field(tree, id).props.onChange as (e: unknown) => void)({ target: { value } });
+  const element = field(tree, id);
+  (element.props.onChange as (value: unknown) => void)(element.type === ThemedSelect ? value : { target: { value } });
 }
 async function submit(tree: React.ReactNode) {
   await (elements(tree).find(n => n.type === "form")!.props.onSubmit as (e: unknown) => Promise<void>)({ preventDefault() {} });

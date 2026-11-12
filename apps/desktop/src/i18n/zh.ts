@@ -12,6 +12,7 @@ export const zh: Messages = {
     error: "错误",
     copy: "复制",
     copied: "已复制",
+    copyFailed: "复制失败，请重试。",
   },
   prompts: {
     editFile: "申请编辑文件",
@@ -91,6 +92,13 @@ export const zh: Messages = {
     chats: "聊天",
   },
   chat: {
+    editMessage: "编辑消息",
+    rewindMessage: "回退文件和对话",
+    contextCompressing: "正在压缩对话历史… 发送新消息可中断压缩。",
+    contextCompressed: "对话历史已压缩，下一条消息将使用摘要继续。",
+    contextCompressionFailed: "对话历史未能压缩，原始记录已保留。",
+    contextCompressionRetry: "重试压缩",
+    contextCompressionBatch: "正在处理第 {batch} 批摘要",
     composerPlaceholder: "发消息…  （/ 命令，可拖文件）",
     composerPlaceholderNew: "开始新会话…  （/ 命令，可拖文件）",
     pickProject: "选择文件夹",

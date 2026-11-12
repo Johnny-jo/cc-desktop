@@ -371,8 +371,7 @@
   font-weight: 500;
 }
 
-.formGroup input,
-.formGroup select {
+.formGroup input {
   width: 100%;
   padding: 7px 10px;
   border: 1px solid var(--border);
@@ -383,8 +382,7 @@
   font-family: inherit;
 }
 
-.formGroup input:focus,
-.formGroup select:focus {
+.formGroup input:focus {
   outline: none;
   border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
   box-shadow: var(--focus-ring);

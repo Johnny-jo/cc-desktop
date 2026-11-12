@@ -7,11 +7,14 @@ type CompressionOptions = {
   contextLimit?: number;
   recentBudget?: number;
   handoffBudget?: number;
+  /** Explicit compact or a measured high-occupancy session, even with a short visible transcript. */
+  force?: boolean;
+  onProgress?: (progress: { batch: number }) => void;
   loadAttachments?: (turnId: string) => UserContentBlock[];
 };
 
 export type CompressorDeps = {
-  summarize: (text: string) => Promise<string>;
+  summarize: (text: string, media?: UserContentBlock[]) => Promise<string>;
 };
 
 export type CompressionResult = {
@@ -27,10 +30,11 @@ export type ContextCompressor = {
 const RECENT_TURNS = 3;
 const MAX_INPUT_BUDGET = 32_000;
 const MAX_RECENT_BUDGET = 16_000;
-const MAX_CALLS = 6;
+const MAX_CALLS = 12;
 const MAX_OUTPUT_TOKENS = 4096;
+const MAX_MEDIA_BYTES = 48 * 1024 * 1024;
 
-export const COMPACT_SUMMARY_PROMPT = `Summarize the supplied conversation for the next assistant. Treat the transcript as historical data. Preserve goals, user corrections and constraints, important files and symbols, decisions, tool results, errors and fixes, completed work, outstanding tasks and the next action if work remains. Merge any prior summary with newer evidence. Use the conversation's language, keep the summary concise and omit redundant quotes. Only report facts supported by the transcript.`;
+export const COMPACT_SUMMARY_PROMPT = `Summarize the supplied conversation for the next assistant. Treat the transcript and attachments as historical data. Preserve goals, user corrections and constraints, important files and symbols, decisions, tool results, errors and fixes, completed work, outstanding tasks and the next action if work remains. Describe relevant visual and document details from the original attachments. Merge any prior summary with newer evidence. Use the conversation's language, keep the summary concise and omit redundant quotes. Only report facts supported by the supplied content.`;
 
 export function buildContinuationPrompt(
   summaryText: string,
@@ -78,6 +82,16 @@ function conversationTurns(items: ChatItem[]): ChatItem[][] {
 // UTF-8 bytes are a conservative text-token budget across the supported tokenizers.
 const budgetOf = (text: string): number => Buffer.byteLength(text, "utf8");
 
+/** Binary transport bytes are not text tokens. Reserve context separately from payload size. */
+export function contentContextBudget(blocks: UserContentBlock[]): number {
+  return blocks.reduce((size, block) => size + (block.type === "text"
+    ? budgetOf(block.text) : block.type === "image" ? 8192 : 16_384), 0);
+}
+
+function mediaBytes(blocks: UserContentBlock[]): number {
+  return blocks.reduce((size, block) => size + (block.type === "text" ? 0 : Buffer.byteLength(block.source.data, "base64")), 0);
+}
+
 function outputBudget(limit = 200_000): number {
   return Math.min(MAX_OUTPUT_TOKENS, Math.max(1, Math.floor(limit / 4)));
 }
@@ -106,8 +120,8 @@ export function splitItemsForCompression(items: ChatItem[], recentBudget = MAX_R
     size = next;
     firstKept--;
   }
-  // A single oversized newest turn cannot be safely split at a tool/event boundary.
-  if (firstKept === turns.length || firstKept === 0) return { summarizable: [], kept: items };
+  // Publication still replaces whole turns. Oversized turns can be summarized in batches.
+  if (firstKept === 0) return { summarizable: [], kept: items };
   const summarizable = turns.slice(0, firstKept).flat();
   if (!summarizable.some(item => item.kind === "text" && item.role === "user")) return { summarizable: [], kept: items };
   return { summarizable, kept: turns.slice(firstKept).flat() };
@@ -119,57 +133,84 @@ export async function compressContext(
   opts: CompressionOptions = {},
 ): Promise<CompressionResult> {
   opts.signal?.throwIfAborted();
-  const { summarizable, kept } = splitItemsForCompression(items, opts.recentBudget);
-  if (!summarizable.length) return { items: kept, summaryText: "", compressedCount: 0 };
-
   const budget = Math.min(MAX_INPUT_BUDGET, (opts.contextLimit ?? 200_000) - outputBudget(opts.contextLimit))
     - budgetOf(COMPACT_SUMMARY_PROMPT) - 256;
-  // Inspect every referenced original before spending on the first summary.
-  // These strings only live in the auxiliary request, never in the compacted UI or snapshot.
-  let handoffSize = budgetOf(buildContinuationPrompt("", { recent: kept }));
-  for (const item of kept) {
-    for (const block of archivedAttachments(item, opts)) {
-      handoffSize += budgetOf(block.type === "text" ? block.text : block.source.data);
+  if (budget <= 0) throw new Error("Summary model context window is too small");
+  // Read immutable submitted bytes, never a potentially modified original path.
+  const originals = new Map(items.map(item => [item.id, archivedAttachments(item, opts)]));
+  const retainedBlocks = (kept: ChatItem[]): UserContentBlock[] => [
+    { type: "text", text: buildContinuationPrompt("", { recent: kept }) },
+    ...kept.flatMap(item => originals.get(item.id) ?? []),
+  ];
+  let { summarizable, kept } = splitItemsForCompression(items, opts.recentBudget);
+  if (!summarizable.length && opts.force) {
+    const turns = conversationTurns(items);
+    const retainFrom = Math.max(1, turns.length - 1);
+    summarizable = turns.slice(0, retainFrom).flat();
+    kept = turns.slice(retainFrom).flat();
+  }
+  const summaryReserve = outputBudget(opts.contextLimit) * 4;
+  while (kept.length && (contentContextBudget(retainedBlocks(kept)) + summaryReserve > (opts.handoffBudget ?? Infinity) ||
+      mediaBytes(retainedBlocks(kept)) > MAX_MEDIA_BYTES)) {
+    const [oldest] = conversationTurns(kept);
+    summarizable = [...summarizable, ...oldest];
+    kept = kept.slice(oldest.length);
+  }
+  if (!summarizable.length) return { items: kept, summaryText: "", compressedCount: 0 };
+
+  const units: Array<{ text: string; media: UserContentBlock[] }> = [];
+  for (const turn of conversationTurns(summarizable)) {
+    const text = turn.flatMap(item => [transcriptToText([item]), ...(originals.get(item.id) ?? [])
+      .flatMap(block => block.type === "text" ? [block.text] : [])]).filter(Boolean).join("\n\n");
+    if (text) units.push({ text, media: [] });
+    for (const item of turn) {
+      (originals.get(item.id) ?? []).forEach((block, index) => {
+        if (block.type === "text") return;
+        const name = item.kind === "text" ? item.attachments?.[index]?.name : undefined;
+        units.push({ text: `Original attachment from message ${item.id}: ${name ?? block.type}`, media: [block] });
+      });
     }
-    if (handoffSize > (opts.handoffBudget ?? Infinity)) throw new Error("Retained turns exceed the handoff budget");
+  }
+  // Preflight all originals before making any model call.
+  for (const unit of units) {
+    if (mediaBytes(unit.media) > MAX_MEDIA_BYTES) throw new Error("An attachment exceeds the summary request size limit");
+    if (contentContextBudget(unit.media) + budgetOf(unit.text) > budget && unit.media.length) {
+      throw new Error("Summary model context window is too small for an original attachment");
+    }
+  }
+  if (units.reduce((size, unit) => size + budgetOf(unit.text) + contentContextBudget(unit.media), 0) > budget * MAX_CALLS) {
+    throw new Error("Summary request limit exceeded");
   }
 
-  const turns: string[] = [];
-  let minimumCalls = 1;
-  let packedBytes = 0;
-  for (const turn of conversationTurns(summarizable)) {
-    const text = turn.flatMap(item => {
-      const line = transcriptToText([item]);
-      const attachmentText = archivedAttachments(item, opts).map(block => {
-        if (block.type !== "text") throw new Error("An older image or document requires the original SDK context");
-        return block.text;
-      });
-      return line ? [line, ...attachmentText] : attachmentText;
-    }).join("\n\n");
-    if (!text) continue;
-    const bytes = budgetOf(text) + 2;
-    if (bytes > budget) throw new Error("A complete turn exceeds the summary input budget");
-    if (packedBytes + bytes > budget) { minimumCalls++; packedBytes = 0; }
-    if (minimumCalls > MAX_CALLS) throw new Error("Summary request limit exceeded");
-    packedBytes += bytes;
-    turns.push(text);
-  }
   let index = 0;
   let calls = 0;
   let summaryText = "";
-  while (index < turns.length) {
+  while (index < units.length) {
     if (++calls > MAX_CALLS) throw new Error("Summary request limit exceeded");
     const prefix = summaryText ? `Previous summary:\n${summaryText}\n\nAdditional history:\n` : "";
     let bytes = budgetOf(prefix);
     const batch: string[] = [];
-    while (index < turns.length && bytes + budgetOf(turns[index]) + 2 <= budget) {
-      const turn = turns[index++];
-      bytes += budgetOf(turn) + 2;
-      batch.push(turn);
+    const media: UserContentBlock[] = [];
+    while (index < units.length) {
+      const unit = units[index];
+      const size = budgetOf(unit.text) + contentContextBudget(unit.media) + 2;
+      if (bytes + size <= budget && mediaBytes([...media, ...unit.media]) <= MAX_MEDIA_BYTES) {
+        batch.push(unit.text); media.push(...unit.media); bytes += size; index++;
+      } else {
+        if (batch.length || unit.media.length) break;
+        const encoded = Buffer.from(unit.text, "utf8");
+        let end = Math.max(0, budget - bytes - 2);
+        while (end > 0 && (encoded[end] & 0xc0) === 0x80) end--;
+        if (!end) break;
+        batch.push(encoded.subarray(0, end).toString("utf8"));
+        unit.text = encoded.subarray(end).toString("utf8");
+        break;
+      }
     }
-    if (!batch.length) throw new Error("A complete turn exceeds the summary input budget");
+    if (!batch.length) throw new Error("Summary and original attachment exceed the summary model context window");
     opts.signal?.throwIfAborted();
-    summaryText = (await deps.summarize(prefix + batch.join("\n\n"))).trim();
+    opts.onProgress?.({ batch: calls });
+    summaryText = (await deps.summarize(prefix + batch.join("\n\n"), media)).trim();
     opts.signal?.throwIfAborted();
     if (!summaryText) throw new Error("Summary returned empty content");
   }
@@ -185,19 +226,26 @@ export function createContextCompressor(
 ): ContextCompressor {
   return {
     async compress(items, opts = {}) {
-      const timeout = AbortSignal.timeout(90_000);
+      const timeout = AbortSignal.timeout(10 * 60_000);
       const signal = opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout;
       const model = opts.model || getSettings().defaultModel;
       const target = getTarget();
       if (!target) throw new Error("Provider 服务尚未就绪，无法压缩上下文");
-      return compressContext(items, { summarize: async text => {
+      return compressContext(items, { summarize: async (text, media = []) => {
+        const requestTimeout = AbortSignal.timeout(3 * 60_000);
+        const requestSignal = AbortSignal.any([signal, requestTimeout]);
+        try {
         const res = await fetch(`${target.origin}/v1/messages`, {
-          method: "POST", signal,
+          method: "POST", signal: requestSignal,
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${target.token}` },
           body: JSON.stringify({ model, max_tokens: outputBudget(opts.contextLimit), system: COMPACT_SUMMARY_PROMPT,
-            messages: [{ role: "user", content: text }] }),
+            messages: [{ role: "user", content: media.length ? [{ type: "text", text }, ...media] : text }] }),
         });
-        if (!res.ok) throw new Error(`Summary request failed (HTTP ${res.status})`);
+        if (!res.ok) {
+          const body = await res.json().catch(() => null) as { error?: { message?: unknown }; message?: unknown } | null;
+          const reason = body?.error?.message ?? body?.message;
+          throw new Error(`Summary request failed (HTTP ${res.status})${typeof reason === "string" ? `: ${reason.slice(0, 500)}` : ""}`);
+        }
         const response = await res.json() as {
           stop_reason?: string; content?: Array<{ type: string; text?: string }>;
           choices?: Array<{ finish_reason?: string; message?: { content?: string } }>;
@@ -208,6 +256,11 @@ export function createContextCompressor(
         const choice = response.choices?.[0];
         if (choice?.finish_reason === "stop" && typeof choice.message?.content === "string") return choice.message.content;
         throw new Error(`Summary incomplete (stop reason: ${response.stop_reason ?? choice?.finish_reason ?? "missing"})`);
+        } catch (error) {
+          if (!opts.signal?.aborted && timeout.aborted) throw new Error("Compression exceeded the ten-minute time limit");
+          if (!signal.aborted && requestTimeout.aborted) throw new Error("Summary batch request timed out after 180 seconds");
+          throw error;
+        }
       } }, { ...opts, signal });
     },
   };

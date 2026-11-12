@@ -96,6 +96,7 @@ export function appendUserItem(
       id: opts.nextId("user"),
       role: "user",
       text,
+      at: Date.now(),
       ...(opts.sdkCostAtSubmission !== undefined ? { sdkCostAtSubmission: opts.sdkCostAtSubmission } : {}),
       ...(opts.attachments?.length
         ? { attachments: opts.attachments }

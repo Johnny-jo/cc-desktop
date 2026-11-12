@@ -607,7 +607,7 @@ describe("compaction handoff", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "compact-settings-"));
     const archive = new SessionArchive(dir);
     const summary = roomDeferred<string>();
-    const summarize = vi.fn(() => summary.promise);
+    const summarize = vi.fn().mockImplementationOnce(() => summary.promise).mockResolvedValue("fresh summary");
     const calls: Array<{ model: unknown; text: string }> = [];
     const queryFn: QueryFn = ({ prompt, options }) => (async function* () {
       for await (const msg of prompt as AsyncIterable<unknown>) {
@@ -628,9 +628,91 @@ describe("compaction handoff", () => {
       summary.resolve("obsolete");
       await pending;
       expect(calls.filter(item => item.text === "original question")).toEqual([{ model, text: "original question" }]);
-      expect(archive.listCompactions(id)).toEqual([]);
+      await vi.waitFor(() => expect(archive.listCompactions(id)).toHaveLength(1));
+      const [compaction] = archive.listCompactions(id);
+      expect(archive.loadCompaction(id, compaction.revision)?.summaryText).toBe("fresh summary");
       expect(ctx.manager.getSummary(id)?.status).toBe("idle");
     } finally { summary.resolve("late"); ctx.manager.disposeAll(); fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("automatically compacts after a completed high-occupancy turn without waiting for another prompt", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "compact-after-turn-"));
+    const archive = new SessionArchive(dir);
+    archive.upsertSummary({ id: "id", title: "fixture", cwd: dir, status: "idle", updatedAt: 1, sdkSessionId: "old" });
+    archive.saveItems("id", history);
+    const summarize = vi.fn(async () => "automatic summary");
+    const prompts: string[] = [];
+    const ctx = makeDeps({ archive, compressor: { compress: (items, opts) => compressContext(items, { summarize }, opts) },
+      queryFn: ({ prompt }) => (async function* () {
+        for await (const message of prompt as AsyncIterable<unknown>) {
+          prompts.push(userTextFromPrompt(message));
+          yield { type: "assistant", context_usage: { total_tokens: 180_000, raw_max_tokens: 200_000 }, message: { content: [] } };
+          yield { type: "result", subtype: "success", session_id: "current" };
+        }
+      })(),
+    });
+    try {
+      await ctx.manager.continue("id", { text: "finish this turn", attachments: [] });
+      await vi.waitFor(() => expect(archive.listCompactions("id")).toHaveLength(1));
+      expect(prompts).toEqual(["finish this turn"]);
+      expect(ctx.sessions.some(session => session.contextCompression?.state === "running")).toBe(true);
+      expect(ctx.manager.getSummary("id")?.contextCompression?.state).toBe("completed");
+      await ctx.manager.continue("id", { text: "next task", attachments: [] });
+      expect(prompts[1]).toContain("automatic summary");
+      expect(prompts[1]).toContain("next task");
+      expect(summarize).toHaveBeenCalledOnce();
+    } finally { ctx.manager.disposeAll(); fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("publishes an automatic compression failure while retaining the transcript and SDK lineage", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "compact-auto-failure-"));
+    const archive = new SessionArchive(dir);
+    archive.upsertSummary({ id: "id", title: "fixture", cwd: dir, status: "idle", updatedAt: 1, sdkSessionId: "old" });
+    archive.saveItems("id", history);
+    const ctx = makeDeps({ archive, compressor: { compress: async () => { throw new Error("Summary provider unavailable"); } },
+      queryFn: ({ prompt }) => (async function* () {
+        for await (const _ of prompt as AsyncIterable<unknown>) {
+          yield { type: "assistant", context_usage: { total_tokens: 180_000, raw_max_tokens: 200_000 }, message: { content: [] } };
+          yield { type: "result", subtype: "success", session_id: "current" };
+        }
+      })(),
+    });
+    try {
+      await ctx.manager.continue("id", { text: "finish this turn", attachments: [] });
+      await vi.waitFor(() => expect(ctx.manager.getSummary("id")?.contextCompression?.state).toBe("failed"));
+      expect(ctx.manager.getSummary("id")?.contextCompression?.message).toContain("Summary provider unavailable");
+      expect(archive.listCompactions("id")).toEqual([]);
+      expect(ctx.manager.getTranscript("id")).toContainEqual(expect.objectContaining({ text: "sentinel-0" }));
+      expect(archive.loadIndex()[0].sdkSessionId).toBe("current");
+    } finally { ctx.manager.disposeAll(); fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("lets a new prompt interrupt automatic compression without publishing the stale summary or a failure", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "compact-auto-cancel-"));
+    const archive = new SessionArchive(dir);
+    archive.upsertSummary({ id: "id", title: "fixture", cwd: dir, status: "idle", updatedAt: 1, sdkSessionId: "old" });
+    archive.saveItems("id", history);
+    const pending = roomDeferred<string>();
+    const summarize = vi.fn(() => pending.promise);
+    let turn = 0;
+    const ctx = makeDeps({ archive, compressor: { compress: (items, opts) => compressContext(items, { summarize }, opts) },
+      queryFn: ({ prompt }) => (async function* () {
+        for await (const _ of prompt as AsyncIterable<unknown>) {
+          yield { type: "assistant", context_usage: { total_tokens: ++turn === 1 ? 180_000 : 100, raw_max_tokens: 200_000 }, message: { content: [] } };
+          yield { type: "result", subtype: "success", session_id: "current" };
+        }
+      })(),
+    });
+    try {
+      await ctx.manager.continue("id", { text: "finish first", attachments: [] });
+      await vi.waitFor(() => expect(summarize).toHaveBeenCalledOnce());
+      await ctx.manager.continue("id", { text: "newer task", attachments: [] });
+      pending.resolve("STALE_SUMMARY");
+      await vi.waitFor(() => expect(ctx.manager.getSummary("id")?.contextCompression).toBeUndefined());
+      expect(archive.listCompactions("id")).toEqual([]);
+      expect(ctx.manager.getTranscript("id")).toContainEqual(expect.objectContaining({ text: "newer task" }));
+      expect(JSON.stringify(ctx.manager.getTranscript("id"))).not.toContain("STALE_SUMMARY");
+    } finally { pending.resolve("late"); ctx.manager.disposeAll(); fs.rmSync(dir, { recursive: true, force: true }); }
   });
 
   it.each(["text", "missing", "image", "oversized"])("preflights the original %s attachment of an older turn", async kind => {
@@ -638,7 +720,7 @@ describe("compaction handoff", () => {
     const archive = new SessionArchive(dir);
     const file = path.join(dir, kind === "image" ? "fixture.png" : "fixture.txt");
     fs.writeFileSync(file, kind === "oversized" ? "large".repeat(6800) : "ORIGINAL_ATTACHMENT_RULE");
-    const summarize = vi.fn(async (_text: string) => "summary");
+    const summarize = vi.fn(async (_text: string, _media?: unknown[]) => "summary");
     const ctx = makeDeps({ archive, compressor: { compress: (items, opts) => compressContext(items, { summarize }, opts) } });
     try {
       const id = await ctx.manager.start({ text: "earlier request", attachments: [{
@@ -650,10 +732,13 @@ describe("compaction handoff", () => {
       const source = [{ ...user, id: kind === "missing" ? "legacy-with-no-saved-bytes" : user.id }, ...history];
       ctx.manager.saveTranscript(id, source, { replace: true });
       const result = await ctx.manager.compressSession(id);
-      if (kind === "text") {
+      if (kind !== "missing") {
         expect(result.ok).toBe(true);
-        expect(summarize.mock.calls[0][0]).toContain("ORIGINAL_ATTACHMENT_RULE");
-        expect(summarize.mock.calls[0][0]).not.toContain("DIFFERENT_CONTENT_AT_PATH");
+        if (kind === "text") expect(summarize.mock.calls[0][0]).toContain("ORIGINAL_ATTACHMENT_RULE");
+        if (kind === "image") expect(summarize.mock.calls.flatMap(call => call[1] ?? [])).toContainEqual(expect.objectContaining({
+          type: "image", source: expect.objectContaining({ data: Buffer.from("ORIGINAL_ATTACHMENT_RULE").toString("base64") }),
+        }));
+        expect(summarize.mock.calls.map(call => call[0]).join(" ")).not.toContain("DIFFERENT_CONTENT_AT_PATH");
         const [index] = archive.listCompactions(id);
         expect(JSON.stringify(archive.loadCompaction(id, index.revision)?.original)).not.toContain("ORIGINAL_ATTACHMENT_RULE");
         expect(JSON.stringify(ctx.manager.getTranscript(id))).not.toContain("ORIGINAL_ATTACHMENT_RULE");

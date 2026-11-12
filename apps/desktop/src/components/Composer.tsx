@@ -18,6 +18,7 @@ import { IMAGE_MIME_TYPES, MODEL_ATTACHMENT_LIMITS, modelAttachmentError } from 
 import { getDesktop } from "../lib/desktop-api";
 import {
   abortActiveSession,
+  clearComposerDraftRequest,
   compressActiveSession,
   dequeuePrompt,
   getState,
@@ -210,6 +211,7 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
   // The panel stays mounted briefly after close so the exit animation plays.
   const [modelMenuPanelMounted, setModelMenuPanelMounted] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const modelMenuRef = useRef<HTMLDivElement | null>(null);
   const modelMenuPanelRef = useRef<HTMLDivElement | null>(null);
   const { t } = useI18n();
@@ -221,6 +223,21 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
   );
   const projectPath = useAppStore((s) => s.projectPath);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
+  const draftRequest = useAppStore((s) => s.composerDraftRequest);
+  useEffect(() => {
+    if (!draftRequest) return;
+    if (draftRequest.sessionId === activeSessionId && !running) {
+      setText(draftRequest.text);
+      setAttachments(draftRequest.attachments);
+      setAttachmentError(null);
+      setHelpNote(null);
+      setSlashIndex(0);
+      setAtIndex(0);
+      setAtMatches([]);
+      inputRef.current?.focus();
+    }
+    clearComposerDraftRequest(draftRequest.nonce);
+  }, [draftRequest, activeSessionId, running]);
   useEffect(() => { setHistorySession(null); }, [activeSessionId]);
   const settings = useAppStore((s) => s.settings);
   const slashBySession = useAppStore((s) => s.slashBySession);
@@ -639,13 +656,11 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
             return;
           }
           setText("");
-          setHelpNote("Compressing…");
+          setHelpNote(t.chat.contextCompressing);
           try {
             const res = await compressActiveSession();
             setHelpNote(
-              res.ok
-                ? (res.message ?? "Context compressed")
-                : `Compression failed: ${res.message ?? "unknown error"}`,
+              res.message ?? (res.ok ? t.chat.contextCompressed : t.chat.contextCompressionFailed),
             );
           } catch (err) {
             setHelpNote(
@@ -701,6 +716,7 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
       onOpenSettings,
       onToggleChanges,
       settings?.permissionMode,
+      t,
       text,
     ],
   );
@@ -899,6 +915,7 @@ export function Composer({ onToggleChanges, onOpenSettings }: ComposerProps) {
           </div>
         ) : null}
         <textarea
+          ref={inputRef}
           className="composer-input"
           rows={2}
           placeholder={
